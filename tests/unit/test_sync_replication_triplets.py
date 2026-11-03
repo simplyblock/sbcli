@@ -59,7 +59,7 @@ class TestPickRemoteTriplet:
             pick_remote_triplet([], {})
 
     @pytest.mark.parametrize("sites", [(3, 3), (4, 4), (6, 6), (8, 8)])
-    def test_equal_sites_give_every_node_one_role_of_each_kind(self, sites):
+    def test_equal_sites_give_each_node_one_role_per_kind(self, sites):
         owners, nodes = sites
         candidates = _site(nodes)
         _, load = _pick_many(candidates, owners)
@@ -79,13 +79,13 @@ class TestPickRemoteTriplet:
         assert sum(totals) == 9 and max(totals) - min(totals) <= 1
         assert all(max(counts) == 1 for counts in _role_counts(candidates, load))
 
-    def test_existing_load_steers_the_pick(self):
+    def test_existing_load_steers_pick(self):
         load = {"b0": [3, 0, 0], "b1": [0, 0, 0], "b2": [0, 0, 0], "b3": [0, 0, 0]}
         triplet = pick_remote_triplet(_site(4), load)
         assert triplet[0] != "b0"
         assert load["b0"][0] == 3
 
-    def test_members_are_failure_domain_diverse_when_possible(self):
+    def test_members_span_failure_domains_when_possible(self):
         candidates = _site(6, fd=lambda i: i // 2)  # domains 0,0,1,1,2,2
         fd = {c.node_id: c.failure_domain for c in candidates}
         triplets, _ = _pick_many(candidates, 6, fd_on=True)
@@ -111,7 +111,7 @@ class TestPickRemoteTriplet:
         for triplet in triplets:
             assert len({label[m] for m in triplet}) == 3
 
-    def test_kept_members_stay_the_empty_slot_is_filled(self):
+    def test_kept_members_stay_empty_slot_is_filled(self):
         candidates = _site(4)
         load: dict[str, list[int]] = {}
         triplet = pick_remote_triplet(candidates, load,
@@ -120,18 +120,18 @@ class TestPickRemoteTriplet:
         assert triplet[1] in ("b1", "b3")
         assert load["b2"] == [1, 0, 0] and load["b0"] == [0, 0, 1]
 
-    def test_kept_member_need_not_be_a_candidate(self):
+    def test_kept_member_need_not_be_candidate(self):
         offline = SiteNode("b9", "h9")
         triplet = pick_remote_triplet(_site(3), {}, keep=(offline, None, None))
         assert triplet[0] == "b9"
         assert set(triplet[1:]) <= {"b0", "b1", "b2"}
 
-    def test_a_new_member_avoids_the_host_of_a_kept_one(self):
+    def test_new_member_avoids_host_of_kept_one(self):
         kept = SiteNode("b9", "h0")  # shares host h0 with candidate b0
         triplet = pick_remote_triplet(_site(3), {}, keep=(kept, None, None))
         assert "b0" not in triplet
 
-    def test_a_full_keep_changes_nothing_but_the_load(self):
+    def test_full_keep_changes_nothing_but_load(self):
         candidates = _site(3)
         load: dict[str, list[int]] = {}
         assert pick_remote_triplet(candidates, load, keep=tuple(candidates)) == ("b0", "b1", "b2")
@@ -151,17 +151,17 @@ class TestJcContexts:
         })
         assert counts == {"a0": 1, "a1": 2, "a2": 2, "b0": 2, "b1": 2, "b2": 2}
 
-    def test_a_member_named_twice_counts_once(self):
+    def test_member_named_twice_counts_once(self):
         assert jc_contexts_per_node({"a0": ["b0", "b0"]}) == {"a0": 1, "b0": 1}
 
-    def test_the_cap_is_the_jc_replace_jm_limit(self):
+    def test_cap_is_jc_replace_jm_limit(self):
         assert JC_MAX_CONTEXTS_PER_NODE == 16
         assert jc_context_violation({"n1": 16, "n2": 3}) is None
         reason = jc_context_violation({"n1": 17, "n2": 18, "n3": 16})
         assert reason is not None
         assert "n1 (17)" in reason and "n2 (18)" in reason and "n3" not in reason
 
-    def test_an_unbalanced_two_site_cluster_exceeds_the_cap(self):
+    def test_unbalanced_two_site_cluster_exceeds_cap(self):
         """20 owners on one site, 4 nodes on the other: 15 remote roles each
         plus their own local three."""
         a = [f"a{i}" for i in range(20)]
@@ -181,7 +181,7 @@ class TestJcContexts:
 
 class TestApplyRoleMoves:
 
-    def test_final_layout_of_a_plan(self):
+    def test_final_layout_of_plan(self):
         layout = {"n1": ("n2", "n3"), "n2": ("n3", "n1"), "n3": ("n1", "n2")}
         moves = [
             RoleMove("n3", ROLE_SECONDARY, "n1", "n4"),
@@ -193,7 +193,7 @@ class TestApplyRoleMoves:
         assert apply_role_moves(layout, moves) == {
             "n1": ("n2", "n3"), "n2": ("n3", "n1"), "n3": ("n4", "n1"), "n4": ("n1", "n2")}
 
-    def test_a_partly_executed_layout_ends_the_same(self):
+    def test_partly_executed_layout_ends_same(self):
         layout = {"n1": ("n2", ""), "n2": ("n1", "")}
         moves = [RoleMove("n2", ROLE_SECONDARY, "n1", "n3"),
                  RoleMove("n3", ROLE_PRIMARY, "", "n3"),

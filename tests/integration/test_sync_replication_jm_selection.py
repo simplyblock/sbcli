@@ -106,7 +106,7 @@ class TestJournalCopiesPerSite:
         assert set(picked[:2]) == {_jm(a[1]), _jm(a[2])}
         assert set(picked[2:]) == {_jm(n) for n in b}
 
-    def test_four_plus_four_balances_domains_inside_each_site(self, db):
+    def test_four_plus_four_balances_domains_per_site(self, db):
         cluster = _seed_cluster(db, fd=True)
         a = [_seed_node(db, cluster, f"a{i}", "site-a", fd=fd, ha_jm_count=8)
              for i, fd in enumerate([0, 0, 1, 1, 1], start=1)]
@@ -124,14 +124,14 @@ class TestJournalCopiesPerSite:
         assert {fd_of[j][0] for j in other} == {"site-b"}
         assert other_fds.count(0) == 2 and other_fds.count(1) == 2
 
-    def test_a_site_without_enough_jms_is_a_specific_error(self, db):
+    def test_site_without_enough_jms_is_specific_error(self, db):
         cluster = _seed_cluster(db)
         a = [_seed_node(db, cluster, f"a{i}", "site-a") for i in range(1, 4)]
         [_seed_node(db, cluster, f"b{i}", "site-b") for i in range(1, 3)]
         with pytest.raises(ops.SiteJournalPlacementError, match="site 'site-b' 2"):
             ops.get_sorted_ha_jms(a[0])
 
-    def test_an_offline_nodes_jm_is_never_picked(self, db):
+    def test_offline_nodes_jm_is_never_picked(self, db):
         # a forced shutdown takes a node offline without marking its JM
         cluster = _seed_cluster(db)
         a = [_seed_node(db, cluster, f"a{i}", "site-a") for i in range(1, 4)]
@@ -177,13 +177,13 @@ class TestJournalNames:
         assert set(ordered[:3]) == {owner.jm_device.jm_bdev} | {f"remote_jm_{n.get_id()}n1" for n in a[1:]}
         assert set(ordered[3:]) == {f"remote_xs_jm_{n.get_id()}n1" for n in b}
 
-    def test_the_list_is_never_cut_to_ha_jm_count(self, db):
+    def test_list_is_never_cut_to_ha_jm_count(self, db):
         cluster = _seed_cluster(db)
         a, b = _two_sites(db, cluster)
         owner = _owner_with_journal(db, cluster, a, b, ha_jm_count=4)
         assert len(ops.get_node_jm_names(owner).names) == 6
 
-    def test_remote_site_host_holding_a_copy(self, db):
+    def test_remote_site_host_holding_copy(self, db):
         cluster = _seed_cluster(db)
         a, b = _two_sites(db, cluster)
         owner = _owner_with_journal(db, cluster, a, b)
@@ -194,7 +194,7 @@ class TestJournalNames:
         assert set(ordered[:3]) == {host.jm_device.jm_bdev} | {f"remote_jm_{n.get_id()}n1" for n in b[1:]}
         assert set(ordered[3:]) == {f"remote_xs_jm_{n.get_id()}n1" for n in a}
 
-    def test_remote_site_host_without_a_copy(self, db):
+    def test_remote_site_host_without_copy(self, db):
         cluster = _seed_cluster(db)
         a, b = _two_sites(db, cluster)
         owner = _owner_with_journal(db, cluster, a, b)
@@ -234,7 +234,7 @@ class TestRemoteJmNames:
                                | {f"remote_xs_jm_{n.get_id()}" for n in b})
         assert {r.remote_bdev for r in records} == {f"{c}n1" for c in controllers}
 
-    def test_remote_triplet_host_connects_its_owners_journal(self, db, rpcs):
+    def test_remote_triplet_host_connects_owners_journal(self, db, rpcs):
         # b4 holds no copy and has no journal of its own yet: it reaches the
         # owner's JMs only because it is in the owner's remote triplet.
         cluster = _seed_cluster(db)
@@ -261,7 +261,7 @@ class TestRemoteJmNames:
         rpcs[cross.get_id()].jc_get_jm_status.return_value = {f"remote_jm_{target.get_id()}n1": True}
         assert ops._peer_reachable_via_jm_quorum(target.get_id(), this) is False
 
-    def test_data_plane_vote_asks_each_peer_for_its_own_name(self, db, rpcs):
+    def test_data_plane_vote_asks_each_peer_own_name(self, db, rpcs):
         cluster = _seed_cluster(db)
         node = _seed_node(db, cluster, "t", "site-a")
         same = _seed_node(db, cluster, "p1", "site-a", jm_vuid=1)
@@ -275,7 +275,7 @@ class TestRemoteJmNames:
         rpcs[cross.get_id()].bdev_get.assert_called_with(f"remote_xs_jm_{node.get_id()}n1")
         rpcs[cross.get_id()].bdev_nvme_controller_list.assert_called_with(f"remote_xs_jm_{node.get_id()}")
 
-    def test_data_plane_vote_through_the_real_client(self, db):
+    def test_data_plane_vote_through_real_client(self, db):
         """The peers answer as JSON-RPC: a remote error of the bdev probe is
         an abstain, a present bdev whose controller lookup comes back EINVAL
         (unmatched name, 22 un-negated) a disconnected vote, an enabled
@@ -310,7 +310,7 @@ class TestRemoteJmNames:
         assert (gone.mgmt_ip, {"id": 1, "method": "bdev_get_bdevs",
                                "params": {"name": f"remote_xs_jm_{node.get_id()}n1"}}) in sent
 
-    def test_health_check_uses_the_cross_site_controller(self, db, rpcs):
+    def test_health_check_uses_cross_site_controller(self, db, rpcs):
         cluster = _seed_cluster(db)
         owner = _seed_node(db, cluster, "a1", "site-a")
         record = RemoteJMDevice()
@@ -349,7 +349,7 @@ class TestDistribCreation:
             ok, err = ops._create_bdev_stack(snode, _distr_stack(), primary_node=primary_node)
         return ok, err, push
 
-    def test_home_primary_creates_a_site_aware_sync_distrib(self, db, rpcs):
+    def test_home_primary_creates_site_aware_sync_distrib(self, db, rpcs):
         cluster = _seed_cluster(db)
         a, b = _two_sites(db, cluster)
         owner = _owner_with_journal(db, cluster, a, b)
@@ -361,7 +361,7 @@ class TestDistribCreation:
         assert params["jm_names"] == ops.get_node_jm_names(owner).names
         push.assert_called_once_with(owner, "distrib_1", home_site="site-a")
 
-    def test_remote_site_instance_counts_its_own_site_as_local(self, db, rpcs):
+    def test_remote_site_instance_counts_own_site_local(self, db, rpcs):
         cluster = _seed_cluster(db)
         a, b = _two_sites(db, cluster)
         owner = _owner_with_journal(db, cluster, a, b)
@@ -373,7 +373,7 @@ class TestDistribCreation:
         assert host.jm_device.jm_bdev in params["jm_names"]
         push.assert_called_once_with(host, "distrib_1", home_site="site-a")
 
-    def test_a_rejected_map_push_is_retried(self, db, rpcs):
+    def test_rejected_map_push_is_retried(self, db, rpcs):
         # a JSON-RPC error of the push raises; send_cluster_map_to_distr reads it as False
         cluster = _seed_cluster(db)
         a, b = _two_sites(db, cluster)
@@ -387,7 +387,7 @@ class TestDistribCreation:
         assert rpc.bdev_distrib_create.call_count == 2
         assert [c.args[0]["name"] for c in rpc.distr_send_cluster_map.call_args_list] == ["distrib_1"] * 2
 
-    def test_a_rejected_create_is_retried_with_its_sync_parameters(self, db, rpcs):
+    def test_rejected_create_retries_with_sync_parameters(self, db, rpcs):
         cluster = _seed_cluster(db)
         a, b = _two_sites(db, cluster)
         owner = _owner_with_journal(db, cluster, a, b)
@@ -403,7 +403,7 @@ class TestDistribCreation:
         assert [(c.kwargs["synchronous_replication_mode"], c.kwargs["jm_n_local"]) for c in calls] == [(1, 3)] * 2
         rpc.bdev_distrib_delete.assert_called_once_with("distrib_1")
 
-    def test_a_journal_without_other_site_copies_is_refused(self, db, rpcs):
+    def test_journal_without_other_site_copies_is_refused(self, db, rpcs):
         cluster = _seed_cluster(db)
         a, b = _two_sites(db, cluster)
         owner = _owner_with_journal(db, cluster, a, b, enable_ha_jm=False)
@@ -475,7 +475,7 @@ class TestReplacementOnRemoval:
                 return True
             rpcs[node_id].jc_replace_jm.side_effect = _replace
 
-    def test_six_instances_get_a_same_site_replacement(self, db, rpcs):
+    def test_six_instances_get_same_site_replacement(self, db, rpcs):
         (a1, a2, a3, a4), (b1, b2, b3, b4) = self._setup(db)
         expected = {n.get_id(): {a1.jm_vuid} for n in (a1, a2, a3, b3, b4)}
         expected[b2.get_id()] = {a1.jm_vuid, b2.jm_vuid}
@@ -504,7 +504,7 @@ class TestReplacementOnRemoval:
         assert _jm(b4) in stored_b2.jm_ids and _jm(b1) not in stored_b2.jm_ids
         assert _jm(a4) not in stored_a1.jm_ids
 
-    def test_no_free_jm_on_the_site_leaves_the_slot_short(self, db, rpcs):
+    def test_no_free_jm_on_site_leaves_slot_short(self, db, rpcs):
         (a1, a2, a3, a4), (b1, b2, b3, b4) = self._setup(db)
         b4.jm_device.status = JMDevice.STATUS_UNAVAILABLE   # site b has no free JM left
         b4.write_to_db(db.kv_store)

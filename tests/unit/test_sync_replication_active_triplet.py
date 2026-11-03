@@ -31,43 +31,42 @@ def _owner(**fields):
     return node
 
 
+#: An owner without sync replication has no site and no remote triplet.
+_NON_SYNC = {"site": "", "remote_primary_node_id": "", "remote_secondary_node_id": "",
+             "remote_tertiary_node_id": ""}
+
+
 class TestActiveTriplet:
 
-    @pytest.mark.parametrize("active_site", ["", "site-a"])
-    def test_home_led(self, active_site):
-        active = ops.lvs_active_triplet(_owner(lvs_active_site=active_site))
-        assert active.node_ids == ("p", "s", "t")
-        assert active.grants_allowed and active.moving_to == ""
-
-    def test_led_from_the_other_site(self):
-        active = ops.lvs_active_triplet(_owner(lvs_active_site="site-b"))
-        assert active.node_ids == ("rp", "rs", "rt")
-        assert active.grants_allowed
-
-    def test_moving_away_offers_the_home_triplet_first(self):
-        active = ops.lvs_active_triplet(_owner(lvs_active_site="moving:site-b"))
-        assert active.node_ids == ("p", "s", "t", "rp", "rs", "rt")
-        assert active.moving_to == "site-b" and not active.grants_allowed
-
-    def test_moving_back_home_offers_the_remote_triplet_first(self):
-        active = ops.lvs_active_triplet(_owner(lvs_active_site="moving:site-a"))
-        assert active.node_ids == ("rp", "rs", "rt", "p", "s", "t")
-        assert active.moving_to == "site-a" and not active.grants_allowed
+    @pytest.mark.parametrize("fields, node_ids, moving_to", [
+        pytest.param({"lvs_active_site": ""}, ("p", "s", "t"), "", id="home-led"),
+        pytest.param({"lvs_active_site": "site-a"}, ("p", "s", "t"), "", id="home-site-named"),
+        pytest.param(_NON_SYNC, ("p", "s", "t"), "", id="non-sync"),
+        pytest.param({"lvs_active_site": "site-b"}, ("rp", "rs", "rt"), "", id="led-from-the-other-site"),
+        pytest.param({"lvs_active_site": "moving:site-b"}, ("p", "s", "t", "rp", "rs", "rt"), "site-b",
+                     id="moving-away-offers-the-home-triplet-first"),
+        pytest.param({"lvs_active_site": "moving:site-a"}, ("rp", "rs", "rt", "p", "s", "t"), "site-a",
+                     id="moving-back-home-offers-the-remote-triplet-first"),
+    ])
+    def test_triplet_that_may_lead(self, fields, node_ids, moving_to):
+        active = ops.lvs_active_triplet(_owner(**fields))
+        assert active.node_ids == node_ids
+        assert active.moving_to == moving_to
+        assert active.grants_allowed is (not moving_to)
 
     def test_ftt1_home_triplet_has_two_members(self):
         assert ops.lvs_active_triplet(_owner(tertiary_node_id="")).node_ids == ("p", "s")
 
-    def test_non_sync_owner_is_always_home_led(self):
-        owner = _owner(site="", remote_primary_node_id="", remote_secondary_node_id="",
-                       remote_tertiary_node_id="")
-        assert ops.lvs_active_triplet(owner).node_ids == ("p", "s", "t")
-        assert ops.lvs_led_from_home(owner)
-
-    @pytest.mark.parametrize("active_site, home", [
-        ("", True), ("site-a", True), ("site-b", False), ("moving:site-b", False),
-        ("moving:site-a", False)])
-    def test_led_from_home(self, active_site, home):
-        assert ops.lvs_led_from_home(_owner(lvs_active_site=active_site)) is home
+    @pytest.mark.parametrize("fields, home", [
+        pytest.param({"lvs_active_site": ""}, True, id="unset"),
+        pytest.param({"lvs_active_site": "site-a"}, True, id="own-site"),
+        pytest.param(_NON_SYNC, True, id="non-sync"),
+        pytest.param({"lvs_active_site": "site-b"}, False, id="other-site"),
+        pytest.param({"lvs_active_site": "moving:site-b"}, False, id="moving-away"),
+        pytest.param({"lvs_active_site": "moving:site-a"}, False, id="moving-home"),
+    ])
+    def test_led_from_home(self, fields, home):
+        assert ops.lvs_led_from_home(_owner(**fields)) is home
 
 
 _HOME = ("p", "s", "t")
@@ -76,39 +75,32 @@ _REMOTE = ("rp", "rs", "rt")
 
 class TestHublvolExpected:
 
-    @pytest.mark.parametrize("active_site", ["", "site-a"])
-    def test_home_led_expects_it_on_the_home_triplet_only(self, active_site):
-        owner = _owner(lvs_active_site=active_site)
+    @pytest.mark.parametrize("fields, passive", [
+        pytest.param({"lvs_active_site": ""}, _REMOTE, id="unset"),
+        pytest.param({"lvs_active_site": "site-a"}, _REMOTE, id="own-site"),
+        pytest.param(_NON_SYNC, (), id="non-sync"),
+    ])
+    def test_home_led_expects_it_on_home_triplet_only(self, fields, passive):
+        owner = _owner(**fields)
         assert all(ops.lvs_hublvol_expected(owner, nid) for nid in _HOME)
-        assert not any(ops.lvs_hublvol_expected(owner, nid) for nid in _REMOTE)
+        assert not any(ops.lvs_hublvol_expected(owner, nid) for nid in passive)
 
-    def test_led_from_the_other_site_expects_it_on_the_remote_triplet_only(self):
+    def test_other_site_led_expects_remote_triplet_only(self):
         owner = _owner(lvs_active_site="site-b")
         assert not any(ops.lvs_hublvol_expected(owner, nid) for nid in _HOME)
         assert all(ops.lvs_hublvol_expected(owner, nid) for nid in _REMOTE)
 
     @pytest.mark.parametrize("active_site", ["moving:site-b", "moving:site-a"])
-    def test_a_move_in_flight_expects_it_on_both_triplets(self, active_site):
+    def test_move_in_flight_expects_it_on_both_triplets(self, active_site):
         owner = _owner(lvs_active_site=active_site)
         assert all(ops.lvs_hublvol_expected(owner, nid) for nid in _HOME + _REMOTE)
-
-    def test_ftt1_follows_the_active_triplet(self):
-        owner = _owner(tertiary_node_id="", remote_tertiary_node_id="", lvs_active_site="site-b")
-        assert [ops.lvs_hublvol_expected(owner, nid) for nid in ("p", "s", "rp", "rs")] == [
-            False, False, True, True]
-
-    def test_non_sync_owner_expects_it_on_every_member(self):
-        owner = _owner(site="", remote_primary_node_id="", remote_secondary_node_id="",
-                       remote_tertiary_node_id="")
-        assert all(ops.lvs_hublvol_expected(owner, nid) for nid in _HOME)
 
     @pytest.mark.parametrize("fields", [
         {"lvs_active_site": ""},
         {"lvs_active_site": "site-b"},
-        {"site": "", "remote_primary_node_id": "", "remote_secondary_node_id": "",
-         "remote_tertiary_node_id": ""},
+        _NON_SYNC,
     ], ids=["home-led", "remote-led", "non-sync"])
-    def test_a_node_in_neither_triplet_keeps_it(self, fields):
+    def test_node_in_neither_triplet_keeps_it(self, fields):
         # A relocation target that the owner does not list in either triplet yet.
         assert ops.lvs_hublvol_expected(_owner(**fields), "new-host")
 
@@ -133,14 +125,14 @@ class TestNonLeaderHubOk:
         (True, {"lvs_active_site": ""}, ("new-host", "site-a"), ("p", "site-a"), True),
     ], ids=["non-sync-relocation", "active-member", "passive-member", "moving-same-site",
             "moving-other-site", "relocation-new-host"])
-    def test_equals_the_site_rule(self, sync, owner_fields, node, leader, expected):
+    def test_equals_site_rule(self, sync, owner_fields, node, leader, expected):
         cluster = SimpleNamespace(sync_replication=sync)
         snode, leader_node = _site_node(*node), _site_node(*leader)
         owner = _owner(**owner_fields)
         assert ops._non_leader_hub_ok(cluster, snode, leader_node, owner) is expected
         assert ops._hublvol_same_site(cluster, snode, leader_node) is expected
 
-    def test_a_passive_member_behind_a_same_site_leader_gets_none(self):
+    def test_passive_member_behind_local_leader_gets_none(self):
         # Cluster expansion rebuilds a new home member behind the owner even
         # when the LVS is led from the other site.
         cluster = SimpleNamespace(sync_replication=True)
@@ -160,25 +152,20 @@ class TestInstanceRole:
         ("rs", True, "secondary"), ("rs", False, "secondary"),
         ("rt", True, "tertiary"), ("rt", False, "tertiary"),
     ])
-    def test_the_role_follows_the_slot_but_primary_must_lead(self, node_id, leading, role):
+    def test_role_follows_slot_but_primary_must_lead(self, node_id, leading, role):
         assert ops.lvs_instance_role(_owner(), node_id, leading=leading) == role
-
-    def test_ftt1_has_no_tertiary_slot(self):
-        owner = _owner(tertiary_node_id="")
-        assert ops.lvs_instance_role(owner, "s", leading=False) == "secondary"
-        assert ops.lvs_instance_role(owner, "p", leading=True) == "primary"
 
 
 class TestLeaderCandidatesWithoutSites:
 
-    def test_the_callers_list_unchanged(self):
+    def test_callers_list_unchanged(self):
         nodes = [SimpleNamespace(site="", lvstore="LVS_1", get_id=lambda i=i: i) for i in ("p", "s")]
         candidates = ops._lvs_leader_candidates(nodes, "LVS_1")
         assert candidates.nodes == nodes
         assert candidates.grants_allowed
         assert candidates.owner_id is None and candidates.taker_id is None
 
-    def test_duck_typed_nodes_without_a_site_attribute(self):
+    def test_duck_typed_nodes_without_site_attribute(self):
         nodes = [SimpleNamespace(lvstore="LVS_1", get_id=lambda: "p")]
         assert ops._lvs_leader_candidates(nodes, "LVS_1").nodes == nodes
 
@@ -195,7 +182,7 @@ def _task(**fields):
 
 class TestPromoteTaskOwnership:
 
-    def test_a_live_running_task_owns_the_move(self):
+    def test_live_running_task_owns_move(self):
         assert ops.sync_promote_task_owns_move(_task())
         assert ops.sync_promote_task_owns_move(_task(status=JobSchedule.STATUS_SUSPENDED))
         assert ops.sync_promote_task_owns_move(_task(status=JobSchedule.STATUS_NEW))
@@ -204,7 +191,7 @@ class TestPromoteTaskOwnership:
         assert not ops.sync_promote_task_owns_move(_task(status=JobSchedule.STATUS_DONE))
         assert not ops.sync_promote_task_owns_move(_task(canceled=True))
 
-    def test_a_task_whose_runner_died_owns_nothing(self):
+    def test_task_whose_runner_died_owns_nothing(self):
         stale = datetime.datetime.now(datetime.UTC) - datetime.timedelta(
             seconds=ops.constants.TASK_LEASE_TTL_SEC + 60)
         assert not ops.sync_promote_task_owns_move(_task(updated_at=str(stale)))

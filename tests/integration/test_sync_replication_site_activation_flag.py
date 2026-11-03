@@ -72,7 +72,7 @@ def registry(monkeypatch):
 class TestBeginSiteActivation:
 
     @pytest.mark.parametrize("state", [DOWN, FENCING, DONE])
-    def test_begin_sets_the_flag_of_the_recorded_site(self, db, state):
+    def test_begin_sets_flag_of_recorded_site(self, db, state):
         cluster = _cluster(db, state)
         token = src.begin_site_activation(cluster.get_id(), SITE_A)
         assert token
@@ -81,12 +81,12 @@ class TestBeginSiteActivation:
         assert _record(db, cluster.get_id()) == (SITE_A, state)
 
     @pytest.mark.parametrize("state, site", [(DRAINING, SITE_A), (DOWN, SITE_B), ("", SITE_A)])
-    def test_begin_refuses_a_site_not_ready_to_return(self, db, state, site):
+    def test_begin_refuses_site_not_ready_to_return(self, db, state, site):
         cluster = _cluster(db, state)
         assert src.begin_site_activation(cluster.get_id(), site) == ""
         assert _flag(db, cluster.get_id()) == NO_FLAG
 
-    def test_begin_refuses_while_a_flag_is_set(self, db):
+    def test_begin_refuses_while_flag_is_set(self, db):
         cluster = _cluster(db, DONE)
         first = src.begin_site_activation(cluster.get_id(), SITE_A)
         assert src.begin_site_activation(cluster.get_id(), SITE_A) == ""
@@ -97,7 +97,7 @@ class TestBeginSiteActivation:
         assert src.begin_site_activation(cluster.get_id(), SITE_A) == ""
         assert _flag(db, cluster.get_id()) == NO_FLAG
 
-    def test_a_concurrent_begin_wins_and_the_loser_refuses(self, db):
+    def test_concurrent_begin_wins_and_loser_refuses(self, db):
         # Another process begins between this begin's transactional read and
         # its commit (from the mutation, the first time it runs): the
         # transaction conflicts and replays on the winner's record, so this
@@ -151,7 +151,7 @@ class TestBeginSiteActivation:
 class TestSiteActivationOwned:
 
     @pytest.mark.parametrize("status", [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY])
-    def test_the_holder_under_a_serving_status_passes(self, db, status):
+    def test_holder_under_serving_status_passes(self, db, status):
         cluster = _cluster(db, DOWN, status=status)
         token = src.begin_site_activation(cluster.get_id(), SITE_A)
         src.site_activation_owned(cluster.get_id(), token)
@@ -160,7 +160,7 @@ class TestSiteActivationOwned:
         lambda cid, token: src.end_site_activation(cid, token),
         lambda cid, token: src.clear_site_activation(cid),
     ])
-    def test_a_token_gone_is_cancelled(self, db, drop):
+    def test_token_gone_is_cancelled(self, db, drop):
         cluster = _cluster(db, DOWN)
         token = src.begin_site_activation(cluster.get_id(), SITE_A)
         drop(cluster.get_id(), token)
@@ -175,7 +175,7 @@ class TestSiteActivationOwned:
             src.site_activation_owned(cluster.get_id(), token)
 
     @pytest.mark.parametrize("status", [Cluster.STATUS_SUSPENDED, Cluster.STATUS_IN_ACTIVATION])
-    def test_a_cluster_not_serving_is_cancelled(self, db, status):
+    def test_cluster_not_serving_is_cancelled(self, db, status):
         cluster = _cluster(db, DONE)
         token = src.begin_site_activation(cluster.get_id(), SITE_A)
         _seed_record(db, cluster, SITE_A, DONE, status=status)
@@ -186,12 +186,16 @@ class TestSiteActivationOwned:
 
 class TestEndClearStamp:
 
+    @pytest.mark.parametrize("write", [
+        pytest.param(lambda cid, token: src.end_site_activation(cid, token), id="end"),
+        pytest.param(lambda cid, token: src.stamp_site_activation(cid, token), id="stamp"),
+    ])
     @pytest.mark.parametrize("token", ["", "another"])
-    def test_end_leaves_another_token(self, db, token):
-        cluster = _cluster(db, DOWN)
-        own = src.begin_site_activation(cluster.get_id(), SITE_A)
-        src.end_site_activation(cluster.get_id(), token)
-        assert _flag(db, cluster.get_id()) == (SITE_A, own, own)
+    def test_writer_leaves_another_token(self, db, token, write):
+        cluster = _with_flag(db, _cluster(db, DOWN), since=_ago(120))
+        before = _flag(db, cluster.get_id())
+        write(cluster.get_id(), token)
+        assert _flag(db, cluster.get_id()) == before
 
     def test_end_clears_its_own_token(self, db):
         cluster = _cluster(db, DOWN)
@@ -206,7 +210,7 @@ class TestEndClearStamp:
         assert _flag(db, cluster.get_id()) == NO_FLAG
         assert _record(db, cluster.get_id()) == (SITE_A, DONE)
 
-    def test_clear_without_a_flag_names_no_site(self, db):
+    def test_clear_without_flag_names_no_site(self, db):
         cluster = _cluster(db, DOWN)
         assert src.clear_site_activation(cluster.get_id()) == ""
         assert _flag(db, cluster.get_id()) == NO_FLAG
@@ -219,14 +223,7 @@ class TestEndClearStamp:
         assert (site, since) == (SITE_A, token)
         assert datetime.fromisoformat(heartbeat) > datetime.fromisoformat(token)
 
-    @pytest.mark.parametrize("token", ["", "another"])
-    def test_stamp_leaves_another_token(self, db, token):
-        cluster = _with_flag(db, _cluster(db, DOWN), since=_ago(120))
-        before = _flag(db, cluster.get_id())
-        src.stamp_site_activation(cluster.get_id(), token)
-        assert _flag(db, cluster.get_id()) == before
-
-    def test_stamp_does_not_resurrect_a_cleared_flag(self, db):
+    def test_stamp_does_not_resurrect_cleared_flag(self, db):
         cluster = _cluster(db, DOWN)
         token = src.begin_site_activation(cluster.get_id(), SITE_A)
         src.clear_site_activation(cluster.get_id())
@@ -238,7 +235,7 @@ class TestEndClearStamp:
         (lambda cid, token: src.clear_site_activation(cid), "_drop_site_activation_flag", False),
         (lambda cid, token: src.stamp_site_activation(cid, token), "_stamp_site_activation_flag", True),
     ])
-    def test_a_field_written_concurrently_survives(self, db, write, mutation, flag_after):
+    def test_field_written_concurrently_survives(self, db, write, mutation, flag_after):
         # Another flow commits a change of the cluster between the writer's
         # transactional read and its commit: the writer's mutation replays on
         # the new record, so the other flow's field survives.
@@ -260,7 +257,7 @@ class TestEndClearStamp:
         assert db.get_cluster_by_id(cluster.get_id()).is_re_balancing is True
         assert (_flag(db, cluster.get_id())[1] == token) is flag_after
 
-    def test_the_record_clear_leaves_the_flag(self, db):
+    def test_record_clear_leaves_flag(self, db):
         cluster = _cluster(db, DONE)
         token = src.begin_site_activation(cluster.get_id(), SITE_A)
         assert db.clear_lost_site(cluster.get_id(), SITE_A, (DONE,), [], lambda _c, _nodes: []) == []
@@ -276,7 +273,7 @@ class TestSuspensionKeepsTheFlag:
 
     @pytest.mark.parametrize("state, record_after", [(DOWN, ("", "")), (FENCING, (SITE_A, FENCING)),
                                                      (DONE, (SITE_A, DONE))])
-    def test_the_record_clear_under_suspension_leaves_it(self, db, state, record_after):
+    def test_record_clear_under_suspension_leaves_it(self, db, state, record_after):
         cluster = _with_flag(db, _cluster(db, state, status=Cluster.STATUS_SUSPENDED), since=_ago(10))
         before = _flag(db, cluster.get_id())
         monitor._clear_site_record_under_suspension(cluster.get_id())
@@ -284,7 +281,7 @@ class TestSuspensionKeepsTheFlag:
         assert _flag(db, cluster.get_id()) == before
 
     @pytest.mark.parametrize("state", [DOWN, FENCING, DONE])
-    def test_a_monitor_suspension_leaves_it(self, db, state):
+    def test_monitor_suspension_leaves_it(self, db, state):
         cluster = _with_flag(db, _cluster(db, state), since=_ago(10))
         before = _flag(db, cluster.get_id())
         monitor._set_cluster_status(db.get_cluster_by_id(cluster.get_id()), Cluster.STATUS_SUSPENDED)
@@ -343,39 +340,35 @@ def _watch(db, cluster):
 
 class TestSiteActivationWatchdog:
 
-    def test_a_stale_heartbeat_clears_the_flag(self, db, registry):
+    def test_stale_heartbeat_clears_flag(self, db, registry):
         cluster = _with_flag(db, _cluster(db, DONE), since=_ago(STALE + 60), heartbeat=_ago(STALE + 5))
         _site(db, cluster)
         _watch(db, cluster)
         assert _flag(db, cluster.get_id()) == NO_FLAG
         assert _record(db, cluster.get_id()) == (SITE_A, DONE)
 
-    def test_a_fresh_heartbeat_within_budget_keeps_it(self, db, registry):
+    def test_fresh_heartbeat_within_budget_keeps_it(self, db, registry):
         cluster = _with_flag(db, _cluster(db, DOWN), since=_ago(STALE + 60), heartbeat=_ago(30))
         _site(db, cluster)
         before = _flag(db, cluster.get_id())
         _watch(db, cluster)
         assert _flag(db, cluster.get_id()) == before
 
-    def test_past_budget_with_no_thread_clears_it(self, db, registry):
+    @pytest.mark.parametrize("entry", ["no thread", "dead thread"])
+    def test_past_budget_without_live_thread_clears_it(self, db, registry, entry):
         cluster = _with_flag(db, _cluster(db, DOWN), since=_ago(PAST_BUDGET), heartbeat=_ago(30))
         _site(db, cluster)
+        if entry == "dead thread":
+            dead = threading.Thread(target=lambda: None)
+            dead.start()
+            dead.join()
+            registry[cluster.get_id()] = dead
         _watch(db, cluster)
         assert _flag(db, cluster.get_id()) == NO_FLAG
         assert _record(db, cluster.get_id()) == (SITE_A, DOWN)
-
-    def test_past_budget_with_a_dead_thread_clears_it(self, db, registry):
-        cluster = _with_flag(db, _cluster(db, DOWN), since=_ago(PAST_BUDGET), heartbeat=_ago(30))
-        _site(db, cluster)
-        dead = threading.Thread(target=lambda: None)
-        dead.start()
-        dead.join()
-        registry[cluster.get_id()] = dead
-        _watch(db, cluster)
-        assert _flag(db, cluster.get_id()) == NO_FLAG
         assert cluster.get_id() not in registry
 
-    def test_past_budget_with_a_live_thread_keeps_it(self, db, registry):
+    def test_past_budget_with_live_thread_keeps_it(self, db, registry):
         cluster = _with_flag(db, _cluster(db, DOWN), since=_ago(PAST_BUDGET), heartbeat=_ago(30))
         _site(db, cluster)
         before = _flag(db, cluster.get_id())
@@ -398,7 +391,7 @@ class TestSiteActivationWatchdog:
         _watch(db, cluster)
         assert _flag(db, cluster.get_id()) == before
 
-    def test_the_monitor_pass_runs_the_watchdog(self, db, monitor_pass, registry):
+    def test_monitor_pass_runs_watchdog(self, db, monitor_pass, registry):
         cluster = _with_flag(db, _cluster(db, DOWN), since=_ago(STALE + 60), heartbeat=_ago(STALE + 5))
         _site(db, cluster, a_status=StorageNode.STATUS_OFFLINE)
         after = monitor_pass.run(cluster)

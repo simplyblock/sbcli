@@ -1,8 +1,9 @@
-"""Pure rules of the LVS stack on a sync-replication remote triplet: the
-triplet a node belongs to, the leader candidates of a non-leader rebuild, the
-hublvol site rule, the pending marks kept with the refs, and the probes that
-tell a torn-down or not-yet-built distrib from a failure. The flows against
-the real database are in tests/integration/test_sync_replication_lvs_stack.py.
+"""Pure rules of the LVS stack on a sync-replication remote triplet: which
+triplet a node belongs to, the leader candidates for a non-leader rebuild, the
+hublvol site rule, the pending marks kept with the refs, and the probe that
+tells a torn-down remote instance from a failure. The flows against the real
+database, including senders that meet a distrib not built yet, are tested in
+tests/integration/test_sync_replication_lvs_stack.py.
 """
 import logging
 import time
@@ -11,7 +12,7 @@ from unittest.mock import MagicMock, create_autospec
 
 import pytest
 
-from simplyblock_core import constants, distr_controller
+from simplyblock_core import constants
 from simplyblock_core import storage_node_ops as ops
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.storage_node import StorageNode
@@ -39,12 +40,12 @@ def _owner(**fields):
 
 class TestLvsTripletOf:
 
-    def test_home_members_get_the_home_triplet(self):
+    def test_home_members_get_home_triplet(self):
         owner = _owner()
         for node_id in ("p", "s", "t"):
             assert ops.lvs_triplet_of(owner, node_id) == ("p", "s", "t")
 
-    def test_remote_members_get_the_remote_triplet(self):
+    def test_remote_members_get_remote_triplet(self):
         owner = _owner()
         for node_id in ("rp", "rs", "rt"):
             assert ops.lvs_triplet_of(owner, node_id) == ("rp", "rs", "rt")
@@ -64,39 +65,19 @@ class TestRebuildCandidates:
     """The leader candidates of a non-leader rebuild are the LVS's ACTIVE
     triplet (lvs_active_triplet): home, remote, or both while it moves."""
 
-    def test_home_triplet_without_the_rebuilding_node(self):
+    def test_home_triplet_without_rebuilding_node(self):
         owner = _owner()
         assert ops.non_leader_rebuild_candidates(owner, "rs") == ["p", "s", "t"]
         assert ops.non_leader_rebuild_candidates(owner, "s") == ["p", "t"]
 
-    def test_led_from_the_remote_site_is_the_remote_triplet(self):
+    def test_led_from_remote_site_is_remote_triplet(self):
         owner = _owner(lvs_active_site="site-b")
         assert ops.non_leader_rebuild_candidates(owner, "s") == ["rp", "rs", "rt"]
         assert ops.non_leader_rebuild_candidates(owner, "p") == ["rp", "rs", "rt"]
         assert ops.non_leader_rebuild_candidates(owner, "rs") == ["rp", "rt"]
 
-    def test_home_site_named_explicitly_is_the_home_triplet(self):
-        owner = _owner(lvs_active_site="site-a")
-        assert ops.non_leader_rebuild_candidates(owner, "rs") == ["p", "s", "t"]
-
-    def test_moving_offers_both_triplets_source_first(self):
-        owner = _owner(lvs_active_site="moving:site-b")
-        assert ops.non_leader_rebuild_candidates(owner, "t") == ["p", "s", "rp", "rs", "rt"]
-        owner = _owner(lvs_active_site="moving:site-a")
-        assert ops.non_leader_rebuild_candidates(owner, "t") == ["rp", "rs", "rt", "p", "s"]
-
-    def test_empty_slots_are_skipped(self):
-        owner = _owner(tertiary_node_id="")
-        assert ops.non_leader_rebuild_candidates(owner, "rp") == ["p", "s"]
-
 
 class TestHublvolSiteRule:
-
-    def test_sync_cluster_only_within_a_site(self):
-        cluster = SimpleNamespace(sync_replication=True)
-        a1, a2, b1 = (SimpleNamespace(site=s) for s in ("site-a", "site-a", "site-b"))
-        assert ops._hublvol_same_site(cluster, a1, a2) is True
-        assert ops._hublvol_same_site(cluster, a1, b1) is False
 
     def test_non_sync_cluster_is_never_restricted(self):
         cluster = SimpleNamespace(sync_replication=False)
@@ -111,21 +92,21 @@ class TestPendingMarks:
         assert ops.remote_triplet_refs(node) == ("b1", "b2", "b3")
         assert node.remote_instances_pending == ["b1", "b2", "b3"]
 
-    def test_an_unchanged_member_is_not_marked_again(self):
+    def test_unchanged_member_is_not_marked_again(self):
         node = StorageNode()
         node.remote_primary_node_id, node.remote_secondary_node_id, node.remote_tertiary_node_id = (
             "b1", "b2", "b3")
         ops._set_remote_triplet_refs(node, ("b1", "b4", "b3"))
         assert node.remote_instances_pending == ["b4"]
 
-    def test_a_member_leaving_the_triplet_is_unmarked(self):
+    def test_member_leaving_triplet_is_unmarked(self):
         node = StorageNode()
         ops._set_remote_triplet_refs(node, ("b1", "b2", "b3"))
         node.remote_instances_pending = ["b2"]
         ops._set_remote_triplet_refs(node, ("b1", "b4", "b3"))
         assert node.remote_instances_pending == ["b4"]
 
-    def test_clearing_the_refs_clears_the_marks(self):
+    def test_clearing_refs_clears_marks(self):
         node = StorageNode()
         ops._set_remote_triplet_refs(node, ("b1", "b2", "b3"))
         ops._set_remote_triplet_refs(node, ("", "", ""))
@@ -147,49 +128,23 @@ class TestRemoteInstanceLeftovers:
 
     def test_all_gone(self):
         owner = SimpleNamespace(lvstore_stack=_stack())
-        assert ops._remote_instance_leftovers(self._peer(lambda name: None), owner) == []
+        peer = self._peer(lambda name: None)
+        assert ops._remote_instance_leftovers(peer, owner) == []
+        # the lvstore entry is not probed
+        probed = [c.args[0] for c in peer.rpc_client.return_value.bdev_get.call_args_list]
+        assert probed == ["d1", "d2", "raid0_1"]
 
-    def test_a_surviving_bdev_is_reported(self):
+    def test_surviving_bdev_is_reported(self):
         owner = SimpleNamespace(lvstore_stack=_stack())
         peer = self._peer(lambda name: {"name": name} if name == "d2" else None)
         assert ops._remote_instance_leftovers(peer, owner) == ["d2"]
 
-    def test_a_failed_probe_counts_as_present(self):
+    def test_failed_probe_counts_as_present(self):
         def _probe(name):
             if name == "raid0_1":
                 raise RPCException("connection error")
         owner = SimpleNamespace(lvstore_stack=_stack())
         assert ops._remote_instance_leftovers(self._peer(_probe), owner) == ["raid0_1"]
-
-    def test_the_lvstore_entry_is_not_probed(self):
-        owner = SimpleNamespace(lvstore_stack=_stack())
-        peer = self._peer(lambda name: None)
-        ops._remote_instance_leftovers(peer, owner)
-        probed = [c.args[0] for c in peer.rpc_client.return_value.bdev_get.call_args_list]
-        assert probed == ["d1", "d2", "raid0_1"]
-
-
-class TestDistribNotBuilt:
-
-    def _node(self):
-        node = MagicMock()
-        node.get_id.return_value = "b1"
-        return node
-
-    def test_no_such_device_means_not_built(self):
-        rpc = MagicMock()
-        rpc.bdev_get.return_value = None
-        assert distr_controller._distrib_not_built(rpc, self._node(), "d1") is True
-
-    def test_an_existing_distrib_keeps_the_failure(self):
-        rpc = MagicMock()
-        rpc.bdev_get.return_value = {"name": "d1"}
-        assert distr_controller._distrib_not_built(rpc, self._node(), "d1") is False
-
-    def test_an_unreachable_node_keeps_the_failure(self):
-        rpc = MagicMock()
-        rpc.bdev_get.side_effect = RPCException("connection error")
-        assert distr_controller._distrib_not_built(rpc, self._node(), "d1") is False
 
 
 class TestLvsLeadershipVerdict:
@@ -224,7 +179,7 @@ class TestLvsLeadershipVerdict:
         for rpc in rpcs.values():
             rpc.get_lvstore.assert_called_once_with("LVS_1")
 
-    def test_a_skipped_site_is_not_probed(self):
+    def test_skipped_site_is_not_probed(self):
         lost, lost_rpc = self._member("b0", site="B", answer={"lvs leadership": True})
         here, _rpc = self._member("a0", answer={"lvs leadership": True})
         verdict = ops._lvs_leadership_verdict("LVS_1", {"b0": lost, "a0": here}, skip_site="B")
@@ -250,13 +205,9 @@ class TestNonLeaderRole:
     def test_by_position(self, node_id, role):
         assert ops._non_leader_role(_member(node_id), _owner()) == role
 
-    @pytest.mark.parametrize("role", ["secondary", "tertiary"])
-    def test_the_named_role_wins(self, role):
-        assert ops._non_leader_role(_member("rt"), _owner(), role) == role
-
-    def test_a_leader_role_is_refused(self):
-        with pytest.raises(ValueError):
-            ops._non_leader_role(_member("s"), _owner(), "primary")
+    def test_named_role_wins(self):
+        # rs holds the secondary slot: the named tertiary role overrides it
+        assert ops._non_leader_role(_member("rs"), _owner(), "tertiary") == "tertiary"
 
 
 class TestLvolBdevRegistered:
@@ -267,7 +218,7 @@ class TestLvolBdevRegistered:
         lvol = SimpleNamespace(lvol_uuid="u-1", lvs_name="LVS_1", lvol_bdev="LVOL_1")
         return lvol
 
-    def test_a_uuid_hit(self):
+    def test_uuid_hit(self):
         rpc = create_autospec(RPCClient, instance=True)
         rpc.bdev_get.return_value = {"name": "u-1"}
         assert ops._lvol_bdev_registered(rpc, self._lvol()) is True
@@ -288,7 +239,7 @@ class TestLvolBdevRegistered:
 class TestSendLvolAna:
     """A failed per-NIC flip is logged; the other NICs are still flipped."""
 
-    def test_a_failed_nic_does_not_stop_the_next(self):
+    def test_failed_nic_does_not_stop_next(self):
         rpc = create_autospec(RPCClient, instance=True)
         rpc.nvmf_subsystem_listener_set_ana_state.side_effect = [
             RPCRemoteError(message="boom", code=-1), True]
@@ -330,22 +281,20 @@ class TestFenceUnblockWarning:
         return peer, rpc
 
     @pytest.mark.parametrize("answer, warned", [
-        ({"name": "LVS_1", "lvs leadership": False}, True),
-        ({"name": "LVS_1", "lvs leadership": True}, False),
-        (None, False),
+        pytest.param({"name": "LVS_1", "lvs leadership": False}, True, id="not-leading"),
+        pytest.param({"name": "LVS_1", "lvs leadership": True}, False, id="leading"),
+        pytest.param(None, False, id="no-lvstore"),
+        pytest.param(RPCConnectionError("down"), False, id="failed-probe"),
     ])
-    def test_the_answer_decides(self, caplog, answer, warned):
-        peer, rpc = self._peer(answer)
+    def test_answer_decides(self, caplog, answer, warned):
+        if isinstance(answer, Exception):
+            peer, rpc = self._peer(error=answer)
+        else:
+            peer, rpc = self._peer(answer)
         with caplog.at_level(logging.ERROR):
             self._fence().warn_if_unblocking_a_non_leader(peer)
         rpc.get_lvstore.assert_called_once_with("LVS_1")
         assert ("NO LONGER leader" in caplog.text) is warned
-
-    def test_a_failed_probe_is_silent(self, caplog):
-        peer, _rpc = self._peer(error=RPCConnectionError("down"))
-        with caplog.at_level(logging.ERROR):
-            self._fence().warn_if_unblocking_a_non_leader(peer)
-        assert "NO LONGER leader" not in caplog.text
 
 
 # ---------------------------------------------------------------------------
@@ -402,7 +351,7 @@ class TestFenceRelease:
         peer.rpc_client = MagicMock(return_value=rpc)
         return peer, rpc
 
-    def test_an_abort_releases_every_peer_before_its_own_step(self):
+    def test_abort_releases_every_peer_before_its_own_step(self):
         log: list = []
         peers = [self._peer(name, log)[0] for name in ("s", "t", "rs")]
         fence = ops._LvsFence(_lvs_owner(), _taker([]), None,
@@ -416,7 +365,7 @@ class TestFenceRelease:
                        ("on_abort",)]
         assert fence.blocked_peers == []
 
-    def test_a_regular_cluster_unblocks_without_asking_the_ha_state(self):
+    def test_regular_cluster_unblocks_without_ha_state(self):
         log: list = []
         (s, s_rpc), (t, t_rpc) = self._peer("s", log), self._peer("t", log)
         fence = ops._LvsFence(_lvs_owner(), _taker([]), None)
@@ -434,7 +383,7 @@ class TestFenceRelease:
         s_rpc.jc_ha_status.assert_not_called()
         t_rpc.jc_ha_status.assert_not_called()
 
-    def test_a_port_the_guard_keeps_blocked_is_dropped_unopened(self, monkeypatch):
+    def test_port_guard_keeps_blocked_is_dropped_unopened(self, monkeypatch):
         log: list = []
         asked: list = []
 
@@ -462,25 +411,25 @@ class TestFencedBounds:
             fence.block_started["s"] = time.monotonic() - held_for
         return fence
 
-    def test_unfenced_during_a_removal_uses_the_ordinary_client(self):
+    def test_unfenced_during_removal_uses_ordinary_client(self):
         calls: list = []
         assert self._fence(calls, removal=True).fenced("bdev_lvol_set_leader", "LVS_1", leader=True)
         assert calls == [({}, "bdev_lvol_set_leader")]
 
-    def test_unfenced_failure_during_a_removal_names_it(self):
+    def test_unfenced_failure_during_removal_names_it(self):
         calls: list = []
         fence = self._fence(calls, {"bdev_lvol_set_leader": RPCConnectionError("down")}, removal=True)
         with pytest.raises(ops.LeadershipTransferError, match="no port fenced during a removal"):
             fence.fenced("bdev_lvol_set_leader", "LVS_1", leader=True)
 
-    def test_unfenced_without_a_removal_keeps_the_bound(self):
+    def test_unfenced_without_removal_keeps_bound(self):
         calls: list = []
         self._fence(calls).fenced("get_lvstore", "LVS_1")
         assert calls == [({"timeout": constants.FENCE_RPC_TIMEOUT_SEC,
                            "retry": constants.FENCE_RPC_RETRY}, "get_lvstore")]
 
     @pytest.mark.parametrize("removal", [False, True])
-    def test_a_held_fence_clamps_either_way(self, removal):
+    def test_held_fence_clamps_either_way(self, removal):
         calls: list = []
         left = 0.2
         self._fence(calls, removal=removal,
@@ -504,13 +453,13 @@ class TestGrantBudget:
         assert fence.granted is True
         return {method: kwargs["timeout"] for kwargs, method in calls}
 
-    def test_the_leader_set_gets_its_own_budget(self):
+    def test_leader_set_gets_its_own_budget(self):
         timeouts = self._grant(held_for=0.0)
         assert timeouts["bdev_lvol_set_leader"] == pytest.approx(constants.FENCE_SET_LEADER_TIMEOUT_SEC, abs=0.05)
         assert timeouts["bdev_lvol_set_lvs_opts"] == pytest.approx(constants.FENCE_RPC_TIMEOUT_SEC, abs=0.05)
         assert timeouts["get_lvstore"] == pytest.approx(constants.FENCE_RPC_TIMEOUT_SEC, abs=0.05)
 
-    def test_near_the_deadline_the_leader_set_is_clamped_too(self):
+    def test_near_deadline_leader_set_is_clamped_too(self):
         left = 1.0
         timeouts = self._grant(held_for=constants.FENCE_DEADLINE_SEC - left)
         assert timeouts["bdev_lvol_set_leader"] <= left

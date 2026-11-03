@@ -69,17 +69,16 @@ def test_distrib_create_omits_sync_fields_by_default():
     assert params["jm_vuid"] == 7
 
 
-def test_distrib_create_sends_sync_params():
-    params = _distrib_create_request(synchronous_replication_mode=1, jm_n_local=3)
-    assert params["synchronous_replication_mode"] == 1
-    assert params["jm_n_local"] == 3
-
-
-def test_distrib_create_sends_explicit_zeroes():
-    """0 is a real value ("disabled" / "all local"), not "unset"."""
-    params = _distrib_create_request(synchronous_replication_mode=0, jm_n_local=0)
-    assert params["synchronous_replication_mode"] == 0
-    assert params["jm_n_local"] == 0
+@pytest.mark.parametrize("mode, n_local", [
+    pytest.param(1, 3, id="sends_sync_params"),
+    # Zero is a real value (mode "disabled", jm_n_local "all local"), so it
+    # is sent, not dropped as unset.
+    pytest.param(0, 0, id="sends_explicit_zeroes"),
+])
+def test_distrib_create_sends_given_sync_params(mode, n_local):
+    params = _distrib_create_request(synchronous_replication_mode=mode, jm_n_local=n_local)
+    assert params["synchronous_replication_mode"] == mode
+    assert params["jm_n_local"] == n_local
 
 
 @pytest.mark.parametrize("method", ["distr_add_nodes", "distr_add_devices"])
@@ -119,29 +118,18 @@ def test_sync_replication_status_for_one_distrib():
                                  "params": {"name": "distrib_1"}}]
 
 
-def test_replica_sync_start_sends_name_and_defaults():
+@pytest.mark.parametrize("kwargs, params", [
+    pytest.param({}, {"name": "distrib_1", "job_size": constants.MIG_JOB_SIZE,
+                      "jobs": constants.MIG_PARALLEL_JOBS}, id="sends_name_and_defaults"),
+    pytest.param({"qos_high_priority": True, "job_size": 128, "jobs": 8},
+                 {"name": "distrib_1", "qos_high_priority": True, "job_size": 128, "jobs": 8},
+                 id="sends_overrides"),
+    pytest.param({"job_size": 0, "jobs": 0}, {"name": "distrib_1"}, id="omits_zero_job_params"),
+])
+def test_replica_sync_start_request(kwargs, params):
     client, session = _client(True)
-    assert client.distr_migration_replica_sync_start("distrib_1") is True
-    assert _posted(session) == [{"id": 1, "method": "distr_migration_replica_sync_start",
-                                 "params": {"name": "distrib_1",
-                                            "job_size": constants.MIG_JOB_SIZE,
-                                            "jobs": constants.MIG_PARALLEL_JOBS}}]
-
-
-def test_replica_sync_start_sends_overrides():
-    client, session = _client(True)
-    assert client.distr_migration_replica_sync_start(
-        "distrib_1", qos_high_priority=True, job_size=128, jobs=8) is True
-    (sent,) = _posted(session)
-    assert sent["method"] == "distr_migration_replica_sync_start"
-    assert sent["params"] == {"name": "distrib_1", "qos_high_priority": True, "job_size": 128, "jobs": 8}
-
-
-def test_replica_sync_start_omits_zero_job_params():
-    client, session = _client(True)
-    client.distr_migration_replica_sync_start("distrib_1", job_size=0, jobs=0)
-    (sent,) = _posted(session)
-    assert sent["params"] == {"name": "distrib_1"}
+    assert client.distr_migration_replica_sync_start("distrib_1", **kwargs) is True
+    assert _posted(session) == [{"id": 1, "method": "distr_migration_replica_sync_start", "params": params}]
 
 
 def test_replica_sync_start_busy_raises_positive_ebusy():

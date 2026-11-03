@@ -165,12 +165,17 @@ def flag_ops(cluster_ops):
 
 class TestClusterFlag:
 
-    def test_put_cluster_sets_the_arbitration_flag(self, client, cluster, flag_ops):
-        response = client.put(f'/api/v2/clusters/{CLUSTER_ID}/', json={'two_node_arbitration': True})
+    @pytest.mark.parametrize('sync, flag', [
+        pytest.param(False, True, id='enabling_on_a_regular_cluster'),
+        pytest.param(True, False, id='disabling_on_sync_replication'),
+    ])
+    def test_put_cluster_sets_arbitration_flag(self, client, cluster, flag_ops, sync, flag):
+        cluster.sync_replication = sync
+        response = client.put(f'/api/v2/clusters/{CLUSTER_ID}/', json={'two_node_arbitration': flag})
         assert response.status_code == 204
-        flag_ops.set_two_node_arbitration.assert_called_once_with(CLUSTER_ID, True)
+        flag_ops.set_two_node_arbitration.assert_called_once_with(CLUSTER_ID, flag)
 
-    def test_a_refused_rename_sets_no_flag(self, client, cluster, flag_ops):
+    def test_refused_rename_sets_no_flag(self, client, cluster, flag_ops):
         flag_ops.set_name.side_effect = ValueError("A cluster with the name 'taken' already exists")
         with pytest.raises(ValueError):
             client.put(f'/api/v2/clusters/{CLUSTER_ID}/',
@@ -193,19 +198,14 @@ class TestClusterFlagOnSyncReplication:
         assert 'not supported on a sync-replication cluster' in response.json()['detail']['message']
         flag_ops.set_two_node_arbitration.assert_not_called()
 
-    def test_disabling_is_allowed(self, client, sync_cluster, flag_ops):
-        response = client.put(f'/api/v2/clusters/{CLUSTER_ID}/', json={'two_node_arbitration': False})
-        assert response.status_code == 204
-        flag_ops.set_two_node_arbitration.assert_called_once_with(CLUSTER_ID, False)
-
-    def test_a_refused_request_renames_nothing(self, client, sync_cluster, flag_ops):
+    def test_refused_request_renames_nothing(self, client, sync_cluster, flag_ops):
         response = client.put(f'/api/v2/clusters/{CLUSTER_ID}/',
                               json={'name': 'renamed', 'two_node_arbitration': True})
         assert response.status_code == 400
         flag_ops.set_name.assert_not_called()
         flag_ops.set_two_node_arbitration.assert_not_called()
 
-    def test_a_rename_alone_is_allowed(self, client, sync_cluster, flag_ops):
+    def test_rename_alone_is_allowed(self, client, sync_cluster, flag_ops):
         response = client.put(f'/api/v2/clusters/{CLUSTER_ID}/', json={'name': 'renamed'})
         assert response.status_code == 204
         flag_ops.set_name.assert_called_once_with(CLUSTER_ID, 'renamed')

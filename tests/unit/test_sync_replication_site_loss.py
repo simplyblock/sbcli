@@ -35,23 +35,18 @@ def _node(node_id="a0"):
 
 class TestSeenVotes:
 
-    @pytest.mark.parametrize("votes, seen", [
-        ((0, 0), (0, 0)),       # nobody to ask, or nobody holds the link
-        ((2, 3), (1, 3)),       # one peer still reports it enabled
-        ((3, 3), (0, 3)),
-        ((0, 3), (3, 3)),
+    @pytest.mark.parametrize("votes, seen, kwargs, fresh", [
+        pytest.param((0, 0), (0, 0), {}, False, id="nobody-votes"),     # no peer to ask, or no peer has the link
+        pytest.param((2, 3), (1, 3), {}, False, id="one-enabled"),      # one peer still reports it enabled
+        pytest.param((3, 3), (0, 3), {}, False, id="none-enabled"),
+        pytest.param((0, 3), (3, 3), {}, False, id="all-enabled"),
+        pytest.param((2, 3), (1, 3), {"fresh": True}, True, id="fresh"),
     ])
-    def test_enabled_is_total_minus_disconnected(self, votes, seen):
+    def test_enabled_is_total_minus_disconnected(self, votes, seen, kwargs, fresh):
         node = _node()
         with patch.object(storage_node_monitor, "_data_plane_votes", return_value=votes) as taken:
-            assert storage_node_monitor.data_plane_seen_votes(node) == seen
-        taken.assert_called_once_with(node, False)
-
-    def test_fresh_is_passed_through(self):
-        node = _node()
-        with patch.object(storage_node_monitor, "_data_plane_votes", return_value=(2, 3)) as taken:
-            assert storage_node_monitor.data_plane_seen_votes(node, fresh=True) == (1, 3)
-        taken.assert_called_once_with(node, True)
+            assert storage_node_monitor.data_plane_seen_votes(node, **kwargs) == seen
+        taken.assert_called_once_with(node, fresh)
 
 
 # ---------------------------------------------------------------------------
@@ -78,29 +73,28 @@ class TestSpdkAnswers:
                 mock.return_value = answer
         return runner._spdk_answers(node), node
 
-    def test_the_node_api_reporting_spdk_up_is_an_answer(self):
+    def test_node_api_reporting_spdk_up_is_answer(self):
         answered, node = self._probe((True, None), RPCException("connection error"))
         assert answered == API_UP
         node.client.return_value.spdk_process_is_up.assert_called_once_with(8080, "cluster-1")
         node.rpc_client.assert_not_called()
 
     @pytest.mark.parametrize("node_api", [_REFUSED, (False, None), (None, "no such process")])
-    def test_a_version_from_the_rpc_is_an_answer(self, node_api):
+    def test_version_from_rpc_is_answer(self, node_api):
         answered, _ = self._probe(node_api, _VERSION)
         assert answered == RPC_ANSWERS
 
-    @pytest.mark.parametrize("node_api", [_REFUSED, (False, None)])
-    def test_a_live_proxy_in_front_of_a_dead_spdk_is_no_answer(self, node_api):
+    @pytest.mark.parametrize("rpc", [
         # The RPC proxy is up and returns no result, so get_version() comes
         # back None without raising.
-        answered, node = self._probe(node_api, None)
+        pytest.param(None, id="live-proxy-dead-spdk"),
+        pytest.param(RPCException("connection error"), id="nothing-answering"),
+    ])
+    @pytest.mark.parametrize("node_api", [_REFUSED, (False, None)])
+    def test_no_version_is_no_answer(self, node_api, rpc):
+        answered, node = self._probe(node_api, rpc)
         assert answered == ""
         node.rpc_client.return_value.get_version.assert_called_once_with()
-
-    @pytest.mark.parametrize("node_api", [_REFUSED, (False, None)])
-    def test_nothing_answering_is_no_answer(self, node_api):
-        answered, _ = self._probe(node_api, RPCException("connection error"))
-        assert answered == ""
 
 
 # ---------------------------------------------------------------------------
@@ -118,7 +112,7 @@ class TestCollectSiteGone:
                   StorageNode.STATUS_OFFLINE, StorageNode.STATUS_IN_CREATION,
                   StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_REMOVED)
 
-    def test_a_transient_node_without_an_enabled_vote_is_gone(self):
+    def test_transient_node_without_enabled_vote_is_gone(self):
         nodes, seen = [], {}
         for status in self.PROBED:
             for votes in ((0, 0), (1, 3)):
@@ -206,8 +200,9 @@ class TestDrainNodesConvergesAFrozenSite:
         node.cluster_id = "cluster-1"
         return node
 
-    def test_a_gone_restarting_node_is_restart_cancelled_and_forced_offline(self):
-        node = self._mk("b0", RESTARTING)
+    @pytest.mark.parametrize("status", [RESTARTING, IN_SHUTDOWN])
+    def test_gone_node_restart_cancelled_forced_offline(self, status):
+        node = self._mk("b0", status)
         with patch.object(storage_node_monitor.tasks_controller,
                           "cancel_pending_node_restart_tasks") as cancel, \
              patch.object(storage_node_monitor.storage_node_ops, "set_node_status") as set_status, \
@@ -216,25 +211,16 @@ class TestDrainNodesConvergesAFrozenSite:
             storage_node_monitor._drain_nodes([node], "site drain", {"b0": True})
         cancel.assert_called_once()
         assert any(len(c.args) >= 2 and c.args[1] == OFFLINE for c in set_status.call_args_list), \
-            f"the gone RESTARTING node was not forced OFFLINE: {set_status.call_args_list}"
-        set_offline.assert_not_called()  # set_node_offline skips RESTARTING; the forced path is used
+            f"the gone {status} node was not forced OFFLINE: {set_status.call_args_list}"
+        set_offline.assert_not_called()  # set_node_offline skips this status; the forced path is used
 
-    def test_a_gone_in_shutdown_node_is_forced_offline(self):
-        node = self._mk("b0", IN_SHUTDOWN)
-        with patch.object(storage_node_monitor.tasks_controller, "cancel_pending_node_restart_tasks"), \
-             patch.object(storage_node_monitor.storage_node_ops, "set_node_status") as set_status, \
-             patch.object(storage_node_monitor.device_controller, "device_set_unavailable"):
-            storage_node_monitor._drain_nodes([node], "site drain", {"b0": True})
-        assert any(len(c.args) >= 2 and c.args[1] == OFFLINE for c in set_status.call_args_list), \
-            f"the gone IN_SHUTDOWN node was not forced OFFLINE: {set_status.call_args_list}"
-
-    def test_a_gone_schedulable_node_is_set_offline(self):
+    def test_gone_schedulable_node_is_set_offline(self):
         node = self._mk("b0", SCHEDULABLE)
         with patch.object(storage_node_monitor, "set_node_offline") as set_offline:
             storage_node_monitor._drain_nodes([node], "site drain", {"b0": True})
         set_offline.assert_called_once()  # not in the skip list, so the normal path converges it
 
-    def test_a_restarting_node_not_judged_gone_is_left_alone(self):
+    def test_restarting_node_not_judged_gone_is_left_alone(self):
         node = self._mk("b0", RESTARTING)
         with patch.object(storage_node_monitor.tasks_controller,
                           "cancel_pending_node_restart_tasks") as cancel, \
@@ -250,27 +236,27 @@ class TestSyncClusterStatus:
 
     # the site goes
 
-    def test_two_nodes_offline_and_one_up_is_a_site_draining(self):
+    def test_two_nodes_offline_and_one_up_is_site_draining(self):
         verdict = _verdict(_sync_cluster(), _layout(a=(OFFLINE, OFFLINE, ONLINE)))
         assert _proposed(verdict) == (DEGRADED, SITE_A, DRAINING)
 
-    def test_every_node_offline_is_a_site_down(self):
+    def test_every_node_offline_is_site_down(self):
         verdict = _verdict(_sync_cluster(), _layout(a=(OFFLINE,) * 3))
         assert _proposed(verdict) == (DEGRADED, SITE_A, DOWN)
 
-    def test_every_node_unreachable_unvetoed_is_a_site_down(self):
+    def test_every_node_unreachable_unvetoed_is_site_down(self):
         a = ("a0", "a1", "a2")
         verdict = _verdict(_sync_cluster(), _layout(a=(UNREACHABLE,) * 3), majority=a, veto=a)
         assert _proposed(verdict) == (DEGRADED, SITE_A, DOWN)
 
-    def test_one_vetoed_node_keeps_the_site_draining(self):
+    def test_one_vetoed_node_keeps_site_draining(self):
         # a0: one peer still reports its link enabled - a majority reports it
         # disconnected all the same, which alone would make the site "down"
         verdict = _verdict(_sync_cluster(), _layout(a=(UNREACHABLE,) * 3),
                            majority=("a0", "a1", "a2"), veto=("a1", "a2"))
         assert _proposed(verdict) == (DEGRADED, SITE_A, DRAINING)
 
-    def test_three_vetoed_unreachable_nodes_are_no_site_loss(self):
+    def test_three_vetoed_unreachable_nodes_no_site_loss(self):
         nodes = _layout(a=(UNREACHABLE,) * 3)
         verdict = _verdict(_sync_cluster(), nodes)
         assert _proposed(verdict) == (ACTIVE, "", "")
@@ -278,12 +264,11 @@ class TestSyncClusterStatus:
 
     # the site is recorded
 
-    @pytest.mark.parametrize("first", [RESTARTING, ONLINE])
-    def test_a_recorded_site_with_one_node_up_is_not_judged(self, first):
-        verdict = _verdict(_sync_cluster((SITE_A, DOWN)), _layout(a=(first, OFFLINE, OFFLINE)))
+    def test_recorded_site_with_restarting_node_not_judged(self):
+        verdict = _verdict(_sync_cluster((SITE_A, DOWN)), _layout(a=(RESTARTING, OFFLINE, OFFLINE)))
         assert _proposed(verdict) == (DEGRADED, "", "")
 
-    def test_a_recorded_site_coming_back_stays_degraded(self):
+    def test_recorded_site_coming_back_stays_degraded(self):
         cluster = _sync_cluster((SITE_A, DOWN))
         a = [OFFLINE] * 3
         for i in range(4):
@@ -291,7 +276,7 @@ class TestSyncClusterStatus:
             if i < 3:
                 a[i] = ONLINE
 
-    def test_a_recorded_site_and_the_other_out_suspend(self):
+    def test_recorded_site_and_other_out_suspend(self):
         verdict = _verdict(_sync_cluster((SITE_A, DOWN)),
                            _layout(a=(OFFLINE,) * 3, b=(OFFLINE, OFFLINE, ONLINE)))
         assert _proposed(verdict) == (SUSPENDED, "", "")
@@ -302,20 +287,19 @@ class TestSyncClusterStatus:
 
     # no witness: the management node lost its own network
 
-    def test_all_nodes_unwitnessed_fall_back_to_majority(self):
+    @pytest.mark.parametrize("a, b", [
+        pytest.param((UNREACHABLE,) * 3, (UNREACHABLE,) * 3, id="all-nodes"),
+        pytest.param((UNREACHABLE, UNREACHABLE, ONLINE), (UNREACHABLE, UNREACHABLE, ONLINE),
+                     id="two-per-site"),
+    ])
+    def test_unwitnessed_nodes_fall_back_to_majority(self, a, b):
         """Gone by the veto only, so the majority dict (nobody gone) decides."""
-        nodes = _layout(a=(UNREACHABLE,) * 3, b=(UNREACHABLE,) * 3)
-        verdict = _verdict(_sync_cluster(), nodes, veto=[n.get_id() for n in nodes])
+        nodes = _layout(a=a, b=b)
+        verdict = _verdict(_sync_cluster(), nodes, veto=[n.get_id() for n in nodes if n.status == UNREACHABLE])
         assert _proposed(verdict) == (ACTIVE, "", "")
         assert verdict.gone == {}
 
-    def test_two_per_site_unwitnessed_fall_back_to_majority(self):
-        """Gone by the veto only, so the majority dict (nobody gone) decides."""
-        nodes = _layout(a=(UNREACHABLE, UNREACHABLE, ONLINE), b=(UNREACHABLE, UNREACHABLE, ONLINE))
-        verdict = _verdict(_sync_cluster(), nodes, veto=("a0", "a1", "b0", "b1"))
-        assert _proposed(verdict) == (ACTIVE, "", "")
-
-    def test_a_recorded_site_without_a_witness_stays_degraded(self):
+    def test_recorded_site_without_witness_stays_degraded(self):
         majority: dict = {}
         verdict = storage_node_monitor._sync_cluster_status(
             _sync_cluster((SITE_A, DOWN)), _layout(a=(OFFLINE,) * 3, b=(UNREACHABLE,) * 3),
@@ -336,7 +320,7 @@ class TestSyncClusterStatus:
         (("a0",), ("a0", "b0", "b1"), {"a0": True}),          # gone by both
         ((), ("a0", "b0", "b1"), {}),                         # gone by the veto only
     ])
-    def test_with_no_healthy_site_escalation_needs_both_dicts(
+    def test_no_healthy_site_escalation_needs_both_dicts(
             self, status, state, majority, veto, gone):
         verdict = _verdict(_sync_cluster((SITE_A, state)),
                            _layout(a=(status, ONLINE, ONLINE), b=(UNREACHABLE, UNREACHABLE, ONLINE)),
@@ -346,13 +330,13 @@ class TestSyncClusterStatus:
 
     # degenerate snapshots: the computation of main
 
-    def test_no_node_with_a_site_suspends(self):
+    def test_no_node_with_site_suspends(self):
         majority: dict = {}
         verdict = storage_node_monitor._sync_cluster_status(_sync_cluster(), [], {}, majority, {}, [])
         assert _proposed(verdict) == (SUSPENDED, "", "")
         assert verdict.gone == {}
 
-    def test_a_lone_gone_site_suspends_with_no_proposal(self):
+    def test_lone_gone_site_suspends_with_no_proposal(self):
         majority: dict = {}
         nodes = [n for n in _layout(a=(OFFLINE,) * 3) if n.site == SITE_A]
         verdict = storage_node_monitor._sync_cluster_status(_sync_cluster(), nodes, {}, majority, {}, [])
@@ -380,20 +364,20 @@ class TestSyncClusterStatusDuringARemoval:
     node mid-removal while its devices are not rebuilt yet,
     ``status_without_removal`` leaves it out. The site rule judges both."""
 
-    def test_a_removal_on_one_site_degrades_by_the_removal_only(self):
+    def test_removal_on_one_site_degrades_by_removal_only(self):
         nodes = _layout(a=(MIGRATING_DEVICES, ONLINE, ONLINE))
         _removal(nodes[0])
         verdict = _verdict(_sync_cluster(), nodes)
         assert _halves(verdict) == (DEGRADED, ACTIVE)
         assert (verdict.site, verdict.state) == ("", "")
 
-    def test_a_removal_with_rebuilt_devices_does_not_count(self):
+    def test_removal_with_rebuilt_devices_does_not_count(self):
         nodes = _layout(a=(MIGRATING_LVOLS, ONLINE, ONLINE))
         _removal(nodes[0], migrated=True)
         verdict = _verdict(_sync_cluster(), nodes)
         assert _halves(verdict) == (ACTIVE, ACTIVE)
 
-    def test_a_removal_and_a_failure_on_one_site_take_it_out_by_the_removal(self):
+    def test_removal_and_failure_on_site_count_as_removal(self):
         nodes = _layout(a=(MIGRATING_DEVICES, OFFLINE, ONLINE))
         _removal(nodes[0])
         verdict = _verdict(_sync_cluster(), nodes)
@@ -402,14 +386,14 @@ class TestSyncClusterStatusDuringARemoval:
         assert _proposed(verdict) == (DEGRADED, SITE_A, DRAINING)
         assert verdict.status_without_removal == DEGRADED
 
-    def test_a_recorded_site_and_a_removal_on_the_other(self):
+    def test_recorded_site_and_removal_on_other(self):
         nodes = _layout(a=(OFFLINE,) * 3, b=(MIGRATING_DEVICES, ONLINE, ONLINE))
         _removal(nodes[3])
         verdict = _verdict(_sync_cluster((SITE_A, DOWN)), nodes)
         assert _halves(verdict) == (DEGRADED, DEGRADED)
         assert (verdict.site, verdict.state) == ("", "")
 
-    def test_the_majority_fallback_judges_both_halves(self):
+    def test_majority_fallback_judges_both_halves(self):
         # Every node unwitnessed (gone by the veto only) and b0 mid-removal:
         # no healthy site by the veto rule, the majority dict decides.
         nodes = _layout(a=(UNREACHABLE,) * 3, b=(MIGRATING_DEVICES, UNREACHABLE, UNREACHABLE))
@@ -419,7 +403,7 @@ class TestSyncClusterStatusDuringARemoval:
         assert _halves(verdict) == (DEGRADED, ACTIVE)
         assert (verdict.site, verdict.state, verdict.gone) == ("", "", {})
 
-    def test_a_removal_shut_down_node_is_gone_for_a_site_loss(self):
+    def test_removal_shut_down_node_is_gone_for_site_loss(self):
         # a0's SPDK is stopped by its removal, a1 and a2 are OFFLINE: the site
         # is lost as a whole (down), not draining.
         nodes = _layout(a=(MIGRATING_DEVICES, OFFLINE, OFFLINE))

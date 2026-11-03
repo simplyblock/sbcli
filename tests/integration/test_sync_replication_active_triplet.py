@@ -164,18 +164,23 @@ def _promote_task(db, cluster, owner, *, status=JobSchedule.STATUS_RUNNING, stal
 
 class TestRemoteLedLookups:
 
-    def test_volume_lookup_finds_the_remote_leader(self, db, rpcs, env):
+    @pytest.mark.parametrize("recover", [
+        pytest.param(True, id="with-recovery"),
+        pytest.param(False, id="without-recovery"),
+    ])
+    def test_volume_lookup_finds_remote_leader(self, db, rpcs, env, recover):
         _, a, b, _ = _layout(db, active_site=SITE_B)
         rpcs.lead(b[1])
         home = _home(db, a)
-        leader, non_leaders = ops.find_leader_with_failover(home, "LVS_1")
+        leader, non_leaders = ops.find_leader_with_failover(home, "LVS_1", recover=recover)
         assert leader.get_id() == b[1].get_id()
         # the caller's own members come back as the non-leaders
         assert [n.get_id() for n in non_leaders] == [n.get_id() for n in home]
         for node in a:
             rpcs[node.get_id()].get_lvstore.assert_not_called()
+        _nothing_granted(rpcs, [*a, *b])
 
-    def test_create_on_leader_runs_on_the_remote_leader(self, db, rpcs, env):
+    def test_create_on_leader_runs_on_remote_leader(self, db, rpcs, env):
         _, a, b, _ = _layout(db, active_site=SITE_B)
         rpcs.lead(b[0])
         ran_on = []
@@ -183,7 +188,7 @@ class TestRemoteLedLookups:
             _home(db, a), "LVS_1", lambda node: ran_on.append(node.get_id()) or True)
         assert ok and ran_on == [b[0].get_id()] and leader.get_id() == b[0].get_id()
 
-    def test_snapshot_lookup_finds_the_remote_leader(self, db, rpcs, env):
+    def test_snapshot_lookup_finds_remote_leader(self, db, rpcs, env):
         cluster, a, b, _ = _layout(db, active_site=SITE_B)
         rpcs.lead(b[2])
         # snapshot create / clone / consistency-group snapshot all resolve
@@ -191,7 +196,7 @@ class TestRemoteLedLookups:
         leader = snapshot_controller._find_lvs_leader(cluster.get_id(), "LVS_1", _home(db, a))
         assert leader.get_id() == b[2].get_id()
 
-    def test_snapshot_delete_runs_on_the_remote_leader(self, db, rpcs, env):
+    def test_snapshot_delete_runs_on_remote_leader(self, db, rpcs, env):
         _, a, b, _ = _layout(db, active_site=SITE_B)
         rpcs.lead(b[0])
         snap = types.SimpleNamespace(
@@ -202,7 +207,7 @@ class TestRemoteLedLookups:
             snapshot_monitor.process_snap_delete(snap, _fresh(db, a[0]), all_mini_lvols=[])
         assert delete.call_args.args[0].get_id() == b[0].get_id()
 
-    def test_snapshot_delete_skips_a_raising_member_and_caches_by_site(self, db, rpcs, env):
+    def test_snap_delete_skips_raising_member_caches_site(self, db, rpcs, env):
         _, a, b, owner = _layout(db, active_site=SITE_B)
         b0, b1 = b[0].get_id(), b[1].get_id()
         rpcs[b0].get_lvstore.side_effect = RPCRemoteError(message="busy", code=-16)
@@ -225,7 +230,7 @@ class TestRemoteLedLookups:
         assert cycle_cache[(owner.get_id(), SITE_B)].get_id() == b1
         assert {n.get_id(): rpcs[n.get_id()].get_lvstore.call_count for n in (*a, *b)} == probes
 
-    def test_snapshot_monitor_cache_follows_a_site_switch(self, db, rpcs, env):
+    def test_snapshot_monitor_cache_follows_site_switch(self, db, rpcs, env):
         _, a, b, owner = _layout(db)
         rpcs.lead(a[0])
         snap = types.SimpleNamespace(
@@ -244,7 +249,7 @@ class TestRemoteLedLookups:
                                                  leader_cache=cycle_cache)
         assert [c.args[0].get_id() for c in delete.call_args_list] == [a[0].get_id(), b[0].get_id()]
 
-    def test_home_lookup_skips_the_remote_triplet(self, db, rpcs, env):
+    def test_home_lookup_skips_remote_triplet(self, db, rpcs, env):
         _, a, b, _ = _layout(db)
         rpcs.lead(a[0])
         leader, _ = ops.find_leader_with_failover(_home(db, a), "LVS_1")
@@ -252,7 +257,7 @@ class TestRemoteLedLookups:
         for node in b:
             rpcs[node.get_id()].get_lvstore.assert_not_called()
 
-    def test_resize_without_a_leader_resizes_nowhere(self, db, rpcs, env):
+    def test_resize_without_leader_resizes_nowhere(self, db, rpcs, env):
         _, a, b, owner = _layout(db, active_site=SITE_B)
         lvol = types.SimpleNamespace(
             ha_type="ha", nodes=[n.get_id() for n in a], lvs_name="LVS_1", lvol_bdev="LVOL_1",
@@ -262,7 +267,7 @@ class TestRemoteLedLookups:
         for node in (*a, *b):
             rpcs[node.get_id()].bdev_lvol_resize.assert_not_called()
 
-    def test_resize_runs_on_the_remote_leader_first(self, db, rpcs, env):
+    def test_resize_runs_on_remote_leader_first(self, db, rpcs, env):
         _, a, b, owner = _layout(db, active_site=SITE_B)
         rpcs.lead(b[0])
         lvol = types.SimpleNamespace(
@@ -282,7 +287,7 @@ class TestRemoteLedLookups:
 
 class TestLeaderlessRecovery:
 
-    def test_recovery_grants_the_remote_primary(
+    def test_recovery_grants_remote_primary(
             self, db, rpcs, hub, env, no_sleep):
         _, a, b, _ = _layout(db, active_site=SITE_B)
         _journal_ready(rpcs, b[0])
@@ -295,14 +300,14 @@ class TestLeaderlessRecovery:
         # no hublvol repair wires the remote primary's own LVS
         hub["connect_to_hublvol"].assert_not_called()
 
-    def test_a_taker_without_local_journal_quorum_is_refused(self, db, rpcs, hub, env, no_sleep):
+    def test_taker_without_local_journal_quorum_is_refused(self, db, rpcs, hub, env, no_sleep):
         _, a, b, _ = _layout(db, active_site=SITE_B)
         _journal_ready(rpcs, b[0], local=False)
         leader, _ = ops.find_leader_with_failover(_home(db, a), "LVS_1")
         assert leader is None
         assert _grants(rpcs, [*a, *b]) == []
 
-    def test_recovery_during_a_move_grants_nothing(self, db, rpcs, hub, env, no_sleep):
+    def test_recovery_during_move_grants_nothing(self, db, rpcs, hub, env, no_sleep):
         cluster, a, b, owner = _layout(db, active_site="moving:" + SITE_B)
         _journal_ready(rpcs, b[0])
         nodes = [_fresh(db, n) for n in (*a, *b)]
@@ -328,7 +333,7 @@ class TestLookupWithoutRecovery:
         _grant_takes(rpcs, b[0])
         return cluster, a, b
 
-    def test_a_leaderless_lvs_has_no_leader_and_gets_none(self, db, rpcs, hub, env, no_sleep):
+    def test_leaderless_lvs_has_no_leader_and_gets_none(self, db, rpcs, hub, env, no_sleep):
         cluster, a, b = self._leaderless(db, rpcs)
         assert ops.find_leader_with_failover(_home(db, a), "LVS_1", recover=False) == (None, [])
         for node in (*a, *b):
@@ -340,7 +345,7 @@ class TestLookupWithoutRecovery:
         # means it did not start
         assert db.acquire_lvstore_lock(cluster.get_id(), "takeleader/LVS_1", "test") == (True, None)
 
-    def test_the_answer_does_not_hold_off_a_later_recovery(self, db, rpcs, hub, env, no_sleep):
+    def test_answer_does_not_hold_off_later_recovery(self, db, rpcs, hub, env, no_sleep):
         _, a, b = self._leaderless(db, rpcs)
         assert ops.find_leader_with_failover(_home(db, a), "LVS_1", recover=False) == (None, [])
         # not a "confirmed leaderless" verdict: the default lookup still recovers
@@ -348,16 +353,7 @@ class TestLookupWithoutRecovery:
         assert leader.get_id() == b[0].get_id()
         assert _grants(rpcs, [*a, *b]) == [b[0].get_id()]
 
-    def test_a_leader_that_reports_itself_is_returned(self, db, rpcs, env):
-        _, a, b, _ = _layout(db, active_site=SITE_B)
-        rpcs.lead(b[1])
-        home = _home(db, a)
-        leader, non_leaders = ops.find_leader_with_failover(home, "LVS_1", recover=False)
-        assert leader.get_id() == b[1].get_id()
-        assert [n.get_id() for n in non_leaders] == [n.get_id() for n in home]
-        _nothing_granted(rpcs, [*a, *b])
-
-    def test_a_cached_no_leader_verdict_is_honoured(self, db, rpcs, env):
+    def test_cached_no_leader_verdict_is_honoured(self, db, rpcs, env):
         cluster, a, b, _ = _layout(db, active_site=SITE_B)
         rpcs.lead(b[0])
         ttl_cache.no_leader_cache.put((cluster.get_id(), "LVS_1"), True)
@@ -365,7 +361,7 @@ class TestLookupWithoutRecovery:
         for node in (*a, *b):
             rpcs[node.get_id()].get_lvstore.assert_not_called()
 
-    def test_an_unreachable_member_forces_no_leadership_change(self, db, rpcs, hub, env, no_sleep):
+    def test_unreachable_member_forces_no_leader_change(self, db, rpcs, hub, env, no_sleep):
         _, a, b, _ = _layout(db, active_site=SITE_B)
         # b0 does not answer on mgmt while its fabric is healthy
         _goes_silent(rpcs, b[0], RPCException("timeout"))
@@ -387,7 +383,7 @@ class TestLookupWithoutRecovery:
 class TestMovingOwnedByPromote:
 
     @pytest.mark.parametrize("leader_index", [0, 4])
-    def test_lookup_finds_a_leader_on_either_triplet(
+    def test_lookup_finds_leader_on_either_triplet(
             self, db, rpcs, env, leader_index):
         cluster, a, b, owner = _layout(db, active_site="moving:" + SITE_B)
         _promote_task(db, cluster, owner)
@@ -411,7 +407,7 @@ class TestMovingOwnedByPromote:
             rpc.bdev_lvol_set_lvs_signal.assert_not_called()
         assert _fresh(db, owner).lvs_active_site == "moving:" + SITE_B
 
-    def test_a_promote_task_blocks_recovery_by_node_or_lvs(self, db, env):
+    def test_promote_task_blocks_recovery_by_node_or_lvs(self, db, env):
         cluster, a, b, owner = _layout(db)
         other = _promote_task(db, cluster, owner, node_id="elsewhere")
         assert ops._leadership_moving_tasks_active(cluster.get_id(), [], "LVS_1")
@@ -420,7 +416,7 @@ class TestMovingOwnedByPromote:
         assert ops._leadership_moving_tasks_active(cluster.get_id(), ["elsewhere"], "LVS_2")
         assert not ops._leadership_moving_tasks_active(cluster.get_id(), [a[0].get_id()], "LVS_2")
 
-    def test_a_finished_or_dead_promote_task_blocks_nothing(self, db, env):
+    def test_finished_or_dead_promote_task_blocks_nothing(self, db, env):
         cluster, _, _, owner = _layout(db)
         _promote_task(db, cluster, owner, status=JobSchedule.STATUS_DONE)
         _promote_task(db, cluster, owner, stale=True)
@@ -451,7 +447,7 @@ class TestGrantLockAgainstBeginMove:
         with patch.object(ops.health_controller, "_check_sec_node_hublvol"):
             yield
 
-    def test_a_grant_in_progress_holds_the_move_back(
+    def test_grant_in_progress_holds_move_back(
             self, db, rpcs, hub, env, no_sleep):
         cluster, a, b, owner = _layout(db)
         _journal_ready(rpcs, a[0])
@@ -476,16 +472,7 @@ class TestGrantLockAgainstBeginMove:
         assert _begin_move(db, cluster, owner, SITE_B) == []
         assert _fresh(db, owner).lvs_active_site == "moving:" + SITE_B
 
-    def test_recovery_after_a_committed_move_grants_nothing(self, db, rpcs, hub, env, no_sleep):
-        cluster, a, b, owner = _layout(db)
-        _journal_ready(rpcs, a[0])
-        assert _begin_move(db, cluster, owner, SITE_B) == []
-        nodes = _home(db, a)
-        assert ops._recover_leaderless_lvs(
-            cluster.get_id(), nodes, "LVS_1", nodes[0], owner_id=owner.get_id()) is None
-        assert _grants(rpcs, [*a, *b]) == []
-
-    def test_recovery_during_an_owned_move_grants_nothing(
+    def test_recovery_during_owned_move_grants_nothing(
             self, db, rpcs, hub, env, no_sleep):
         cluster, a, b, owner = _layout(db)
         _journal_ready(rpcs, a[0])
@@ -501,7 +488,7 @@ class TestGrantLockAgainstBeginMove:
         assert _grants(rpcs, [*a, *b]) == []
         assert _fresh(db, owner).lvs_active_site == "moving:" + SITE_B
 
-    def test_a_home_leader_rebuild_holds_the_move_back(self, db, env):
+    def test_home_leader_rebuild_holds_move_back(self, db, env):
         cluster, a, _, owner = _layout(db)
         inside, release = threading.Event(), threading.Event()
 
@@ -519,17 +506,7 @@ class TestGrantLockAgainstBeginMove:
             worker.join(10)
         assert _begin_move(db, cluster, owner, SITE_B) == []
 
-    @pytest.mark.parametrize("marker", ["moving:" + SITE_B, SITE_B])
-    def test_a_home_leader_rebuild_after_the_move_is_refused(self, db, env, marker):
-        _, _, _, owner = _layout(db, active_site=marker)
-        with patch.object(ops, "_recreate_lvstore_impl") as impl:
-            with pytest.raises(ops.LVSLeadershipElsewhereError):
-                ops.recreate_lvstore(_fresh(db, owner))
-            with pytest.raises(ops.LVSLeadershipElsewhereError):
-                ops.recreate_lvstore(_fresh(db, owner), activation_mode=True)
-        impl.assert_not_called()
-
-    def test_begin_move_needs_the_expected_marker(self, db, env):
+    def test_begin_move_needs_expected_marker(self, db, env):
         cluster, _, _, owner = _layout(db, active_site=SITE_B)
         problems = _begin_move(db, cluster, owner, SITE_A)
         assert len(problems) == 1 and "expected ''" in problems[0]
@@ -537,7 +514,7 @@ class TestGrantLockAgainstBeginMove:
         assert _begin_move(db, cluster, owner, SITE_A, expect=SITE_B) == []
         assert _fresh(db, owner).lvs_active_site == "moving:" + SITE_A
 
-    def test_marker_compare_and_set_detects_a_change(self, db, env):
+    def test_marker_compare_and_set_detects_change(self, db, env):
         _, _, _, owner = _layout(db, active_site="moving:" + SITE_B)
         assert ops.set_lvs_active_site(owner.get_id(), SITE_A, expect="moving:" + SITE_A) is False
         assert _fresh(db, owner).lvs_active_site == "moving:" + SITE_B
@@ -554,15 +531,11 @@ def _ids(nodes):
 
 class TestActiveTripletNodes:
 
-    def test_home_led(self, db):
-        _, a, _, owner = _layout(db)
-        assert _ids(ops.active_triplet_nodes(owner, db)) == _ids(a)
-
-    def test_led_from_the_other_site(self, db):
+    def test_led_from_other_site(self, db):
         _, _, b, owner = _layout(db, active_site=SITE_B)
         assert _ids(ops.active_triplet_nodes(owner, db)) == _ids(b)
 
-    def test_ftt1_leaves_the_tertiary_slot_empty(self, db):
+    def test_ftt1_leaves_tertiary_slot_empty(self, db):
         cluster = _seed_cluster(db, ftt=1)
         a, b = _sites(db, cluster)
         owner = _make_owner(db, a[0], a, b, lvs_id=1, ftt=1)
@@ -573,7 +546,7 @@ class TestActiveTripletNodes:
         owner = _update(db, owner, remote_tertiary_node_id="", lvs_active_site=SITE_B)
         assert _ids(ops.active_triplet_nodes(owner, db)) == (b[0].get_id(), b[1].get_id(), None)
 
-    def test_the_home_primary_is_read_from_the_database_too(self, db):
+    def test_home_primary_is_read_from_database_too(self, db):
         _, a, _, owner = _layout(db)
         _update(db, a[0], status=StorageNode.STATUS_OFFLINE)
         primary, _, _ = ops.active_triplet_nodes(owner, db)
@@ -581,13 +554,7 @@ class TestActiveTripletNodes:
         assert owner.status == StorageNode.STATUS_ONLINE
         assert primary.get_id() == owner.get_id() and primary.status == StorageNode.STATUS_OFFLINE
 
-    @pytest.mark.parametrize("target", [SITE_A, SITE_B])
-    def test_a_move_in_flight_has_no_active_triplet(self, db, target):
-        _, _, _, owner = _layout(db, active_site="moving:" + target)
-        with pytest.raises(ValueError, match="no active triplet"):
-            ops.active_triplet_nodes(owner, db)
-
-    def test_a_slot_naming_a_missing_node_is_not_an_empty_slot(self, db):
+    def test_slot_naming_missing_node_is_not_empty_slot(self, db):
         _, _, _, owner = _layout(db, active_site=SITE_B)
         owner = _update(db, owner, remote_secondary_node_id="gone")
         with pytest.raises(KeyError, match="gone"):
@@ -601,7 +568,7 @@ class TestActiveTripletNodes:
 class TestRestart:
 
     @pytest.mark.parametrize("marker", [SITE_B, "moving:" + SITE_B])
-    def test_home_primary_restarts_behind_the_remote_leader(
+    def test_home_primary_restarts_behind_remote_leader(
             self, db, rpcs, env, marker):
         _, a, b, owner = _layout(db, active_site=marker)
         rpcs.lead(b[0])
@@ -613,7 +580,7 @@ class TestRestart:
         assert (snode.get_id(), leader.get_id(), primary.get_id()) == (
             owner.get_id(), b[0].get_id(), owner.get_id())
 
-    def test_home_secondary_never_takes_over_a_remote_led_lvs(self, db, rpcs, env):
+    def test_home_secondary_never_takes_remote_led_lvs(self, db, rpcs, env):
         _, a, b, owner = _layout(db, active_site=SITE_B)
         env.down.add(owner.get_id())
         rpcs.lead(b[0])
@@ -626,7 +593,7 @@ class TestRestart:
         assert (snode.get_id(), leader.get_id(), primary.get_id()) == (
             a[1].get_id(), b[0].get_id(), owner.get_id())
 
-    def test_home_tertiary_quiesces_the_remote_leader(self, db, rpcs, env):
+    def test_home_tertiary_quiesces_remote_leader(self, db, rpcs, env):
         _, a, b, owner = _layout(db, active_site=SITE_B)
         rpcs.lead(b[1])
         with patch.object(ops, "recreate_lvstore", return_value=True), \
@@ -634,7 +601,7 @@ class TestRestart:
             assert ops._recreate_all_lvstores_serial(_fresh(db, a[2])) is True
         assert rebuild.call_args.args[1].get_id() == b[1].get_id()
 
-    def test_recreate_on_sec_quiesces_the_remote_leader(self, db, rpcs, env):
+    def test_recreate_on_sec_quiesces_remote_leader(self, db, rpcs, env):
         _, a, b, owner = _layout(db, active_site=SITE_B)
         rpcs.lead(b[0])
         with patch.object(ops, "recreate_lvstore_on_non_leader", return_value=True) as rebuild:
@@ -650,18 +617,11 @@ class TestRestart:
         rebuild.assert_not_called()
 
     @pytest.mark.parametrize("marker, restarting, down, as_leader", [
-        (SITE_B, 0, (), True),                  # the active primary
-        (SITE_B, 1, (), False),                 # the active secondary behind a connected primary
-        (SITE_B, 1, (0,), True),                # ... takes over from a disconnected one
-        (SITE_B, 2, (), False),                 # the active tertiary never leads
-        (SITE_B, 2, (0,), False),
-        (SITE_B, 2, (0, 1), False),             # ... and is never skipped
         ("", 0, (), False),                     # the passive triplet
         ("", 1, (0,), False),
-        ("moving:" + SITE_B, 0, (), False),     # a move in flight
-        ("moving:" + SITE_A, 1, (0,), False),
+        ("moving:" + SITE_A, 1, (0,), False),   # a move in flight
     ])
-    def test_a_remote_member_leads_by_its_position(
+    def test_remote_member_leads_by_its_position(
             self, db, rpcs, env, marker, restarting, down, as_leader):
         _, a, b, owner = _layout(db, active_site=marker)
         env.down.update(b[i].get_id() for i in down)
@@ -675,7 +635,7 @@ class TestRestart:
         assert as_leader_of == ([(me, owner.get_id())] if as_leader else [])
         assert as_non_leader_of == ([] if as_leader else [(me, owner.get_id())])
 
-    def test_an_empty_primary_slot_counts_as_disconnected(self, db, rpcs, env):
+    def test_empty_primary_slot_counts_as_disconnected(self, db, rpcs, env):
         _, a, b, owner = _layout(db, active_site=SITE_B)
         _update(db, owner, remote_primary_node_id="")
         with patch.object(ops, "recreate_lvstore", return_value=True) as leader_rebuild, \
@@ -686,7 +646,7 @@ class TestRestart:
         non_leader_rebuild.assert_not_called()
 
     @pytest.mark.parametrize("failure", [False, RPCException("spdk gone")])
-    def test_a_failed_leader_rebuild_fails_the_restart(self, db, rpcs, env, failure):
+    def test_failed_leader_rebuild_fails_restart(self, db, rpcs, env, failure):
         _, a, b, owner = _layout(db, active_site=SITE_B)
         seen = []
 
@@ -708,7 +668,7 @@ class TestRestart:
         assert set(env.unblocked()) == (
             {n.get_id() for n in (*a, b[1], b[2])} if isinstance(failure, Exception) else set())
 
-    def test_reactivation_is_refused_for_a_remote_led_lvs(self, db, rpcs, hub, env):
+    def test_reactivation_is_refused_for_remote_led_lvs(self, db, rpcs, hub, env):
         cluster = _seed_cluster(db, ftt=1)
         a, b = _sites(db, cluster)
         led_elsewhere = _make_owner(db, a[0], a, b, lvs_id=1, ftt=1)
@@ -743,10 +703,22 @@ class TestTransfer:
                                     reload_metadata=reload)
         return leader, taker
 
-    def test_to_the_remote_triplet(self, db, rpcs, hub, env, adopt):
+    @pytest.mark.parametrize("grant", [
+        pytest.param(True, id="grant"),
+        # Without a grant the taker gets its role and its triplet's hublvol,
+        # but not the leadership. It takes the leadership itself on the first
+        # client IO.
+        pytest.param(False, id="no-grant"),
+    ])
+    def test_to_remote_triplet(self, db, rpcs, hub, env, adopt, grant):
         _, a, b, owner = _layout(db)
         _update(db, owner, lvstore_status="ready")
-        leader, taker = self._run(db, rpcs, a, b, owner)
+        leader, taker = _fresh(db, a[0]), _fresh(db, b[0])
+        _transfer_ready(rpcs, leader)
+        if grant:
+            _grant_takes(rpcs, taker)
+        ops.transfer_lvs_leadership(leader, taker, [_fresh(db, n) for n in (*a, b[1], b[2])],
+                                    lvs_node=_fresh(db, owner), grant=grant)
 
         # every connected peer fenced, the leader last, all released again
         blocked = env.blocked()
@@ -754,7 +726,7 @@ class TestTransfer:
         assert set(blocked) == {n.get_id() for n in (*a, b[1], b[2])}
         assert sorted(env.unblocked()) == sorted(blocked)
         # the old leader: replication suspended, drained, demoted, re-stamped non-leader
-        old = [c[0] for c in rpcs[leader.get_id()].method_calls]
+        old = _rpc_names(rpcs, leader)
         assert old.index("jc_disable_replication") < old.index("bdev_distrib_check_inflight_io") \
             < old.index("bdev_lvol_set_leader") < old.index("bdev_distrib_force_to_non_leader") \
             < old.index("bdev_lvol_set_lvs_opts")
@@ -764,12 +736,18 @@ class TestTransfer:
         assert stack._roles(rpcs[leader.get_id()]) == ["secondary"]
         assert stack._roles(rpcs[a[1].get_id()]) == ["secondary"]
         assert stack._roles(rpcs[a[2].get_id()]) == ["tertiary"]
-        # the taker: metadata reloaded, role primary, granted
-        new = [c[0] for c in rpcs[taker.get_id()].method_calls]
-        assert new.index("bdev_lvol_update_lvstore") < new.index("bdev_lvol_set_lvs_opts") \
-            < new.index("bdev_lvol_set_leader")
+        # The taker gets the primary role. With a grant, its metadata is
+        # reloaded first and then it is made the leader. Without a grant there
+        # is no reload, no set_leader and no poll.
+        new = _rpc_names(rpcs, taker)
         assert stack._roles(rpcs[taker.get_id()]) == ["primary"]
-        assert _grants(rpcs, [*a, *b]) == [taker.get_id()]
+        if grant:
+            assert new.index("bdev_lvol_update_lvstore") < new.index("bdev_lvol_set_lvs_opts") \
+                < new.index("bdev_lvol_set_leader")
+            assert _grants(rpcs, [*a, *b]) == [taker.get_id()]
+        else:
+            assert "bdev_lvol_set_lvs_opts" in new and not set(new) & _GRANT_RPCS
+            assert _grants(rpcs, [*a, *b]) == []
         # hublvol only within the taker's site
         assert adopt.call_args.args[0].get_id() == taker.get_id()
         assert adopt.call_args.args[1].get_id() == owner.get_id()
@@ -786,7 +764,7 @@ class TestTransfer:
         assert _fresh(db, owner).lvstore_status == "ready"
 
     @pytest.mark.parametrize("reload_result", [False, RPCException("reload failed")])
-    def test_a_failed_metadata_reload_grants_nothing(
+    def test_failed_metadata_reload_grants_nothing(
             self, db, rpcs, hub, env, adopt, reload_result):
         _, a, b, owner = _layout(db)
         _update(db, owner, lvstore_status="ready")
@@ -803,7 +781,7 @@ class TestTransfer:
         env.set_node_status.assert_not_called()
         assert _fresh(db, owner).lvstore_status == "ready"
 
-    def test_a_raw_error_releases_every_blocked_peer(self, db, rpcs, hub, env, adopt):
+    def test_raw_error_releases_every_blocked_peer(self, db, rpcs, hub, env, adopt):
         """An error that is not a fence abort leaves the window through the
         transfer's cleanup, which releases every port the fence blocked."""
         _, a, b, owner = _layout(db)
@@ -822,7 +800,7 @@ class TestTransfer:
         assert sorted(env.unblocked()) == sorted(env.blocked())
         assert _fresh(db, owner).lvstore_status == "ready"
 
-    def test_a_grant_that_does_not_take_aborts(self, db, rpcs, hub, env, adopt, no_sleep):
+    def test_grant_that_does_not_take_aborts(self, db, rpcs, hub, env, adopt, no_sleep):
         _, a, b, owner = _layout(db)
         leader, taker = _fresh(db, a[0]), _fresh(db, b[0])
         _transfer_ready(rpcs, leader)       # the taker never reports the leadership
@@ -832,7 +810,7 @@ class TestTransfer:
         assert sorted(env.unblocked()) == sorted(env.blocked())
         assert not _took_leadership(rpcs[a[0].get_id()])
 
-    def test_a_failed_old_leader_restamp_aborts_the_grant(self, db, rpcs, hub, env, adopt):
+    def test_failed_old_leader_restamp_aborts_grant(self, db, rpcs, hub, env, adopt):
         _, a, b, owner = _layout(db)
         rpcs[a[0].get_id()].bdev_lvol_set_lvs_opts.return_value = False
         with pytest.raises(ops.LeadershipTransferError) as err:
@@ -842,7 +820,7 @@ class TestTransfer:
         rpcs[b[0].get_id()].bdev_lvol_set_lvs_opts.assert_not_called()
         assert sorted(env.unblocked()) == sorted(env.blocked())
 
-    def test_a_leader_marked_disconnected_is_still_fenced(self, db, rpcs, hub, env, adopt):
+    def test_leader_marked_disconnected_is_still_fenced(self, db, rpcs, hub, env, adopt):
         _, a, b, owner = _layout(db)
         env.down.add(a[0].get_id())          # stale / cached verdict: "gone"
         leader, _ = self._run(db, rpcs, a, b, owner)
@@ -850,7 +828,7 @@ class TestTransfer:
         rpcs[leader.get_id()].bdev_lvol_set_leader.assert_called_once_with(
             "LVS_1", leader=False, bs_nonleadership=True)
 
-    def test_a_former_leader_is_stamped_non_leader_first(self, db, rpcs, hub, env, adopt):
+    def test_former_leader_is_stamped_non_leader_first(self, db, rpcs, hub, env, adopt):
         # Crash after the demote, before the grant: nobody leads, the former
         # leader may still carry the PRIMARY role.
         _, a, b, owner = _layout(db)
@@ -870,7 +848,7 @@ class TestTransfer:
         assert own == [("block", a[0].get_id()), ("stamp", "secondary"), ("grant", taker.get_id()),
                        ("release", a[0].get_id())]
 
-    def test_without_a_current_leader_nothing_is_demoted(self, db, rpcs, hub, env, adopt):
+    def test_without_current_leader_nothing_is_demoted(self, db, rpcs, hub, env, adopt):
         _, a, b, owner = _layout(db)
         taker = _fresh(db, b[0])
         _grant_takes(rpcs, taker)
@@ -883,49 +861,7 @@ class TestTransfer:
     # grant=False: the taker gets its role and its triplet's hublvol, never the
     # leadership - it takes that itself on the first client IO
 
-    def test_without_a_grant_the_taker_is_stamped_and_wired(self, db, rpcs, hub, env, adopt):
-        _, a, b, owner = _layout(db)
-        _update(db, owner, lvstore_status="ready")
-        leader, taker = _fresh(db, a[0]), _fresh(db, b[0])
-        _transfer_ready(rpcs, leader)
-        ops.transfer_lvs_leadership(leader, taker, [_fresh(db, n) for n in (*a, b[1], b[2])],
-                                    lvs_node=_fresh(db, owner), grant=False)
-
-        # the old leader: replication suspended, drained, demoted, re-stamped non-leader
-        old = _rpc_names(rpcs, leader)
-        assert old.index("jc_disable_replication") < old.index("bdev_distrib_check_inflight_io") \
-            < old.index("bdev_lvol_set_leader") < old.index("bdev_distrib_force_to_non_leader") \
-            < old.index("bdev_lvol_set_lvs_opts")
-        rpcs[leader.get_id()].bdev_lvol_set_leader.assert_called_once_with(
-            "LVS_1", leader=False, bs_nonleadership=True)
-        assert stack._roles(rpcs[leader.get_id()]) == ["secondary"]
-        assert stack._roles(rpcs[a[1].get_id()]) == ["secondary"]
-        assert stack._roles(rpcs[a[2].get_id()]) == ["tertiary"]
-        # the taker: role primary and nothing of a grant - no reload, no set_leader, no poll
-        new = _rpc_names(rpcs, taker)
-        assert "bdev_lvol_set_lvs_opts" in new and not set(new) & _GRANT_RPCS
-        assert stack._roles(rpcs[taker.get_id()]) == ["primary"]
-        assert _grants(rpcs, [*a, *b]) == []
-        # hublvol only within the taker's site, as with a grant
-        assert adopt.call_args.args[0].get_id() == taker.get_id()
-        assert adopt.call_args.args[1].get_id() == owner.get_id()
-        assert stack._hub_callers(hub, "create_secondary_hublvol") == [b[1].get_id()]
-        connects = {c.args[0].get_id(): c.kwargs["role"] for c in hub["connect_to_hublvol"].call_args_list
-                    if not c.kwargs.get("attach_only")}
-        assert connects == {b[1].get_id(): "secondary", b[2].get_id(): "tertiary"}
-        assert not {n.get_id() for n in a} & set(stack._hub_callers(hub, "connect_to_hublvol"))
-        failover = hub["add_hublvol_failover_path"].call_args
-        assert failover.args[0].get_id() == b[2].get_id()
-        assert failover.kwargs["lvs_node"].get_id() == owner.get_id()
-        # every connected peer fenced, the leader last, all released again
-        blocked = env.blocked()
-        assert blocked[-1] == leader.get_id()
-        assert set(blocked) == {n.get_id() for n in (*a, b[1], b[2])}
-        assert sorted(env.unblocked()) == sorted(blocked)
-        env.set_node_status.assert_not_called()
-        assert _fresh(db, owner).lvstore_status == "ready"
-
-    def test_without_a_grant_the_hand_off_is_repeatable(self, db, rpcs, hub, env, adopt):
+    def test_without_grant_hand_off_is_repeatable(self, db, rpcs, hub, env, adopt):
         _, a, b, owner = _layout(db)
 
         def hand_off():
@@ -951,7 +887,7 @@ class TestTransfer:
         assert adopt.call_count == 2
         assert blocked_twice == blocked * 2 and sorted(unblocked_twice) == sorted(blocked_twice)
 
-    def test_without_a_grant_through_the_callers_fence(self, db, rpcs, hub, env, adopt):
+    def test_without_grant_through_callers_fence(self, db, rpcs, hub, env, adopt):
         # the branch a restart uses: the caller owns the fence and the steps after the window
         _, a, b, owner = _layout(db)
         leader, taker = _fresh(db, a[0]), _fresh(db, b[0])
@@ -975,7 +911,7 @@ class TestTransfer:
         assert not fence.blocked_peers and sorted(env.unblocked()) == sorted(env.blocked())
 
     @pytest.mark.parametrize("stamp_result", [False, RPCException("stamp failed")])
-    def test_without_a_grant_a_failed_taker_stamp_aborts(
+    def test_without_grant_failed_taker_stamp_aborts(
             self, db, rpcs, hub, env, adopt, stamp_result):
         _, a, b, owner = _layout(db)
         _update(db, owner, lvstore_status="ready")
@@ -999,7 +935,7 @@ class TestTransfer:
         env.set_node_status.assert_not_called()
         assert _fresh(db, owner).lvstore_status == "ready"
 
-    def test_without_a_grant_a_failed_adopt_reports_no_grant(
+    def test_without_grant_failed_adopt_reports_no_grant(
             self, db, rpcs, hub, env, adopt):
         _, a, b, owner = _layout(db)
         leader, taker = _fresh(db, a[0]), _fresh(db, b[0])
@@ -1076,11 +1012,12 @@ class TestLeaderRebuild:
     (nothing of it patched): it works on that member's own triplet, whichever
     site it is on, and never touches the passive one."""
 
-    def test_the_remote_primary_examines_and_is_granted(self, db, rpcs, hub, env, adopt, attached):
+    def test_remote_primary_examines_and_is_granted(self, db, rpcs, hub, env, adopt, attached):
         cluster, a, b, owner = publish._layout(db, active_site=SITE_B)
         vol = publish._volume(db, cluster, owner, publish._pool(db, cluster), ns_id=1,
                               active_site=SITE_B, demoted=[SITE_A])
         b0, b1, b2 = (n.get_id() for n in b)
+        _update(db, owner, remote_instances_pending=[b0, b2])
         _grant_takes(rpcs, b[0])
         publish._absent_until_created(rpcs[b0], vol.nqn)
         publish._examines(rpcs[b0], vol)
@@ -1107,6 +1044,8 @@ class TestLeaderRebuild:
         # the passive triplet is not probed, fenced, stamped or wired
         _untouched(rpcs, hub, adopt, env, a)
         assert _fresh(db, owner).lvstore_status == "ready"
+        # the rebuild clears its own pending mark, and only that one
+        assert _fresh(db, owner).remote_instances_pending == [b2]
         # ANA: the returning active primary is the optimized path again and its
         # secondary is flipped back before the window (the failback), then with
         # the tertiary once the hand-off is over
@@ -1115,7 +1054,7 @@ class TestLeaderRebuild:
         assert publish._ana_calls(rpcs[b1], vol.nqn) == [(1, "non_optimized")] * 2
         assert publish._ana_calls(rpcs[b2], vol.nqn) == [(1, "non_optimized")]
 
-    def test_a_failing_failback_does_not_abort_the_rebuild(self, db, rpcs, hub, env, adopt, attached):
+    def test_failing_failback_does_not_abort_rebuild(self, db, rpcs, hub, env, adopt, attached):
         """The failback of the returning remote primary's secondary is
         housekeeping, like the home primary's: an error in it is logged and
         the rebuild goes on to the grant."""
@@ -1136,7 +1075,7 @@ class TestLeaderRebuild:
         assert _fresh(db, owner).lvstore_status == "ready"
         assert publish._ana_calls(rpcs[b0], vol.nqn) == [(1, "optimized")]
 
-    def test_an_acting_leader_is_demoted_before_the_grant(
+    def test_acting_leader_is_demoted_before_grant(
             self, db, rpcs, hub, env, adopt):
         _, a, b, owner = _layout(db, active_site=SITE_B)
         b0, b1, b2 = (n.get_id() for n in b)
@@ -1162,27 +1101,7 @@ class TestLeaderRebuild:
         assert _wired(hub) == {b1: ("secondary", b0), b2: ("tertiary", b0)}
         _untouched(rpcs, hub, adopt, env, a)
 
-    def test_the_remote_secondary_takes_over(self, db, rpcs, hub, env, adopt):
-        _, a, b, owner = _layout(db, active_site=SITE_B)
-        b0, b1, b2 = (n.get_id() for n in b)
-        env.down.add(b0)
-        _grant_takes(rpcs, b[1])
-
-        assert ops.recreate_lvstore(_fresh(db, b[1]), lvs_primary=_fresh(db, owner)) is True
-
-        _examined_then_granted(rpcs, b[1])
-        # an acting leader keeps the role of its slot
-        assert stack._roles(rpcs[b1]) == ["secondary"]
-        assert _grants(rpcs, [*a, *b]) == [b1]
-        assert env.blocked() == [b2] == env.unblocked()
-        assert adopt.call_args.args[0].get_id() == b1
-        assert _wired(hub) == {b2: ("tertiary", b1)}
-        hub["create_secondary_hublvol"].assert_not_called()
-        hub["add_hublvol_failover_path"].assert_not_called()
-        _untouched(rpcs, hub, adopt, env, [*a, b[0]])
-        assert _fresh(db, owner).lvstore_status == "ready"
-
-    def test_an_unanswered_leader_probe_aborts_the_rebuild(
+    def test_unanswered_leader_probe_aborts_rebuild(
             self, db, rpcs, hub, env, adopt):
         cluster, a, b, owner = publish._layout(db, active_site=SITE_B)
         vol = publish._volume(db, cluster, owner, publish._pool(db, cluster), ns_id=1,
@@ -1204,14 +1123,7 @@ class TestLeaderRebuild:
         assert _fresh(db, owner).remote_instances_pending == [b0, b2]
         _untouched(rpcs, hub, adopt, env, a)
 
-    def test_a_rebuild_clears_the_members_pending_mark(self, db, rpcs, hub, env, adopt):
-        _, a, b, owner = _layout(db, active_site=SITE_B)
-        _update(db, owner, remote_instances_pending=[b[0].get_id(), b[2].get_id()])
-        _grant_takes(rpcs, b[0])
-        assert ops.recreate_lvstore(_fresh(db, b[0]), lvs_primary=_fresh(db, owner)) is True
-        assert _fresh(db, owner).remote_instances_pending == [b[2].get_id()]
-
-    def test_the_home_primary_works_on_the_home_triplet_only(self, db, rpcs, hub, env, adopt):
+    def test_home_primary_works_on_home_triplet_only(self, db, rpcs, hub, env, adopt):
         # the same rule from the other side: a home-led LVS, the remote triplet is the passive one
         _, a, b, owner = _layout(db)
         a0, a1, a2 = (n.get_id() for n in a)
@@ -1231,7 +1143,7 @@ class TestLeaderRebuild:
         _untouched(rpcs, hub, adopt, env, b)
         assert _fresh(db, owner).lvstore_status == "ready"
 
-    def test_the_owner_record_is_never_written_whole(self, db, rpcs, hub, env, adopt, caplog):
+    def test_owner_record_is_never_written_whole(self, db, rpcs, hub, env, adopt, caplog):
         # The owner is a live node of the passive site: a full-object write of
         # the caller's copy would bring back what another flow changed on it.
         _, a, b, owner = _layout(db, active_site=SITE_B)
@@ -1251,7 +1163,7 @@ class TestLeaderRebuild:
         # whose records other flows change under other locks
         assert not {owner.get_id(), b[0].get_id()} & set(_whole_writes(caplog))
 
-    def test_the_rebuilding_member_is_never_written_whole(
+    def test_rebuilding_member_is_never_written_whole(
             self, db, rpcs, hub, env, adopt, caplog):
         # b0 connects the journal of the other site (RPC round-trips) under the
         # locks of LVS_1 only. Its own record is changed by flows that hold
@@ -1280,7 +1192,7 @@ class TestLeaderRebuild:
         assert (rebuilt.lvs_active_site, rebuilt.remote_instances_pending) == (SITE_A, [a[1].get_id()])
         assert b[0].get_id() not in _whole_writes(caplog)
 
-    def test_the_rebuild_uses_the_triplet_on_record(self, db, rpcs, hub, env, adopt):
+    def test_rebuild_uses_triplet_on_record(self, db, rpcs, hub, env, adopt):
         # The remote refs change under no lock of the rebuild (assign_remote_triplets):
         # the rebuild works on the owner it validated, never on a member that left.
         cluster, a, b, owner = _layout(db, active_site=SITE_B)
@@ -1322,7 +1234,7 @@ class TestLeaderRebuildGuard:
         with pytest.raises(ops.LVSLeadershipElsewhereError, match=match):
             self._rebuild(db, node, owner, **kwargs)
 
-    def test_led_from_home_only_the_home_triplet_may(self, db, env, impl):
+    def test_led_from_home_only_home_triplet_may(self, db, env, impl):
         _, a, b, owner = _layout(db)
         for node in b:
             self._refused(db, node, owner, match="not a member of its active triplet")
@@ -1332,10 +1244,12 @@ class TestLeaderRebuildGuard:
         assert [(c.args[0].get_id(), c.kwargs["lvs_primary"] and c.kwargs["lvs_primary"].get_id())
                 for c in impl.call_args_list] == [(a[0].get_id(), None), (a[1].get_id(), owner.get_id())]
 
-    def test_led_remotely_only_the_remote_triplet_may(self, db, env, impl):
+    def test_led_remotely_only_remote_triplet_may(self, db, env, impl):
         _, a, b, owner = _layout(db, active_site=SITE_B)
         for node in a:
             self._refused(db, node, owner, match="not a member of its active triplet")
+        # nor does the owner build it as the leader in a cluster activation
+        self._refused(db, a[0], owner, match="not a member of its active triplet", activation_mode=True)
         impl.assert_not_called()
         assert self._rebuild(db, b[0], owner) is True
         env.down.add(b[0].get_id())
@@ -1353,7 +1267,7 @@ class TestLeaderRebuildGuard:
         (2, (0,), False),
         (2, (0, 1), False),
     ])
-    def test_a_remote_member_is_held_to_its_position(
+    def test_remote_member_is_held_to_its_position(
             self, db, env, impl, node, down, allowed):
         # restart Step 4 decides this before the rebuild waits for its locks;
         # the guard under them does not take its word for it
@@ -1366,14 +1280,14 @@ class TestLeaderRebuildGuard:
             self._refused(db, b[node], owner, match="no takeover is due")
             impl.assert_not_called()
 
-    def test_an_empty_primary_slot_allows_a_takeover(self, db, env, impl):
+    def test_empty_primary_slot_allows_takeover(self, db, env, impl):
         _, a, b, owner = _layout(db, active_site=SITE_B)
         _update(db, owner, remote_primary_node_id="")
         assert self._rebuild(db, b[1], owner) is True
         self._refused(db, b[2], owner, match="no takeover is due")
         assert _verdicts_asked() == []
 
-    def test_the_takeover_verdict_is_taken_under_the_locks(self, db, env, impl):
+    def test_takeover_verdict_is_taken_under_locks(self, db, env, impl):
         # about the primary, by the dispatch's own voters, and never the
         # verdict the dispatch cached: fresh
         _, a, b, owner = _layout(db, active_site=SITE_B)
@@ -1400,7 +1314,7 @@ class TestLeaderRebuildGuard:
         self._refused(db, b[2], owner, match="no takeover is due")
         assert _verdicts_asked() == []
 
-    def test_the_home_triplet_keeps_the_callers_precondition(self, db, env, impl):
+    def test_home_triplet_keeps_callers_precondition(self, db, env, impl):
         # main's contract (restart Step 2 decides, nothing asks again): its
         # secondary and tertiary pass next to a connected primary, and the
         # guard asks no peer anything
@@ -1410,34 +1324,28 @@ class TestLeaderRebuildGuard:
         assert [c.args[0].get_id() for c in impl.call_args_list] == [a[1].get_id(), a[2].get_id()]
         assert _verdicts_asked() == []
 
-    @pytest.mark.parametrize("active_site, builder", [("", 0), (SITE_B, 3)])
-    def test_an_activation_asks_for_no_verdict(self, db, env, impl, active_site, builder):
-        _, a, b, owner = _layout(db, active_site=active_site)
-        assert self._rebuild(db, [*a, *b][builder], owner, activation_mode=True) is True
-        assert _verdicts_asked() == []
-
     @pytest.mark.parametrize("marker", ["moving:" + SITE_A, "moving:" + SITE_B])
     @pytest.mark.parametrize("activation", [False, True])
-    def test_a_move_in_flight_refuses_everybody(self, db, env, impl, marker, activation):
+    def test_move_in_flight_refuses_everybody(self, db, env, impl, marker, activation):
         _, a, b, owner = _layout(db, active_site=marker)
         for node in (a[0], a[1], b[0], b[1]):
             self._refused(db, node, owner, match="being moved", activation_mode=activation)
         impl.assert_not_called()
 
     @pytest.mark.parametrize("activation", [False, True])
-    def test_a_member_on_the_lost_site_is_refused(self, db, env, impl, activation):
+    def test_member_on_lost_site_is_refused(self, db, env, impl, activation):
         _, a, b, owner = _layout(db, active_site=SITE_B, lost_site=SITE_B)
         self._refused(db, b[0], owner, match="lost site", activation_mode=activation)
         impl.assert_not_called()
 
-    def test_a_node_that_holds_no_instance_is_refused(self, db, env, impl):
+    def test_node_that_holds_no_instance_is_refused(self, db, env, impl):
         cluster, a, b, owner = _layout(db, active_site=SITE_B)
         stranger = stack._seed_node(db, cluster, "b3", SITE_B)
         self._refused(db, stranger, owner, match="not a member")
         impl.assert_not_called()
 
     @pytest.mark.parametrize("active_site, builder, secondary", [("", 0, 1), (SITE_B, 3, 4)])
-    def test_activation_builds_on_the_active_primary_only(self, db, env, impl, active_site, builder, secondary):
+    def test_activation_builds_on_active_primary_only(self, db, env, impl, active_site, builder, secondary):
         _, a, b, owner = _layout(db, active_site=active_site)
         members = [*a, *b]
         self._refused(db, members[secondary], owner, match="activation", activation_mode=True)
@@ -1445,8 +1353,10 @@ class TestLeaderRebuildGuard:
         assert self._rebuild(db, members[builder], owner, activation_mode=True) is True
         assert impl.call_args.args[0].get_id() == members[builder].get_id()
         assert impl.call_args.kwargs["activation_mode"] is True
+        # an activation asks for no disconnected verdict
+        assert _verdicts_asked() == []
 
-    def test_the_rebuild_gets_the_owner_as_validated(self, db, env, impl):
+    def test_rebuild_gets_owner_as_validated(self, db, env, impl):
         # not the caller's copy: its triplet may have changed since it was read
         _, a, b, owner = _layout(db, active_site=SITE_B)
         callers_copy = _fresh(db, owner)
@@ -1459,7 +1369,7 @@ class TestLeaderRebuildGuard:
         self._refused(db, b[1], owner, match="not a member")
 
     @pytest.mark.parametrize("failure", [False, RPCException("spdk gone")])
-    def test_a_failed_rebuild_gives_the_owner_its_status_back(self, db, env, impl, failure):
+    def test_failed_rebuild_gives_owner_its_status_back(self, db, env, impl, failure):
         _, a, b, owner = _layout(db, active_site=SITE_B)
 
         def _fails(snode, **kwargs):
@@ -1524,7 +1434,7 @@ class TestTakeoverVerdictUnderTheLocks:
         """Restart Step 4's question, as Step 4 asks it."""
         return ops._remote_member_leads_at_restart(_fresh(db, owner), _fresh(db, node), db)
 
-    def test_a_primary_back_within_the_ttl_stops_takeover(self, db, impl, votes):
+    def test_primary_back_within_ttl_stops_takeover(self, db, impl, votes):
         _, a, b, owner = _layout(db, active_site=SITE_B)
         votes.return_value = (2, 2)             # b0 is ONLINE on record, its journal gone for its peers
         assert self._dispatch_says(db, owner, b[1]) is True
@@ -1543,7 +1453,7 @@ class TestTakeoverVerdictUnderTheLocks:
         assert self._dispatch_says(db, owner, b[1]) is False
         assert votes.call_count == 2
 
-    def test_a_primary_gone_within_the_ttl_allows_takeover(self, db, impl, votes):
+    def test_primary_gone_within_ttl_allows_takeover(self, db, impl, votes):
         _, a, b, owner = _layout(db, active_site=SITE_B)
         assert self._dispatch_says(db, owner, b[1]) is False        # cached: connected
         votes.return_value = (2, 2)
@@ -1553,7 +1463,7 @@ class TestTakeoverVerdictUnderTheLocks:
         assert impl.call_args.args[0].get_id() == b[1].get_id()
         assert votes.call_count == 2
 
-    def test_a_primary_offline_on_record_needs_no_vote(self, db, impl, votes):
+    def test_primary_offline_on_record_needs_no_vote(self, db, impl, votes):
         # the mgmt short-circuit comes first and is never cached
         _, a, b, owner = _layout(db, active_site=SITE_B)
         _update(db, b[0], status=StorageNode.STATUS_OFFLINE)
@@ -1564,13 +1474,13 @@ class TestTakeoverVerdictUnderTheLocks:
 
         votes.assert_not_called()
 
-    def test_the_primary_itself_needs_no_vote(self, db, impl, votes):
+    def test_primary_itself_needs_no_vote(self, db, impl, votes):
         _, a, b, owner = _layout(db, active_site=SITE_B)
         assert ops.recreate_lvstore(_fresh(db, b[0]), lvs_primary=_fresh(db, owner)) is True
         votes.assert_not_called()
 
     # replaced_monitor before votes: pytest sets fixtures of one scope up in the order they are requested
-    def test_a_replaced_monitor_module_is_not_asked(self, db, impl, replaced_monitor, votes):
+    def test_replaced_monitor_module_is_not_asked(self, db, impl, replaced_monitor, votes):
         _, a, b, owner = _layout(db, active_site=SITE_B)
         assert self._dispatch_says(db, owner, b[1]) is False
         assert votes.call_count == 1
@@ -1619,7 +1529,7 @@ class TestRestartByPosition:
     disconnected primary, everybody else a non-leader behind the node
     _rebuild_anchor names - and "nobody leads" blocks nothing."""
 
-    def test_the_active_primary_rebuilds_the_lvs_as_its_leader(self, db, rpcs, hub, env, adopt):
+    def test_active_primary_rebuilds_lvs_as_its_leader(self, db, rpcs, hub, env, adopt):
         _, a, b, owner = _layout(db, active_site=SITE_B)
         b0, b1, b2 = (n.get_id() for n in b)
         _grant_takes(rpcs, b[0])
@@ -1636,7 +1546,7 @@ class TestRestartByPosition:
         assert _fresh(db, owner).lvstore_status == "ready"
 
     @pytest.mark.parametrize("primary_leads", [False, True])
-    def test_the_active_secondary_stands_behind_its_primary(
+    def test_active_secondary_stands_behind_its_primary(
             self, db, rpcs, hub, env, adopt, primary_leads):
         """Its primary is connected, whether it leads or not."""
         _, a, b, owner = _layout(db, active_site=SITE_B)
@@ -1656,7 +1566,7 @@ class TestRestartByPosition:
         adopt.assert_not_called()
         assert _fresh(db, owner).lvstore_status == "ready"
 
-    def test_the_active_secondary_leads_without_its_primary(self, db, rpcs, hub, env, adopt):
+    def test_active_secondary_leads_without_its_primary(self, db, rpcs, hub, env, adopt):
         _, a, b, owner = _layout(db, active_site=SITE_B)
         b0, b1, b2 = (n.get_id() for n in b)
         env.down.add(b0)
@@ -1666,14 +1576,18 @@ class TestRestartByPosition:
 
         assert ret is True and leader_rebuilds == [(b1, owner.get_id())]
         _examined_then_granted(rpcs, b[1])
+        # an acting leader keeps the role of its slot
         assert stack._roles(rpcs[b1]) == ["secondary"]
         assert _grants(rpcs, [*a, *b]) == [b1]
         _quiesced(env, [b[2]])
+        assert adopt.call_args.args[0].get_id() == b1
         assert _wired(hub) == {b2: ("tertiary", b1)}
+        hub["create_secondary_hublvol"].assert_not_called()
+        hub["add_hublvol_failover_path"].assert_not_called()
         _untouched(rpcs, hub, adopt, env, [*a, b[0]])
         assert _fresh(db, owner).lvstore_status == "ready"
 
-    def test_a_returning_primary_stops_the_takeover(self, db, rpcs, hub, env, adopt):
+    def test_returning_primary_stops_takeover(self, db, rpcs, hub, env, adopt):
         # Step 4 chooses the takeover before the leader rebuild waits for its
         # locks; a primary that is connected again once they are held is no
         # peer of that rebuild and would get a second leader next to it
@@ -1709,7 +1623,7 @@ class TestRestartByPosition:
         assert _fresh(db, owner).lvstore_status == "ready"
 
     @pytest.mark.parametrize("down, behind", [((), 0), ((0,), 1), ((0, 1), None)])
-    def test_the_active_tertiary_is_always_built_non_leader(
+    def test_active_tertiary_is_always_built_non_leader(
             self, db, rpcs, hub, env, adopt, down, behind):
         # behind the primary, behind the secondary when the primary is
         # disconnected, and with both disconnected it is BUILT all the same,
@@ -1731,7 +1645,7 @@ class TestRestartByPosition:
 
     @pytest.mark.parametrize("restarting, role", [(0, "secondary"), (1, "secondary"), (2, "tertiary")])
     @pytest.mark.parametrize("site_b_down", [False, True])
-    def test_a_passive_member_stands_behind_the_active_primary(
+    def test_passive_member_stands_behind_active_primary(
             self, db, rpcs, hub, env, adopt, restarting, role, site_b_down):
         # restart Steps 1-3 of a home member (owner, secondary, tertiary):
         # nobody reports the leadership, and with the whole active triplet
@@ -1754,7 +1668,7 @@ class TestRestartByPosition:
         assert _fresh(db, owner).lvstore_status == "ready"
 
     @pytest.mark.parametrize("restarting, role", [(1, "secondary"), (2, "tertiary")])
-    def test_a_leaderless_home_led_lvs_blocks_no_restart(
+    def test_leaderless_home_led_lvs_blocks_no_restart(
             self, db, rpcs, hub, env, adopt, restarting, role):
         # the state after a fail-back promote, before the first IO: Steps 2-3
         # as on main, behind the primary although it does not lead
@@ -1783,7 +1697,7 @@ class TestRestartByPosition:
         hub["connect_to_hublvol"].side_effect = _connect
 
     @pytest.mark.parametrize("taker", [0, 1])
-    def test_a_site_reboot_ends_with_the_tertiary_wired(
+    def test_site_reboot_ends_with_tertiary_wired(
             self, db, rpcs, hub, env, adopt, taker):
         # b2 restarts with b0 and b1 disconnected, then b0 comes back (or b1,
         # which takes over from b0)
@@ -1807,7 +1721,7 @@ class TestRestartByPosition:
         assert _wired(hub) == {b2: ("tertiary", leader)}
         assert _fresh(db, owner).lvstore_status == "ready"
 
-    def test_an_unbuilt_tertiary_fails_the_leader_rebuild(
+    def test_unbuilt_tertiary_fails_leader_rebuild(
             self, db, rpcs, hub, env, adopt, no_sleep):
         """The tertiary is online but holds no instance of LVS_1."""
         # the reason the tertiary is never skipped (no_sleep: the abort of the
@@ -1826,7 +1740,7 @@ class TestRestartByPosition:
 
     @pytest.mark.parametrize("restarting", [1, 3])          # a1: Step 2, b0: Step 4
     @pytest.mark.parametrize("answer", [RPCException("no answer"), None])
-    def test_while_moving_a_silent_member_refuses_a_hosted_lvs(
+    def test_while_moving_silent_member_refuses_hosted_lvs(
             self, db, rpcs, hub, env, adopt, restarting, answer):
         _, a, b, owner = _layout(db, active_site="moving:" + SITE_B)
         members = [*a, *b]
@@ -1841,7 +1755,7 @@ class TestRestartByPosition:
         assert _fresh(db, owner).lvstore_status == "ready"
 
     @pytest.mark.parametrize("answer", [RPCException("no answer"), None])
-    def test_while_moving_a_silent_member_refuses_the_owner(
+    def test_while_moving_silent_member_refuses_owner(
             self, db, rpcs, hub, env, adopt, answer):
         # Step 1 re-raises, after it released the port of every other member
         _, a, b, owner = _layout(db, active_site="moving:" + SITE_B)
@@ -1862,7 +1776,7 @@ class TestRestartByPosition:
         (SITE_A, 3, 4, "secondary"),        # moving back: the source is the remote triplet
         (SITE_A, 2, 3, "tertiary"),
     ])
-    def test_while_moving_a_member_restarts_behind_the_source(
+    def test_while_moving_member_restarts_behind_source(
             self, db, rpcs, hub, env, adopt, target, restarting, behind, role):
         """Nobody reports the leadership."""
         _, a, b, owner = _layout(db, active_site="moving:" + target)
@@ -1880,7 +1794,7 @@ class TestRestartByPosition:
         assert _fresh(db, owner).lvstore_status == "ready"
 
     @pytest.mark.parametrize("restarting", [0, 1, 3])       # Steps 1, 2 and 4
-    def test_while_moving_a_member_restarts_behind_the_leader(
+    def test_while_moving_member_restarts_behind_leader(
             self, db, rpcs, hub, env, adopt, restarting):
         _, a, b, owner = _layout(db, active_site="moving:" + SITE_B)
         members = [*a, *b]
@@ -1916,7 +1830,7 @@ class TestPromoteRunnerLookup:
         pytest.param("cancel", ["LVS_1"], id="cancel, hand-off recorded"),
         pytest.param("stale lease", [], id="stale lease"),
     ])
-    def test_a_task_that_lost_its_move_makes_no_leader(
+    def test_task_that_lost_its_move_makes_no_leader(
             self, db, rpcs, hub, env, adopt, no_sleep, short_lock_wait, lost_by, transferring):
         cluster, a, b, owner = _layout(db, active_site="moving:" + SITE_B)
         task = _promote_task(
@@ -1945,7 +1859,7 @@ class TestPromoteRunnerLookup:
             rpcs[node.get_id()].bdev_lvol_set_lvs_signal.assert_not_called()
         assert db.acquire_lvstore_lock(cluster.get_id(), "takeleader/LVS_1", "test") == (True, None)
 
-    def test_a_task_that_owns_its_move_hands_off_from_nobody(
+    def test_task_that_owns_its_move_hands_off_from_nobody(
             self, db, rpcs, hub, env, adopt, no_sleep, short_lock_wait):
         cluster, a, b, owner = _layout(db, active_site="moving:" + SITE_B)
         task = _promote_task(
@@ -1964,7 +1878,7 @@ class TestPromoteRunnerLookup:
 class TestReconcile:
 
     @pytest.mark.parametrize("leader_index, site", [(3, SITE_B), (1, SITE_A)])
-    def test_an_abandoned_move_settles_on_the_actual_leader(
+    def test_abandoned_move_settles_on_actual_leader(
             self, db, rpcs, env, leader_index, site):
         cluster, a, b, owner = _layout(db, active_site="moving:" + SITE_B)
         _promote_task(db, cluster, owner, stale=True)
@@ -1975,7 +1889,7 @@ class TestReconcile:
         assert _fresh(db, owner).lvs_active_site == site
         assert _grants(rpcs, members) == []
 
-    def test_reconciled_even_behind_a_cached_no_leader_verdict(self, db, rpcs, env):
+    def test_reconciled_despite_cached_no_leader_verdict(self, db, rpcs, env):
         cluster, a, b, owner = _layout(db, active_site="moving:" + SITE_B)
         ttl_cache.no_leader_cache.put((cluster.get_id(), "LVS_1"), True)
         rpcs.lead(b[0])
@@ -1987,7 +1901,7 @@ class TestReconcile:
         assert _fresh(db, owner).lvs_active_site == SITE_B
 
     @pytest.mark.parametrize("leader_index, unknown_index", [(0, 5), (4, 2)])
-    def test_an_unanswered_member_leaves_the_marker(self, db, rpcs, env, leader_index, unknown_index):
+    def test_unanswered_member_leaves_marker(self, db, rpcs, env, leader_index, unknown_index):
         _, a, b, owner = _layout(db, active_site="moving:" + SITE_B)
         members = [*a, *b]
         rpcs.lead(members[leader_index])
@@ -1996,7 +1910,7 @@ class TestReconcile:
         assert leader.get_id() == members[leader_index].get_id()
         assert _fresh(db, owner).lvs_active_site == "moving:" + SITE_B
 
-    def test_a_failed_probe_is_never_read_as_no_leader(self, db, rpcs, hub, env, no_sleep):
+    def test_failed_probe_is_never_read_as_no_leader(self, db, rpcs, hub, env, no_sleep):
         _, a, b, owner = _layout(db, active_site="moving:" + SITE_B)
         rpcs[b[2].get_id()].get_lvstore.side_effect = RPCException("timeout")
         for node in (*a, *b):
@@ -2006,13 +1920,13 @@ class TestReconcile:
         assert _fresh(db, owner).lvs_active_site == "moving:" + SITE_B
 
     @pytest.mark.parametrize("leader_index", [4, 5])
-    def test_a_non_primary_target_leader_is_not_followed(
+    def test_non_primary_target_leader_is_not_followed(
             self, db, rpcs, env, leader_index):
         # On the target site only the primary of its triplet - the move's taker
         # - may lead. Settling on b1 / b2 would open b0, alive and not
         # redirected to them, as the optimized path of every volume promoted
         # there. A non-primary leading on the SOURCE site is the state before
-        # the move and is followed (test_an_abandoned_move_settles_on_the_actual_leader).
+        # the move and is followed (test_abandoned_move_settles_on_actual_leader).
         _, a, b, owner = _layout(db, active_site="moving:" + SITE_B)
         members = [*a, *b]
         rpcs.lead(members[leader_index])
@@ -2031,14 +1945,14 @@ class TestReconcile:
         assert ops.reconcile_lvs_move(owner.get_id()) is None
         assert _fresh(db, owner).lvs_active_site == "moving:" + SITE_B
 
-    def test_a_cached_disconnected_verdict_hides_no_leader(self, db, rpcs, env):
+    def test_cached_disconnected_verdict_hides_no_leader(self, db, rpcs, env):
         _, a, b, owner = _layout(db, active_site="moving:" + SITE_A)
         env.down.add(b[0].get_id())          # _check_peer_disconnected says gone
         rpcs.lead(b[0])                      # but it answers: it leads
         assert ops.reconcile_lvs_move(owner.get_id()) == SITE_B
         assert _grants(rpcs, [*a, *b]) == []
 
-    def test_a_leaderless_move_finishes_on_the_target_primary(
+    def test_leaderless_move_finishes_on_target_primary(
             self, db, rpcs, hub, env, adopt, short_lock_wait):
         cluster, a, b, owner = _layout(db, active_site="moving:" + SITE_B)
         _promote_task(db, cluster, owner, status=JobSchedule.STATUS_DONE)
@@ -2055,7 +1969,7 @@ class TestReconcile:
             rpcs[node.get_id()].bdev_lvol_set_leader.assert_not_called()
         assert env.blocked() and sorted(env.unblocked()) == sorted(env.blocked())
 
-    def test_a_lost_marker_write_is_settled_again(
+    def test_lost_marker_write_is_settled_again(
             self, db, rpcs, hub, env, adopt, short_lock_wait):
         _, a, b, owner = _layout(db, active_site="moving:" + SITE_B)
         for node in (*a, *b):
@@ -2071,7 +1985,7 @@ class TestReconcile:
         _nothing_granted(rpcs, [*a, *b])
         assert sorted(env.unblocked()) == sorted(env.blocked())
 
-    def test_a_target_without_quorum_keeps_the_marker(
+    def test_target_without_quorum_keeps_marker(
             self, db, rpcs, hub, env, short_lock_wait):
         _, a, b, owner = _layout(db, active_site="moving:" + SITE_B)
         for node in (*a, *b):
@@ -2082,13 +1996,13 @@ class TestReconcile:
         assert _grants(rpcs, [*a, *b]) == []
         assert _fresh(db, owner).lvs_active_site == "moving:" + SITE_B
 
-    def test_a_move_taker_must_be_a_triplet_primary(self, db, rpcs, env):
+    def test_move_taker_must_be_triplet_primary(self, db, rpcs, env):
         _, a, b, owner = _layout(db, active_site="moving:" + SITE_B)
         with pytest.raises(ops.LVSMoveChangedError, match="not the primary"):
             ops.move_lvs_leadership(owner.get_id(), "moving:" + SITE_B, SITE_B, taker_id=b[1].get_id())
         assert not rpcs[b[1].get_id()].method_calls
 
-    def test_a_fenced_lost_target_hands_back_to_the_source(
+    def test_fenced_lost_target_hands_back_to_source(
             self, db, rpcs, hub, env, short_lock_wait):
         _, a, b, owner = _layout(db, active_site="moving:" + SITE_B, lost_site=SITE_B,
                                  lost_site_state="done")
@@ -2102,7 +2016,7 @@ class TestReconcile:
         assert stack._roles(rpcs[a[0].get_id()]) == ["primary"]
         _nothing_granted(rpcs, [*a, *b])
 
-    def test_a_stale_disconnected_verdict_skips_no_member(
+    def test_stale_disconnected_verdict_skips_no_member(
             self, db, rpcs, hub, env, adopt, short_lock_wait):
         _, a, b, owner = _layout(db, active_site="moving:" + SITE_B)
         for node in (*a, *b):
@@ -2113,7 +2027,7 @@ class TestReconcile:
         assert stack._roles(rpcs[a[0].get_id()]) == ["secondary"]
         _nothing_granted(rpcs, [*a, *b])
 
-    def test_a_silent_member_on_the_old_site_blocks_the_move(self, db, rpcs, hub, env, adopt):
+    def test_silent_member_on_old_site_blocks_move(self, db, rpcs, hub, env, adopt):
         _, a, b, owner = _layout(db, active_site="moving:" + SITE_B)
         rpcs[a[2].get_id()].get_lvstore.side_effect = RPCException("timeout")
         with pytest.raises(ops.LVSMoveChangedError, match="does not answer"):
@@ -2121,7 +2035,7 @@ class TestReconcile:
         assert _grants(rpcs, [*a, *b]) == []
         assert env.blocked() == []
 
-    def test_a_leader_after_the_scan_stops_the_hand_off(
+    def test_leader_after_scan_stops_hand_off(
             self, db, rpcs, hub, env, adopt, short_lock_wait):
         _, a, b, owner = _layout(db, active_site="moving:" + SITE_B)
         for node in (*a, *b):
@@ -2135,7 +2049,7 @@ class TestReconcile:
         rpcs[b[0].get_id()].bdev_lvol_set_lvs_opts.assert_not_called()
         assert _fresh(db, owner).lvs_active_site == "moving:" + SITE_B
 
-    def test_a_failed_hand_off_leaves_the_marker(self, db, rpcs, hub, env, adopt, short_lock_wait):
+    def test_failed_hand_off_leaves_marker(self, db, rpcs, hub, env, adopt, short_lock_wait):
         _, a, b, owner = _layout(db, active_site="moving:" + SITE_B)
         for node in (*a, *b):
             _journal_ready(rpcs, node)
@@ -2150,7 +2064,7 @@ class TestReconcile:
         rpcs[b[0].get_id()].bdev_lvol_set_leader.assert_not_called()
         assert env.blocked() and sorted(env.unblocked()) == sorted(env.blocked())
 
-    def test_a_live_promote_task_keeps_its_move(self, db, rpcs, env):
+    def test_live_promote_task_keeps_its_move(self, db, rpcs, env):
         cluster, a, b, owner = _layout(db, active_site="moving:" + SITE_B)
         task = _promote_task(db, cluster, owner)
         rpcs.lead(b[0])
@@ -2160,29 +2074,25 @@ class TestReconcile:
         db.atomic_update(task, lambda t: setattr(t, "status", JobSchedule.STATUS_DONE))
         assert ops.reconcile_lvs_move(owner.get_id()) == SITE_B
 
-    def test_the_fenced_lost_site_counts_as_not_leading(self, db, rpcs, env):
+    @pytest.mark.parametrize("lost_site_state, settled_site", [
+        pytest.param("done", SITE_B, id="the_fenced_lost_site_counts_as_not_leading"),
+        pytest.param("fencing", None, id="a_lost_site_still_fencing_is_unknown"),
+    ])
+    def test_silent_lost_site(self, db, rpcs, env, lost_site_state, settled_site):
         _, a, b, owner = _layout(db, active_site="moving:" + SITE_B, lost_site=SITE_A,
-                                 lost_site_state="done")
+                                 lost_site_state=lost_site_state)
         for node in a:
             rpcs[node.get_id()].get_lvstore.side_effect = RPCException("site lost")
         rpcs.lead(b[0])
-        assert ops.reconcile_lvs_move(owner.get_id()) == SITE_B
+        assert ops.reconcile_lvs_move(owner.get_id()) == settled_site
 
-    def test_a_lost_site_still_fencing_is_unknown(self, db, rpcs, env):
-        _, a, b, owner = _layout(db, active_site="moving:" + SITE_B, lost_site=SITE_A,
-                                 lost_site_state="fencing")
-        for node in a:
-            rpcs[node.get_id()].get_lvstore.side_effect = RPCException("site lost")
-        rpcs.lead(b[0])
-        assert ops.reconcile_lvs_move(owner.get_id()) is None
-
-    def test_a_move_whose_marker_changed_touches_nothing(self, db, rpcs, env):
+    def test_move_whose_marker_changed_touches_nothing(self, db, rpcs, env):
         _, a, b, owner = _layout(db, active_site=SITE_B)
         with pytest.raises(ops.LVSMoveChangedError):
             ops.move_lvs_leadership(owner.get_id(), "moving:" + SITE_B, SITE_B, taker_id=b[0].get_id())
         assert not rpcs[b[0].get_id()].method_calls
 
-    def test_a_move_from_a_stale_leader_touches_nothing(self, db, rpcs, env):
+    def test_move_from_stale_leader_touches_nothing(self, db, rpcs, env):
         _, a, b, owner = _layout(db, active_site="moving:" + SITE_B)
         with pytest.raises(ops.LVSMoveChangedError, match="expected"):
             ops.move_lvs_leadership(owner.get_id(), "moving:" + SITE_B, SITE_B,
@@ -2200,7 +2110,7 @@ class TestReconcile:
                                 current_leader_id=leader.get_id() if leader is not None else None,
                                 taker_id=taker.get_id())
 
-    def test_a_move_from_a_live_leader_grants_nothing(self, db, rpcs, hub, env, adopt):
+    def test_move_from_live_leader_grants_nothing(self, db, rpcs, hub, env, adopt):
         _, a, b, owner = _layout(db, active_site="moving:" + SITE_B)
         _transfer_ready(rpcs, a[0])
         _demote_takes(rpcs, a[0])
@@ -2219,7 +2129,7 @@ class TestReconcile:
         assert env.blocked()[-1] == a[0].get_id()
         assert sorted(env.unblocked()) == sorted(env.blocked())
 
-    def test_the_unblock_guard_reads_the_flag_the_move_remembered(
+    def test_unblock_guard_reads_flag_move_remembered(
             self, db, rpcs, hub, env, adopt, monkeypatch):
         """Every port the hand-off releases asks the two-node unblock guard;
         it answers from the cluster the move read before the fence, never with
@@ -2240,7 +2150,7 @@ class TestReconcile:
         assert len(env.unblocked()) >= 2
         assert cached and all(cached), cached
 
-    def test_an_old_leader_that_still_leads_fails_the_move(
+    def test_old_leader_that_still_leads_fails_move(
             self, db, rpcs, hub, env, adopt):
         _, a, b, owner = _layout(db, active_site="moving:" + SITE_B)
         _transfer_ready(rpcs, a[0])          # it reports the leadership whatever it is sent
@@ -2253,7 +2163,7 @@ class TestReconcile:
         assert env.blocked() and sorted(env.unblocked()) == sorted(env.blocked())
 
     @pytest.mark.parametrize("promoted_index, settled_site", [(3, SITE_B), (1, None)])
-    def test_a_self_promotion_mid_hand_off_fails_the_move(
+    def test_self_promotion_mid_hand_off_fails_move(
             self, db, rpcs, hub, env, adopt, promoted_index, settled_site):
         # B -> A from nobody: the previous taker (b0) armed its promotion before
         # the hand-off, which sends it no demote; a member of the taker's own
@@ -2274,7 +2184,7 @@ class TestReconcile:
         assert _fresh(db, owner).lvs_active_site == (settled_site or "moving:" + SITE_A)
         _nothing_granted(rpcs, [*a, *b])
 
-    def test_a_leader_beside_the_taker_keeps_ana_closed(
+    def test_leader_beside_taker_keeps_ana_closed(
             self, db, rpcs, hub, env, adopt, short_lock_wait):
         # B -> A from nobody, a1 turns up leading during the hand-off: a0 is
         # stamped primary and is the hub, with no redirect to a1 - its first IO
@@ -2318,7 +2228,7 @@ class TestReconcile:
 
     @pytest.mark.parametrize("answer", [RPCException("timeout"), None,
                                         RPCRemoteError(message="busy", code=-16)])
-    def test_a_silent_member_on_the_other_site_fails_the_move(
+    def test_silent_member_on_other_site_fails_move(
             self, db, rpcs, hub, env, adopt, answer):
         # it answered "not leading" before the hand-off; no answer after it is
         # never read as "does not lead"
@@ -2333,7 +2243,7 @@ class TestReconcile:
 
     @pytest.mark.parametrize("answer", [RPCException("timeout"), None,
                                         RPCRemoteError(message="busy", code=-16)])
-    def test_a_silent_member_beside_the_taker_is_ignored(
+    def test_silent_member_beside_taker_is_ignored(
             self, db, rpcs, hub, env, adopt, answer):
         _, a, b, owner = _layout(db, active_site="moving:" + SITE_A)
         _during_hand_off(rpcs, a[0], lambda: _goes_silent(rpcs, a[2], answer))
@@ -2341,7 +2251,7 @@ class TestReconcile:
         assert _fresh(db, owner).lvs_active_site == SITE_A
         _nothing_granted(rpcs, [*a, *b])
 
-    def test_the_taker_is_not_probed_again_after_the_hand_off(self, db, rpcs, hub, env, adopt):
+    def test_taker_is_not_probed_again_after_hand_off(self, db, rpcs, hub, env, adopt):
         # whether the taker leads yet does not decide the move: a taker that
         # took the leadership during the hand-off is where it belongs
         _, a, b, owner = _layout(db, active_site="moving:" + SITE_A)

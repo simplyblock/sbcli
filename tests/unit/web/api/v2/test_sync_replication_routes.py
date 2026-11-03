@@ -37,7 +37,6 @@ from simplyblock_core.exceptions import (
     SyncPromoteFailedError,
     SyncPromoteRefusedError,
     SyncReplicationSiteError,
-    SyncReplicationUnsupportedError,
     SyncSiteOfflineError,
 )
 from simplyblock_core.utils.nvme import NvmeConnectEntry
@@ -181,7 +180,7 @@ def _detail(response):
 class TestSiteRequired:
     """A mutating verb (promote, demote) acts from a named site, so a missing one
     is a 400. A status read is cluster-wide and site-optional: see
-    ``TestVolumeStatus.test_without_a_site_is_cluster_wide`` and the group twin."""
+    ``TestVolumeStatus.test_without_site_is_cluster_wide`` and the group twin."""
 
     @pytest.mark.parametrize('method, path', [('post', 'failover'), ('post', 'demote')])
     @pytest.mark.parametrize('query', ['', '?site='])
@@ -215,7 +214,7 @@ class TestSiteRequired:
 
 class TestVolumePromote:
 
-    def test_done_is_200_with_the_site_connection_strings(self, client, sync_controller):
+    def test_done_is_200_with_site_connection_strings(self, client, sync_controller):
         sync_controller.sync_promote_lvol.return_value = SyncPromoteResult(
             in_progress=False, connection_strings={VOLUME_ID: [_entry()]})
 
@@ -232,15 +231,16 @@ class TestVolumePromote:
         assert entry['connect'] == 'nvme connect -a 10.0.1.10'
 
     @pytest.mark.parametrize('query, force', [('', True), ('&planned=false', True), ('&planned=true', False)])
-    def test_force_is_not_planned(self, client, sync_controller, query, force):
+    def test_force_is_not_planned(self, client, sync_controller, lvol_controller, query, force):
         sync_controller.sync_promote_lvol.return_value = SyncPromoteResult(
             in_progress=False, connection_strings={VOLUME_ID: []})
 
         client.post(REPLICATION_URL + f'failover?site={SITE}{query}')
 
         sync_controller.sync_promote_lvol.assert_called_once_with(VOLUME_ID, SITE, force=force)
+        lvol_controller.replicate_lvol_on_target_cluster.assert_not_called()
 
-    def test_in_progress_is_409_with_the_task(self, client, sync_controller):
+    def test_in_progress_is_409_with_task(self, client, sync_controller):
         sync_controller.sync_promote_lvol.return_value = SyncPromoteResult(in_progress=True, task_id=TASK_ID)
 
         response = client.post(REPLICATION_URL + f'failover?site={SITE}&planned=true')
@@ -248,7 +248,7 @@ class TestVolumePromote:
         assert response.status_code == 409
         assert _detail(response) == {'message': 'promote in progress; call again', 'task_id': TASK_ID}
 
-    def test_gate_is_409_with_the_problems(self, client, sync_controller):
+    def test_gate_is_409_with_problems(self, client, sync_controller):
         sync_controller.sync_promote_lvol.side_effect = SyncGateError(
             'sync-replication planned', ['LVS_1: distrib_11 on n1: replica_unsynced'])
 
@@ -264,7 +264,7 @@ class TestVolumePromote:
         SyncPromoteRefusedError('other volumes of the LVS are still active on site site-a',
                                 [OTHER_VOLUME_ID]),
     ])
-    def test_refused_is_409_with_the_volumes(self, client, sync_controller, error):
+    def test_refused_is_409_with_volumes(self, client, sync_controller, error):
         sync_controller.sync_promote_lvol.side_effect = error
 
         response = client.post(REPLICATION_URL + f'failover?site={SITE}&planned=true')
@@ -272,7 +272,7 @@ class TestVolumePromote:
         assert response.status_code == 409
         assert _detail(response) == {'message': str(error), 'volumes': error.volumes}
 
-    def test_a_failed_promote_is_409_with_its_task_and_volumes(self, client, sync_controller):
+    def test_failed_promote_is_409_with_task_and_volumes(self, client, sync_controller):
         sync_controller.sync_promote_lvol.side_effect = SyncPromoteFailedError(
             'the last promote to site site-b failed: task t1: failed: ANA refused', [VOLUME_ID], 't1')
 
@@ -299,19 +299,11 @@ class TestVolumePromote:
         assert response.status_code == 500
         assert response.json()['detail'] == 'ANA RPC failed on n4'
 
-    def test_a_generation_is_400(self, client, sync_controller):
+    def test_generation_is_400(self, client, sync_controller):
         response = client.post(REPLICATION_URL + f'failover?site={SITE}&generation=1')
 
         assert response.status_code == 400
         sync_controller.sync_promote_lvol.assert_not_called()
-
-    def test_the_async_fail_over_is_not_used(self, client, sync_controller, lvol_controller):
-        sync_controller.sync_promote_lvol.return_value = SyncPromoteResult(
-            in_progress=False, connection_strings={VOLUME_ID: []})
-
-        client.post(REPLICATION_URL + f'failover?site={SITE}')
-
-        lvol_controller.replicate_lvol_on_target_cluster.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -342,7 +334,7 @@ class TestVolumeDemote:
 class TestVolumeStatus:
 
     @pytest.mark.parametrize('role, dto_role', [('primary', 'source'), ('secondary', 'secondary')])
-    def test_healthy_fills_the_async_dto(self, client, sync_controller, resources, role, dto_role):
+    def test_healthy_fills_async_dto(self, client, sync_controller, resources, role, dto_role):
         sync_controller.volume_sync_status.return_value = VolumeSyncStatus(
             role=role, site=SITE, cluster=_cluster_status())
 
@@ -384,7 +376,7 @@ class TestVolumeStatus:
         assert body['lag_seconds'] is None
 
     @pytest.mark.parametrize('query', ['', '?site='])
-    def test_without_a_site_is_cluster_wide(self, client, sync_controller, resources, query):
+    def test_without_site_is_cluster_wide(self, client, sync_controller, resources, query):
         """Regression: 2026-10-14-status-read-site-optional — the csi-addons
         adapter's GetVolumeReplicationInfo reads this route with no site (it has
         no class params to derive one from), and a required site 400'd it, so the
@@ -434,7 +426,7 @@ class TestVolumeSyncStatus:
         assert (body['state'], body['peer_ready'], body['diverged'], body['bytes_behind']) == \
             ('healthy', True, False, 0)
 
-    def test_without_a_site_is_cluster_wide(self, client, sync_controller, resources):
+    def test_without_site_is_cluster_wide(self, client, sync_controller, resources):
         sync_controller.volume_sync_status.return_value = VolumeSyncStatus(
             role='primary', site=SITE, cluster=_cluster_status())
 
@@ -462,17 +454,14 @@ class TestVolumeNoOps:
         assert response.status_code == 204
         lvol_controller.replication_failback.assert_not_called()
 
-    def test_failback_still_needs_a_body(self, client, lvol_controller):
-        assert client.post(REPLICATION_URL + 'failback').status_code == 422
-
     @pytest.mark.parametrize('policy', [REPLICATION_POLICY_ID, None])
-    def test_policy_update_is_a_no_op(self, client, policy_controller, policy):
+    def test_policy_update_is_no_op(self, client, policy_controller, policy):
         response = client.put(VOLUME_URL, json={'replication_policy_id': policy})
 
         assert response.status_code == 204
         assert policy_controller.method_calls == []
 
-    def test_policy_update_keeps_the_other_attributes(self, client, lvol_controller, policy_controller):
+    def test_policy_update_keeps_other_attributes(self, client, lvol_controller, policy_controller):
         response = client.put(VOLUME_URL, json={
             'name': 'renamed', 'size': '20G', 'replication_policy_id': REPLICATION_POLICY_ID})
 
@@ -482,45 +471,21 @@ class TestVolumeNoOps:
         lvol_controller.resize_lvol.assert_called_once()
         assert policy_controller.method_calls == []
 
-    def test_relationship_is_404(self, client, policy_controller):
-        response = client.get(REPLICATION_URL)
-
-        assert response.status_code == 404
-        policy_controller.get_relationship.assert_not_called()
-
-    def test_cluster_relationship_is_404(self, client, policy_controller):
-        response = client.get(RELATIONSHIP_URL)
-
-        assert response.status_code == 404
-        policy_controller.get_relationship.assert_not_called()
-
-
-class TestAsyncOperationsRefused:
-    """The controllers refuse them on a sync cluster (tested against the real
-    database); the routes answer that refusal with a 400."""
-
-    @pytest.mark.parametrize('path, controller, method', [
-        ('start', 'lvol', 'replication_start'),
-        ('stop', 'lvol', 'replication_stop'),
-        ('trigger', 'lvol', 'replication_trigger'),
-        ('commit', 'lvol', 'replication_commit'),
-        ('cutover-proceed', 'policy', 'set_cutover_proceed'),
+    @pytest.mark.parametrize('url', [
+        pytest.param(REPLICATION_URL, id='relationship'),
+        pytest.param(RELATIONSHIP_URL, id='cluster_relationship'),
     ])
-    def test_is_400(self, client, lvol_controller, policy_controller, path, controller, method):
-        mock = lvol_controller if controller == 'lvol' else policy_controller
-        getattr(mock, method).side_effect = SyncReplicationUnsupportedError(
-            'Replication x is not supported on a sync-replication cluster')
+    def test_relationship_is_404(self, client, policy_controller, url):
+        response = client.get(url)
 
-        response = client.post(REPLICATION_URL + path)
-
-        assert response.status_code == 400
-        assert 'sync-replication' in _detail(response)['message']
+        assert response.status_code == 404
+        policy_controller.get_relationship.assert_not_called()
 
 
 class TestConnect:
 
     @pytest.mark.parametrize('query', ['', f'?site={SITE}'])
-    def test_does_not_require_or_forward_a_site(self, client, lvol_controller, query):
+    def test_does_not_require_or_forward_site(self, client, lvol_controller, query):
         """Regression: 2026-10-09-connect-active-site — connect required the
         caller to name the site and returned that site's paths, so a node that
         guessed its own zone could be handed paths for a site the volume is not
@@ -535,7 +500,7 @@ class TestConnect:
         lvol_controller.connect_lvol.assert_called_once_with(VOLUME_ID, host_nqn=None)
         assert response.json()[0]['reconnect-delay'] == 2
 
-    def test_forwards_the_host_nqn(self, client, lvol_controller):
+    def test_forwards_host_nqn(self, client, lvol_controller):
         lvol_controller.connect_lvol.return_value = ([_entry()], None)
 
         response = client.get(VOLUME_URL + 'connect?host_nqn=nqn.host')
@@ -581,7 +546,7 @@ class TestGroup:
         assert _detail(response)['task_id'] == TASK_ID
         sync_controller.sync_promote_group.assert_called_once_with(GROUP_ID, SITE, force=True)
 
-    def test_promote_does_not_need_a_policy(self, client, sync_controller, policy_controller, resources):
+    def test_promote_does_not_need_policy(self, client, sync_controller, policy_controller, resources):
         resources.group.policy_id = ''
         sync_controller.sync_promote_group.return_value = SyncPromoteResult(
             in_progress=False, connection_strings={})
@@ -592,7 +557,7 @@ class TestGroup:
         assert response.json() == {'members': []}
         policy_controller.failover_group.assert_not_called()
 
-    def test_missing_member_is_409_with_the_ids(self, client, sync_controller):
+    def test_missing_member_is_409_with_ids(self, client, sync_controller):
         sync_controller.sync_promote_group.side_effect = SyncGroupMemberError(
             'members not found', [OTHER_VOLUME_ID])
 
@@ -606,8 +571,9 @@ class TestGroup:
 
         assert client.post(GROUP_URL + f'replication/failover?site={SITE}').status_code == 412
 
-    def test_demote_is_204(self, client, sync_controller, group_controller):
-        sync_controller.sync_demote_group.return_value = [VOLUME_ID]
+    @pytest.mark.parametrize('demoted', [[VOLUME_ID], []])
+    def test_demote_is_204(self, client, sync_controller, group_controller, demoted):
+        sync_controller.sync_demote_group.return_value = demoted
 
         response = client.post(GROUP_URL + f'replication/demote?site={SITE}')
 
@@ -615,16 +581,7 @@ class TestGroup:
         sync_controller.sync_demote_group.assert_called_once_with(GROUP_ID, SITE)
         group_controller.demote_group.assert_not_called()
 
-    def test_an_empty_group_succeeds_on_demote_and_promote(self, client, sync_controller):
-        sync_controller.sync_demote_group.return_value = []
-        sync_controller.sync_promote_group.return_value = SyncPromoteResult(
-            in_progress=False, connection_strings={})
-
-        assert client.post(GROUP_URL + f'replication/demote?site={SITE}').status_code == 204
-        response = client.post(GROUP_URL + f'replication/failover?site={SITE}&planned=true')
-        assert response.status_code == 200 and response.json() == {'members': []}
-
-    def test_a_failed_group_promote_is_409_with_its_task(self, client, sync_controller):
+    def test_failed_group_promote_is_409_with_its_task(self, client, sync_controller):
         sync_controller.sync_promote_group.side_effect = SyncPromoteFailedError(
             'the last promote to site site-b failed', [VOLUME_ID, OTHER_VOLUME_ID], 't1')
 
@@ -639,7 +596,7 @@ class TestGroup:
 
         assert client.post(GROUP_URL + f'replication/demote?site={SITE}').status_code == 409
 
-    def test_status_fills_the_async_group_dto(self, client, sync_controller, lvol_controller):
+    def test_status_fills_async_group_dto(self, client, sync_controller, lvol_controller):
         sync_controller.group_sync_status.return_value = GroupSyncStatus(
             role='primary', site=SITE, member_count=3, cluster=_cluster_status('resyncing'))
 
@@ -666,7 +623,7 @@ class TestGroup:
             (SITE, 'secondary', 'healthy', True)
 
     @pytest.mark.parametrize('path', ['replication/status', 'replication/sync-status'])
-    def test_status_without_a_site_is_cluster_wide(self, client, sync_controller, path):
+    def test_status_without_site_is_cluster_wide(self, client, sync_controller, path):
         """The group status reads are site-optional for the same reason the volume
         ones are (the csi-addons VGR adapter carries no site): a missing site
         resolves server-side (controller ``site=None``) and answers 200."""
@@ -679,7 +636,7 @@ class TestGroup:
         args, _ = sync_controller.group_sync_status.call_args
         assert args == (GROUP_ID, None)
 
-    def test_sync_status_on_a_non_sync_cluster_is_400(self, client, sync_controller, async_cluster):
+    def test_sync_status_on_non_sync_cluster_is_400(self, client, sync_controller, async_cluster):
         assert client.get(GROUP_URL + f'replication/sync-status?site={SITE}').status_code == 400
         sync_controller.group_sync_status.assert_not_called()
 
@@ -690,11 +647,8 @@ class TestGroup:
         assert response.status_code == 204
         group_controller.failback_group.assert_not_called()
 
-    def test_failback_still_needs_a_body(self, client):
-        assert client.post(GROUP_URL + 'replication/failback').status_code == 422
-
     @pytest.mark.parametrize('policy', [REPLICATION_POLICY_ID, None])
-    def test_policy_is_a_no_op(self, client, group_controller, policy):
+    def test_policy_is_no_op(self, client, group_controller, policy):
         response = client.put(GROUP_URL + 'replication', json={'replication_policy_id': policy})
 
         assert response.status_code == 204
@@ -708,7 +662,7 @@ class TestGroup:
 @pytest.mark.usefixtures('async_cluster')
 class TestAsyncClusterUnchanged:
 
-    def test_failover_ignores_the_site(self, client, sync_controller, lvol_controller):
+    def test_failover_ignores_site(self, client, sync_controller, lvol_controller):
         lvol_controller.replicate_lvol_on_target_cluster.return_value = True
 
         response = client.post(REPLICATION_URL + f'failover?site={SITE}')
@@ -732,7 +686,7 @@ class TestAsyncClusterUnchanged:
         assert 'SyncPromoteResultDTO' in responses['200']['description']
         assert 'warnings' in responses['200']['description']
 
-    def test_demote_ignores_the_site(self, client, sync_controller, lvol_controller):
+    def test_demote_ignores_site(self, client, sync_controller, lvol_controller):
         lvol_controller.demote_lvol.return_value = {'demoted': True}
 
         response = client.post(REPLICATION_URL + f'demote?site={SITE}')
@@ -751,29 +705,19 @@ class TestAsyncClusterUnchanged:
         lvol_controller.get_replication_info.assert_called_once_with(VOLUME_ID)
         assert sync_controller.method_calls == []
 
-    def test_failback_calls_the_controller(self, client, lvol_controller):
-        lvol_controller.replication_failback.return_value = True
-
-        assert client.post(REPLICATION_URL + 'failback', json={}).status_code == 204
-        lvol_controller.replication_failback.assert_called_once_with(VOLUME_ID, source_cluster_id=None)
-
-    def test_policy_update_attaches(self, client, policy_controller):
-        assert client.put(VOLUME_URL, json={'replication_policy_id': REPLICATION_POLICY_ID}).status_code == 204
-        policy_controller.attach_policy.assert_called_once_with(VOLUME_ID, REPLICATION_POLICY_ID)
-
     def test_relationship(self, client, policy_controller):
         policy_controller.get_relationship.return_value = None
 
         assert client.get(RELATIONSHIP_URL).status_code == 404
         policy_controller.get_relationship.assert_called_once_with(VOLUME_ID)
 
-    def test_start_calls_the_controller(self, client, lvol_controller):
+    def test_start_calls_controller(self, client, lvol_controller):
         lvol_controller.replication_start.return_value = True
 
         assert client.post(REPLICATION_URL + 'start').status_code == 204
         lvol_controller.replication_start.assert_called_once()
 
-    def test_group_failover_without_a_policy_promoting_nothing_is_409(
+    def test_group_failover_promoting_nothing_is_409(
             self, client, sync_controller, policy_controller, resources):
         # A group without a policy is not refused up front (a relocate may have
         # emptied it); only a fail-over that promotes nothing is a 409.

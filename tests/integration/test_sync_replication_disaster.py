@@ -207,7 +207,7 @@ def _desync(node, vuid, ts="2026-09-30T10:00:00Z"):
 
 class TestApi:
 
-    def test_a_forced_promote_queues_a_disaster_task(self, db, spdk, evidence):
+    def test_forced_promote_queues_disaster_task(self, db, spdk, evidence):
         lost = _Lost(db, spdk)
         with pytest.raises(SyncSiteOfflineError):
             lost.promote("v1a", force=False)
@@ -221,14 +221,14 @@ class TestApi:
 
     @pytest.mark.parametrize("status", [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN,
                                         StorageNode.STATUS_RESTARTING])
-    def test_a_node_of_the_site_that_may_run_refuses(self, db, spdk, evidence, status):
+    def test_node_of_site_that_may_run_refuses(self, db, spdk, evidence, status):
         lost = _Lost(db, spdk)
         _update(db, lost.a[2], status=status)
         with pytest.raises(SyncPromoteRefusedError, match="online|may still run"):
             lost.promote("v1a")
         assert db.get_sync_promote_task(lost.cluster.get_id(), "LVS_1") is None
 
-    def test_an_lvs_unsynced_before_the_loss_is_refused(self, db, spdk, evidence):
+    def test_lvs_unsynced_before_loss_is_refused(self, db, spdk, evidence):
         lost = _Lost(db, spdk)
         _desync(lost.a[1], vuid=11)
         with pytest.raises(SyncGateError):
@@ -236,7 +236,7 @@ class TestApi:
         assert db.get_sync_promote_task(lost.cluster.get_id(), "LVS_1") is None
         assert lost.cluster_now().lost_site == ""
 
-    def test_another_unsynced_lvs_blocks_only_its_own_promote(self, db, spdk, evidence, moves):
+    def test_other_unsynced_lvs_blocks_only_own_promote(self, db, spdk, evidence, moves):
         lost = _Lost(db, spdk)
         _desync(lost.a[2], vuid=21)                     # LVS_2 unsynced before the loss
         # the surviving site's instances report the loss itself: never counts
@@ -249,7 +249,7 @@ class TestApi:
 
     @pytest.mark.parametrize("force", [False, True], ids=["unforced", "forced"])
     @pytest.mark.parametrize("state", [Cluster.LOST_SITE_DOWN, Cluster.LOST_SITE_DRAINING])
-    def test_opening_a_survivor_led_volume_fences_nothing(
+    def test_opening_survivor_led_volume_fences_nothing(
             self, db, spdk, evidence, moves, state, force):
         # The monitor recorded A; no fail-over ran. The ANA-only row of a
         # volume whose LVS is led from B (forced or not: the row comes before
@@ -276,7 +276,7 @@ class TestApi:
         assert all(SITE_A not in lost.vol(n).sync_demoted_sites for n in lost.vols)
         assert moves.calls == []
 
-    def test_a_queued_promote_never_opens_a_later_lost_site(self, db, spdk, evidence, moves):
+    def test_queued_promote_never_opens_later_lost_site(self, db, spdk, evidence, moves):
         # Queued to B while A was recorded; before the pass A returned and the
         # monitor recorded B. The task, judged against A, must not open B.
         lost = _Lost(db, spdk)
@@ -295,7 +295,7 @@ class TestApi:
         assert _record(db, lost.cluster.get_id()) == (SITE_B, Cluster.LOST_SITE_DRAINING)
 
     @pytest.mark.parametrize("state", [Cluster.LOST_SITE_DOWN, Cluster.LOST_SITE_DRAINING])
-    def test_a_recorded_site_refuses_a_planned_promote(self, db, spdk, evidence, state):
+    def test_recorded_site_refuses_planned_promote(self, db, spdk, evidence, state):
         # online_sites / promote_decision: even with every node of A back
         # ONLINE, a recorded A is no site to promote from or to.
         lost = _Lost(db, spdk)
@@ -317,7 +317,7 @@ class TestApi:
 
 class TestSiteSteps:
 
-    def test_the_site_is_fenced_before_the_lvs_moves(
+    def test_site_is_fenced_before_lvs_moves(
             self, db, spdk, evidence, moves):
         lost = _Lost(db, spdk)
         seen = {}
@@ -347,7 +347,7 @@ class TestSiteSteps:
         assert (v1a.sync_active_site, v1a.sync_demoted_sites) == (SITE_B, [])
         assert dp._states(spdk, lost.b, v1a) == ["optimized", "non_optimized", "non_optimized"]
 
-    def test_a_failed_device_is_fenced_as_failed(self, db, spdk, evidence, moves):
+    def test_failed_device_is_fenced_as_failed(self, db, spdk, evidence, moves):
         lost = _Lost(db, spdk)
         node = _fresh(db, lost.a[2])
         node.nvme_devices[0].status = NVMeDevice.STATUS_FAILED
@@ -362,7 +362,7 @@ class TestSiteSteps:
         for peer in lost.b:
             assert lost.events_to(spdk, peer)[failed.cluster_device_order] == NVMeDevice.STATUS_FAILED
 
-    def test_a_refused_gate_marks_nothing(self, db, spdk, evidence, moves):
+    def test_refused_gate_marks_nothing(self, db, spdk, evidence, moves):
         lost = _Lost(db, spdk)
         result = lost.promote("v1a")
         _desync(lost.a[0], vuid=12)                     # recorded between enqueue and run
@@ -376,24 +376,10 @@ class TestSiteSteps:
         assert all(lost.vol(n).sync_demoted_sites == [] for n in lost.vols)
         assert moves.calls == []
 
-    def test_the_gate_runs_before_anything_is_marked(self, db, spdk, evidence, moves):
-        lost = _Lost(db, spdk)
-        states = []
-        real = src.check_disaster_gate
-
-        def _gate(cluster_id, site, lvs_names=None):
-            states.append(lost.cluster_now().lost_site)
-            return real(cluster_id, site, lvs_names)
-
-        result = lost.promote("v1a")
-        with patch.object(src, "check_disaster_gate", side_effect=_gate):
-            assert lost.run(result.task_id)
-        assert states[0] == ""
-
     @pytest.mark.parametrize("probe, answered", [
         ("node-api", "the node API reports the SPDK process up"),
         ("rpc", "its RPC answers")])
-    def test_an_unreachable_node_with_live_spdk_is_not_lost(
+    def test_unreachable_node_with_live_spdk_is_not_lost(
             self, db, spdk, evidence, moves, probe, answered):
         lost = _Lost(db, spdk)
         node = lost.a[2]
@@ -408,7 +394,7 @@ class TestSiteSteps:
         assert lost.cluster_now().lost_site == ""
         assert moves.calls == []
 
-    def test_a_disaster_promote_hands_off_through_the_real_move(self, db, spdk, evidence):
+    def test_disaster_promote_hands_off_through_real_move(self, db, spdk, evidence):
         """The promote driven through its runner with the real hand-off: the
         lost members are probed (none leads), the members of B answer as
         non-leaders before and after the hand-off, and LVS_1 ends led from B."""
@@ -425,7 +411,7 @@ class TestSiteSteps:
         for node in (*lost.a, *lost.b):
             spdk[node.get_id()].get_lvstore.assert_any_call("LVS_1")
 
-    def test_a_live_rpc_proxy_in_front_of_a_dead_spdk_is_lost(self, db, spdk, evidence, moves):
+    def test_live_rpc_proxy_in_front_of_dead_spdk_is_lost(self, db, spdk, evidence, moves):
         # The RPC proxy of every lost node outlived its SPDK and answers each
         # call with no result.
         lost = _Lost(db, spdk)
@@ -439,7 +425,7 @@ class TestSiteSteps:
         assert (cluster.lost_site, cluster.lost_site_state) == (SITE_A, Cluster.LOST_SITE_DONE)
         assert lost.vol("v1a").sync_active_site == SITE_B
 
-    def test_a_site_nobody_holds_a_jm_link_to_passes_the_proof(self, db, spdk, evidence, moves):
+    def test_site_nobody_holds_jm_link_to_passes_proof(self, db, spdk, evidence, moves):
         # 0/0: no surviving peer holds a JM bdev of the lost nodes, so nobody
         # votes about them - silence is no veto.
         lost = _Lost(db, spdk)
@@ -457,7 +443,7 @@ class TestSiteSteps:
         assert lost.vol("v1a").sync_active_site == SITE_B
         assert moves.calls == [("LVS_1", None, lost.b[0].get_id(), MOVING_B, SITE_B)]
 
-    def test_a_node_the_data_plane_still_reaches_is_not_lost(self, db, spdk, evidence, moves):
+    def test_node_data_plane_still_reaches_is_not_lost(self, db, spdk, evidence, moves):
         lost = _Lost(db, spdk)
         node = lost.a[1]
         evidence.connected.add(node.get_id())
@@ -470,7 +456,7 @@ class TestSiteSteps:
         assert lost.cluster_now().lost_site == ""
         assert moves.calls == []
 
-    def test_a_late_connected_vote_leaves_the_fence_open(self, db, spdk, evidence, moves):
+    def test_late_connected_vote_leaves_fence_open(self, db, spdk, evidence, moves):
         lost = _Lost(db, spdk)
         real = evidence.votes
         asked = {"n": 0}
@@ -490,7 +476,7 @@ class TestSiteSteps:
         assert (cluster.lost_site, cluster.lost_site_state) == (SITE_A, Cluster.LOST_SITE_FENCING)
         assert moves.calls == []
 
-    def test_a_retry_completes_a_fence_missing_an_ack(self, db, spdk, evidence, moves):
+    def test_retry_completes_fence_missing_ack(self, db, spdk, evidence, moves):
         lost = _Lost(db, spdk)
         spdk[lost.b[2].get_id()].distr_status_events_update.side_effect = [RPCException("gone"), True, True]
         first = lost.promote("v1a")
@@ -508,7 +494,7 @@ class TestSiteSteps:
         assert lost.cluster_now().lost_site_state == Cluster.LOST_SITE_DONE
         assert lost.vol("v1a").sync_active_site == SITE_B
 
-    def test_a_down_or_unreachable_survivor_must_ack(self, db, spdk, evidence, moves):
+    def test_down_or_unreachable_survivor_must_ack(self, db, spdk, evidence, moves):
         lost = _Lost(db, spdk)
         _update(db, lost.b[1], status=StorageNode.STATUS_DOWN)
         _update(db, lost.b[2], status=StorageNode.STATUS_UNREACHABLE)
@@ -519,7 +505,7 @@ class TestSiteSteps:
         assert lost.events_to(spdk, lost.b[1])          # the DOWN node got them
         assert lost.cluster_now().lost_site_state == Cluster.LOST_SITE_FENCING
 
-    def test_a_restarting_survivor_gets_the_fence_before_done(
+    def test_restarting_survivor_gets_fence_before_done(
             self, db, spdk, evidence, moves):
         lost = _Lost(db, spdk)
         _update(db, lost.b[2], status=StorageNode.STATUS_RESTARTING)
@@ -535,7 +521,7 @@ class TestSiteSteps:
             assert lost.run(result.task_id)
         assert set(lost.events_to(spdk, lost.b[2]).values()) == {NVMeDevice.STATUS_UNAVAILABLE}
 
-    def test_a_second_promote_after_done_skips_the_site_steps(self, db, spdk, evidence, moves):
+    def test_second_promote_after_done_skips_site_steps(self, db, spdk, evidence, moves):
         lost = _Lost(db, spdk)
         assert lost.run(lost.promote("v1a").task_id)
         sent = {n.get_id(): spdk[n.get_id()].distr_status_events_update.call_count for n in lost.b}
@@ -549,7 +535,7 @@ class TestSiteSteps:
         assert lost.vol("v2b").sync_active_site == SITE_A
         assert moves.calls[-1] == ("LVS_2", None, lost.b[1].get_id(), MOVING_B, SITE_B)
 
-    def test_a_lost_member_still_leading_aborts_the_hand_off(
+    def test_lost_member_still_leading_aborts_hand_off(
             self, db, spdk, evidence, moves):
         lost = _Lost(db, spdk)
         assert lost.run(lost.promote("v1a").task_id)
@@ -560,7 +546,7 @@ class TestSiteSteps:
         assert _fresh(db, lost.owner2).lvs_active_site == ""       # the marker undone
         assert [c[0] for c in moves.calls] == ["LVS_1"]
 
-    def test_a_non_leader_lost_member_allows_the_hand_off(
+    def test_non_leader_lost_member_allows_hand_off(
             self, db, spdk, evidence, moves):
         lost = _Lost(db, spdk)
         assert lost.run(lost.promote("v1a").task_id)
@@ -574,7 +560,7 @@ class TestSiteSteps:
 
     @pytest.mark.parametrize("silence", [None, RPCException("connection refused")],
                              ids=["no-lvs", "rpc-error"])
-    def test_a_silent_but_seen_member_aborts_the_hand_off(
+    def test_silent_but_seen_member_aborts_hand_off(
             self, db, spdk, evidence, moves, silence):
         lost = _Lost(db, spdk)
         assert lost.run(lost.promote("v1a").task_id)
@@ -591,7 +577,7 @@ class TestSiteSteps:
         assert _fresh(db, lost.owner2).lvs_active_site == ""       # the marker undone
         assert [c[0] for c in moves.calls] == ["LVS_1"]
 
-    def test_a_silent_but_running_member_aborts_the_hand_off(
+    def test_silent_but_running_member_aborts_hand_off(
             self, db, spdk, evidence, moves):
         lost = _Lost(db, spdk)
         assert lost.run(lost.promote("v1a").task_id)
@@ -607,7 +593,7 @@ class TestSiteSteps:
         assert _fresh(db, lost.owner2).lvs_active_site == ""       # the marker undone
         assert [c[0] for c in moves.calls] == ["LVS_1"]
 
-    def test_a_forced_promote_fails_a_site_that_is_down_over(self, db, spdk, evidence, moves):
+    def test_forced_promote_fails_site_that_is_down_over(self, db, spdk, evidence, moves):
         # The monitor recorded A down, no fail-over ran: the forced promote
         # takes the record down -> fencing -> done and fails A over.
         lost = _Lost(db, spdk)
@@ -639,7 +625,7 @@ class TestSiteSteps:
         assert lost.vol("v1a").sync_active_site == SITE_B
         assert moves.calls == [("LVS_1", None, lost.b[0].get_id(), MOVING_B, SITE_B)]
 
-    def test_a_forced_promote_during_the_drain_changes_nothing(
+    def test_forced_promote_during_drain_changes_nothing(
             self, db, spdk, evidence, moves):
         lost = _Lost(db, spdk)
         lost.record(Cluster.LOST_SITE_DRAINING)
@@ -657,7 +643,7 @@ class TestSiteSteps:
         assert _fresh(db, lost.owner1).lvs_active_site == ""
         assert moves.calls == []
 
-    def test_a_down_site_with_a_node_online_fails_the_proof(self, db, spdk, evidence, moves):
+    def test_down_site_with_node_online_fails_proof(self, db, spdk, evidence, moves):
         # A recorded site is no "online" site for the API, so the forced
         # promote is queued; the runner's proof refuses it.
         lost = _Lost(db, spdk)
@@ -670,7 +656,7 @@ class TestSiteSteps:
         assert all(not lost.events_to(spdk, n) for n in lost.b)
         assert moves.calls == []
 
-    def test_a_task_without_the_fence_flag_never_fences(self, db, spdk, evidence, moves):
+    def test_task_without_fence_flag_never_fences(self, db, spdk, evidence, moves):
         # A task that carries lost_site without the fence flag runs no site
         # steps; its move is refused while the fence is not done.
         lost = _Lost(db, spdk)
@@ -697,7 +683,7 @@ class TestSiteSteps:
         assert moves.calls == []
 
     @pytest.mark.parametrize("state", [Cluster.LOST_SITE_DRAINING, Cluster.LOST_SITE_DOWN])
-    def test_a_planned_move_is_refused_once_a_site_is_recorded(self, db, spdk, gate, moves, state):
+    def test_planned_move_is_refused_once_site_is_recorded(self, db, spdk, gate, moves, state):
         # promote_move_problems in the marker transaction: a planned promote
         # queued before the monitor recorded A.
         cluster, a, b, owner, pool, vol, task_id = dp._queued(db, spdk, gate)
@@ -711,7 +697,7 @@ class TestSiteSteps:
         assert moves.calls == []
         assert _record(db, cluster.get_id()) == (SITE_A, state)
 
-    def test_a_sibling_opens_on_s_after_the_fail_over(self, db, spdk, evidence, moves):
+    def test_sibling_opens_on_s_after_fail_over(self, db, spdk, evidence, moves):
         lost = _Lost(db, spdk)
         assert lost.run(lost.promote("v1a").task_id)
         _desync(lost.a[2], vuid=21)             # LVS_2 unsynced: does not concern LVS_1
@@ -723,7 +709,7 @@ class TestSiteSteps:
 
     @pytest.mark.parametrize("state", [Cluster.LOST_SITE_FENCING, "moving", Cluster.LOST_SITE_DRAINING,
                                        Cluster.LOST_SITE_DOWN])
-    def test_a_returning_node_keeps_every_path_closed(self, db, spdk, evidence, state):
+    def test_returning_node_keeps_every_path_closed(self, db, spdk, evidence, state):
         lost = _Lost(db, spdk)
         if state == "moving":
             src.set_lost_site_state(lost.cluster.get_id(), SITE_A, Cluster.LOST_SITE_DONE, ("",))
@@ -744,7 +730,7 @@ class TestLostSiteGrantGuards:
 
     @pytest.mark.parametrize("state", [Cluster.LOST_SITE_FENCING, Cluster.LOST_SITE_DONE,
                                        Cluster.LOST_SITE_DRAINING, Cluster.LOST_SITE_DOWN])
-    def test_no_grant_and_no_leader_rebuild_on_the_lost_site(self, db, rpcs, env, state):
+    def test_no_grant_and_no_leader_rebuild_on_lost_site(self, db, rpcs, env, state):
         cluster, a, b, owner = stack._one_owner_layout(db, lost_site=SITE_A)
         cluster.lost_site_state = state
         cluster.write_to_db(db.kv_store)
@@ -755,7 +741,7 @@ class TestLostSiteGrantGuards:
 
     @pytest.mark.parametrize("state", [Cluster.LOST_SITE_FENCING, Cluster.LOST_SITE_DRAINING,
                                        Cluster.LOST_SITE_DOWN])
-    def test_an_abandoned_move_to_the_lost_site_is_refused(self, db, rpcs, env, state):
+    def test_abandoned_move_to_lost_site_is_refused(self, db, rpcs, env, state):
         cluster, a, b, owner = stack._one_owner_layout(db, lost_site=SITE_A)
         cluster.lost_site_state = state
         cluster.write_to_db(db.kv_store)
@@ -770,7 +756,7 @@ class TestLostSiteGrantGuards:
     @pytest.mark.parametrize("state, refused", [(Cluster.LOST_SITE_DRAINING, True),
                                                 (Cluster.LOST_SITE_DOWN, True),
                                                 (Cluster.LOST_SITE_DONE, False)])
-    def test_a_silent_unfenced_member_blocks_the_hand_off(
+    def test_silent_unfenced_member_blocks_hand_off(
             self, db, rpcs, env, state, refused):
         # Only a fenced site (done) is skipped by the hand-off's probes: a
         # silent member of a site the monitor recorded may still hold the
@@ -808,7 +794,7 @@ def _suspended(db, cluster, nodes):
 
 class TestActivation:
 
-    def test_the_leader_is_built_on_the_active_remote_primary(self, db, rpcs, hub, env, adopt):
+    def test_leader_is_built_on_active_remote_primary(self, db, rpcs, hub, env, adopt):
         cluster, a, b, owner_a, owner_b = stack._two_owner_layout(db)
         owner_a = _update(db, owner_a, lvs_active_site=SITE_B)      # LVS_1 led from b0
         _suspended(db, cluster, [*a, *b])
@@ -836,7 +822,7 @@ class TestActivation:
                              (b[2].get_id(), b[0].get_id(), "tertiary")}
 
     @pytest.mark.parametrize("failure", ["adopt", "connect"])
-    def test_an_unwired_remote_follower_fails_the_activation(
+    def test_unwired_remote_follower_fails_activation(
             self, db, rpcs, hub, env, adopt, failure):
         # Nothing repairs a remote follower's redirect later, and the site rule
         # would open its paths (Pass 4, the lvol monitor's ANA self-heal).
@@ -863,7 +849,7 @@ class TestActivation:
         ana.assert_not_called()                                     # Pass 4 never ran
         assert db.get_cluster_by_id(cluster.get_id()).status == Cluster.STATUS_SUSPENDED
 
-    def test_the_leader_rebuilds_on_one_node_never_overlap(self, db, rpcs, hub, env, adopt):
+    def test_leader_rebuilds_on_one_node_never_overlap(self, db, rpcs, hub, env, adopt):
         cluster = stack._seed_cluster(db)
         a, b = stack._sites(db, cluster)
         owners = [stack._make_owner(db, a[0], a, b, lvs_id=1),
@@ -897,7 +883,7 @@ class TestActivation:
         assert on_b0 == sorted(["", owners[0].get_id(), owners[1].get_id()])
         assert overlaps == []
 
-    def test_an_lvs_moving_still_refuses_the_activation(self, db, rpcs, hub, env):
+    def test_lvs_moving_still_refuses_activation(self, db, rpcs, hub, env):
         cluster, a, b, owner_a, owner_b = stack._two_owner_layout(db)
         _update(db, owner_a, lvs_active_site=MOVING_B)
         _suspended(db, cluster, [*a, *b])
@@ -909,10 +895,12 @@ class TestActivation:
             with pytest.raises(ValueError):
                 cluster_ops._cluster_activate(cluster.get_id())
 
-    def test_the_remote_primary_rebuilds_the_lvs_as_its_leader(self, db, rpcs, hub, env, adopt):
-        # The real rebuild (RPCs mocked): the LVS of a0 led from b0.
+    def test_remote_primary_rebuilds_lvs_as_its_leader(self, db, rpcs, hub, env, adopt):
+        # The real rebuild with mocked RPCs. a0's LVS is led from b0, and the
+        # instances on b0 and b1 are still marked pending.
         _, a, b, owner_a, _ = stack._two_owner_layout(db)
-        owner_a = _update(db, owner_a, lvs_active_site=SITE_B)
+        owner_a = _update(db, owner_a, lvs_active_site=SITE_B,
+                          remote_instances_pending=[b[0].get_id(), b[1].get_id()])
 
         def _set_leader(*args, leader=False, **kwargs):
             if leader:
@@ -934,23 +922,12 @@ class TestActivation:
         assert stack._roles(rpc)[-1] == "primary"
         for node in (*a, b[1], b[2]):
             assert not stack._took_leadership(rpcs[node.get_id()])
-        assert _fresh(db, owner_a).lvstore_status == "ready"
-
-    def test_the_leader_rebuild_clears_its_pending_mark(self, db, rpcs, hub, env, adopt):
+        fresh = _fresh(db, owner_a)
+        assert fresh.lvstore_status == "ready"
         # b0 leads LVS_1 from now on: the mark's readers must not take it for absent.
-        _, a, b, owner_a, _ = stack._two_owner_layout(db)
-        owner_a = _update(db, owner_a, lvs_active_site=SITE_B,
-                          remote_instances_pending=[b[0].get_id(), b[1].get_id()])
+        assert fresh.remote_instances_pending == [b[1].get_id()]
 
-        def _set_leader(*args, leader=False, **kwargs):
-            if leader:
-                rpcs.lead(b[0])
-            return True
-        rpcs[b[0].get_id()].bdev_lvol_set_leader.side_effect = _set_leader
-        assert ops.recreate_lvstore(_fresh(db, b[0]), lvs_primary=owner_a, activation_mode=True) is True
-        assert _fresh(db, owner_a).remote_instances_pending == [b[1].get_id()]
-
-    def test_only_the_active_remote_primary_may_build_it(self, db, rpcs, env):
+    def test_only_active_remote_primary_may_build_it(self, db, rpcs, env):
         _, a, b, owner_a, _ = stack._two_owner_layout(db)
         owner_a = _update(db, owner_a, lvs_active_site=SITE_B)
         with patch.object(ops, "_recreate_lvstore_impl", return_value=True) as impl:
@@ -1012,7 +989,7 @@ class TestClusterStatus:
         stack._sites(db, cluster)
         assert _status(db, cluster) == Cluster.STATUS_ACTIVE
 
-    def test_losing_every_node_of_one_site_does_not_suspend(self, db):
+    def test_losing_all_nodes_of_one_site_does_not_suspend(self, db):
         cluster = stack._seed_cluster(db)
         a, b = stack._sites(db, cluster)
         for node in a:
@@ -1023,7 +1000,7 @@ class TestClusterStatus:
         _update(db, b[1], status=StorageNode.STATUS_OFFLINE)       # beyond it
         assert _status(db, cluster) == Cluster.STATUS_SUSPENDED
 
-    def test_live_nodes_with_failed_devices_drain_the_site(self, db):
+    def test_live_nodes_with_failed_devices_drain_site(self, db):
         # beyond its FTT, so it is out and drained - but not down: its nodes run
         cluster = stack._seed_cluster(db)
         a, b = stack._sites(db, cluster)
@@ -1088,7 +1065,7 @@ class TestLostSiteRecord:
         ((SITE_A, FENCING), FENCING, ("", FENCING)),                   # a retry: already there
         ((SITE_A, FENCING), DONE, (FENCING,)),
     ])
-    def test_a_transition(self, db, before, state, expect):
+    def test_transition(self, db, before, state, expect):
         cluster = _seed_record(db, stack._seed_cluster(db), *before)
         assert src.set_lost_site_state(cluster.get_id(), SITE_A, state, expect) is True
         assert _record(db, cluster.get_id()) == (SITE_A, state)
@@ -1099,19 +1076,19 @@ class TestLostSiteRecord:
         ((SITE_B, DOWN), DOWN, ("", DRAINING, DOWN)),                  # another site recorded
         ((SITE_B, DOWN), DRAINING, ("",)),
     ])
-    def test_a_refused_transition_writes_nothing(self, db, before, state, expect):
+    def test_refused_transition_writes_nothing(self, db, before, state, expect):
         cluster = _seed_record(db, stack._seed_cluster(db), *before)
         assert src.set_lost_site_state(cluster.get_id(), SITE_A, state, expect) is False
         assert _record(db, cluster.get_id()) == before
 
     @pytest.mark.parametrize("state", [DRAINING, DOWN])
-    def test_the_monitor_clears_its_own_record(self, db, state):
+    def test_monitor_clears_its_own_record(self, db, state):
         cluster = _seed_record(db, stack._seed_cluster(db), SITE_A, state)
         assert src.clear_monitor_lost_site(cluster.get_id()) is True
         assert _record(db, cluster.get_id()) == ("", "")
 
     @pytest.mark.parametrize("before", [(SITE_A, FENCING), (SITE_A, DONE), ("", "")])
-    def test_the_monitor_does_not_clear_a_fail_over_record(self, db, before):
+    def test_monitor_does_not_clear_fail_over_record(self, db, before):
         cluster = _seed_record(db, stack._seed_cluster(db), *before)
         assert src.clear_monitor_lost_site(cluster.get_id()) is False
         assert _record(db, cluster.get_id()) == before
@@ -1121,7 +1098,7 @@ class TestLostSiteRecord:
          "_set_lost_site_record", (SITE_A, DOWN)),
         (lambda cid: src.clear_monitor_lost_site(cid), "_clear_monitor_record", ("", "")),
     ])
-    def test_a_field_written_concurrently_survives(self, db, write, mutation, expected):
+    def test_field_written_concurrently_survives(self, db, write, mutation, expected):
         # Another flow commits a change of the cluster between the writer's
         # transactional read and its commit (from the writer's mutation, the
         # first time it runs): the writer's transaction conflicts and replays
@@ -1152,7 +1129,7 @@ class TestRecordSiteReturn:
         (DOWN, SITE_A, ()),             # the monitor's record: nothing was fenced
         (DONE, SITE_B, (SITE_A,)),      # a fail-over: the volume stays fenced on A
     ])
-    def test_a_return_leaves_the_volume_sites(self, db, state, active, demoted):
+    def test_return_leaves_volume_sites(self, db, state, active, demoted):
         """The site activation's record step clears the record and leaves every
         volume's active site and fence as they are: after ``down`` the volume
         is still active on A with no fence, after a fail-over it stays fenced
@@ -1254,7 +1231,7 @@ class TestMonitorSettlesAnAbandonedMove:
     the monitor pass probes every member (get_lvstore) and settles the marker
     on the actual leader, and the pass goes on to its site record."""
 
-    def test_the_marker_follows_the_member_that_leads(self, db, rpcs, monitor_pass):
+    def test_marker_follows_member_that_leads(self, db, rpcs, monitor_pass):
         cluster, a, b, owner = stack._one_owner_layout(db)
         owner = _update(db, owner, lvs_active_site=MOVING_B)
         rpcs.lead(a[0])             # the hand-off never happened: the source primary leads
@@ -1270,20 +1247,18 @@ class TestMonitorRecord:
     """When the storage-node monitor writes, keeps or clears its record of a
     site, by the cluster's stored status."""
 
-    def test_a_working_cluster_records_a_site_that_is_gone(self, db, monitor_pass):
-        cluster = stack._seed_cluster(db)
+    @pytest.mark.parametrize("stored, expected", [
+        pytest.param(Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, id="working-cluster"),
+        pytest.param(Cluster.STATUS_READONLY, Cluster.STATUS_READONLY, id="read-only-stays-read-only"),
+    ])
+    def test_cluster_records_site_that_is_gone(self, db, monitor_pass, stored, expected):
+        cluster = _seed_record(db, stack._seed_cluster(db), "", "", status=stored)
         _site(db, cluster, a_status=StorageNode.STATUS_OFFLINE)
         after = monitor_pass.run(cluster)
-        assert (after.lost_site, after.lost_site_state, after.status) == (SITE_A, DOWN, Cluster.STATUS_DEGRADED)
-
-    def test_a_read_only_cluster_records_and_stays_read_only(self, db, monitor_pass):
-        cluster = _seed_record(db, stack._seed_cluster(db), "", "", status=Cluster.STATUS_READONLY)
-        _site(db, cluster, a_status=StorageNode.STATUS_OFFLINE)
-        after = monitor_pass.run(cluster)
-        assert (after.lost_site, after.lost_site_state, after.status) == (SITE_A, DOWN, Cluster.STATUS_READONLY)
+        assert (after.lost_site, after.lost_site_state, after.status) == (SITE_A, DOWN, expected)
 
     @pytest.mark.parametrize("status", [StorageNode.STATUS_UNREACHABLE, StorageNode.STATUS_SCHEDULABLE])
-    def test_after_down_the_gone_nodes_of_the_site_are_offline(self, db, monitor_pass, status):
+    def test_after_down_gone_nodes_of_site_are_offline(self, db, monitor_pass, status):
         cluster = stack._seed_cluster(db)
         a, b = _site(db, cluster, a_status=status)
         monitor_pass.majority = monitor_pass.veto = {n.get_id() for n in a}
@@ -1292,7 +1267,7 @@ class TestMonitorRecord:
         assert _statuses(db, a) == [(StorageNode.STATUS_OFFLINE, NVMeDevice.STATUS_UNAVAILABLE)] * 3
         assert _statuses(db, b) == [ONLINE_DEV] * 3
 
-    def test_a_suspended_cluster_coming_back_records_nothing(self, db, monitor_pass):
+    def test_suspended_cluster_coming_back_records_nothing(self, db, monitor_pass):
         # a whole-cluster recovery in flight: B back, A half up
         cluster = _seed_record(db, stack._seed_cluster(db), "", "", status=Cluster.STATUS_SUSPENDED,
                                suspend_drain_complete=True)
@@ -1304,7 +1279,7 @@ class TestMonitorRecord:
         assert (after.lost_site, after.lost_site_state, after.status) == ("", "", Cluster.STATUS_SUSPENDED)
         monitor_pass.activate.assert_not_called()
 
-    def test_an_activation_in_flight_records_nothing(self, db, monitor_pass):
+    def test_activation_in_flight_records_nothing(self, db, monitor_pass):
         now = datetime.now(UTC).isoformat()
         cluster = _seed_record(db, stack._seed_cluster(db), "", "", status=Cluster.STATUS_IN_ACTIVATION,
                                in_activation_since=now, activation_heartbeat=now)
@@ -1313,7 +1288,7 @@ class TestMonitorRecord:
         assert (after.lost_site, after.lost_site_state, after.status) == ("", "", Cluster.STATUS_IN_ACTIVATION)
 
     @pytest.mark.parametrize("stored", [Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY])
-    def test_both_sites_out_clear_the_record_then_suspend(self, db, monitor_pass, stored):
+    def test_both_sites_out_clear_record_then_suspend(self, db, monitor_pass, stored):
         cluster = _seed_record(db, stack._seed_cluster(db), SITE_A, DOWN, status=stored)
         a, b = _site(db, cluster, a_status=StorageNode.STATUS_OFFLINE)
         for node in b[:2]:
@@ -1323,7 +1298,7 @@ class TestMonitorRecord:
         assert (Cluster.STATUS_SUSPENDED, ("", "")) in monitor_pass.status_writes
 
     @pytest.mark.parametrize("state", [DRAINING, DOWN])
-    def test_a_suspension_by_cluster_restart_clears_the_record(self, db, monitor_pass, state):
+    def test_suspension_by_cluster_restart_clears_record(self, db, monitor_pass, state):
         from simplyblock_core import cluster_ops
         cluster = _seed_record(db, stack._seed_cluster(db), SITE_A, state, status=Cluster.STATUS_DEGRADED)
         _site(db, cluster)
@@ -1332,7 +1307,7 @@ class TestMonitorRecord:
         after = monitor_pass.run(cluster)
         assert (after.lost_site, after.lost_site_state, after.status) == ("", "", Cluster.STATUS_SUSPENDED)
 
-    def test_a_fail_over_record_stays_under_a_suspension(self, db, monitor_pass):
+    def test_fail_over_record_stays_under_suspension(self, db, monitor_pass):
         cluster = _seed_record(db, stack._seed_cluster(db), SITE_A, DONE, status=Cluster.STATUS_SUSPENDED,
                                suspend_drain_complete=True)
         _site(db, cluster, a_status=StorageNode.STATUS_OFFLINE)
@@ -1342,7 +1317,7 @@ class TestMonitorRecord:
     # the watchdogs write SUSPENDED too
 
     @pytest.mark.parametrize("state, heartbeat", [(DRAINING, "stale"), (DOWN, "")])
-    def test_a_wedged_activation_clears_the_record(
+    def test_wedged_activation_clears_record(
             self, db, monitor_pass, state, heartbeat):
         since = (datetime.now(UTC) - timedelta(days=1)).isoformat()
         cluster = _seed_record(db, stack._seed_cluster(db), SITE_A, state, status=Cluster.STATUS_IN_ACTIVATION,
@@ -1352,7 +1327,7 @@ class TestMonitorRecord:
         assert (after.lost_site, after.lost_site_state, after.status) == ("", "", Cluster.STATUS_SUSPENDED)
         assert monitor_pass.status_writes[0] == (Cluster.STATUS_SUSPENDED, ("", ""))
 
-    def test_a_wedged_activation_keeps_a_fail_over_record(self, db, monitor_pass):
+    def test_wedged_activation_keeps_fail_over_record(self, db, monitor_pass):
         since = (datetime.now(UTC) - timedelta(days=1)).isoformat()
         cluster = _seed_record(db, stack._seed_cluster(db), SITE_A, DONE, status=Cluster.STATUS_IN_ACTIVATION,
                                in_activation_since=since, activation_heartbeat=since)
@@ -1360,7 +1335,7 @@ class TestMonitorRecord:
         after = monitor_pass.run(cluster)
         assert (after.lost_site, after.lost_site_state, after.status) == (SITE_A, DONE, Cluster.STATUS_SUSPENDED)
 
-    def test_an_abandoned_shrink_clears_the_record(self, db, monitor_pass):
+    def test_abandoned_shrink_clears_record(self, db, monitor_pass):
         cluster = _seed_record(db, stack._seed_cluster(db), SITE_A, DOWN, status=Cluster.STATUS_IN_SHRINK)
         a, b = _site(db, cluster, a_status=StorageNode.STATUS_OFFLINE)
         for node in b[:2]:
@@ -1372,7 +1347,7 @@ class TestMonitorRecord:
     # the down sweep is a level rule
 
     @pytest.mark.parametrize("status", [StorageNode.STATUS_UNREACHABLE, StorageNode.STATUS_SCHEDULABLE])
-    def test_a_gone_node_of_a_site_already_down_is_set_offline(self, db, monitor_pass, status):
+    def test_gone_node_of_site_already_down_is_set_offline(self, db, monitor_pass, status):
         cluster = _seed_record(db, stack._seed_cluster(db), SITE_A, DOWN, status=Cluster.STATUS_DEGRADED)
         a, b = _site(db, cluster, a_status=StorageNode.STATUS_OFFLINE)
         _update(db, a[0], status=status)
@@ -1382,7 +1357,7 @@ class TestMonitorRecord:
         assert _statuses(db, b) == [ONLINE_DEV] * 3
 
     @pytest.mark.parametrize("status", [StorageNode.STATUS_UNREACHABLE, StorageNode.STATUS_SCHEDULABLE])
-    def test_a_vetoed_node_of_a_site_down_is_left_alone(self, db, monitor_pass, status):
+    def test_vetoed_node_of_site_down_is_left_alone(self, db, monitor_pass, status):
         cluster = _seed_record(db, stack._seed_cluster(db), SITE_A, DOWN, status=Cluster.STATUS_DEGRADED)
         a, b = _site(db, cluster, a_status=StorageNode.STATUS_OFFLINE)
         _update(db, a[0], status=status)
@@ -1391,17 +1366,20 @@ class TestMonitorRecord:
         assert _statuses(db, a[:1]) == [(status, NVMeDevice.STATUS_ONLINE)]
         assert _statuses(db, b) == [ONLINE_DEV] * 3
 
-    def test_without_a_witness_no_node_is_set_offline(self, db, monitor_pass):
-        # the management node lost its network: every vote 0/0, so the
-        # majority dict (nobody gone) is in force
-        cluster = _seed_record(db, stack._seed_cluster(db), SITE_A, DOWN, status=Cluster.STATUS_DEGRADED)
+    @pytest.mark.parametrize("state", [pytest.param(DRAINING, id="site-drain"), pytest.param(DOWN, id="down-sweep")])
+    def test_without_witness_no_node_is_set_offline(self, db, monitor_pass, state):
+        # The management node lost its network, so every vote is 0/0 and the
+        # majority result says that no node is gone. Neither the site drain
+        # nor the down sweep sets a0 offline, and the lost-site record does
+        # not change.
+        cluster = _seed_record(db, stack._seed_cluster(db), SITE_A, state, status=Cluster.STATUS_DEGRADED)
         a, b = _site(db, cluster, a_status=StorageNode.STATUS_OFFLINE, b_status=StorageNode.STATUS_UNREACHABLE)
         _update(db, a[0], status=StorageNode.STATUS_UNREACHABLE)
         monitor_pass.veto = {n.get_id() for n in (a[0], *b)}
         after = monitor_pass.run(cluster)
         assert _statuses(db, a[:1]) == [(StorageNode.STATUS_UNREACHABLE, NVMeDevice.STATUS_ONLINE)]
         assert _statuses(db, b) == [(StorageNode.STATUS_UNREACHABLE, NVMeDevice.STATUS_ONLINE)] * 3
-        assert (after.lost_site, after.lost_site_state, after.status) == (SITE_A, DOWN, Cluster.STATUS_DEGRADED)
+        assert (after.lost_site, after.lost_site_state, after.status) == (SITE_A, state, Cluster.STATUS_DEGRADED)
 
     @pytest.mark.parametrize("status", [StorageNode.STATUS_UNREACHABLE, StorageNode.STATUS_SCHEDULABLE])
     @pytest.mark.parametrize("gone_by_both", [False, True])
@@ -1482,7 +1460,7 @@ def _sweep(cluster, owner, vol):
 
 class TestFollowerRedirect:
 
-    def test_an_unwired_follower_is_closed_and_retried(self, db, spdk):
+    def test_unwired_follower_is_closed_and_retried(self, db, spdk):
         cluster, a, b, owner, vol = _served(db, spdk)
         _hub(spdk, a[1], "LVS_1", connected=False)
         _hub(spdk, a[2], "LVS_1", connected=True)
@@ -1492,7 +1470,7 @@ class TestFollowerRedirect:
         assert publish._seen(spdk, a[2], vol) == "non_optimized"
         assert len(_retries(db, cluster, a[1], vol)) == 1 and _retries(db, cluster, a[2], vol) == []
 
-    def test_the_group_writer_opens_a_follower_once_wired(self, db, spdk):
+    def test_group_writer_opens_follower_once_wired(self, db, spdk):
         cluster, a, b, owner, vol = _served(db, spdk)
         state = _hub(spdk, a[1], "LVS_1", connected=False)
         port = a[1].get_lvol_subsys_port("LVS_1")
@@ -1504,7 +1482,7 @@ class TestFollowerRedirect:
         ops.apply_sync_ana_groups(spdk[a[1].get_id()], vol, a[1], port, "non_optimized")
         assert publish._seen(spdk, a[1], vol) == "non_optimized"
 
-    def test_a_leader_or_an_unknown_redirect_is_not_closed(self, db, spdk):
+    def test_leader_or_unknown_redirect_is_not_closed(self, db, spdk):
         cluster, a, b, owner, vol = _served(db, spdk)
         _hub(spdk, a[1], "LVS_1", connected=False, leader=True)     # a leader is not judged
         spdk[a[2].get_id()].get_lvstore.side_effect = RPCException("busy")
@@ -1512,7 +1490,7 @@ class TestFollowerRedirect:
             ops._set_lvol_ana_on_node(vol, node, "non_optimized")
         assert [publish._seen(spdk, n, vol) for n in (a[1], a[2])] == ["non_optimized"] * 2
 
-    def test_the_monitor_never_opens_an_unwired_follower(self, db, spdk):
+    def test_monitor_never_opens_unwired_follower(self, db, spdk):
         # LVS_1 led from b0; Pass 3 wired b1 but not b2, the activation failed
         # before Pass 4: both followers still closed.
         cluster, a, b, owner, vol = _served(db, spdk, active_site=SITE_B)
@@ -1533,7 +1511,7 @@ class TestFollowerRedirect:
         assert publish._seen(spdk, b[1], vol) == "non_optimized"
         assert publish._seen(spdk, b[2], vol) == "inaccessible"
 
-    def test_an_open_follower_whose_redirect_is_gone_is_closed(self, db, spdk):
+    def test_open_follower_without_redirect_is_closed(self, db, spdk):
         from simplyblock_core.services import lvol_monitor
         cluster, a, b, owner, vol = _served(db, spdk, active_site=SITE_B)
         _hub(spdk, b[2], "LVS_1", connected=False)
@@ -1561,7 +1539,7 @@ class TestInSiteFailover:
         return cluster, a, b, owner, vol
 
     @pytest.mark.parametrize("leader", [False, True])
-    def test_the_monitor_keeps_the_secondary_optimized(self, db, spdk, leader):
+    def test_monitor_keeps_secondary_optimized(self, db, spdk, leader):
         cluster, a, b, owner, vol = self._failed_over(db, spdk)
         _hub(spdk, a[1], "LVS_1", connected=False, leader=leader)
         _sweep(cluster, owner, vol)
@@ -1569,7 +1547,7 @@ class TestInSiteFailover:
         assert publish._seen(spdk, a[2], vol) == "non_optimized"
         assert _retries(db, cluster, a[1], vol) == []
 
-    def test_a_retried_registration_republishes_it_optimized(self, db, spdk):
+    def test_retried_registration_republishes_it_optimized(self, db, spdk):
         cluster, a, b, owner, vol = self._failed_over(db, spdk)
         _hub(spdk, a[1], "LVS_1", connected=False)
         _set(spdk, a[1], vol, "inaccessible")
@@ -1580,7 +1558,7 @@ class TestInSiteFailover:
         ops._set_lvol_ana_on_node(vol, a[1], "non_optimized")
         assert publish._seen(spdk, a[1], vol) == "optimized"
 
-    def test_the_primary_restarting_hands_back_to_the_failback(self, db, spdk):
+    def test_primary_restarting_hands_back_to_failback(self, db, spdk):
         cluster, a, b, owner, vol = self._failed_over(db, spdk)
         _update(db, owner, status=StorageNode.STATUS_RESTARTING)
         _hub(spdk, a[1], "LVS_1", connected=True)

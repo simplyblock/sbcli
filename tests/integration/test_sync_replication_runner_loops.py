@@ -38,16 +38,15 @@ def corrupt_cluster():
         db.kv_store.clear(key)
 
 
-def test_a_cluster_read_error_ends_the_promote_loop(corrupt_cluster):
+@pytest.mark.parametrize("spec", [
+    pytest.param(tasks_runner_sync_promote.SPEC, id="promote"),
+    pytest.param(tasks_runner_sync_resync.SPEC, id="resync"),
+])
+def test_cluster_read_error_ends_loop(corrupt_cluster, spec):
     # one_cycle ends at the driver's sleep: the error escaping it is raised
     # before the loop got there.
     with pytest.raises(json.JSONDecodeError):
-        task_driver.one_cycle(tasks_runner_sync_promote.SPEC)
-
-
-def test_a_cluster_read_error_ends_the_resync_loop(corrupt_cluster):
-    with pytest.raises(json.JSONDecodeError):
-        task_driver.one_cycle(tasks_runner_sync_resync.SPEC)
+        task_driver.one_cycle(spec)
 
 
 # ---------------------------------------------------------------------------
@@ -90,30 +89,23 @@ def _first_reconcile_raises(owners):
     return patch.object(storage_node_ops, "reconcile_lvs_move", side_effect=_reconcile)
 
 
-def test_a_failing_reconcile_of_a_canceled_task_leaves_its_marker_and_settles_the_others():
+@pytest.mark.parametrize("task_fields, result", [
+    pytest.param({"canceled": True}, "canceled", id="canceled"),
+    # At the retry limit the driver ends the task without running its handler.
+    pytest.param({"retry": 5, "function_result": "unhandled error: lost answer"},
+                 "max retry reached (5) after: unhandled error: lost answer", id="retry-ceiling"),
+])
+def test_ended_task_reconcile_error_settles_others(task_fields, result):
+    """The driver ends the task without running its handler. A reconcile error
+    after that commit does not escape, and the other owners are still settled."""
     db = DBController()
-    task, owners = _transferring_promote(db, canceled=True)
+    task, owners = _transferring_promote(db, **task_fields)
     handler = MagicMock()
     with _first_reconcile_raises(owners) as reconcile:
         done = task_driver.drive(tasks_runner_sync_promote.SPEC, task, handler=handler)
     handler.assert_not_called()
-    assert (done.status, done.function_result) == (JobSchedule.STATUS_DONE, "canceled")
+    assert (done.status, done.function_result) == (JobSchedule.STATUS_DONE, result)
     assert [c.args[0] for c in reconcile.call_args_list] == [o.get_id() for o in owners]
     # the failed one is left to the storage-node monitor's reconcile
-    assert stack._fresh(db, owners[0]).lvs_active_site == MOVING_B
-    assert stack._fresh(db, owners[1]).lvs_active_site == stack.SITE_B
-
-
-def test_a_failing_reconcile_does_not_escape_the_retry_ceiling():
-    # At max_retry the driver ends the task failed without a pass; the settle
-    # after that commit lets nothing escape.
-    db = DBController()
-    task, owners = _transferring_promote(db, retry=5, function_result="unhandled error: lost answer")
-    handler = MagicMock()
-    with _first_reconcile_raises(owners):
-        done = task_driver.drive(tasks_runner_sync_promote.SPEC, task, handler=handler)
-    handler.assert_not_called()
-    assert done.status == JobSchedule.STATUS_DONE
-    assert done.function_result == "max retry reached (5) after: unhandled error: lost answer"
     assert stack._fresh(db, owners[0]).lvs_active_site == MOVING_B
     assert stack._fresh(db, owners[1]).lvs_active_site == stack.SITE_B

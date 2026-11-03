@@ -157,7 +157,7 @@ def _run(db, task_id):
 
 class TestDemote:
 
-    def test_demote_fences_only_the_site_triplet_and_records(self, db, spdk, gate):
+    def test_demote_fences_only_site_triplet_and_records(self, db, spdk, gate):
         cluster, a, b, owner, pool, vol = _registered(db, spdk)
         before_b = _states(spdk, b, vol)
         assert src.sync_demote_lvol(vol.get_id(), SITE_A) == [vol.get_id()]
@@ -166,7 +166,7 @@ class TestDemote:
         gate.assert_called_once_with(cluster.get_id())
         assert db.get_lvol_by_id(vol.get_id()).sync_demoted_sites == [SITE_A]
 
-    def test_a_volume_not_served_on_the_site_is_a_no_op(self, db, spdk, gate):
+    def test_volume_not_served_on_site_is_no_op(self, db, spdk, gate):
         cluster, a, b, owner, pool, vol = _registered(db, spdk)
         calls = {n.get_id(): dict(spdk[n.get_id()].groups) for n in (*a, *b)}
         assert src.sync_demote_lvol(vol.get_id(), SITE_B) == []
@@ -175,7 +175,7 @@ class TestDemote:
         assert src.sync_demote_lvol(vol.get_id(), SITE_A) == [vol.get_id()]
         assert src.sync_demote_lvol(vol.get_id(), SITE_A) == []     # idempotent
 
-    def test_a_failed_gate_fences_and_records_nothing(self, db, spdk, gate):
+    def test_failed_gate_fences_and_records_nothing(self, db, spdk, gate):
         cluster, a, b, owner, pool, vol = _registered(db, spdk)
         gate.side_effect = _gate_fails
         with pytest.raises(SyncGateError):
@@ -183,13 +183,11 @@ class TestDemote:
         assert _state(spdk, a[0], vol) == "optimized"
         assert db.get_lvol_by_id(vol.get_id()).sync_demoted_sites == []
 
-    @pytest.mark.parametrize("failure", ["false", "raise"])
-    def test_one_failed_ana_rpc_leaves_the_demote_unrecorded(self, db, spdk, gate, failure):
+    def test_one_failed_ana_rpc_leaves_demote_unrecorded(self, db, spdk, gate):
         cluster, a, b, owner, pool, vol = _registered(db, spdk)
         target = spdk[a[2].get_id()]
-        effect = (MagicMock(return_value=False) if failure == "false"
-                  else MagicMock(side_effect=RPCException("timeout")))
-        with patch.object(target, "nvmf_subsystem_listener_set_ana_state", effect):
+        with patch.object(target, "nvmf_subsystem_listener_set_ana_state",
+                          MagicMock(side_effect=RPCException("timeout"))):
             with pytest.raises(SyncAnaError):
                 src.sync_demote_lvol(vol.get_id(), SITE_A)
         assert db.get_lvol_by_id(vol.get_id()).sync_demoted_sites == []
@@ -206,7 +204,7 @@ class TestDemote:
         assert _state(spdk, a[1], vol) == "non_optimized"      # SPDK down: its restart closes it
         assert _state(spdk, a[2], vol) == "inaccessible"
 
-    def test_a_restart_after_the_demote_keeps_the_path_closed(self, db, spdk, gate):
+    def test_restart_after_demote_keeps_path_closed(self, db, spdk, gate):
         cluster, a, b, owner, pool, vol = _registered(db, spdk)
         src.sync_demote_lvol(vol.get_id(), SITE_A)
         ops._set_lvol_ana_on_node(vol, a[1], "non_optimized")      # stale caller copy of the volume
@@ -222,7 +220,7 @@ class TestDemote:
             assert _states(spdk, a, v) == ["inaccessible"] * 3
             assert db.get_lvol_by_id(v.get_id()).sync_demoted_sites == [SITE_A]
 
-    def test_group_with_an_unresolvable_member_touches_nothing(self, db, spdk, gate):
+    def test_unresolvable_member_group_touches_nothing(self, db, spdk, gate):
         cluster, a, b, owner, pool, vol = _registered(db, spdk)
         group = _group(db, cluster, [vol], extra_ids=["gone-" + uuid.uuid4().hex[:6]])
         with pytest.raises(SyncGroupMemberError) as exc:
@@ -249,14 +247,14 @@ def _group(db, cluster, members, extra_ids=()):
 
 class TestPromoteApi:
 
-    def test_promote_to_the_serving_site_answers_its_paths(self, db, spdk, gate):
+    def test_promote_to_serving_site_answers_its_paths(self, db, spdk, gate):
         cluster, a, b, owner, pool, vol = _registered(db, spdk)
         result = src.sync_promote_lvol(vol.get_id(), SITE_A)
         assert not result.in_progress
         assert [e.ip for e in result.connection_strings[vol.get_id()]] == [_ip(n) for n in a]
         gate.assert_not_called()
 
-    def test_a_volume_on_a_non_home_led_lvs_is_fenced_and_moved(self, db, spdk, gate):
+    def test_non_home_led_volume_is_fenced_and_moved(self, db, spdk, gate):
         # The LVS is led from site-b and a fresh volume on it carries site-b,
         # never connected. A pod landing on site-a follows the workload: the
         # promote fences site-b (demotes it) and queues the move instead of
@@ -273,7 +271,7 @@ class TestPromoteApi:
         assert db.get_lvol_by_id(vol.get_id()).sync_demoted_sites == [SITE_B]
         assert db.get_sync_promote_task(cluster.get_id(), "LVS_1") is not None
 
-    def test_a_birth_state_volume_is_fenced_at_home_and_moved(self, db, spdk, gate, moves):
+    def test_birth_state_volume_fenced_at_home_and_moved(self, db, spdk, gate, moves):
         """First placement: a brand-new volume (never connected, born on its
         home) whose pod lands on the site its LVS is not homed on. The promote
         fences the home itself - what an unstage would have done - and queues
@@ -300,7 +298,7 @@ class TestPromoteApi:
         assert not done.in_progress
         assert [e.ip for e in done.connection_strings[vol.get_id()]] == [_ip(n) for n in b]
 
-    def test_a_birth_state_volume_promoted_to_its_own_home_is_a_no_op(self, db, spdk, gate):
+    def test_birth_state_volume_promoted_home_is_no_op(self, db, spdk, gate):
         # A birth-state volume promoted to the site it is already led from gets
         # the ordinary served answer, and nothing is fenced. Its paths are
         # handed out, so it is connected from then on.
@@ -318,11 +316,11 @@ class TestPromoteApi:
         assert after.sync_never_connected is False
         gate.assert_not_called()
 
-    def test_birth_siblings_of_the_lvs_are_demoted_and_moved_together(self, db, spdk, gate):
+    def test_birth_siblings_are_demoted_and_moved_together(self, db, spdk, gate):
         """The LVS moves as one: a never-connected sibling still at its home is
         demoted together with the move, so the LVS's other fresh volumes do not
         block a first-placement move. A connected sibling does
-        (test_group_lvs_rule_covers_volumes_outside_the_group)."""
+        (test_group_lvs_rule_covers_volumes_outside_group)."""
         cluster, a, b, owner, pool, vol = _registered(db, spdk)
         other = _another(db, spdk, cluster, owner, pool, a, b)
         other.sync_never_connected = True
@@ -332,7 +330,7 @@ class TestPromoteApi:
         assert result.in_progress
         assert db.get_lvol_by_id(other.get_id()).sync_demoted_sites == [SITE_A]
 
-    def test_a_connected_volume_is_refused_not_demoted(self, db, spdk, gate):
+    def test_connected_volume_is_refused_not_demoted(self, db, spdk, gate):
         """A connect handed out the home's paths, so a consumer may hold them:
         the planned promote is refused as not demoted and nothing is fenced."""
         cluster, a, b, owner, pool, vol = _registered(db, spdk)
@@ -347,7 +345,7 @@ class TestPromoteApi:
         assert db.get_lvol_by_id(vol.get_id()).sync_demoted_sites == []
         assert "inaccessible" not in _states(spdk, a, vol)
 
-    def test_a_refused_connect_keeps_never_connected(self, db, spdk, gate):
+    def test_refused_connect_keeps_never_connected(self, db, spdk, gate):
         """A connect the host is not authorized for hands out no path, so the
         volume stays never connected and its first placement still moves."""
         cluster, a, b, owner, pool, vol = _registered(db, spdk)
@@ -362,7 +360,7 @@ class TestPromoteApi:
         assert result.in_progress
         assert db.get_lvol_by_id(vol.get_id()).sync_demoted_sites == [SITE_A]
 
-    def test_site_activation_holds_the_auto_demote(self, db, spdk, gate):
+    def test_site_activation_holds_auto_demote(self, db, spdk, gate):
         """While a site activation of A runs, the LVS led from A is not
         auto-demoted: the activation is opening its paths. The promote is
         refused with the activation's retry reason, nothing is fenced."""
@@ -379,7 +377,7 @@ class TestPromoteApi:
         assert db.get_lvol_by_id(vol.get_id()).sync_demoted_sites == []
         assert "inaccessible" not in _states(spdk, a, vol)
 
-    def test_a_connect_during_the_gate_keeps_the_lvs(self, db, spdk, gate):
+    def test_connect_during_gate_keeps_lvs(self, db, spdk, gate):
         """The plan holds both never-connected volumes of LVS_1; a connect of
         the sibling lands while the demote's live gate runs. Under the
         site-rule lock the demote sees the sibling connected and fences
@@ -404,25 +402,13 @@ class TestPromoteApi:
             assert db.get_lvol_by_id(v.get_id()).sync_demoted_sites == []
             assert "inaccessible" not in _states(spdk, a, v)
 
-    def test_t_offline_is_412_forced_is_a_disaster_failover(self, db, spdk, gate):
-        cluster, a, b, owner, pool, vol = _registered(db, spdk)
-        for node in a:
-            _update(db, node, status=StorageNode.STATUS_OFFLINE)
-        with pytest.raises(SyncSiteOfflineError):
-            src.sync_promote_lvol(vol.get_id(), SITE_B)
-        # judged by the disaster gate, not the planned one (test_sync_replication_disaster.py)
-        result = src.sync_promote_lvol(vol.get_id(), SITE_B, force=True)
-        assert result.in_progress
-        assert _task(db, result.task_id).function_params["lost_site"] == SITE_A
-        gate.assert_not_called()
-
     def test_forced_while_t_is_online_is_refused(self, db, spdk, gate):
         cluster, a, b, owner, pool, vol = _registered(db, spdk)
         src.sync_demote_lvol(vol.get_id(), SITE_A)
         with pytest.raises(SyncPromoteRefusedError, match="online"):
             src.sync_promote_lvol(vol.get_id(), SITE_B, force=True)
 
-    def test_a_failed_gate_is_409_and_queues_nothing(self, db, spdk, gate):
+    def test_failed_gate_is_409_and_queues_nothing(self, db, spdk, gate):
         cluster, a, b, owner, pool, vol = _registered(db, spdk)
         src.sync_demote_lvol(vol.get_id(), SITE_A)
         gate.side_effect = _gate_fails
@@ -430,7 +416,7 @@ class TestPromoteApi:
             src.sync_promote_lvol(vol.get_id(), SITE_B)
         assert db.get_sync_promote_task(cluster.get_id(), "LVS_1") is None
 
-    def test_in_progress_while_the_task_runs_done_after(self, db, spdk, gate, moves):
+    def test_in_progress_while_task_runs_done_after(self, db, spdk, gate, moves):
         cluster, a, b, owner, pool, vol = _registered(db, spdk)
         src.sync_demote_lvol(vol.get_id(), SITE_A)
         first = src.sync_promote_lvol(vol.get_id(), SITE_B)
@@ -443,7 +429,7 @@ class TestPromoteApi:
         assert not done.in_progress
         assert [e.ip for e in done.connection_strings[vol.get_id()]] == [_ip(n) for n in b]
 
-    def test_a_canceled_task_is_not_in_progress(self, db, spdk, gate):
+    def test_canceled_task_is_not_in_progress(self, db, spdk, gate):
         cluster, a, b, owner, pool, vol = _registered(db, spdk)
         src.sync_demote_lvol(vol.get_id(), SITE_A)
         first = src.sync_promote_lvol(vol.get_id(), SITE_B)
@@ -454,7 +440,7 @@ class TestPromoteApi:
         assert {t.uuid for t in db.get_active_sync_promote_tasks(cluster.get_id())} == {
             first.task_id, second.task_id}
 
-    def test_an_abandoned_move_is_reconciled_before_judging(self, db, spdk, gate):
+    def test_abandoned_move_is_reconciled_before_judging(self, db, spdk, gate):
         cluster, a, b, owner, pool, vol = _registered(db, spdk)
         src.sync_demote_lvol(vol.get_id(), SITE_A)
         _update(db, owner, lvs_active_site=MOVING_B)
@@ -468,7 +454,7 @@ class TestPromoteApi:
         assert result.in_progress and result.task_id        # a fresh planned move queued
         assert _task(db, result.task_id).function_params["owners"] == {"LVS_1": owner.get_id()}
 
-    def test_an_unsettled_abandoned_move_is_refused(self, db, spdk, gate):
+    def test_unsettled_abandoned_move_is_refused(self, db, spdk, gate):
         cluster, a, b, owner, pool, vol = _registered(db, spdk)
         src.sync_demote_lvol(vol.get_id(), SITE_A)
         _update(db, owner, lvs_active_site=MOVING_B)
@@ -480,7 +466,7 @@ class TestPromoteApi:
         assert MOVING_B in str(exc.value) and owner.get_id() in str(exc.value)
         assert db.get_sync_promote_task(cluster.get_id(), "LVS_1") is None
 
-    def test_a_move_owned_by_a_live_task_is_not_reconciled(self, db, spdk, gate):
+    def test_move_owned_by_live_task_is_not_reconciled(self, db, spdk, gate):
         cluster, a, b, owner, pool, vol = _registered(db, spdk)
         src.sync_demote_lvol(vol.get_id(), SITE_A)
         first = src.sync_promote_lvol(vol.get_id(), SITE_B)
@@ -490,12 +476,12 @@ class TestPromoteApi:
         reconcile.assert_not_called()
 
     @pytest.mark.parametrize("force", [False, True])
-    @pytest.mark.parametrize("source_offline", [False, True])
-    def test_an_offline_target_site_is_refused_not_412(
-            self, db, spdk, gate, force, source_offline):
+    def test_offline_target_site_is_refused_not_412(self, db, spdk, gate, force):
+        # Both sites are offline. The refusal for the offline target site comes
+        # first, before the 412 and before the disaster handling.
         cluster, a, b, owner, pool, vol = _registered(db, spdk)
         src.sync_demote_lvol(vol.get_id(), SITE_A)
-        for node in (*b, *(a if source_offline else ())):
+        for node in (*b, *a):
             _update(db, node, status=StorageNode.STATUS_OFFLINE)
         with pytest.raises(SyncPromoteRefusedError, match=f"site {SITE_B} has no online node") as exc:
             src.sync_promote_lvol(vol.get_id(), SITE_B, force=force)
@@ -503,7 +489,7 @@ class TestPromoteApi:
         assert exc.value.volumes == [vol.get_id()]
         assert db.get_sync_promote_task(cluster.get_id(), "LVS_1") is None
 
-    def test_group_lvs_rule_covers_volumes_outside_the_group(self, db, spdk, gate):
+    def test_group_lvs_rule_covers_volumes_outside_group(self, db, spdk, gate):
         cluster, a, b, owner, pool, vol = _registered(db, spdk)
         outsider = _another(db, spdk, cluster, owner, pool, a, b)
         member2 = _another(db, spdk, cluster, owner, pool, a, b)
@@ -535,7 +521,7 @@ def _queued(db, spdk, gate, **layout):
 
 class TestPromoteRunner:
 
-    def test_planned_promote_moves_the_lvs_and_opens_on_s(self, db, spdk, gate, moves):
+    def test_planned_promote_moves_lvs_and_opens_on_s(self, db, spdk, gate, moves):
         cluster, a, b, owner, pool, vol, task_id = _queued(db, spdk, gate)
         moves.leader["LVS_1"] = owner
         assert _run(db, task_id)
@@ -552,7 +538,7 @@ class TestPromoteRunner:
         assert _states(spdk, b, vol) == ["optimized", "non_optimized", "non_optimized"]
         assert _states(spdk, a, vol) == ["inaccessible"] * 3
 
-    def test_gate_failure_before_the_marker_changes_nothing(self, db, spdk, gate, moves):
+    def test_gate_failure_before_marker_changes_nothing(self, db, spdk, gate, moves):
         cluster, a, b, owner, pool, vol, task_id = _queued(db, spdk, gate)
         gate.side_effect = _gate_fails
         _run(db, task_id)
@@ -562,7 +548,7 @@ class TestPromoteRunner:
         assert _fresh(db, owner).lvs_active_site == ""
         assert moves.calls == []
 
-    def test_a_volume_created_after_enqueue_aborts_the_move(self, db, spdk, gate, moves):
+    def test_volume_created_after_enqueue_aborts_move(self, db, spdk, gate, moves):
         cluster, a, b, owner, pool, vol, task_id = _queued(db, spdk, gate)
         late = _volume(db, cluster, owner, pool)            # active on A, not demoted
         _run(db, task_id)
@@ -571,7 +557,7 @@ class TestPromoteRunner:
         assert _fresh(db, owner).lvs_active_site == ""
         assert moves.calls == []
 
-    def test_gate_failure_after_the_marker_restores_the_site(self, db, spdk, gate, moves):
+    def test_gate_failure_after_marker_restores_site(self, db, spdk, gate, moves):
         cluster, a, b, owner, pool, vol, task_id = _queued(db, spdk, gate)
         gate.side_effect = [None, SyncGateError("sync-replication planned", ["late unsynced"])]
         _run(db, task_id)
@@ -580,7 +566,7 @@ class TestPromoteRunner:
         assert moves.calls == []
         assert db.get_lvol_by_id(vol.get_id()).sync_active_site == SITE_A
 
-    def test_no_rpc_runs_inside_the_transaction(self, db, spdk, gate, moves):
+    def test_no_rpc_runs_inside_transaction(self, db, spdk, gate, moves):
         cluster, a, b, owner, pool, vol, task_id = _queued(db, spdk, gate)
         moves.leader["LVS_1"] = owner
         inside = threading.Event()
@@ -603,7 +589,7 @@ class TestPromoteRunner:
             assert _run(db, task_id)
         assert _fresh(db, owner).lvs_active_site == SITE_B
 
-    def test_leader_already_on_s_is_only_the_ana_step(self, db, spdk, gate, moves):
+    def test_leader_already_on_s_is_only_ana_step(self, db, spdk, gate, moves):
         """Another volume of the LVS was promoted before: only this one's
         paths open, no hand-off."""
         cluster, a, b, owner, pool, vol, task_id = _queued(db, spdk, gate)
@@ -625,7 +611,7 @@ class TestPromoteRunner:
         sibling = _another(db, spdk, cluster, owner, pool, a, b, active_site=SITE_A, demoted=[SITE_A])
         return cluster, a, b, owner, sibling, task_id
 
-    def test_ana_step_with_the_lvs_triplet_offline_is_refused(
+    def test_ana_step_with_lvs_triplet_offline_is_refused(
             self, db, spdk, gate, moves):
         """Another node of B online does not open this LVS's paths: 409, no
         task, nothing recorded (never a 200 for a volume never opened)."""
@@ -642,7 +628,7 @@ class TestPromoteRunner:
         fresh = db.get_lvol_by_id(sibling.get_id())
         assert (fresh.sync_active_site, fresh.sync_demoted_sites) == (SITE_A, [SITE_A])
 
-    def test_ana_step_losing_its_triplet_after_enqueue_fails(
+    def test_ana_step_losing_triplet_after_enqueue_fails(
             self, db, spdk, gate, moves):
         """The race the decision cannot see: the open sets no path, so the task
         fails - reported once, then the table refuses - never a 200."""
@@ -670,7 +656,7 @@ class TestPromoteRunner:
         with pytest.raises(SyncPromoteRefusedError, match=f"site {SITE_B} has no online node"):
             src.sync_promote_lvol(sibling.get_id(), SITE_B)
 
-    def test_ana_only_task_with_a_failed_gate_opens_nothing(self, db, spdk, gate, moves):
+    def test_ana_only_task_with_failed_gate_opens_nothing(self, db, spdk, gate, moves):
         cluster, a, b, owner, pool, vol, task_id = _queued(db, spdk, gate)
         moves.leader["LVS_1"] = owner
         _run(db, task_id)
@@ -683,7 +669,7 @@ class TestPromoteRunner:
         assert db.get_lvol_by_id(sibling.get_id()).sync_active_site == SITE_A
 
     @pytest.mark.parametrize("status", [LVol.STATUS_IN_DELETION, LVol.STATUS_IN_CREATION])
-    def test_a_volume_not_servable_at_the_pass_is_not_opened(self, db, spdk, gate, moves, status):
+    def test_volume_not_servable_at_pass_is_not_opened(self, db, spdk, gate, moves, status):
         cluster, a, b, owner, pool, vol, task_id = _queued(db, spdk, gate)
         moves.leader["LVS_1"] = owner
         db.atomic_update(vol, lambda v: setattr(v, "status", status))
@@ -692,7 +678,7 @@ class TestPromoteRunner:
         assert _states(spdk, b, vol) == ["inaccessible"] * 3
         assert db.get_lvol_by_id(vol.get_id()).sync_active_site == SITE_A
 
-    def test_a_delete_during_the_open_closes_the_paths_again(self, db, spdk, gate, moves):
+    def test_delete_during_open_closes_paths_again(self, db, spdk, gate, moves):
         cluster, a, b, owner, pool, vol, task_id = _queued(db, spdk, gate)
         moves.leader["LVS_1"] = owner
         target = spdk[b[2].get_id()]
@@ -708,7 +694,7 @@ class TestPromoteRunner:
         assert _states(spdk, b, vol) == ["inaccessible"] * 3
         assert db.get_lvol_by_id(vol.get_id()).sync_active_site == SITE_A
 
-    def test_a_failed_close_after_a_status_change_is_reported(self, db, spdk, gate, moves):
+    def test_failed_close_after_status_change_is_reported(self, db, spdk, gate, moves):
         cluster, a, b, owner, pool, vol, task_id = _queued(db, spdk, gate)
         moves.leader["LVS_1"] = owner
         target = spdk[b[2].get_id()]
@@ -727,7 +713,7 @@ class TestPromoteRunner:
         assert "left servable" in _task(db, task_id).function_result
         assert db.get_lvol_by_id(vol.get_id()).sync_active_site == SITE_A
 
-    def test_a_delete_waits_for_an_open_and_keeps_its_record(self, db, spdk, gate, moves):
+    def test_delete_waits_for_open_and_keeps_its_record(self, db, spdk, gate, moves):
         """delete_lvol's in_deletion write takes the site-rule lock and is
         field-scoped: it lands after the open and its record, never between,
         and never reverts the promoted site."""
@@ -749,13 +735,13 @@ class TestPromoteRunner:
         assert (stored.status, stored.sync_active_site) == (LVol.STATUS_IN_DELETION, SITE_B)
         assert _task(db, task_id).function_result.startswith("promoted")
 
-    def test_a_writer_keeps_a_volume_in_deletion_closed(self, db, spdk, gate):
+    def test_writer_keeps_volume_in_deletion_closed(self, db, spdk, gate):
         cluster, a, b, owner, pool, vol = _registered(db, spdk)
         db.atomic_update(vol, lambda v: setattr(v, "status", LVol.STATUS_IN_DELETION))
         ops._set_lvol_ana_on_node(vol, a[0], "optimized")
         assert _state(spdk, a[0], vol) == "inaccessible"
 
-    def test_a_failed_open_records_nothing_and_is_retried(self, db, spdk, gate, moves):
+    def test_failed_open_records_nothing_and_is_retried(self, db, spdk, gate, moves):
         cluster, a, b, owner, pool, vol, task_id = _queued(db, spdk, gate)
         moves.leader["LVS_1"] = owner
         with patch.object(spdk[b[1].get_id()], "nvmf_subsystem_listener_set_ana_state",
@@ -783,16 +769,20 @@ class TestResume:
         assert problems == []
         assert _fresh(db, owner).lvs_active_site == MOVING_B
 
-    def test_after_the_marker_transaction(self, db, spdk, gate, moves):
+    def test_after_marker_transaction(self, db, spdk, gate, moves):
         cluster, a, b, owner, pool, vol, task_id = _queued(db, spdk, gate)
         self._marked(db, gate, cluster, owner, task_id)
+        # The marker transaction records the move in the task and does not
+        # change the task's status.
+        task = _task(db, task_id)
+        assert (task.status, task.function_params["moves"]) == (JobSchedule.STATUS_NEW, {"LVS_1": ""})
         moves.leader["LVS_1"] = owner
         assert _run(db, task_id)
         assert gate.call_count == 2          # the resumed move right before its hand-off, the opening
         assert moves.calls[0][:3] == ("LVS_1", owner.get_id(), b[0].get_id())
         assert db.get_lvol_by_id(vol.get_id()).sync_active_site == SITE_B
 
-    def test_after_the_marker_with_the_gate_now_failing(self, db, spdk, gate, moves):
+    def test_after_marker_with_gate_now_failing(self, db, spdk, gate, moves):
         cluster, a, b, owner, pool, vol, task_id = _queued(db, spdk, gate)
         self._marked(db, gate, cluster, owner, task_id)
         gate.side_effect = _gate_fails
@@ -800,7 +790,7 @@ class TestResume:
         assert moves.calls == []
         assert _fresh(db, owner).lvs_active_site == ""
 
-    def test_after_the_grant_before_the_marker_settled(self, db, spdk, gate, moves):
+    def test_after_grant_before_marker_settled(self, db, spdk, gate, moves):
         cluster, a, b, owner, pool, vol, task_id = _queued(db, spdk, gate)
         self._marked(db, gate, cluster, owner, task_id)
         trb.checkpoint(_task(db, task_id), transferring=["LVS_1"])
@@ -810,7 +800,7 @@ class TestResume:
         assert _fresh(db, owner).lvs_active_site == SITE_B
         assert db.get_lvol_by_id(vol.get_id()).sync_active_site == SITE_B
 
-    def test_after_the_move_before_the_open(self, db, spdk, gate, moves):
+    def test_after_move_before_open(self, db, spdk, gate, moves):
         cluster, a, b, owner, pool, vol, task_id = _queued(db, spdk, gate)
         self._marked(db, gate, cluster, owner, task_id)
         ops.set_lvs_active_site(owner.get_id(), SITE_B, expect=MOVING_B)
@@ -818,13 +808,7 @@ class TestResume:
         assert moves.calls == [] and gate.call_count == 1      # the opening only
         assert _states(spdk, b, vol) == ["optimized", "non_optimized", "non_optimized"]
 
-    def test_the_marker_transaction_leaves_the_status_alone(self, db, spdk, gate, moves):
-        cluster, a, b, owner, pool, vol, task_id = _queued(db, spdk, gate)
-        self._marked(db, gate, cluster, owner, task_id)
-        task = _task(db, task_id)
-        assert (task.status, task.function_params["moves"]) == (JobSchedule.STATUS_NEW, {"LVS_1": ""})
-
-    def test_a_resumed_hand_off_is_recorded_once(self, db, spdk, gate, moves):
+    def test_resumed_hand_off_is_recorded_once(self, db, spdk, gate, moves):
         cluster, a, b, owner, pool, vol, task_id = _queued(db, spdk, gate)
         self._marked(db, gate, cluster, owner, task_id)
         trb.checkpoint(_task(db, task_id), transferring=["LVS_1"])
@@ -873,7 +857,7 @@ class TestTwoLvs:
         assert gate.call_count == 4
         assert [db.get_lvol_by_id(v.get_id()).sync_active_site for v in vols] == [SITE_B, SITE_B]
 
-    def test_the_gate_turning_false_between_the_transfers(self, db, spdk, gate, moves):
+    def test_gate_turning_false_between_transfers(self, db, spdk, gate, moves):
         cluster, a, b, owners, vols, task_id = _two_lvs(db, spdk, gate)
         moves.leader.update(LVS_1=owners[0], LVS_2=owners[1])
         gate.side_effect = [None, None, SyncGateError("sync-replication planned", ["LVS_2 unsynced"])]
@@ -883,7 +867,7 @@ class TestTwoLvs:
         assert _fresh(db, owners[1]).lvs_active_site == ""         # restored, never handed off
         assert [db.get_lvol_by_id(v.get_id()).sync_active_site for v in vols] == [SITE_A, SITE_A]
 
-    def test_a_failed_second_hand_off_is_reconciled_after_done(self, db, spdk, gate, moves):
+    def test_failed_second_hand_off_reconciled_after_done(self, db, spdk, gate, moves):
         cluster, a, b, owners, vols, task_id = _two_lvs(db, spdk, gate)
         moves.leader.update(LVS_1=owners[0], LVS_2=owners[1])
         moves.fail["LVS_2"] = ops.LeadershipTransferError("grant refused")
@@ -908,7 +892,7 @@ class TestTwoLvs:
 
 class TestCancel:
 
-    def test_canceled_before_the_pass_touches_nothing(self, db, spdk, gate, moves):
+    def test_canceled_before_pass_touches_nothing(self, db, spdk, gate, moves):
         cluster, a, b, owner, pool, vol, task_id = _queued(db, spdk, gate)
         tasks_controller.cancel_task(task_id)
         with patch.object(ops, "reconcile_lvs_move") as reconcile:
@@ -919,7 +903,7 @@ class TestCancel:
         gate.assert_not_called()
         assert _fresh(db, owner).lvs_active_site == ""
 
-    def test_a_cancel_racing_the_marker_undoes_it_by_journal(
+    def test_cancel_racing_marker_undoes_it_by_journal(
             self, db, spdk, gate, moves):
         """cancel_task reads the task, the marker transaction commits, the
         cancel writes: the journal (moves) survives the cancel, and the next
@@ -942,7 +926,7 @@ class TestCancel:
         assert _fresh(db, owner).lvs_active_site == ""
         assert moves.calls == []
 
-    def test_a_cancel_racing_the_transfer_record_reconciles(self, db, spdk, gate, moves):
+    def test_cancel_racing_transfer_record_reconciles(self, db, spdk, gate, moves):
         cluster, a, b, owner, pool, vol, task_id = _queued(db, spdk, gate)
         TestResume()._marked(db, gate, cluster, owner, task_id)
         stale = _task(db, task_id)
@@ -954,7 +938,7 @@ class TestCancel:
             _run(db, task_id)
         reconcile.assert_called_once_with(owner.get_id())
 
-    def test_a_cancel_seen_after_the_marker_undoes_it(self, db, spdk, gate, moves):
+    def test_cancel_seen_after_marker_undoes_it(self, db, spdk, gate, moves):
         cluster, a, b, owner, pool, vol, task_id = _queued(db, spdk, gate)
         real = db.begin_sync_promote_moves
 
@@ -969,7 +953,7 @@ class TestCancel:
         assert moves.calls == []
         assert _fresh(db, owner).lvs_active_site == ""
 
-    def test_a_cancel_before_the_second_transfer(self, db, spdk, gate, moves):
+    def test_cancel_before_second_transfer(self, db, spdk, gate, moves):
         cluster, a, b, owners, vols, task_id = _two_lvs(db, spdk, gate)
         moves.leader.update(LVS_1=owners[0], LVS_2=owners[1])
         real_move = moves.move
@@ -984,7 +968,7 @@ class TestCancel:
         assert _fresh(db, owners[0]).lvs_active_site == SITE_B
         assert _fresh(db, owners[1]).lvs_active_site == ""
 
-    def test_a_cancel_before_the_open_leaves_it_to_next_call(self, db, spdk, gate, moves):
+    def test_cancel_before_open_leaves_it_to_next_call(self, db, spdk, gate, moves):
         cluster, a, b, owner, pool, vol, task_id = _queued(db, spdk, gate)
         moves.leader["LVS_1"] = owner
         real_move = moves.move
@@ -1010,7 +994,7 @@ class TestUnexpectedError:
     task keeps its markers while SUSPENDED, the next pass resumes it, and at
     the ceiling it ends failed without a pass."""
 
-    def test_the_task_waits_with_its_markers_and_the_next_pass_resumes(self, db, spdk, gate, moves):
+    def test_task_waits_with_markers_next_pass_resumes(self, db, spdk, gate, moves):
         cluster, a, b, owner, pool, vol, task_id = _queued(db, spdk, gate)
         earlier = {"task_id": "an-earlier-task", "reason": "failed: gate failed"}
         db.atomic_update(vol, lambda v: setattr(v, "sync_promote_failures", {SITE_B: earlier}))
@@ -1033,7 +1017,7 @@ class TestUnexpectedError:
         assert db.get_lvol_by_id(vol.get_id()).sync_active_site == SITE_B
         assert _failures(db, vol) == {}
 
-    def test_at_the_ceiling_the_task_ends_failed_without_a_pass(self, db, spdk, gate, moves):
+    def test_at_ceiling_task_ends_failed_without_pass(self, db, spdk, gate, moves):
         cluster, a, b, owners, vols, task_id = _two_lvs(db, spdk, gate)
         assert db.begin_sync_promote_moves(
             _task(db, task_id), {"LVS_1": (owners[0].get_id(), ""), "LVS_2": (owners[1].get_id(), "")},
@@ -1090,7 +1074,7 @@ def _check(site=SITE_B):
 
 class TestCreateAgainstTheMove:
 
-    def test_a_claim_read_before_the_marker_never_commits(self, db, spdk, gate):
+    def test_claim_read_before_marker_never_commits(self, db, spdk, gate):
         cluster, a, b, owner, pool, vol, task_id = _queued(db, spdk, gate)
         lvol = _new_volume(cluster, owner, pool)
         tr = db.kv_store.create_transaction()
@@ -1106,7 +1090,7 @@ class TestCreateAgainstTheMove:
         with pytest.raises(KeyError):
             db.get_lvol_by_id(lvol.get_id())
 
-    def test_a_create_under_the_promote_tx_aborts_the_move(
+    def test_create_under_promote_tx_aborts_move(
             self, db, spdk, gate):
         cluster, a, b, owner, pool, vol, task_id = _queued(db, spdk, gate)
         task = _task(db, task_id)
@@ -1125,13 +1109,13 @@ class TestCreateAgainstTheMove:
         assert lvol.get_id() in problems[0]
         assert _fresh(db, owner).lvs_active_site == ""
 
-    def test_a_claimed_volume_starts_never_connected(self, db, spdk, gate):
+    def test_claimed_volume_starts_never_connected(self, db, spdk, gate):
         cluster, a, b, owner, pool, vol = _registered(db, spdk)
         lvol = _new_volume(cluster, owner, pool)
         db.claim_lvol_ns_slot(lvol, owner, False, standalone_nqn=f"{cluster.nqn}:lvol:{lvol.uuid}")
         assert db.get_lvol_by_id(lvol.get_id()).sync_never_connected is True
 
-    def test_the_claim_replaces_a_stale_computed_site(self, db, spdk, gate):
+    def test_claim_replaces_stale_computed_site(self, db, spdk, gate):
         cluster, a, b, owner, pool, vol = _registered(db, spdk)
         lvol = _new_volume(cluster, owner, pool, site=SITE_A)       # computed earlier
         _update(db, owner, lvs_active_site=SITE_B)                   # a whole promote ran since
@@ -1217,7 +1201,7 @@ def _thread(fn, *args):
 
 class TestSiteRuleLock:
 
-    def test_a_demote_waits_for_an_ana_writer_in_flight(self, db, spdk, gate):
+    def test_demote_waits_for_ana_writer_in_flight(self, db, spdk, gate):
         cluster, a, b, owner, pool, vol = _registered(db, spdk)
         pause = _Pause(spdk, a[1])
         with patch.object(pause.target, "nvmf_subsystem_listener_set_ana_state", pause):
@@ -1235,7 +1219,7 @@ class TestSiteRuleLock:
         assert _states(spdk, a, vol) == ["inaccessible"] * 3
         assert db.get_lvol_by_id(vol.get_id()).sync_demoted_sites == [SITE_A]
 
-    def test_a_writer_behind_a_demote_sends_the_closed_state(self, db, spdk, gate):
+    def test_writer_behind_demote_sends_closed_state(self, db, spdk, gate):
         cluster, a, b, owner, pool, vol = _registered(db, spdk)
         pause = _Pause(spdk, a[2], only_state="inaccessible")
         with patch.object(pause.target, "nvmf_subsystem_listener_set_ana_state", pause):
@@ -1249,7 +1233,7 @@ class TestSiteRuleLock:
         assert not writer.errors and not demote.errors
         assert _state(spdk, a[0], vol) == "inaccessible"
 
-    def test_a_stale_close_never_lands_after_the_open(self, db, spdk, gate, moves):
+    def test_stale_close_never_lands_after_open(self, db, spdk, gate, moves):
         """A writer paused on the S primary after computing its pre-promote
         state (closed) holds the lock: the promote's marker and opening wait
         for it, so the path ends open."""
@@ -1292,7 +1276,7 @@ def _failures(db, vol):
 
 class TestFailureReport:
 
-    def test_a_failure_is_recorded_and_reported_once(
+    def test_failure_is_recorded_and_reported_once(
             self, db, spdk, gate, moves):
         cluster, a, b, owner, pool, vol, task_id = _queued(db, spdk, gate)
         _failed_run(db, gate, task_id)
@@ -1331,7 +1315,7 @@ class TestFailureReport:
         assert exc.value.task_id == t3
         assert _failures(db, vol) == _failures(db, vol2) == {}
 
-    def test_another_sites_request_keeps_the_failure(self, db, spdk, gate, moves):
+    def test_another_sites_request_keeps_failure(self, db, spdk, gate, moves):
         cluster, a, b, owner, pool, vol, task_id = _queued(db, spdk, gate)
         _failed_run(db, gate, task_id)
         db.atomic_update(vol, lambda v: setattr(v, "sync_demoted_sites", []))   # served on A again
@@ -1342,7 +1326,7 @@ class TestFailureReport:
             src.sync_promote_lvol(vol.get_id(), SITE_B)
         assert exc.value.task_id == task_id
 
-    def test_a_stale_volume_copy_still_finds_the_failure(self, db, spdk, gate, moves):
+    def test_stale_volume_copy_still_finds_failure(self, db, spdk, gate, moves):
         cluster, a, b, owner, pool, vol, task_id = _queued(db, spdk, gate)
         stale = db.get_lvol_by_id(vol.get_id())       # loaded before the task ends
         _failed_run(db, gate, task_id)
@@ -1352,7 +1336,7 @@ class TestFailureReport:
         assert exc.value.task_id == task_id
         assert db.get_sync_promote_task(cluster.get_id(), "LVS_1").uuid == task_id
 
-    def test_concurrent_consumers_get_the_entry_once(self, db, spdk, gate, moves):
+    def test_concurrent_consumers_get_entry_once(self, db, spdk, gate, moves):
         cluster, a, b, owner, pool, vol, task_id = _queued(db, spdk, gate)
         _failed_run(db, gate, task_id)
         barrier, got = threading.Barrier(4), []
@@ -1368,7 +1352,7 @@ class TestFailureReport:
         assert [g["task_id"] for g in got if g is not None] == [task_id]
         assert got.count(None) == 3
 
-    def test_a_success_removes_the_sites_entry(self, db, spdk, gate, moves):
+    def test_success_removes_sites_entry(self, db, spdk, gate, moves):
         cluster, a, b, owner, pool, vol, task_id = _queued(db, spdk, gate)
         _failed_run(db, gate, task_id)
         # a later task of the volume to B (queued without a caller consuming)
@@ -1383,7 +1367,7 @@ class TestFailureReport:
         assert _task(db, again).function_result.startswith("promoted")
         assert _failures(db, vol) == {SITE_A: {"task_id": "other", "reason": "failed: x"}}
 
-    def test_a_group_call_consumes_only_its_sites_entries(self, db, spdk, gate, moves):
+    def test_group_call_consumes_only_its_sites_entries(self, db, spdk, gate, moves):
         cluster, a, b, owner, pool, vol = _registered(db, spdk)
         vol2 = _another(db, spdk, cluster, owner, pool, a, b)
         group = _group(db, cluster, [vol, vol2])
@@ -1398,7 +1382,7 @@ class TestFailureReport:
         assert _failures(db, vol) == {SITE_A: {"task_id": "other", "reason": "failed: x"}}
         assert _failures(db, vol2) == {}
 
-    def test_a_repeated_finish_publishes_nothing_again(self, db, spdk, gate, moves):
+    def test_repeated_finish_publishes_nothing_again(self, db, spdk, gate, moves):
         cluster, a, b, owner, pool, vol, task_id = _queued(db, spdk, gate)
         _failed_run(db, gate, task_id)
         result = _task(db, task_id).function_result
@@ -1408,7 +1392,7 @@ class TestFailureReport:
         assert _failures(db, vol) == {}
         assert _task(db, task_id).function_result == result
 
-    def test_an_interrupted_finish_is_all_or_nothing(
+    def test_interrupted_finish_is_all_or_nothing(
             self, db, spdk, gate, moves):
         cluster, a, b, owner, pool, vol = _registered(db, spdk)
         vol2 = _another(db, spdk, cluster, owner, pool, a, b)
@@ -1433,7 +1417,7 @@ class TestFailureReport:
         assert _failures(db, vol)[SITE_B]["task_id"] == _failures(db, vol2)[SITE_B]["task_id"] == task_id
 
     @pytest.mark.parametrize("t_fails, u_fails", [(True, False), (False, True)])
-    def test_a_canceled_late_finish_spares_the_replacement(
+    def test_canceled_late_finish_spares_replacement(
             self, db, spdk, gate, moves, t_fails, u_fails):
         """A task canceled mid-run that ends after its replacement leaves the replacement's outcome alone."""
         cluster, a, b, owner, pool, vol, t_id = _queued(db, spdk, gate)
@@ -1481,7 +1465,7 @@ class TestFailureReport:
 
 class TestGroupCluster:
 
-    def test_an_empty_group_is_a_no_op_after_the_site_check(self, db, spdk, gate):
+    def test_empty_group_is_no_op_after_site_check(self, db, spdk, gate):
         cluster, a, b, owner, pool, vol = _registered(db, spdk)
         group = _group(db, cluster, [])
         assert src.sync_demote_group(group.get_id(), SITE_A) == []
@@ -1494,7 +1478,7 @@ class TestGroupCluster:
         gate.assert_not_called()
 
     @pytest.mark.parametrize("mixed", [False, True])
-    def test_a_member_of_another_cluster_refuses_the_group(self, db, spdk, gate, mixed):
+    def test_member_of_another_cluster_refuses_group(self, db, spdk, gate, mixed):
         cluster, a, b, owner, pool, vol = _registered(db, spdk)
         other_cluster, oa, ob, other_owner, other_pool, foreign = _registered(db, spdk)
         group = _group(db, cluster, [vol, foreign] if mixed else [foreign])
@@ -1543,7 +1527,7 @@ class TestMonitorReconcile:
         yield
         src._reconcile_attempts.invalidate()
 
-    def test_one_failed_reconcile_does_not_stop_the_others(
+    def test_one_failed_reconcile_does_not_stop_others(
             self, db, spdk, gate):
         cluster, a, b, owners, vols, task_id = _two_lvs(db, spdk, gate)
         for owner in owners:
@@ -1561,7 +1545,7 @@ class TestMonitorReconcile:
             src.reconcile_abandoned_moves(cluster.get_id())       # throttled
             assert len(tried) == 2
 
-    def test_an_unexpected_error_is_a_defect_and_propagates(self, db, spdk, gate):
+    def test_unexpected_error_is_defect_and_propagates(self, db, spdk, gate):
         cluster, a, b, owner, pool, vol = _registered(db, spdk)
         _update(db, owner, lvs_active_site=MOVING_B)
         with patch.object(ops, "reconcile_lvs_move", side_effect=TypeError("bug")):

@@ -90,30 +90,20 @@ def live_status():
         yield status
 
 
-# The direct async operations, each as (name, call(volume id)).
-_DIRECT = [
-    ("start", lambda vid: lvol_controller.replication_start(vid, replication_cluster_id=str(uuid.uuid4()))),
-    ("stop", lambda vid: lvol_controller.replication_stop(vid)),
-    ("trigger", lambda vid: lvol_controller.replication_trigger(vid)),
-    ("commit", lambda vid: lvol_controller.replication_commit(vid)),
-    ("cutover-proceed", lambda vid: replication_policy_controller.set_cutover_proceed(vid)),
-]
-
-
 # ---------------------------------------------------------------------------
 # the direct async operations on a sync cluster
 # ---------------------------------------------------------------------------
 
 class TestDirectAsyncOperationsRefused:
 
-    @pytest.mark.parametrize("name, call", _DIRECT, ids=[n for n, _ in _DIRECT])
-    def test_refused_before_anything_changes(self, db, no_rpc, name, call):
-        # A replication node set: commit's own precondition would pass.
+    def test_start_is_refused_before_anything_changes(self, db, no_rpc):
+        # The destination cluster does not exist: the sync guard answers
+        # before the destination is looked up.
         cluster, owner, vol = _sync_volume(db, do_replicate=True, replication_node_id=str(uuid.uuid4()))
         before = _record(db, vol)
 
         with pytest.raises(SyncReplicationUnsupportedError, match="sync-replication"):
-            call(vol.get_id())
+            lvol_controller.replication_start(vol.get_id(), replication_cluster_id=str(uuid.uuid4()))
 
         assert _record(db, vol) == before
         assert db.get_snapshots_by_lvol_id(vol.get_id()) == []
@@ -135,7 +125,7 @@ class TestDirectAsyncOperationsRefused:
         lambda: lvol_controller.replication_stop("no-such-volume"),
         lambda: lvol_controller.replication_commit("no-such-volume"),
     ])
-    def test_a_missing_volume_is_still_false(self, db, call):
+    def test_missing_volume_is_still_false(self, db, call):
         assert call() is False
 
 
@@ -148,7 +138,7 @@ class TestDirectAsyncOperationsOnAnAsyncCluster:
         assert lvol_controller.replication_stop(vol.get_id()) is True
         assert db.get_lvol_by_id(vol.get_id()).do_replicate is False
 
-    def test_policy_managed_volume_still_refuses_the_raw_verbs(self, db, no_rpc):
+    def test_policy_managed_volume_still_refuses_raw_verbs(self, db, no_rpc):
         """Attaching a policy IS the way replication is started; calling the
         raw verb would let a volume run on settings that diverge from its
         policy."""
@@ -194,7 +184,9 @@ class TestRoutes:
 
     @pytest.mark.parametrize("path", ["start", "stop", "trigger", "commit", "cutover-proceed"])
     def test_async_operation_is_400(self, db, no_rpc, web_client, path):
-        cluster, owner, vol = _sync_volume(db, do_replicate=True)
+        # The volume has a replication node, so commit's own precondition
+        # would pass. The 400 comes from sync replication alone.
+        cluster, owner, vol = _sync_volume(db, do_replicate=True, replication_node_id=str(uuid.uuid4()))
         before = _record(db, vol)
 
         response = web_client.post(_volume_url(cluster, vol) + "replication/" + path)
@@ -202,6 +194,7 @@ class TestRoutes:
         assert response.status_code == 400, response.text
         assert "sync-replication" in response.json()["detail"]["message"]
         assert _record(db, vol) == before
+        assert db.get_snapshots_by_lvol_id(vol.get_id()) == []
         assert db.get_job_tasks(cluster.get_id()) == []
 
     @pytest.mark.parametrize("site, role", [(SITE_A, "primary"), (SITE_B, "secondary")])
@@ -256,7 +249,7 @@ class TestGroupSyncStatus:
         live_status.assert_called_once_with(cluster.get_id(), max_age=3)
 
     @pytest.mark.parametrize("site, role", [(SITE_A, src.ROLE_PRIMARY), (SITE_B, src.ROLE_SECONDARY)])
-    def test_every_member_served_on_the_site(self, db, live_status, site, role):
+    def test_every_member_served_on_site(self, db, live_status, site, role):
         cluster, owner, vol = _sync_volume(db)
         other = _volume(db, cluster, owner, _pool(db, cluster))
 
@@ -273,7 +266,7 @@ class TestGroupSyncStatus:
         assert src.group_sync_status(group.get_id(), SITE_A).role == src.ROLE_SECONDARY
         assert src.group_sync_status(group.get_id(), SITE_B).role == src.ROLE_SECONDARY
 
-    def test_a_removed_member_does_not_count(self, db, live_status):
+    def test_removed_member_does_not_count(self, db, live_status):
         cluster, owner, vol = _sync_volume(db)
         gone = _volume(db, cluster, owner, _pool(db, cluster), active_site=SITE_B)
 
@@ -281,7 +274,7 @@ class TestGroupSyncStatus:
 
         assert (status.role, status.member_count) == (src.ROLE_PRIMARY, 1)
 
-    def test_a_missing_member_refuses(self, db, live_status):
+    def test_missing_member_refuses(self, db, live_status):
         cluster, owner, vol = _sync_volume(db)
         missing = str(uuid.uuid4())
         group = _group(db, cluster, [vol], extra_ids=[missing])
@@ -298,7 +291,7 @@ class TestGroupSyncStatus:
             src.group_sync_status(_group(db, cluster, [vol]).get_id(), "site-x")
 
     @pytest.mark.parametrize("site", [None, ""])
-    def test_a_missing_site_reads_the_members_led_site(self, db, live_status, site):
+    def test_missing_site_reads_members_led_site(self, db, live_status, site):
         """A site-less group status read is cluster-wide: it resolves to the
         members' led site (role primary there), the read the csi-addons VGR
         adapter makes with no site to assert."""
@@ -310,7 +303,7 @@ class TestGroupSyncStatus:
         assert (status.role, status.site, status.member_count) == (src.ROLE_PRIMARY, SITE_A, 2)
 
     @pytest.mark.parametrize("site", [None, ""])
-    def test_a_missing_site_on_an_empty_group_reads_a_cluster_site(self, db, live_status, site):
+    def test_empty_group_without_site_reads_cluster_site(self, db, live_status, site):
         cluster, owner, vol = _sync_volume(db)
         group = _group(db, cluster, [], removed=[vol])
 
@@ -319,7 +312,7 @@ class TestGroupSyncStatus:
         assert (status.role, status.member_count) == (src.ROLE_SECONDARY, 0)
         assert status.site in (SITE_A, SITE_B)
 
-    def test_not_a_sync_cluster(self, db, live_status):
+    def test_not_sync_cluster(self, db, live_status):
         cluster, node, vol = _async_volume(db)
 
         with pytest.raises(SyncReplicationUnsupportedError):
@@ -329,7 +322,7 @@ class TestGroupSyncStatus:
 
 class TestVolumeSyncStatusById:
 
-    def test_reads_the_stored_volume(self, db, live_status):
+    def test_reads_stored_volume(self, db, live_status):
         cluster, owner, vol = _sync_volume(db)
 
         status = src.volume_sync_status_by_id(vol.get_id(), SITE_B)

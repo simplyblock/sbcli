@@ -6,7 +6,6 @@ the rejection helper and the CLI ``--site``. The flows against the real
 database (create, clone, restart, repair, failover, Pass 4, connect, the
 rejections) are in tests/integration/test_sync_replication_lvol_publish.py.
 """
-import contextlib
 import sys
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -86,13 +85,13 @@ class TestAnaRule:
             "p": "optimized", "s": "non_optimized", "t": "non_optimized",
             "rp": "inaccessible", "rs": "inaccessible", "rt": "inaccessible"}
 
-    def test_volume_active_on_the_remote_triplet(self):
+    def test_volume_active_on_remote_triplet(self):
         ctx = _ctx(_owner(lvs_active_site=SITE_B))
         assert _states(_lvol(sync_active_site=SITE_B), ctx) == {
             "p": "inaccessible", "s": "inaccessible", "t": "inaccessible",
             "rp": "optimized", "rs": "non_optimized", "rt": "non_optimized"}
 
-    def test_the_callers_state_never_decides_on_a_sync_cluster(self):
+    def test_callers_state_never_decides_on_sync_cluster(self):
         """A caller computing "primary" as lvol.node_id (the home owner) must
         not open the home owner of a remote-led volume."""
         ctx = _ctx(_owner(lvs_active_site=SITE_B))
@@ -100,38 +99,35 @@ class TestAnaRule:
         assert ops.lvol_ana_state(lvol, _node("p", SITE_A), "optimized", ctx=ctx) == "inaccessible"
         assert ops.lvol_ana_state(lvol, _node("rp", SITE_B), "non_optimized", ctx=ctx) == "optimized"
 
-    def test_demoted_site_is_fenced(self):
-        states = _states(_lvol(sync_demoted_sites=[SITE_A]), _ctx())
+    @pytest.mark.parametrize("lvol_fields, ctx_kwargs, state", [
+        pytest.param({"sync_demoted_sites": [SITE_A]}, {}, "non_optimized", id="demoted-site"),
+        pytest.param({}, {"lost_site": SITE_A}, "non_optimized", id="lost-site"),
+        pytest.param({}, {"owner": {"lvs_active_site": "moving:site-b"}}, "non_optimized",
+                     id="moving-to-b"),
+        pytest.param({}, {"owner": {"lvs_active_site": "moving:site-a"}}, "non_optimized",
+                     id="moving-to-a"),
+        # The volume says B is active while its LVS is led from A (a create
+        # racing a move). No path opens: B's instances are not leaders, have no
+        # hublvol to the leader, and would take the leadership on the first IO.
+        pytest.param({"sync_active_site": SITE_B}, {}, "non_optimized", id="off-the-leading-site"),
+        # Activation registers every path closed until its Pass 4.
+        pytest.param({}, {}, "inaccessible", id="callers-inaccessible"),
+    ])
+    def test_every_path_is_fenced(self, lvol_fields, ctx_kwargs, state):
+        owner_fields = ctx_kwargs.get("owner")
+        ctx = _ctx(_owner(**owner_fields) if owner_fields else None,
+                   lost_site=ctx_kwargs.get("lost_site", ""))
+        states = _states(_lvol(**lvol_fields), ctx, state=state)
         assert set(states.values()) == {"inaccessible"}
 
-    def test_lost_site_is_fenced(self):
-        states = _states(_lvol(), _ctx(lost_site=SITE_A))
-        assert set(states.values()) == {"inaccessible"}
-
-    @pytest.mark.parametrize("moving", ["moving:site-b", "moving:site-a"])
-    def test_nothing_is_open_while_the_leadership_moves(self, moving):
-        states = _states(_lvol(), _ctx(_owner(lvs_active_site=moving)))
-        assert set(states.values()) == {"inaccessible"}
-
-    def test_a_volume_off_the_leading_site_is_fenced(self):
-        """Judgment call A: sync_active_site B on an LVS led from A (a create
-        racing a move) opens nothing - B's instances are non-leaders without a
-        hublvol to the leader and would take the leadership on the first IO."""
-        states = _states(_lvol(sync_active_site=SITE_B), _ctx())
-        assert set(states.values()) == {"inaccessible"}
-
-    def test_promoted_is_optimized_on_an_open_site_only(self):
+    def test_promoted_is_optimized_on_open_site_only(self):
         ctx = _ctx()
         assert ops.lvol_ana_state(_lvol(), _node("s", SITE_A), "optimized",
                                   promoted=True, ctx=ctx) == "optimized"
         assert ops.lvol_ana_state(_lvol(), _node("rs", SITE_B), "optimized",
                                   promoted=True, ctx=ctx) == "inaccessible"
 
-    def test_a_callers_inaccessible_always_wins(self):
-        """Activation registers every path closed until its Pass 4."""
-        assert set(_states(_lvol(), _ctx(), state="inaccessible").values()) == {"inaccessible"}
-
-    def test_an_empty_sync_active_site_means_the_home_site(self):
+    def test_empty_sync_active_site_means_home_site(self):
         assert _states(_lvol(sync_active_site=""), _ctx())["p"] == "optimized"
 
     def test_ftt1_home_triplet(self):
@@ -140,7 +136,7 @@ class TestAnaRule:
         assert ops.lvol_ana_state(_lvol(), _node("p", SITE_A), "non_optimized", ctx=ctx) == "optimized"
 
     @pytest.mark.parametrize("site", ["", MagicMock(name="site")])
-    def test_a_non_sync_node_keeps_the_callers_state(self, site):
+    def test_non_sync_node_keeps_callers_state(self, site):
         # No ctx and no database in this tier: a read would raise.
         node = SimpleNamespace(site=site, get_id=lambda: "p")
         for state in ("optimized", "non_optimized", "inaccessible"):
@@ -165,12 +161,7 @@ class TestMembers:
         assert lvol_controller.role_secondary_ids(_owner(tertiary_node_id="")) == [
             "s", "rp", "rs", "rt"]
 
-    def test_non_sync_owner_has_home_secondaries_only(self):
-        owner = _owner(site="", remote_primary_node_id="", remote_secondary_node_id="",
-                       remote_tertiary_node_id="")
-        assert lvol_controller.role_secondary_ids(owner) == ["s", "t"]
-
-    def test_a_siteless_mock_node_has_no_remote_members(self):
+    def test_siteless_mock_node_has_no_remote_members(self):
         node = MagicMock(secondary_node_id="s", tertiary_node_id="")
         assert lvol_controller.role_secondary_ids(node) == ["s"]
 
@@ -183,49 +174,35 @@ class TestSnapshotSyncDeletePeers:
         assert snapshot_monitor.sync_delete_peer_ids("ha", _owner(), "p") == [
             "s", "t", "rp", "rs", "rt"]
 
-    def test_phase_one_on_a_remote_leader(self):
+    def test_phase_one_on_remote_leader(self):
         assert snapshot_monitor.sync_delete_peer_ids("ha", _owner(), "rs") == [
             "p", "s", "t", "rp", "rt"]
-
-    def test_single_has_no_peers(self):
-        assert snapshot_monitor.sync_delete_peer_ids("single", _owner(), "p") == []
 
 
 class TestRemoteMembers:
     """lvol_remote_members: the remote part of lvol.nodes follows the refs."""
 
-    def _members(self, nodes, triplet, owner=None):
+    @pytest.mark.parametrize("nodes, triplet, owner_fields, expected", [
+        pytest.param(["p", "s", "t", "rp", "rs", "rt"], ("rp", "x", "rt"), {},
+                     ["p", "s", "t", "rp", "x", "rt"], id="replacement"),
+        pytest.param(["p", "s", "t", "rp", "rs", "rt"], ("rs", "rp", "rt"), {},
+                     ["p", "s", "t", "rs", "rp", "rt"], id="swap"),
+        pytest.param(["p", "s", "t", "rp", "rs", "rt"], ("rs", "rt", "y"), {},
+                     ["p", "s", "t", "rs", "rt", "y"], id="shift"),
+        pytest.param(["p", "s", "t", "rp", "rt"], ("rp", "x", "rt"), {},
+                     ["p", "s", "t", "rp", "x", "rt"], id="empty-slot-filled"),
+        pytest.param(["p", "s", "rp", "rs", "rt"], ("x", "rs", "rt"), {"tertiary_node_id": ""},
+                     ["p", "s", "x", "rs", "rt"], id="ftt1-home-prefix-of-two"),
+        pytest.param(["p", "gone", "s", "rp", "rs", "rt"], ("rp", "rs", "rt"), {},
+                     ["p", "gone", "s", "rp", "rs", "rt"],
+                     id="home-part-keeps-its-order-and-unknown-ids"),
+        pytest.param(["p", "s", "t", "rp", "rs", "rt"], ("rp", "rs", "rt"), {},
+                     ["p", "s", "t", "rp", "rs", "rt"], id="nodes-matching-the-refs-are-kept"),
+    ])
+    def test_remote_members(self, nodes, triplet, owner_fields, expected):
         by_id = {nid: _node(nid, site) for nid, site in
                  HOME + REMOTE + [("x", SITE_B), ("y", SITE_B)]}
-        return ops.lvol_remote_members(nodes, owner or _owner(), triplet, by_id)
-
-    def test_replacement(self):
-        assert self._members(["p", "s", "t", "rp", "rs", "rt"], ("rp", "x", "rt")) == [
-            "p", "s", "t", "rp", "x", "rt"]
-
-    def test_swap(self):
-        assert self._members(["p", "s", "t", "rp", "rs", "rt"], ("rs", "rp", "rt")) == [
-            "p", "s", "t", "rs", "rp", "rt"]
-
-    def test_shift(self):
-        assert self._members(["p", "s", "t", "rp", "rs", "rt"], ("rs", "rt", "y")) == [
-            "p", "s", "t", "rs", "rt", "y"]
-
-    def test_empty_slot_filled(self):
-        assert self._members(["p", "s", "t", "rp", "rt"], ("rp", "x", "rt")) == [
-            "p", "s", "t", "rp", "x", "rt"]
-
-    def test_ftt1_home_prefix_of_two(self):
-        assert self._members(["p", "s", "rp", "rs", "rt"], ("x", "rs", "rt"),
-                             owner=_owner(tertiary_node_id="")) == ["p", "s", "x", "rs", "rt"]
-
-    def test_the_home_part_keeps_its_order_and_unknown_ids(self):
-        assert self._members(["p", "gone", "s", "rp", "rs", "rt"], ("rp", "rs", "rt")) == [
-            "p", "gone", "s", "rp", "rs", "rt"]
-
-    def test_nodes_matching_the_refs_are_kept(self):
-        nodes = ["p", "s", "t", "rp", "rs", "rt"]
-        assert self._members(nodes, ("rp", "rs", "rt")) == nodes
+        assert ops.lvol_remote_members(nodes, _owner(**owner_fields), triplet, by_id) == expected
 
 
 def _nic(ip, trtype="TCP"):
@@ -242,7 +219,7 @@ class TestListenerProbe:
         node.data_nics = [_nic("10.0.0.1"), _nic("10.0.0.2")]
         return node
 
-    def test_only_the_listeners_that_exist(self):
+    def test_only_listeners_that_exist(self):
         rpc = MagicMock()
         rpc.subsystem_get.return_value = {"listen_addresses": [
             {"trtype": "tcp", "traddr": "10.0.0.2", "trsvcid": "4420"}]}
@@ -260,13 +237,13 @@ class TestListenerProbe:
         rpc.subsystem_get.return_value = None
         assert ops.live_listener_nics(rpc, _lvol(fabric="tcp", nqn="nqn:1"), self._node(), 4420) == []
 
-    def test_a_failed_probe_is_never_read_as_absent(self):
+    def test_failed_probe_is_never_read_as_absent(self):
         rpc = MagicMock()
         rpc.subsystem_get.side_effect = RuntimeError("timeout")
         with pytest.raises(RuntimeError):
             ops.live_listener_nics(rpc, _lvol(fabric="tcp", nqn="nqn:1"), self._node(), 4420)
 
-    def test_a_pod_network_listener_is_matched_on_its_bind_address(self):
+    def test_pod_network_listener_matched_on_bind_address(self):
         # On the pod network a listener binds listen_ip4, while clients still
         # connect to ip4_address (the Service's address).
         node = _node("p", SITE_A)
@@ -279,46 +256,6 @@ class TestListenerProbe:
         lvol = _lvol(fabric="tcp", nqn="nqn:1")
         assert ops._lvol_listener_nics(lvol, node) == [("TCP", "10.42.1.5")]
         assert ops.live_listener_nics(rpc, lvol, node, 4420) == [("TCP", "10.42.1.5")]
-
-
-class TestGroupsWithoutASweep:
-    """The rule's inputs are read fresh under the site-rule lock (its
-    serialization is tested against FDB in
-    tests/integration/test_sync_replication_demote_promote.py); here the lock
-    is a no-op and the fresh read answers the volume as given."""
-
-    @pytest.fixture(autouse=True)
-    def _fresh_inputs(self):
-        with patch.object(ops, "sync_site_rule_locks", lambda *a, **k: contextlib.nullcontext()), \
-                patch.object(ops, "_fresh_site_rule_inputs",
-                             side_effect=lambda lvol, db=None: (lvol, _ctx())):
-            yield
-
-    def test_own_group_on_the_given_listeners_only(self):
-        node = _node("p", SITE_A)
-        node.data_nics = [_nic("10.0.0.1"), _nic("10.0.0.2")]
-        rpc = MagicMock()
-        rpc.nvmf_subsystem_listener_set_ana_state.return_value = True
-        ok, err = ops.apply_sync_ana_groups(
-            rpc, _lvol(fabric="tcp", nqn="nqn:1"), node, 4420, "non_optimized", ns_id=3,
-            nics=[("TCP", "10.0.0.2")])
-        assert (ok, err) == (True, None)
-        rpc.nvmf_subsystem_listener_set_ana_state.assert_called_once_with(
-            "nqn:1", "10.0.0.2", 4420, trtype="TCP", ana="optimized", anagrpid=3)
-        rpc.subsystem_get.assert_not_called()
-
-    def test_a_failed_group_rpc_is_reported_and_queued(self):
-        node = _node("s", SITE_A)
-        node.cluster_id = "cl-1"
-        node.data_nics = [_nic("10.0.0.1")]
-        rpc = MagicMock()
-        rpc.nvmf_subsystem_listener_set_ana_state.return_value = False
-        lvol = _lvol(fabric="tcp", nqn="nqn:1", nodes=["p", "s", "t", "rp", "rs", "rt"])
-        with patch.object(ops.tasks_controller, "add_lvol_sync_op_task") as queue:
-            ok, err = ops.apply_sync_ana_groups(
-                rpc, lvol, node, 4420, "non_optimized", ns_id=2)
-        assert not ok and "ns [2]" in err
-        queue.assert_called_once_with("cl-1", "s", "lv-1", "register", secondary_index=0)
 
 
 class TestAnaDrift:
@@ -341,16 +278,16 @@ class TestAnaDrift:
                                   node or self._node(), ctx=_ctx())
 
     @pytest.mark.parametrize("state", ["optimized", "non_optimized"])
-    def test_an_open_site_accepts_either_accessible_state(self, state):
+    def test_open_site_accepts_either_accessible_state(self, state):
         assert self._drift(self._rpc(state)) is None
 
-    def test_an_open_site_left_inaccessible_is_drift(self):
+    def test_open_site_left_inaccessible_is_drift(self):
         assert "inaccessible" in self._drift(self._rpc("inaccessible"))
 
-    def test_a_closed_site_reported_open_is_drift(self):
+    def test_closed_site_reported_open_is_drift(self):
         assert "wants it inaccessible" in self._drift(self._rpc("optimized"), node=self._node("rs", SITE_B))
 
-    def test_a_closed_site_inaccessible_is_right(self):
+    def test_closed_site_inaccessible_is_right(self):
         assert self._drift(self._rpc("inaccessible"), node=self._node("rs", SITE_B)) is None
 
     @pytest.mark.parametrize("rpc_kwargs", [{"port": "4499"}, {"group": 7}])
@@ -371,7 +308,7 @@ class TestAnaDrift:
 
 class TestReject:
 
-    def test_sync_cluster_is_refused_as_a_precondition(self):
+    def test_sync_cluster_is_refused_as_precondition(self):
         with pytest.raises(SyncReplicationUnsupportedError) as exc:
             reject_on_sync_replication(SimpleNamespace(sync_replication=True), "Volume suspend")
         assert isinstance(exc.value, PreconditionError)

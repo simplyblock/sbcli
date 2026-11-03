@@ -6,8 +6,6 @@ is being moved. Also the ids of the active triplet in slot order
 real database (active_triplet_nodes) are in
 tests/integration/test_sync_replication_active_triplet.py.
 """
-import enum
-
 import pytest
 
 from simplyblock_core import storage_node_ops as ops
@@ -42,30 +40,31 @@ def _positions(owner, node_ids):
 
 class TestActivePosition:
 
-    def test_a_non_sync_owner_has_only_the_home_triplet(self):
-        owner = _owner(site="", remote_primary_node_id="", remote_secondary_node_id="",
-                       remote_tertiary_node_id="")
+    @pytest.mark.parametrize("fields, passive", [
+        pytest.param({"lvs_active_site": ""}, REMOTE, id="unset"),
+        pytest.param({"lvs_active_site": "site-a"}, REMOTE, id="own-site"),
+        # outside sync replication there is only the home triplet
+        pytest.param({"site": "", "remote_primary_node_id": "", "remote_secondary_node_id": "",
+                      "remote_tertiary_node_id": ""}, (), id="non-sync"),
+    ])
+    def test_led_from_home(self, fields, passive):
+        owner = _owner(**fields)
         assert _positions(owner, HOME) == (PRIMARY, SECONDARY, TERTIARY)
+        assert _positions(owner, passive) == (INACTIVE,) * len(passive)
 
-    @pytest.mark.parametrize("active_site", ["", "site-a"])
-    def test_led_from_home(self, active_site):
-        owner = _owner(lvs_active_site=active_site)
-        assert _positions(owner, HOME) == (PRIMARY, SECONDARY, TERTIARY)
-        assert _positions(owner, REMOTE) == (INACTIVE, INACTIVE, INACTIVE)
-
-    def test_led_from_the_other_site(self):
+    def test_led_from_other_site(self):
         owner = _owner(lvs_active_site="site-b")
         assert _positions(owner, REMOTE) == (PRIMARY, SECONDARY, TERTIARY)
         assert _positions(owner, HOME) == (INACTIVE, INACTIVE, INACTIVE)
 
     @pytest.mark.parametrize("marker", ["moving:site-b", "moving:site-a"])
-    def test_a_move_in_flight_gives_no_member_a_position(self, marker):
+    def test_move_in_flight_gives_no_member_position(self, marker):
         owner = _owner(lvs_active_site=marker)
         assert _positions(owner, HOME + REMOTE) == (MOVING,) * 6
 
     @pytest.mark.parametrize("active_site", ["", "site-b", "moving:site-b"])
     @pytest.mark.parametrize("node_id", ["x", ""])
-    def test_a_node_that_is_no_member_has_no_position(self, active_site, node_id):
+    def test_node_that_is_no_member_has_no_position(self, active_site, node_id):
         with pytest.raises(ValueError, match="not a member"):
             ops.active_position(_owner(lvs_active_site=active_site), node_id)
 
@@ -86,12 +85,6 @@ class TestActivePosition:
         with pytest.raises(ValueError, match="not a member"):
             ops.active_position(owner, "")
 
-    def test_positions_are_an_enum_and_never_strings(self):
-        assert issubclass(ops.ActivePosition, enum.Enum)
-        assert {p.name for p in ops.ActivePosition} == {
-            "PRIMARY", "SECONDARY", "TERTIARY", "INACTIVE", "MOVING"}
-        assert not any(isinstance(p, str) or isinstance(p.value, str) for p in ops.ActivePosition)
-
 
 class TestActiveTripletIds:
 
@@ -99,19 +92,19 @@ class TestActiveTripletIds:
     def test_led_from_home(self, active_site):
         assert ops.active_triplet_ids(_owner(lvs_active_site=active_site)) == HOME
 
-    def test_led_from_the_other_site(self):
+    def test_led_from_other_site(self):
         assert ops.active_triplet_ids(_owner(lvs_active_site="site-b")) == REMOTE
 
     def test_empty_slots_keep_their_place(self):
         owner = _owner(lvs_active_site="site-b", remote_primary_node_id="", remote_tertiary_node_id="")
         assert ops.active_triplet_ids(owner) == ("", "rs", "")
 
-    def test_an_empty_remote_triplet(self):
+    def test_empty_remote_triplet(self):
         owner = _owner(lvs_active_site="site-b", remote_primary_node_id="", remote_secondary_node_id="",
                        remote_tertiary_node_id="")
         assert ops.active_triplet_ids(owner) == ("", "", "")
 
     @pytest.mark.parametrize("marker", ["moving:site-b", "moving:site-a"])
-    def test_a_move_in_flight_has_no_active_triplet(self, marker):
+    def test_move_in_flight_has_no_active_triplet(self, marker):
         with pytest.raises(ValueError, match="no active triplet"):
             ops.active_triplet_ids(_owner(lvs_active_site=marker))

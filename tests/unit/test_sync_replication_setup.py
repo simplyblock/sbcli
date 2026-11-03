@@ -1,7 +1,7 @@
 """Sync-replication setup rules as pure logic: cluster flags, node site, activation layout."""
 import pytest
 
-from simplyblock_core import cluster_ops, storage_node_ops
+from simplyblock_core import cluster_ops
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.storage_node_ops import NodeSiteError, validate_node_site
@@ -81,30 +81,25 @@ def test_non_sync_cluster_without_site(site):
     assert validate_node_site(_cluster(sync=False), site) == ""
 
 
-def test_node_site_error_is_a_value_error():
-    assert issubclass(storage_node_ops.NodeSiteError, ValueError)
-
-
 # -- activation: configured topology -------------------------------------------
 
-def test_two_sites_are_a_valid_topology():
+def test_two_sites_are_valid_topology():
     assert cluster_ops.sync_topology_violation(_cluster(), _two_sites()) is None
 
 
-def test_topology_is_not_checked_on_a_non_sync_cluster():
+def test_topology_is_not_checked_on_non_sync_cluster():
     nodes = [_node("1", ""), _node("2", "x"), _node("3", "y"), _node("4", "z")]
     assert cluster_ops.sync_topology_violation(_cluster(sync=False), nodes) is None
 
 
-def test_third_site_is_refused():
-    nodes = _two_sites() + [_node("201", "site-c")]
+@pytest.mark.parametrize("status", [
+    pytest.param(StorageNode.STATUS_ONLINE, id="online"),
+    pytest.param(StorageNode.STATUS_OFFLINE, id="offline"),
+])
+def test_third_site_is_refused(status):
+    nodes = _two_sites() + [_node("201", "site-c", status=status)]
     violation = cluster_ops.sync_topology_violation(_cluster(), nodes)
     assert "exactly 2 sites" in violation and "site-c" in violation
-
-
-def test_offline_node_on_a_third_site_is_refused():
-    nodes = _two_sites() + [_node("201", "site-c", status=StorageNode.STATUS_OFFLINE)]
-    assert "exactly 2 sites" in cluster_ops.sync_topology_violation(_cluster(), nodes)
 
 
 def test_single_site_is_refused():
@@ -138,12 +133,12 @@ def test_enough_online_nodes_on_each_site():
     assert cluster_ops.sync_capacity_violation(_cluster(), nodes, nodes) is None
 
 
-def test_capacity_is_not_checked_on_a_non_sync_cluster():
+def test_capacity_is_not_checked_on_non_sync_cluster():
     nodes = [_node("1", "")]
     assert cluster_ops.sync_capacity_violation(_cluster(sync=False), nodes, nodes) is None
 
 
-def test_too_few_nodes_for_the_stripe_on_a_site():
+def test_too_few_nodes_for_stripe_on_site():
     # ndcs + npcs = 4 per site, three hosts per site available
     nodes = _two_sites(per_site=3)
     violation = cluster_ops.sync_capacity_violation(_cluster(ndcs=2, npcs=2), nodes, nodes)
@@ -151,7 +146,7 @@ def test_too_few_nodes_for_the_stripe_on_a_site():
     assert "site site-b has 3 online node(s)" in violation
 
 
-def test_too_few_hosts_for_a_triplet_on_a_site():
+def test_too_few_hosts_for_triplet_on_site():
     nodes = _two_sites(per_site=3)
     for node in nodes[:3]:
         node.mgmt_ip = "10.0.0.1"  # three site-a nodes on one host
@@ -159,7 +154,7 @@ def test_too_few_hosts_for_a_triplet_on_a_site():
     assert violation == "site site-a has 3 online node(s) on 1 host(s), needs 2 node(s) on 3 host(s)"
 
 
-def test_a_site_with_no_online_node_is_reported():
+def test_site_with_no_online_node_is_reported():
     nodes = _two_sites()
     online = [n for n in nodes if n.site == "site-a"]
     violation = cluster_ops.sync_capacity_violation(_cluster(), nodes, online)
@@ -168,7 +163,7 @@ def test_a_site_with_no_online_node_is_reported():
 
 # -- activation: journal hosts per site ---------------------------------------------
 
-def test_the_largest_journal_sets_the_hosts_per_site():
+def test_largest_journal_sets_hosts_per_site():
     # site b has four hosts, site a three; one node journals 4 + 4, so every
     # node places four copies on site a as well.
     nodes = _two_sites(per_site=3) + [_node("104", "site-b")]

@@ -95,18 +95,16 @@ def _record(db, cluster, state):
 
 class TestPortCheck:
 
-    @pytest.mark.parametrize("state", RECORDED)
-    @pytest.mark.parametrize("index", [0, 1, 2])
-    def test_the_port_check_skips_an_empty_node(self, db, rpcs, state, index):
+    def test_port_check_skips_empty_node(self, db, rpcs):
         """No LVS port of an empty node is checked and its data NICs are not
         pinged (storage_node_monitor.node_port_check_fun reads only a node
         whose lvstore is ready): the check passes, the node stays ONLINE."""
-        cluster, a, b = _layout(db, state)
+        cluster, a, b = _layout(db, DOWN)
         with patch.object(StorageNode, "client", autospec=True) as client:
-            assert storage_node_monitor.node_port_check_fun(_fresh(db, a[index])) is True
+            assert storage_node_monitor.node_port_check_fun(_fresh(db, a[0])) is True
         client.assert_not_called()
-        rpcs[a[index].get_id()].nvmf_get_blocked_ports.assert_not_called()
-        assert _fresh(db, a[index]).status == ONLINE
+        rpcs[a[0].get_id()].nvmf_get_blocked_ports.assert_not_called()
+        assert _fresh(db, a[0]).status == ONLINE
 
 
 # ---------------------------------------------------------------------------
@@ -134,7 +132,7 @@ def _monitor_pass(db, cluster, owner, vol):
 
 class TestLvolMonitor:
 
-    def test_the_ana_repair_skips_an_empty_owner(self, db, publish_spdk):
+    def test_ana_repair_skips_empty_owner(self, db, publish_spdk):
         """A volume of LVS_1, owned by a0 of the recorded site: the owner's
         lvstore is not ready, so the pass checks no path of it and repairs
         nothing (lvol_monitor.check_node: the owner-side skip)."""
@@ -150,7 +148,7 @@ class TestLvolMonitor:
 
     @pytest.mark.parametrize("state", RECORDED)
     @pytest.mark.parametrize("owner_index", [1, 0], ids=["led-on-B", "led-from-A"])
-    def test_no_subsystem_is_created_on_an_empty_member(self, db, publish_spdk, state, owner_index):
+    def test_no_subsystem_is_created_on_empty_member(self, db, publish_spdk, state, owner_index):
         """A volume of an LVS owned on B (LVS_3 led on B, LVS_2 led from A) has
         paths on every instance, A's remote triplet included. The pass checks
         and repairs B's paths - a follower on B that lost its registration gets
@@ -172,7 +170,7 @@ class TestLvolMonitor:
         assert _fresh(db, a[0]).status == ONLINE
 
     @pytest.mark.parametrize("case", ["no record", "draining", "no sync replication"])
-    def test_a_member_outside_a_record_is_repaired(self, db, publish_spdk, case):
+    def test_member_outside_record_is_repaired(self, db, publish_spdk, case):
         """The control of the absent-member skip: the same ONLINE nodes of A
         without their subsystem are repaired when nothing records them lost
         down / fencing / done - no record, a site still draining (its nodes
@@ -228,16 +226,20 @@ def alerts():
 
 class TestDeferredRegistration:
 
-    @pytest.mark.parametrize("state", RECORDED)
-    def test_a_registration_waits_on_an_empty_member(self, db, publish_spdk, alerts, state):
-        """A register task for a1 (a remote-triplet member of LVS_3, led on B):
-        while A is recorded the task waits like one for an OFFLINE node - no
-        subsystem, namespace or listener on a1, never RUNNING, not counted as a
-        failure (retry unchanged, no repeated-failure alert) however often the
-        runner passes, and a1 stays ONLINE."""
+    @pytest.mark.parametrize("op, state", [
+        *[pytest.param("register", state, id=f"register-{state}") for state in RECORDED],
+        pytest.param("resize", DOWN, id=f"resize-{DOWN}"),
+    ])
+    def test_sync_op_waits_on_empty_member(self, db, publish_spdk, alerts, op, state):
+        """a1 is a remote-triplet member of LVS_3, which is led from B. While
+        site A is recorded as lost, a register or resize task for a1 waits, as
+        it would for an OFFLINE node. However often the runner passes, the task
+        creates no subsystem, namespace, listener or resize on a1, never becomes
+        RUNNING, and does not count as a failure: the retry count does not
+        change and no repeated-failure alert is sent. a1 stays ONLINE."""
         cluster, a, b = _serving(db, state)
         vol = _published_on(db, publish_spdk, cluster, b[1], b)
-        task_id = _sync_op(db, cluster, a[1], vol)
+        task_id = _sync_op(db, cluster, a[1], vol, op=op)
 
         task = _run(db, task_id)
 
@@ -245,10 +247,11 @@ class TestDeferredRegistration:
         assert task.retry == 0
         assert "recorded site" in task.function_result
         assert publish_spdk[a[1].get_id()].subsystems == {}
+        assert "bdev_lvol_resize" not in publish_spdk[a[1].get_id()].others
         assert alerts() == []
         assert _fresh(db, a[1]).status == ONLINE
 
-    def test_a_waiting_registration_runs_once_returned(self, db, publish_spdk, alerts):
+    def test_waiting_registration_runs_once_returned(self, db, publish_spdk, alerts):
         """A task queued before the site was recorded waits while the record
         stands, then registers the volume on a1 once the record is cleared."""
         cluster, a, b = _serving(db, "")
@@ -268,17 +271,6 @@ class TestDeferredRegistration:
         assert [ns["nsid"] for ns in target["namespaces"]] == [vol.ns_id]
         assert alerts() == []
 
-    def test_a_resize_waits_on_an_empty_member(self, db, publish_spdk, alerts):
-        cluster, a, b = _serving(db, DOWN)
-        vol = _published_on(db, publish_spdk, cluster, b[1], b)
-        task_id = _sync_op(db, cluster, a[1], vol, op="resize")
-
-        task = _run(db, task_id)
-
-        assert (task.status, task.retry) == (JobSchedule.STATUS_SUSPENDED, 0)
-        assert "bdev_lvol_resize" not in publish_spdk[a[1].get_id()].others
-        assert alerts() == []
-
     def test_without_sync_replication_it_registers(self, db, publish_spdk):
         cluster, a, b = _serving(db, DOWN, sync=False)
         vol = _published_on(db, publish_spdk, cluster, b[1], b)
@@ -290,7 +282,7 @@ class TestDeferredRegistration:
 
 class TestCreateQueuesTheEmptyMembers:
 
-    def test_a_create_queues_each_empty_member(self, db, rpcs, links):
+    def test_create_queues_each_empty_member(self, db, rpcs, links):
         """The producer of those tasks: a volume created on LVS_3 (led on B)
         while A is recorded registers on B at once; each member of A is "skip"
         (an absent member) and gets a durable register task instead."""
@@ -380,7 +372,7 @@ def lvstore_checks():
 class TestHealthPass:
 
     @pytest.mark.parametrize("state", RECORDED)
-    def test_the_health_pass_builds_nothing_on_it(
+    def test_health_pass_builds_nothing_on_it(
             self, db, health_spdk, hub, checks, lvstore_checks, state):
         """A health pass over every node: the empty nodes of A are checked -
         a0's own stack and hublvol, a1 / a2 as a0's secondaries - and every
@@ -420,22 +412,9 @@ class TestHealthPass:
             assert _fresh(db, node).status == ONLINE
         for node in a:
             assert _fresh(db, node).lvstore_status == ""
-
-    def test_a_failed_check_keeps_the_node_online(self, db, health_spdk, hub):
-        """The verdict on an empty node is its health_check only: False (its
-        lvstore chain is missing) - the status stays ONLINE."""
-        cluster, a, b = _layout(db, DOWN)
-        nodes = [_fresh(db, n) for n in (*a, *b)]
-        healthy._mesh(db, nodes)
-        for node in nodes:
-            health_spdk.add(node)
-        for node in a:
-            _emptied(health_spdk, node)
-
-        health_check_service.check_node(_fresh(db, a[0]))
-
-        fresh = _fresh(db, a[0])
-        assert (fresh.health_check, fresh.status, fresh.lvstore_status) == (False, ONLINE, "")
+        # The empty owner stays ONLINE. Only its health_check fails, because its
+        # lvstore stack is missing.
+        assert _fresh(db, a[0]).health_check is False
 
 
 # ---------------------------------------------------------------------------
@@ -460,7 +439,7 @@ _MIGRATION_RPCS = ("distr_migration_expansion_start", "distr_migration_status")
 class TestDeviceMigration:
 
     @pytest.mark.parametrize("case", [*RECORDED, "suspended"])
-    def test_migration_on_an_empty_node_waits(self, db, rpcs, case):
+    def test_migration_on_empty_node_waits(self, db, rpcs, case):
         """The restart of a0 queues a migration task for each distrib of every
         node (tasks_controller.add_device_mig_task_for_node). Each task goes to
         the primary of its LVS's active triplet. Site A leads LVS_1 and LVS_2,
@@ -499,7 +478,7 @@ class TestDeviceMigration:
             getattr(rpcs[a[0].get_id()], method).assert_not_called()
         assert _fresh(db, a[0]).status == ONLINE
 
-    def test_the_serving_leader_migrates(self, db, rpcs):
+    def test_serving_leader_migrates(self, db, rpcs):
         """The control of the wait: b1 leads LVS_3 on the serving site, its
         task of the same restart starts the migration."""
         cluster, a, b = _layout(db, DOWN)

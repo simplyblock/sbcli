@@ -265,23 +265,20 @@ class TestReactivation:
         cluster.write_to_db(db.kv_store)
         return cluster, a, b
 
-    def test_offline_site_keeps_every_remote_ref(self, db):
+    @pytest.mark.parametrize("status, force", [
+        pytest.param(Cluster.STATUS_SUSPENDED, False, id="offline_site_keeps_every_remote_ref"),
+        pytest.param(Cluster.STATUS_ACTIVE, True, id="force_reactivation_keeps_refs_to_an_offline_site"),
+    ])
+    def test_reactivation_keeps_refs_to_offline_site(self, db, status, force):
         cluster, a, b = self._activated(db, b_status=StorageNode.STATUS_OFFLINE)
-        before = {n.get_id(): storage_node_ops.remote_triplet_refs(n) for n in _nodes(db, cluster).values()}
-        _activate(cluster)
-        after = {n.get_id(): storage_node_ops.remote_triplet_refs(n) for n in _nodes(db, cluster).values()}
-        assert after == before
-
-    def test_force_reactivation_keeps_refs_to_an_offline_site(self, db):
-        cluster, a, b = self._activated(db, b_status=StorageNode.STATUS_OFFLINE)
-        cluster.status = Cluster.STATUS_ACTIVE
+        cluster.status = status
         cluster.write_to_db(db.kv_store)
         before = {n.get_id(): storage_node_ops.remote_triplet_refs(n) for n in _nodes(db, cluster).values()}
-        _activate(cluster, force=True)
+        _activate(cluster, force=force)
         after = {n.get_id(): storage_node_ops.remote_triplet_refs(n) for n in _nodes(db, cluster).values()}
         assert after == before
 
-    def test_a_missing_ref_to_a_down_site_is_refused(self, db):
+    def test_missing_ref_to_down_site_is_refused(self, db):
         cluster, a, b = self._activated(db, b_status=StorageNode.STATUS_OFFLINE)
         _update(db, a[0], remote_secondary_node_id="")
         with patch.object(cluster_ops, "_wait_for_full_device_connectivity"), \
@@ -289,7 +286,7 @@ class TestReactivation:
             cluster_ops._cluster_activate(cluster.get_id())
         assert db.get_cluster_by_id(cluster.get_id()).status == Cluster.STATUS_SUSPENDED
 
-    def test_a_missing_ref_is_filled_on_the_other_site(self, db):
+    def test_missing_ref_is_filled_on_other_site(self, db):
         cluster, a, b = self._activated(db)
         _update(db, a[0], remote_secondary_node_id="")
         _activate(cluster)
@@ -316,7 +313,7 @@ class TestReactivation:
 class TestLocalCandidates:
 
     @pytest.mark.parametrize("sync", [True, False])
-    def test_get_secondary_nodes_stay_on_the_site(self, db, sync):
+    def test_get_secondary_nodes_stay_on_site(self, db, sync):
         """Every other site-A node already hosts a secondary and a tertiary:
         only site B has free candidates."""
         cluster = _seed_cluster(db, sync=sync, ftt=2)
@@ -333,7 +330,7 @@ class TestLocalCandidates:
             assert secs and set(secs) <= b_ids
             assert terts and set(terts) <= b_ids
 
-    def test_get_secondary_nodes_pick_on_the_site(self, db):
+    def test_get_secondary_nodes_pick_on_site(self, db):
         cluster = _seed_cluster(db, ftt=2)
         a = _seed_site(db, cluster, SITE_A, 3)
         _seed_site(db, cluster, SITE_B, 3)
@@ -353,7 +350,7 @@ class TestLocalCandidates:
         assert storage_node_ops.splice_stranded_secondary(
             db.get_storage_node_by_id(a[2].get_id())) is (not sync)
 
-    def test_splice_secondary_uses_an_edge_of_its_site(self, db):
+    def test_splice_secondary_uses_edge_of_its_site(self, db):
         cluster = _seed_cluster(db)
         a = _seed_site(db, cluster, SITE_A, 3)
         b = _seed_site(db, cluster, SITE_B, 3)
@@ -377,7 +374,7 @@ class TestLocalCandidates:
             db.get_storage_node_by_id(a[3].get_id())) is (not sync)
 
     @pytest.mark.parametrize("sync", [True, False])
-    def test_relocation_splice_target_stays_on_the_site(self, db, sync):
+    def test_relocation_splice_target_stays_on_site(self, db, sync):
         cluster = _seed_cluster(db, sync=sync)
         a = _seed_site(db, cluster, SITE_A, 3)
         b = _seed_site(db, cluster, SITE_B, 3)
@@ -386,7 +383,7 @@ class TestLocalCandidates:
             db.get_storage_node_by_id(a[0].get_id()), "secondary", db)
         assert (target is None) is sync
 
-    def test_removal_planner_sees_only_the_removed_nodes_site(self, db):
+    def test_removal_planner_sees_only_removed_nodes_site(self, db):
         cluster = _seed_cluster(db)
         a = _seed_site(db, cluster, SITE_A, 4, lvstore=True)
         b = _seed_site(db, cluster, SITE_B, 4, lvstore=True)
@@ -397,7 +394,7 @@ class TestLocalCandidates:
         assert inputs is not None
         assert sorted(inputs[0]) == sorted(n.get_id() for n in b[1:])
 
-    def test_relocation_pick_stays_on_the_site(self, db):
+    def test_relocation_pick_stays_on_site(self, db):
         cluster = _seed_cluster(db)
         a = _seed_site(db, cluster, SITE_A, 4, lvstore=True)
         b = _seed_site(db, cluster, SITE_B, 4, lvstore=True)
@@ -444,7 +441,7 @@ def _active_cluster(db, *, ftt=1, per_site=3, fd=False, fds_a=None, fds_b=None):
 class TestExpansion:
 
     @pytest.mark.parametrize("fd", [False, True])
-    def test_newcomer_joins_its_site_and_gets_a_remote_triplet(self, db, fd):
+    def test_newcomer_joins_site_and_gets_remote_triplet(self, db, fd):
         cluster, a, b = _active_cluster(db, fd=fd, fds_a=[0, 1, 2], fds_b=[3, 4, 5])
         before = {n.get_id(): storage_node_ops.remote_triplet_refs(n)
                   for n in _nodes(db, cluster).values()}
@@ -464,7 +461,7 @@ class TestExpansion:
         assert {n: storage_node_ops.remote_triplet_refs(nodes[n]) for n in before} == before
         assert db.get_cluster_by_id(cluster.get_id()).expand_state["phase"] == EXPAND_PHASE_COMPLETED
 
-    def test_a_remote_triplet_survives_a_failed_move(self, db):
+    def test_remote_triplet_survives_failed_move(self, db):
         """The first move lands in FDB, the second fails. The resume judges the
         JC cap on the same final layout as the fresh attempt did, although
         the DB pointers now reflect a partly executed plan."""
@@ -536,7 +533,7 @@ class TestRemoval:
         with patch.object(storage_node_ops, "_rebuild_remote_instance", return_value=True):
             yield
 
-    def test_remote_roles_of_a_removed_node_move_to_its_site(self, db):
+    def test_remote_roles_of_removed_node_move_to_its_site(self, db):
         cluster, a, b = _active_cluster(db, per_site=4)
         removed = b[0]
         holders = storage_node_ops.owners_with_remote_role_on(
@@ -564,7 +561,7 @@ class TestRemoval:
             assert storage_node_ops._reselect_remote_roles_held_by(removed) is True
         write.assert_not_called()
 
-    def test_removal_without_a_site_replacement_is_refused(self, db):
+    def test_removal_without_site_replacement_is_refused(self, db):
         cluster, a, b = _active_cluster(db)
         ok, reason = storage_node_ops._check_replica_relocation_feasible(b[0], db)
         assert ok is False
@@ -574,7 +571,7 @@ class TestRemoval:
             assert storage_node_ops._reselect_remote_roles_held_by(b[0]) is False
         assert "cannot re-select" in error.call_args.args[0]
 
-    def test_a_node_without_remote_roles_reselects_nothing(self, db):
+    def test_node_without_remote_roles_reselects_nothing(self, db):
         cluster, a, b = _active_cluster(db)
         idle = _seed_node(db, cluster, SITE_B, "10.4.0.99", lvstore="LVS_idle")
         assert storage_node_ops.owners_with_remote_role_on(
@@ -583,7 +580,7 @@ class TestRemoval:
             assert storage_node_ops._reselect_remote_roles_held_by(idle) is True
         write.assert_not_called()
 
-    def test_admission_and_phase_3d_agree_across_a_local_move(self, db):
+    def test_admission_and_phase_3d_agree_on_local_move(self, db):
         """Admission plans the re-selection before phase 3b moves the local
         roles the removed node hosted; phase 3d, after that move, lands on the
         same triplets (remote picks do not depend on local roles) and within
@@ -637,7 +634,7 @@ class TestFailureDomainAdmission:
         cluster, _, _ = self._layout(db, sync=False)
         assert preconditions.check_fd_balance_current(cluster, db) == (True, "")
 
-    def test_add_is_judged_on_the_new_nodes_site(self, db):
+    def test_add_is_judged_on_new_nodes_site(self, db):
         cluster, _, _ = self._layout(db, sync=True)
         ok, reason = preconditions.check_fd_admission_for_add(
             cluster, db, 0, new_mgmt_ip="10.3.0.50", new_site=SITE_A)
@@ -645,7 +642,7 @@ class TestFailureDomainAdmission:
         assert preconditions.check_fd_admission_for_add(
             cluster, db, 0, new_mgmt_ip="10.4.0.50", new_site=SITE_B) == (True, "")
 
-    def test_remove_is_judged_on_the_nodes_site(self, db):
+    def test_remove_is_judged_on_nodes_site(self, db):
         """Removing a domain-1 host of site B: (1, 2, 3) there, (4, 3, 4) overall."""
         cluster, a, b = self._layout(db, sync=True)
         ok, reason = preconditions.check_fd_admission_for_remove(cluster, db, b[1])

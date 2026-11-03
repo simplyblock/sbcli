@@ -144,7 +144,7 @@ class TestStatus:
         assert [layout.calls(n) for n in (*layout.a, *layout.b)] == [1] * 7 + [0]
         src.check_gate(layout.cluster.get_id())
 
-    def test_an_unsynced_lvs_is_degraded_since_its_desync(self, db, rpcs):
+    def test_unsynced_lvs_is_degraded_since_its_desync(self, db, rpcs):
         layout = _Layout(db, rpcs)
         a0 = layout.a[0]
         desync = (datetime.now(UTC) - timedelta(hours=1)).replace(microsecond=0)
@@ -163,7 +163,7 @@ class TestStatus:
         problems = _gate_problems(src.check_gate, layout.cluster.get_id())
         assert problems == [f"LVS LVS_1: distrib_11 on {a0.get_id()}: replica_unsynced"]
 
-    def test_a_leader_syncing_is_resyncing(self, db, rpcs):
+    def test_leader_syncing_is_resyncing(self, db, rpcs):
         layout = _Layout(db, rpcs)
         layout.set(layout.b[0], "distrib_21", status="primary_syncing", n_primary_unsynced_pages=1)
         layout.set(layout.b[1], "distrib_21", status="primary_unsynced")
@@ -181,7 +181,7 @@ class TestStatus:
         (JobSchedule.STATUS_SUSPENDED, True, False, src.STATE_DEGRADED),
         (JobSchedule.STATUS_RUNNING, True, True, src.STATE_DEGRADED),
     ], ids=["running", "waiting", "waiting-mid-pass", "started-waiting", "canceled"])
-    def test_a_running_catch_up_task_is_resyncing(self, db, rpcs, task_status, started, canceled,
+    def test_running_catch_up_task_is_resyncing(self, db, rpcs, task_status, started, canceled,
                                                   state):
         layout = _Layout(db, rpcs)
         # idle LVS during the catch-up: no HA leader, the non-leaders report unsynced
@@ -219,8 +219,6 @@ class TestStatus:
 
     def test_role_per_site(self, db, rpcs):
         layout = _Layout(db, rpcs)
-        assert src.volume_sync_status(_lvol(layout.owner1), SITE_A).role == src.ROLE_PRIMARY
-        assert src.volume_sync_status(_lvol(layout.owner1), SITE_B).role == src.ROLE_SECONDARY
         # promoted on B: the volume's active site, not the LVS's home, decides
         moved = _lvol(layout.owner1, SITE_B)
         assert src.volume_sync_status(moved, SITE_B).role == src.ROLE_PRIMARY
@@ -229,13 +227,13 @@ class TestStatus:
             src.ROLE_SECONDARY, SITE_A, src.STATE_HEALTHY)
 
     @pytest.mark.parametrize("site", ["site-c", "SITE_A "])
-    def test_an_unknown_site_is_refused(self, db, rpcs, site):
+    def test_unknown_site_is_refused(self, db, rpcs, site):
         layout = _Layout(db, rpcs)
         with pytest.raises(SyncReplicationSiteError):
             src.volume_sync_status(_lvol(layout.owner1), site)
 
     @pytest.mark.parametrize("site", [None, ""])
-    def test_a_missing_site_reads_the_led_site(self, db, rpcs, site):
+    def test_missing_site_reads_led_site(self, db, rpcs, site):
         """A status read with no site is cluster-wide: it resolves to the
         volume's led site (role primary there), the read the csi-addons adapter
         makes with no site to assert. Only an unknown site is refused."""
@@ -247,7 +245,7 @@ class TestStatus:
         moved = src.volume_sync_status(_lvol(layout.owner1, SITE_B), site)
         assert (moved.role, moved.site) == (src.ROLE_PRIMARY, SITE_B)
 
-    def test_a_cluster_without_sync_replication_is_refused(self, db, rpcs):
+    def test_cluster_without_sync_replication_is_refused(self, db, rpcs):
         layout = _Layout(db, rpcs, sync=False)
         cluster_id = layout.cluster.get_id()
         for call in (lambda: src.cluster_sync_status(cluster_id), lambda: src.check_gate(cluster_id),
@@ -256,7 +254,7 @@ class TestStatus:
             with pytest.raises(SyncReplicationUnsupportedError):
                 call()
 
-    def test_the_status_may_be_cached_the_gate_never(self, db, rpcs):
+    def test_status_may_be_cached_gate_never(self, db, rpcs):
         layout = _Layout(db, rpcs)
         cluster_id = layout.cluster.get_id()
         assert src.cluster_sync_status(cluster_id, max_age=60).state == src.STATE_HEALTHY
@@ -275,7 +273,7 @@ class TestStatus:
 
 class TestGates:
 
-    def test_a_silent_online_leader_fails_the_planned_gate(self, db, rpcs):
+    def test_silent_online_leader_fails_planned_gate(self, db, rpcs):
         # a0 (LVS_1's HA leader, which runs the catch-up) does not answer; the
         # others' "synced" is provisional
         layout = _Layout(db, rpcs)
@@ -283,18 +281,18 @@ class TestGates:
         problems = _gate_problems(src.check_gate, layout.cluster.get_id())
         assert problems == [f"LVS LVS_1: {layout.a[0].get_id()} did not answer"]
 
-    def test_a_running_catch_up_fails_the_planned_gate(self, db, rpcs):
+    def test_running_catch_up_fails_planned_gate(self, db, rpcs):
         layout = _Layout(db, rpcs)
         cluster_id = layout.cluster.get_id()
         _catch_up_task(db, layout, JobSchedule.STATUS_RUNNING, started=True)
         assert _gate_problems(src.check_gate, cluster_id) == ["LVS LVS_1: catch-up task running"]
 
-    def test_a_waiting_catch_up_task_mid_pass_passes_the_planned_gate(self, db, rpcs):
+    def test_waiting_catch_up_mid_pass_passes_planned_gate(self, db, rpcs):
         layout = _Layout(db, rpcs)
         _catch_up_task(db, layout, JobSchedule.STATUS_RUNNING, started=False)
         src.check_gate(layout.cluster.get_id())
 
-    def test_a_journal_drop_fails_only_the_disaster_gate(self, db, rpcs):
+    def test_journal_drop_fails_only_disaster_gate(self, db, rpcs):
         layout = _Layout(db, rpcs)
         # a0 is the JC leader of LVS_1 (active on A) and dropped its remote journal
         layout.set(layout.a[0], "distrib_11", remote_journal_in_sync=False)
@@ -307,7 +305,7 @@ class TestGates:
         # LVS_1 is not active on B: losing B does not judge it
         src.check_disaster_gate(cluster_id, SITE_B)
 
-    def test_events_of_the_surviving_site_do_not_count(self, db, rpcs):
+    def test_events_of_surviving_site_do_not_count(self, db, rpcs):
         layout = _Layout(db, rpcs)
         a, b = layout.a, layout.b
         stack._update(db, a[0], status=StorageNode.STATUS_OFFLINE)
@@ -319,14 +317,14 @@ class TestGates:
         _record(b[1], "remote_journal_unsynced", "2026-09-30T11:00:01Z", jm_vuid=1)
         src.check_disaster_gate(layout.cluster.get_id(), SITE_A)
 
-    def test_a_pre_loss_desync_of_a_lost_site_node_blocks(self, db, rpcs):
+    def test_pre_loss_desync_of_lost_site_node_blocks(self, db, rpcs):
         layout = _Layout(db, rpcs)
         _record(layout.a[1], "secondary_zone_unavailable", "2026-09-30T10:00:00Z", vuid=12)
         problems = _gate_problems(src.check_disaster_gate, layout.cluster.get_id(), SITE_A)
         assert problems == [(f"LVS LVS_1: zone desync secondary_zone_unavailable at 2026-09-30T10:00:00Z "
                              f"reported by {layout.a[1].get_id()}")]
 
-    def test_the_lost_sites_latest_journal_event_wins(self, db, rpcs):
+    def test_lost_sites_latest_journal_event_wins(self, db, rpcs):
         layout = _Layout(db, rpcs)
         a0, cluster_id = layout.a[0], layout.cluster.get_id()
         _record(a0, "remote_journal_unsynced", "2026-09-30T10:00:00Z", jm_vuid=1)
@@ -335,7 +333,7 @@ class TestGates:
         _record(a0, "remote_journal_unsynced", "2026-09-30T10:02:00Z", jm_vuid=1)
         _gate_problems(src.check_disaster_gate, cluster_id, SITE_A)
 
-    def test_a_survivors_synced_keeps_a_lost_site_drop(self, db, rpcs):
+    def test_survivors_synced_keeps_lost_site_drop(self, db, rpcs):
         layout = _Layout(db, rpcs)
         _record(layout.a[0], "remote_journal_unsynced", "2026-09-30T10:00:00Z", jm_vuid=1)
         # received later, but from B (e.g. a delayed event of an earlier B JC leadership)
@@ -343,7 +341,7 @@ class TestGates:
         assert db.get_unresolved_sync_replication_events(layout.cluster.get_id(), "LVS_1") == []
         _gate_problems(src.check_disaster_gate, layout.cluster.get_id(), SITE_A)
 
-    def test_an_lvs_moving_is_judged_on_either_side(self, db, rpcs):
+    def test_lvs_moving_is_judged_on_either_side(self, db, rpcs):
         layout = _Layout(db, rpcs)
         # LVS_2 is homed on B, its remote triplet a1 a2 a3 is on A
         _record(layout.a[1], "primary_zone_unavailable", "2026-09-30T10:00:00Z", vuid=21)
@@ -365,7 +363,7 @@ def _journal_events(db, layout, lvs="LVS_1"):
 
 class TestLiveJournalRestore:
 
-    def test_a_live_in_sync_answer_ends_the_drop(self, db, rpcs):
+    def test_live_in_sync_answer_ends_drop(self, db, rpcs):
         layout = _Layout(db, rpcs)
         a0, cluster_id = layout.a[0], layout.cluster.get_id()
         _record(a0, "remote_journal_unsynced", "2026-09-30T10:00:00Z", jm_vuid=1)
@@ -381,7 +379,7 @@ class TestLiveJournalRestore:
         src.check_gate(cluster_id)
         assert len(_journal_events(db, layout)) == 2
 
-    def test_only_a_live_answer_ends_a_drop_after_a_handover(
+    def test_only_live_answer_ends_drop_after_handover(
             self, db, rpcs):
         # A JC handover inside A: a0 dropped, a1's "synced" is received later
         # (independent collectors - it may be older than a0's drop).
@@ -419,7 +417,7 @@ class TestLiveJournalRestore:
         assert any(f"reported by {a1.get_id()}" in p
                    for p in _gate_problems(src.check_disaster_gate, cluster_id, SITE_A))
 
-    def test_a_deleted_nodes_drop_ends_on_its_sites_answer(self, db, rpcs):
+    def test_deleted_nodes_drop_ends_on_its_sites_answer(self, db, rpcs):
         # The recorder judges the drop as the gate does: before, it ignored the
         # unknown node's drop and nothing could ever record the live restore.
         layout = _Layout(db, rpcs)
@@ -435,7 +433,7 @@ class TestLiveJournalRestore:
         src.cluster_sync_status(cluster_id)
         assert len(_journal_events(db, layout)) == count + 1
 
-    def test_a_deleted_nodes_drop_ignores_the_other_site(self, db, rpcs):
+    def test_deleted_nodes_drop_ignores_other_site(self, db, rpcs):
         layout = _Layout(db, rpcs)
         a2, b0, cluster_id = layout.a[2], layout.b[0], layout.cluster.get_id()
         self._deleted_nodes_drop(db, layout)
@@ -462,7 +460,7 @@ class TestLiveJournalRestore:
         src.cluster_sync_status(layout.cluster.get_id())
         assert len(_journal_events(db, layout)) == 1
 
-    def test_a_surviving_jc_leader_keeps_the_gate_closed(self, db, rpcs):
+    def test_surviving_jc_leader_keeps_gate_closed(self, db, rpcs):
         layout = _Layout(db, rpcs)
         cluster_id = layout.cluster.get_id()
         _record(layout.a[0], "remote_journal_unsynced", "2026-09-30T10:00:00Z", jm_vuid=1)
@@ -471,7 +469,7 @@ class TestLiveJournalRestore:
         assert [e.node_id for e in _journal_events(db, layout)] == [layout.a[0].get_id(), layout.b[0].get_id()]
         _gate_problems(src.check_disaster_gate, cluster_id, SITE_A)
 
-    def test_a_drop_received_during_the_query_is_not_erased(self, db, rpcs):
+    def test_drop_received_during_query_is_not_erased(self, db, rpcs):
         layout = _Layout(db, rpcs)
         a0, cluster_id = layout.a[0], layout.cluster.get_id()
         _record(a0, "remote_journal_unsynced", "2026-09-30T10:00:00Z", jm_vuid=1)

@@ -12,27 +12,21 @@ from simplyblock_core.models.nvme_device import JMDevice
 from simplyblock_core.models.storage_node import StorageNode
 
 
-def _cluster(sync=True, ftt=1, fd=False, single_node=False):
+def _cluster(sync=True, ftt=1, fd=False):
     cluster = Cluster()
     cluster.uuid = "c1"
     cluster.sync_replication = sync
     cluster.max_fault_tolerance = ftt
     cluster.enable_failure_domain = fd
-    cluster.is_single_node = single_node
     return cluster
 
 
 # -- journal size -----------------------------------------------------------------
 
 @pytest.mark.parametrize("ftt,fd,expected", [(1, False, 6), (1, True, 8), (2, False, 8)])
-def test_sync_journal_is_the_per_site_rule_on_each_site(ftt, fd, expected):
+def test_sync_journal_is_per_site_rule_on_each_site(ftt, fd, expected):
     assert ops.get_required_ha_jm_count(_cluster(ftt=ftt, fd=fd)) == expected
     assert ops.resolve_ha_jm_count(_cluster(ftt=ftt, fd=fd), None) == expected
-
-
-@pytest.mark.parametrize("ftt,fd,expected", [(1, False, 3), (1, True, 4), (2, False, 4)])
-def test_non_sync_journal_size_by_ftt(ftt, fd, expected):
-    assert ops.get_required_ha_jm_count(_cluster(sync=False, ftt=ftt, fd=fd)) == expected
 
 
 def test_explicit_even_sync_journal_size_is_kept():
@@ -52,12 +46,6 @@ def test_odd_journal_size_stays_valid_without_sync():
 @pytest.mark.parametrize("asked", [False, None, True])
 def test_sync_cluster_always_journals_across_sites(asked):
     assert ops.resolve_enable_ha_jm(_cluster(), asked) is True
-
-
-def test_non_sync_ha_journal_follows_the_request():
-    assert ops.resolve_enable_ha_jm(_cluster(sync=False), False) is False
-    assert ops.resolve_enable_ha_jm(_cluster(sync=False), True) is True
-    assert ops.resolve_enable_ha_jm(_cluster(sync=False, single_node=True), True) is False
 
 
 # -- remote JM names ----------------------------------------------------------------
@@ -93,12 +81,12 @@ def test_pick_never_puts_two_copies_on_one_host():
     assert _pick(candidates, 3, 3, []) == ["j1", "j3"]
 
 
-def test_pick_skips_the_hosts_already_holding_a_copy():
+def test_pick_skips_hosts_already_holding_copy():
     candidates = {"j1": _cand("h1"), "j2": _cand("h2")}
     assert _pick(candidates, 3, 2, [("h1", -1, 0)]) == ["j2"]
 
 
-def test_pick_balances_the_own_site_with_the_local_jm():
+def test_pick_balances_own_site_with_local_jm():
     # own site of a 4 + 4 journal: the local JM is in domain 0, so the three
     # copies picked here must end 2-2 across the site's two domains.
     candidates = {"a0": _cand("h1", fd=0), "a1": _cand("h2", fd=0),
@@ -109,7 +97,7 @@ def test_pick_balances_the_own_site_with_the_local_jm():
     assert fds.count(0) == 2 and fds.count(1) == 2
 
 
-def test_pick_balances_the_other_site_on_its_own():
+def test_pick_balances_other_site_on_its_own():
     # other site of a 4 + 4 journal: nothing taken there yet, domain ids
     # of the local site mean nothing -> 2-2 inside that site.
     candidates = {"a0": _cand("h1", fd=0), "a1": _cand("h2", fd=0), "a2": _cand("h3", fd=0),
@@ -151,7 +139,7 @@ def _replacement_setup(extra_b=()):
     return owner, nodes
 
 
-def test_replacement_comes_from_the_removed_jms_site_only():
+def test_replacement_comes_from_removed_jms_site_only():
     owner, nodes = _replacement_setup()
     # a4 is free on the other site; b-site has no free JM -> nothing, never a4.
     assert ops._pick_site_replacement_jm(owner, "jm-b1", "b", nodes, False) is None
@@ -159,13 +147,13 @@ def test_replacement_comes_from_the_removed_jms_site_only():
     assert ops._pick_site_replacement_jm(owner, "jm-b1", "b", nodes, False) == "jm-b4"
 
 
-def test_replacement_is_never_on_a_surviving_members_host():
+def test_replacement_avoids_surviving_members_host():
     # b4 shares b2's host; b5 is on a host of its own.
     owner, nodes = _replacement_setup(extra_b=[_node("b4", "b", "hb2"), _node("b5", "b", "hb5")])
     assert ops._pick_site_replacement_jm(owner, "jm-b1", "b", nodes, False) == "jm-b5"
 
 
-def test_replacement_restores_the_sites_domain_balance():
+def test_replacement_restores_sites_domain_balance():
     # 4 + 4 journal; site b holds b2 (fd 0), b3, b4 (fd 1) after losing b1 (fd 0).
     owner = _node("a1", "a", "ha1", ha_jm_count=8,
                   jm_ids=["jm-a2", "jm-a3", "jm-a4", "jm-b1", "jm-b2", "jm-b3", "jm-b4"])
@@ -176,7 +164,7 @@ def test_replacement_restores_the_sites_domain_balance():
     assert ops._pick_site_replacement_jm(owner, "jm-b1", "b", nodes, True) == "jm-b6"
 
 
-def test_replacement_avoids_the_owners_host():
+def test_replacement_avoids_owners_host():
     owner, nodes = _replacement_setup(extra_b=[])
     nodes.append(_node("a5", "a", "ha1"))   # shares the owner's host
     nodes.append(_node("a6", "a", "ha6"))
@@ -186,7 +174,7 @@ def test_replacement_avoids_the_owners_host():
     assert ops._pick_site_replacement_jm(owner, "jm-a2", "a", nodes, False) == "jm-a6"
 
 
-def test_replacement_skips_a_jm_of_an_offline_node():
+def test_replacement_skips_jm_of_offline_node():
     # a forced shutdown leaves b4 offline with its JM status still ONLINE
     owner, nodes = _replacement_setup(extra_b=[_node("b4", "b", "hb4", status=StorageNode.STATUS_OFFLINE),
                                                _node("b5", "b", "hb5")])

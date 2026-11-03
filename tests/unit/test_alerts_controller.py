@@ -312,7 +312,7 @@ class TestEventDerivedAlerts(unittest.TestCase):
         self.assertEqual(alerts[0]["message"],
                          "node node-1: unrecoverable io error")
 
-    def test_a_distr_event_below_error_is_not_an_io_error(self):
+    def test_distr_event_below_error_is_not_io_error(self):
         """A sync-replication state change reaches the cluster log through the
         distr domain at Info / Warning: it is not a failed IO."""
         for level in (EventObj.LEVEL_INFO, EventObj.LEVEL_WARN):

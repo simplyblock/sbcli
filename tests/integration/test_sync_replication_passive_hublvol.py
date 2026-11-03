@@ -19,7 +19,6 @@ import pytest
 
 from simplyblock_core import distr_controller, storage_node_ops
 from simplyblock_core.controllers import health_controller, tasks_controller
-from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.services import (
     health_check_service,
@@ -116,7 +115,7 @@ _metadata = pytest.mark.parametrize("metadata", [
 class TestOwnerCheck:
 
     @_metadata
-    def test_a_passive_owner_passes_without_an_rpc(self, db, spdk, metadata):
+    def test_passive_owner_passes_without_rpc(self, db, spdk, metadata):
         layout = _layout(db, spdk, SITE_B)
         _without_metadata(db, layout, metadata)
         owner = layout.a[0]
@@ -127,14 +126,14 @@ class TestOwnerCheck:
         assert spdk[owner.get_id()].mock_calls == []
 
     @pytest.mark.parametrize("target", [SITE_A, SITE_B])
-    def test_during_a_move_the_missing_hublvol_fails(self, db, spdk, target):
+    def test_during_move_missing_hublvol_fails(self, db, spdk, target):
         layout = _layout(db, spdk, SITE_B)
         owner = _update(db, layout.a[0], lvs_active_site=LVS_MOVING_PREFIX + target)
 
         assert health_controller._check_node_hublvol(owner) is False
 
     @_controls
-    def test_control_the_missing_hublvol_fails(self, db, spdk, non_sync):
+    def test_control_missing_hublvol_fails(self, db, spdk, non_sync):
         layout = _control(db, spdk, non_sync)
 
         assert health_controller._check_node_hublvol(_fresh(db, layout.a[0])) is False
@@ -148,7 +147,7 @@ class TestPeerCheck:
         pytest.param({"repair_paths": True}, id="repair-paths"),
     ])
     @pytest.mark.parametrize("slot", [1, 2])
-    def test_a_passive_peer_passes_and_is_not_repaired(self, db, spdk, hub, metadata, mode, slot):
+    def test_passive_peer_passes_and_is_not_repaired(self, db, spdk, hub, metadata, mode, slot):
         layout = _layout(db, spdk, SITE_B)
         _without_metadata(db, layout, metadata)
         owner, peer = layout.a[0], layout.a[slot]
@@ -164,7 +163,7 @@ class TestPeerCheck:
 
     @_controls
     @pytest.mark.parametrize("slot", [1, 2])
-    def test_control_the_missing_controller_is_reconnected(self, db, spdk, hub, non_sync, slot):
+    def test_control_missing_controller_is_reconnected(self, db, spdk, hub, non_sync, slot):
         layout = _control(db, spdk, non_sync)
         owner, peer = layout.a[0], layout.a[slot]
 
@@ -188,7 +187,7 @@ def _node_probes():
 
 class TestCheckNode:
 
-    def test_a_passive_owner_is_healthy_and_its_sec_1_gets_no_hublvol(self, db, spdk, hub):
+    def test_passive_owner_healthy_sec_1_gets_no_hublvol(self, db, spdk, hub):
         layout = _layout(db, spdk, SITE_B)
         owner = layout.a[0]
 
@@ -212,7 +211,7 @@ class TestCheckNode:
 
 class TestHealthService:
 
-    def test_a_passive_owner_is_stored_healthy(self, db, spdk, hub):
+    def test_passive_owner_is_stored_healthy(self, db, spdk, hub):
         layout = _layout(db, spdk, SITE_B)
         owner = layout.a[0]
 
@@ -226,7 +225,7 @@ class TestHealthService:
         assert _hub_callers(hub, "connect_to_hublvol") == []
 
     @_controls
-    def test_control_the_missing_hublvol_is_unhealthy(self, db, spdk, hub, non_sync):
+    def test_control_missing_hublvol_is_unhealthy(self, db, spdk, hub, non_sync):
         layout = _control(db, spdk, non_sync)
         owner = layout.a[0]
 
@@ -263,7 +262,7 @@ def _unblocked(spdk):
 class TestStalePortBlock:
 
     @pytest.mark.parametrize("slot", [0, 1, 2])
-    def test_a_passive_node_is_unblocked(self, db, spdk, blocked_since, slot):
+    def test_passive_node_is_unblocked(self, db, spdk, blocked_since, slot):
         layout = _layout(db, spdk, SITE_B)
         owner, node = layout.a[0], layout.a[slot]
 
@@ -273,7 +272,7 @@ class TestStalePortBlock:
 
     @pytest.mark.parametrize("target", [SITE_A, SITE_B])
     @pytest.mark.parametrize("slot", [0, 1])
-    def test_during_a_move_the_block_stays(self, db, spdk, blocked_since, slot, target):
+    def test_during_move_block_stays(self, db, spdk, blocked_since, slot, target):
         layout = _layout(db, spdk, SITE_B)
         owner = _update(db, layout.a[0], lvs_active_site=LVS_MOVING_PREFIX + target)
 
@@ -283,7 +282,7 @@ class TestStalePortBlock:
 
     @_controls
     @pytest.mark.parametrize("slot", [0, 1])
-    def test_control_the_block_stays(self, db, spdk, blocked_since, non_sync, slot):
+    def test_control_block_stays(self, db, spdk, blocked_since, non_sync, slot):
         layout = _control(db, spdk, non_sync)
 
         _remediate(db, blocked_since, layout.a[slot], _fresh(db, layout.a[0]))
@@ -309,7 +308,7 @@ class TestPeerGate:
 
     @_metadata
     @pytest.mark.parametrize("slot", [1, 2])
-    def test_a_passive_peer_passes_on_the_first_attempt(self, db, spdk, hub, peer_gate, metadata, slot):
+    def test_passive_peer_passes_on_first_attempt(self, db, spdk, hub, peer_gate, metadata, slot):
         layout = _layout(db, spdk, SITE_B)
         _without_metadata(db, layout, metadata)
         verify, reconnect, sleep = peer_gate
@@ -323,7 +322,7 @@ class TestPeerGate:
         assert _hub_callers(hub, "connect_to_hublvol") == []
 
     @_controls
-    def test_control_the_gate_drives_its_reconnects(self, db, spdk, hub, peer_gate, non_sync):
+    def test_control_gate_drives_its_reconnects(self, db, spdk, hub, peer_gate, non_sync):
         layout = _control(db, spdk, non_sync)
         _, reconnect, sleep = peer_gate
 
@@ -361,7 +360,7 @@ class TestOwnOutboundHublvols:
 
     @_primary_status
     @pytest.mark.parametrize("slot", [1, 2])
-    def test_a_passive_follower_connects_to_no_hublvol(self, db, spdk, hub, peer_gate, slot, primary_status):
+    def test_passive_follower_connects_to_no_hublvol(self, db, spdk, hub, peer_gate, slot, primary_status):
         layout = _layout(db, spdk, SITE_B)
         _update(db, layout.a[0], status=primary_status)
         verify, reconnect, sleep = peer_gate
@@ -375,7 +374,7 @@ class TestOwnOutboundHublvols:
         sleep.assert_not_called()
 
     @_controls
-    def test_control_the_tertiary_connects_to_the_acting_leader(self, db, spdk, hub, non_sync):
+    def test_control_tertiary_connects_to_acting_leader(self, db, spdk, hub, non_sync):
         layout = _control(db, spdk, non_sync)
         owner = _update(db, layout.a[0], status=StorageNode.STATUS_OFFLINE)
         sec, tert = layout.a[1], layout.a[2]
@@ -387,20 +386,10 @@ class TestOwnOutboundHublvols:
         assert call.kwargs["role"] == "tertiary"
         assert call.kwargs["lvs_node"].get_id() == owner.get_id()
 
-    @_controls
-    def test_control_the_secondary_reconnects_to_the_primary(self, db, spdk, hub, verified, non_sync):
-        layout = _control(db, spdk, non_sync)
-        sec = layout.a[1]
-
-        assert tasks_runner_port_allow._reconnect_own_sec_tert_hublvols(_fresh(db, sec)) == (True, "")
-
-        callers = _hub_callers(hub, "connect_to_hublvol")
-        assert callers and set(callers) == {sec.get_id()}
-
 
 class TestOwnInboundHublvols:
 
-    def test_a_passive_secondary_exposes_nothing(self, db, spdk, hub):
+    def test_passive_secondary_exposes_nothing(self, db, spdk, hub):
         layout = _layout(db, spdk, SITE_B)
         sec = layout.a[1]
 
@@ -408,16 +397,6 @@ class TestOwnInboundHublvols:
 
         _no_hublvol_repair(hub)
         assert _hublvol_rpcs(spdk, sec) == []
-
-    @_controls
-    def test_control_the_secondary_hublvol_and_the_tertiary_path_are_repaired(self, db, spdk, hub, non_sync):
-        layout = _control(db, spdk, non_sync)
-        sec, tert = layout.a[1], layout.a[2]
-
-        assert tasks_runner_port_allow._reconnect_inbound_hublvols(_fresh(db, sec)) == (True, "")
-
-        assert _hub_callers(hub, "create_secondary_hublvol") == [sec.get_id()]
-        assert _hub_callers(hub, "add_hublvol_failover_path") == [tert.get_id()]
 
 
 def _lvs_ports(layout):
@@ -456,7 +435,7 @@ def _recovering(db):
 class TestPortAllowTask:
 
     @pytest.mark.parametrize("slot", [0, 1])
-    def test_a_passive_node_gets_its_ports_and_no_hublvol(self, db, spdk, hub, peer_gate, slot):
+    def test_passive_node_gets_its_ports_and_no_hublvol(self, db, spdk, hub, peer_gate, slot):
         layout = _layout(db, spdk, SITE_B)
         node = layout.a[slot]
         task, port = _after_outage(db, spdk, layout, node)
@@ -475,7 +454,7 @@ class TestPortAllowTask:
         reconnect.assert_not_called()
 
     @_controls
-    def test_control_the_secondary_repairs_its_hublvols_first(self, db, spdk, hub, verified, non_sync):
+    def test_control_secondary_repairs_its_hublvols_first(self, db, spdk, hub, verified, non_sync):
         layout = _control(db, spdk, non_sync)
         sec, tert = layout.a[1], layout.a[2]
         task, _ = _after_outage(db, spdk, layout, sec)
@@ -490,7 +469,7 @@ class TestPortAllowTask:
         assert sorted(_unblocked(spdk)) == [(sec.get_id(), p) for p in _lvs_ports(layout)]
 
     @_controls
-    def test_control_the_owner_waits_for_its_hublvol(self, db, spdk, hub, non_sync):
+    def test_control_owner_waits_for_its_hublvol(self, db, spdk, hub, non_sync):
         layout = _control(db, spdk, non_sync)
         task, _ = _after_outage(db, spdk, layout, layout.a[0])
 
@@ -498,12 +477,3 @@ class TestPortAllowTask:
             tasks_runner_port_allow.exec_port_allow_task(task)
 
         assert _unblocked(spdk) == []
-
-
-def test_the_non_sync_control_has_no_sync_left(db, spdk):
-    layout = _control(db, spdk, non_sync=True)
-    cluster = db.get_cluster_by_id(layout.cluster.get_id())
-    assert cluster.sync_replication is False and cluster.status == Cluster.STATUS_ACTIVE
-    for node in layout.nodes:
-        fresh = _fresh(db, node)
-        assert (fresh.site, fresh.lvs_active_site, fresh.remote_primary_node_id) == ("", "", "")

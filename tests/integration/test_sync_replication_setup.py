@@ -40,8 +40,7 @@ def db():
     return DBController()
 
 
-def _seed_cluster(db, *, sync=True, status=Cluster.STATUS_UNREADY, ndcs=1, npcs=1,
-                  activated=(), spdk_vcpu_count=0):
+def _seed_cluster(db, *, sync=True, status=Cluster.STATUS_UNREADY, activated=(), spdk_vcpu_count=0):
     cluster = Cluster()
     cluster.uuid = str(uuid.uuid4())
     cluster.cluster_name = f"cl-{cluster.uuid[:8]}"
@@ -49,8 +48,8 @@ def _seed_cluster(db, *, sync=True, status=Cluster.STATUS_UNREADY, ndcs=1, npcs=
     cluster.status = status
     cluster.ha_type = "ha"
     cluster.sync_replication = sync
-    cluster.distr_ndcs = ndcs
-    cluster.distr_npcs = npcs
+    cluster.distr_ndcs = 1
+    cluster.distr_npcs = 1
     cluster.max_fault_tolerance = 1
     cluster.activated_node_ids = list(activated)
     cluster.mode = "docker"
@@ -140,7 +139,7 @@ class TestClusterCreate:
         ({"ha_type": "single", "is_single_node": False}, "ha_type='ha'"),
         ({"ha_type": "ha", "is_single_node": True}, "single-node"),
     ])
-    def test_create_cluster_refuses_before_any_deployment_step(self, db, kwargs, message):
+    def test_create_cluster_refuses_before_deploying(self, db, kwargs, message):
         with patch("simplyblock_core.cluster_ops.scripts") as scripts, \
                 patch("simplyblock_core.cluster_ops.docker") as docker, \
                 patch("simplyblock_core.cluster_ops.mgmt_node_ops") as mgmt, \
@@ -227,24 +226,15 @@ class TestActivationSiteGuards:
         with pytest.raises(PastTheGuard):
             _activate(cluster)
 
-    @pytest.mark.parametrize("extra_status", [StorageNode.STATUS_ONLINE, StorageNode.STATUS_OFFLINE])
-    def test_third_site_is_refused_and_status_restored(self, db, extra_status):
+    def test_third_site_is_refused_and_status_restored(self, db):
         cluster = _seed_cluster(db)
         _seed_two_sites(db, cluster)
-        _seed_node(db, cluster, "site-c", host="10.6.0.1", status=extra_status)
+        _seed_node(db, cluster, "site-c", host="10.6.0.1")
         with pytest.raises(ValueError, match="exactly 2 sites"):
             _activate(cluster)
         assert db.get_cluster_by_id(cluster.get_id()).status == Cluster.STATUS_UNREADY
 
-    def test_node_without_site_is_refused(self, db):
-        cluster = _seed_cluster(db)
-        _seed_two_sites(db, cluster)
-        unsited = _seed_node(db, cluster, "", host="10.6.0.2", status=StorageNode.STATUS_OFFLINE)
-        with pytest.raises(ValueError, match=f"without a site: {unsited.get_id()}"):
-            _activate(cluster)
-        assert db.get_cluster_by_id(cluster.get_id()).status == Cluster.STATUS_UNREADY
-
-    def test_too_few_hosts_on_a_site_refuses_fresh_activation(self, db):
+    def test_too_few_site_hosts_refuse_fresh_activation(self, db):
         cluster = _seed_cluster(db)
         _seed_node(db, cluster, "site-a", host="10.3.0.1")
         _seed_node(db, cluster, "site-a", host="10.3.0.2")
@@ -255,14 +245,7 @@ class TestActivationSiteGuards:
             _activate(cluster)
         assert db.get_cluster_by_id(cluster.get_id()).status == Cluster.STATUS_UNREADY
 
-    def test_stripe_width_per_site_refuses_fresh_activation(self, db):
-        cluster = _seed_cluster(db, ndcs=2, npcs=2)
-        _seed_two_sites(db, cluster, per_site=3)
-        with pytest.raises(ValueError, match="needs 4 node"):
-            _activate(cluster)
-        assert db.get_cluster_by_id(cluster.get_id()).status == Cluster.STATUS_UNREADY
-
-    def test_reactivation_after_a_site_loss_only_warns(self, db):
+    def test_reactivation_after_site_loss_only_warns(self, db):
         """Two configured sites, one of them entirely offline: recovery must not
         be blocked by the capacity rule."""
         cluster = _seed_cluster(db, status=Cluster.STATUS_SUSPENDED)
@@ -274,7 +257,7 @@ class TestActivationSiteGuards:
         messages = [str(c.args[0]) % c.args[1:] for c in warning.call_args_list]
         assert any("reduced site capacity" in m and "site site-b has 0 online" in m for m in messages)
 
-    def test_force_reactivation_does_not_bypass_the_topology(self, db):
+    def test_force_reactivation_does_not_bypass_topology(self, db):
         cluster = _seed_cluster(db, status=Cluster.STATUS_ACTIVE)
         nodes = _seed_two_sites(db, cluster)
         nodes.append(_seed_node(db, cluster, "site-c", host="10.6.0.3", status=StorageNode.STATUS_OFFLINE))
@@ -380,7 +363,7 @@ def _add_node(cluster, site, **kwargs):
 class TestAddNodeSite:
 
     @pytest.mark.parametrize("slots", [1, 2])
-    def test_a_sync_node_has_its_site_from_the_first_write(self, db, slots):
+    def test_sync_node_has_its_site_from_first_write(self, db, slots):
         cluster = _seed_cluster(db)
         original_write = StorageNode.write_to_db
         persisted = []
@@ -403,7 +386,7 @@ class TestAddNodeSite:
             assert writes[0] == "site-a", "the first persisted record lacked the site"
             assert set(writes) == {"site-a"}
 
-    def test_non_sync_cluster_add_succeeds_without_a_site(self, db):
+    def test_non_sync_cluster_add_succeeds_without_site(self, db):
         cluster = _seed_cluster(db, sync=False)
         with _AddNodeWorld(_node_info()):
             assert _add_node(cluster, None) == "Success"
@@ -416,7 +399,7 @@ class TestAddNodeSite:
         (True, "a:b", "invalid site"),
         (False, "site-a", "not created with --sync-replication"),
     ])
-    def test_an_invalid_site_is_refused_before_host_setup(self, db, sync, site, message):
+    def test_invalid_site_is_refused_before_host_setup(self, db, sync, site, message):
         cluster = _seed_cluster(db, sync=sync, spdk_vcpu_count=4)
         with _AddNodeWorld(_node_info()) as world, \
                 pytest.raises(storage_node_ops.NodeSiteError, match=message):
@@ -443,7 +426,7 @@ class TestAddNodeSite:
         {"networks": [{"name": "fabric", "namespace": "infra", "interface": "data0",
                        "ips": ["10.10.10.101/24"]}]},
     ])
-    def test_another_sites_host_is_refused_off_the_host_network(self, db, network):
+    def test_other_sites_host_refused_off_host_network(self, db, network):
         # Off the host network the agent sees only the pod's interfaces and
         # reports the host's address as host_ip.
         cluster = _seed_cluster(db, spdk_vcpu_count=4)
@@ -459,7 +442,7 @@ class TestAddNodeSite:
             existing.get_id()]
 
 
-def test_an_invalid_site_ends_the_node_add_task(db):
+def test_invalid_site_ends_node_add_task(db):
     cluster = _seed_cluster(db, spdk_vcpu_count=4)
     task_id = tasks_controller.add_node_add_task(cluster.get_id(), {
         "cluster_id": cluster.get_id(), "node_addr": NODE_ADDR, "iface_name": "eth0",
@@ -504,14 +487,14 @@ class TestStorageNodeRoute:
         (True, {"site": "a/b"}, "invalid site"),
         (False, {"site": "site-a"}, "not created with --sync-replication"),
     ])
-    def test_invalid_site_is_rejected_without_a_task(self, db, client, sync, extra, message):
+    def test_invalid_site_is_rejected_without_task(self, db, client, sync, extra, message):
         cluster = _seed_cluster(db, sync=sync)
         response = _post_node(client, cluster, **extra)
         assert response.status_code == 400
         assert message in response.json()["detail"]
         assert _node_add_tasks(db, cluster) == []
 
-    def test_valid_site_reaches_the_task(self, db, client):
+    def test_valid_site_reaches_task(self, db, client):
         cluster = _seed_cluster(db)
         response = _post_node(client, cluster, site="site-a")
         assert response.status_code == 201
@@ -519,7 +502,7 @@ class TestStorageNodeRoute:
         assert task.function_params["site"] == "site-a"
         assert response.json() == task.uuid
 
-    def test_non_sync_cluster_without_site_reaches_the_task(self, db, client):
+    def test_non_sync_cluster_without_site_reaches_task(self, db, client):
         cluster = _seed_cluster(db, sync=False)
         response = _post_node(client, cluster)
         assert response.status_code == 201

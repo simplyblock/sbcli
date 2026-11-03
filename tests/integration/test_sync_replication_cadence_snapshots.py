@@ -171,7 +171,7 @@ def _snapshots_of(db, cluster, lvol):
 
 class TestLeaderlessVolume:
 
-    def test_a_due_volume_is_deferred_and_nothing_is_granted(self, db, rpcs, hub, env, no_sleep):
+    def test_due_volume_is_deferred_and_nothing_is_granted(self, db, rpcs, hub, env, no_sleep):
         cluster, a, b, owner, pool = _leaderless(db, rpcs)
         _due_volume(db, cluster, owner, pool)
 
@@ -203,7 +203,7 @@ class TestLeaderlessVolume:
         # four deferred snapshots, one line (rate-limited per LVS)
         assert len(_deferrals(caplog)) == 1
 
-    def test_the_snapshot_is_taken_once_the_primary_leads(
+    def test_snapshot_is_taken_once_primary_leads(
             self, db, rpcs, hub, env, no_sleep):
         cluster, a, b, owner, pool = _leaderless(db, rpcs)
         lvol = _due_volume(db, cluster, owner, pool)
@@ -236,7 +236,7 @@ class TestLeaderlessGroup:
         members = [_due_volume(db, cluster, owner, pool) for _ in range(2)]
         return cluster, a, b, members, _group(db, cluster, owner, members)
 
-    def test_the_group_is_deferred_as_a_whole(self, db, rpcs, hub, env, no_sleep, caplog):
+    def test_group_is_deferred_as_whole(self, db, rpcs, hub, env, no_sleep, caplog):
         cluster, a, b, _, group = self._grouped(db, rpcs)
         caplog.set_level(logging.INFO)
 
@@ -246,7 +246,7 @@ class TestLeaderlessGroup:
         assert db.get_consistency_group_by_id(group.get_id()).last_group_seq == 0
         assert len(_deferrals(caplog)) == 1
 
-    def test_the_generation_is_taken_once_the_primary_leads(
+    def test_generation_is_taken_once_primary_leads(
             self, db, rpcs, hub, env, no_sleep):
         cluster, a, b, members, group = self._grouped(db, rpcs)
         _tick(cluster)
@@ -275,7 +275,7 @@ class TestLeaderlessGroup:
 
 class TestMidTick:
 
-    def test_a_mid_tick_promote_defers_the_second_volume(
+    def test_mid_tick_promote_defers_second_volume(
             self, db, rpcs, hub, env, no_sleep):
         # A leader found for one volume says nothing about the next one.
         cluster, a, b, owner, pool = _layout(db)
@@ -300,7 +300,7 @@ class TestMidTick:
         assert sorted(len(_snapshots_of(db, cluster, lvol)) for lvol in lvols) == [0, 1]
         assert db.acquire_lvstore_lock(cluster.get_id(), "takeleader/LVS_1", "test") == (True, None)
 
-    def test_a_mid_tick_move_back_snapshots_the_second_volume(
+    def test_mid_tick_move_back_snapshots_second_volume(
             self, db, rpcs, hub, env, no_sleep):
         # "Nobody leads" is a verdict about one marker: it does not outlive it.
         cluster, a, b, owner, pool = _leaderless(db, rpcs)
@@ -347,7 +347,7 @@ class TestGuards:
         pytest.param("", "a", 0, id="home-led"),
         pytest.param(SITE_B, "b", 1, id="remote-led-by-its-secondary"),
     ])
-    def test_led_sync_lvs_snapshots_without_a_grant(self, db, rpcs, hub, env, caplog, active_site, site, slot):
+    def test_led_sync_lvs_snapshots_without_grant(self, db, rpcs, hub, env, caplog, active_site, site, slot):
         cluster, a, b, owner, pool = _layout(db, active_site=active_site)
         leader = {"a": a, "b": b}[site][slot]
         rpcs.lead(leader)
@@ -363,7 +363,7 @@ class TestGuards:
         _not_sent(rpcs, [*a, *b], _GRANT_RPCS)
         assert _deferrals(caplog) == []
 
-    def test_a_leaderless_lvs_does_not_hold_back_another_lvs(self, db, rpcs, hub, env, no_sleep):
+    def test_leaderless_lvs_does_not_hold_back_another_lvs(self, db, rpcs, hub, env, no_sleep):
         # LVS_1 (owner a0) is open on site B with nobody leading; LVS_2 (owner
         # b0) is led by b0. Both are probed on the same three nodes.
         cluster, a, b, owner_a, owner_b = stack._two_owner_layout(db)
@@ -384,7 +384,7 @@ class TestGuards:
         rpcs[b[0].get_id()].lvol_create_snapshot2.assert_called_once_with(f"LVS_2/{led.lvol_bdev}", ANY)
         _not_sent(rpcs, [*a, *b], _GRANT_RPCS)
 
-    def test_a_lookup_that_fails_skips_that_volume_only(self, db, rpcs, hub, env, caplog):
+    def test_lookup_that_fails_skips_that_volume_only(self, db, rpcs, hub, env, caplog):
         cluster, a, b, owner, pool = _layout(db)
         rpcs.lead(a[0])
         _can_snapshot(rpcs, [*a, *b])
@@ -412,7 +412,7 @@ class TestGuards:
         assert _deferrals(caplog) == []
         _not_sent(rpcs, [*a, *b], _GRANT_RPCS)
 
-    def test_a_non_sync_volume_skips_the_leader_lookup(self, db, rpcs, caplog):
+    def test_non_sync_volume_skips_leader_lookup(self, db, rpcs, caplog):
         cluster, owner, pool = _plain_layout(db)
         lvol = _due_volume(db, cluster, owner, pool)
         publish._volume(db, cluster, owner, pool, active_site="")   # does not replicate
@@ -430,7 +430,7 @@ class TestGuards:
         assert rpcs == {}                                 # the timer asked no node anything
         assert _deferrals(caplog) == []
 
-    def test_a_non_sync_group_skips_the_leader_lookup(self, db, rpcs, caplog):
+    def test_non_sync_group_skips_leader_lookup(self, db, rpcs, caplog):
         cluster, owner, pool = _plain_layout(db)
         group = _group(db, cluster, owner, [_due_volume(db, cluster, owner, pool) for _ in range(2)])
         caplog.set_level(logging.INFO)

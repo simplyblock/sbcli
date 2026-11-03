@@ -30,7 +30,7 @@ class TestClassify:
         ("remote_journal_unsynced", {"jm_vuid": 1}, (DROPPED, 1)),
         ("remote_journal_synced", {"jm_vuid": "1"}, (RESTORED, 1)),
     ])
-    def test_the_four_statuses(self, status, keys, expected):
+    def test_four_statuses(self, status, keys, expected):
         assert tuple(src.classify_sync_event(_event(status, **keys))) == expected
 
     @pytest.mark.parametrize("event", [
@@ -41,7 +41,7 @@ class TestClassify:
         _event("primary_zone_unavailable", vuid=None),
         {**_event("primary_zone_unavailable", vuid=5), "event_type": "device_status"},
     ])
-    def test_anything_else_is_not_a_sync_event(self, event):
+    def test_anything_else_is_not_sync_event(self, event):
         assert src.classify_sync_event(event) is None
 
 
@@ -54,7 +54,7 @@ class TestEventLevel:
         ("secondary_zone_unavailable", EventObj.LEVEL_WARN),
         ("zone_exploded", EventObj.LEVEL_WARN),                    # unknown status
     ])
-    def test_only_a_synced_journal_is_info_others_warn(self, status, level):
+    def test_only_synced_journal_is_info_others_warn(self, status, level):
         assert src.sync_event_level(status) == level
 
 
@@ -88,16 +88,16 @@ class TestLvsOwnerOfEvent:
         owner = src.lvs_owner_of_event(node, self.nodes, src.SyncEventSubject(kind, vuid))
         return owner.get_id() if owner else None
 
-    def test_a_distrib_vuid_names_the_lvs_holding_it(self):
+    def test_distrib_vuid_names_lvs_holding_it(self):
         assert self._owner(self.n1, ZONE, 12) == "o1"
         assert self._owner(self.n1, ZONE, 21) == "o2"
         assert self._owner(self.r1, ZONE, 11) == "o1"      # remote-triplet instance
 
-    def test_a_jm_vuid_names_the_lvs_of_that_journal(self):
+    def test_jm_vuid_names_lvs_of_that_journal(self):
         assert self._owner(self.n1, DROPPED, 2) == "o2"
         assert self._owner(self.r1, RESTORED, 1) == "o1"
 
-    def test_only_lvs_with_an_instance_on_the_node_count(self):
+    def test_only_lvs_with_instance_on_node_count(self):
         assert self._owner(self.r1, ZONE, 21) is None      # r1 has no LVS_2 instance
         assert self._owner(self.r1, DROPPED, 2) is None
         assert self._owner(self.n1, ZONE, 99) is None      # a raid vuid is not a distrib
@@ -112,11 +112,11 @@ def _zone_event(status, kind=ZONE):
 
 class TestLaggingSites:
 
-    def test_primary_is_the_home_site_replica_the_other(self):
+    def test_primary_is_home_site_replica_other(self):
         assert src.lagging_sites("A", "B", [_zone_event("primary_zone_unavailable")]) == ["A"]
         assert src.lagging_sites("A", "B", [_zone_event("secondary_zone_unavailable")]) == ["B"]
 
-    def test_both_zones_in_first_seen_order_without_repeats(self):
+    def test_both_zones_in_first_seen_order_no_repeats(self):
         events = [_zone_event("secondary_zone_unavailable"), _zone_event("primary_zone_unavailable"),
                   _zone_event("secondary_zone_unavailable")]
         assert src.lagging_sites("A", "B", events) == ["B", "A"]
@@ -127,7 +127,7 @@ class TestLaggingSites:
 
 class TestEventId:
 
-    def test_a_re_read_event_has_the_same_id(self):
+    def test_re_read_event_has_same_id(self):
         event = _event("remote_journal_synced", jm_vuid=1)
         assert src.sync_event_id("c", "n", event) == src.sync_event_id("c", "n", dict(event))
 
@@ -140,7 +140,7 @@ class TestEventId:
         event = _event("remote_journal_synced", jm_vuid=1)
         assert src.sync_event_id("c", "n", event) != src.sync_event_id("c", "n", {**event, **change})
 
-    def test_the_emitting_node_and_cluster_are_part_of_it(self):
+    def test_emitting_node_and_cluster_are_part_of_it(self):
         event = _event("primary_zone_unavailable", vuid=5)
         ids = {src.sync_event_id(c, n, event) for c, n in (("c", "n"), ("c", "m"), ("d", "n"))}
         assert len(ids) == 3

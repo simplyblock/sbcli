@@ -43,7 +43,7 @@ def client():
     return utils
 
 
-def test_absent_lvol_with_skip_error_is_a_successful_no_op(client):
+def test_absent_lvol_with_skip_error_is_no_op(client):
     client.get_lvol_id = MagicMock(return_value=None)
     assert client.delete_lvol("vol-1", skip_error=True) is True
     client.delete_request.assert_not_called()
@@ -57,7 +57,7 @@ def test_absent_lvol_without_skip_error_raises(client):
 
 
 @pytest.mark.parametrize("skip_error", [True, False])
-def test_failed_lookup_propagates_without_a_delete(client, skip_error):
+def test_failed_lookup_propagates_without_delete(client, skip_error):
     failure = ConnectionError("API unreachable")
     client.get_lvol_id = MagicMock(side_effect=failure)
     with pytest.raises(ConnectionError) as raised:

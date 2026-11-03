@@ -312,49 +312,67 @@ def _nothing_returned(db, s, bnd, state=DOWN):
 
 class TestSiteScope:
 
-    @pytest.mark.parametrize("state", RECORD_STATES)
-    def test_pass1_builds_the_leaders_led_from_site(self, db, rpcs, hub, adopt, state):
-        s = _shapes(db, state)
-        a0, b0 = s.a[0].get_id(), s.b[0].get_id()
-        bnd = _activate(db, s)
-        assert sorted(bnd.calls("p1")) == sorted([("p1", a0, a0), ("p1", a0, b0)])
-        # each carries the flag's own token, live at the call
-        assert bnd.holders == [(SITE_A, True), (SITE_A, True)]
-        bnd.create.assert_not_called()
-
-    @pytest.mark.parametrize("state", RECORD_STATES)
-    def test_pass2_runs_only_on_the_site_nodes(self, db, rpcs, hub, adopt, state):
-        s = _shapes(db, state)
+    def test_site_activation_touches_only_site(self, db, rpcs, hub, adopt):
+        """One site activation of A over the four LVS shapes. Every pass and the
+        end state are checked on this one run."""
+        s = _shapes(db)
         (a0, a1, a2), (b0, b1, b2) = _ids(s.a), _ids(s.b)
         bnd = _activate(db, s)
-        # led from A: the activation path behind the leader Pass 1 built on a0
-        assert sorted(bnd.calls("act")) == sorted([("act", a1, a0), ("act", a1, b0), ("act", a2, b0)])
+
+        # Pass 1 builds on a0 the leaders of the LVSs led from A. Each build runs
+        # while the activation flag's token is held.
+        assert sorted(bnd.calls("p1")) == sorted([("p1", a0, a0), ("p1", a0, b0)]), "pass 1 leaders"
+        assert bnd.holders == [(SITE_A, True), (SITE_A, True)], "pass 1 token"
+        bnd.create.assert_not_called()
+
+        # Pass 2 for the LVSs led from A: the followers are rebuilt on the
+        # activation path, behind the leader that Pass 1 built on a0.
+        assert sorted(bnd.calls("act")) == sorted([("act", a1, a0), ("act", a1, b0), ("act", a2, b0)]), \
+            "pass 2 activation path"
         assert {c.args[1].get_id() for c in bnd.non_leader.call_args_list
-                if c.kwargs.get("activation_mode")} == {a0}
-        # led from B, whose leader serves: main's restart path
+                if c.kwargs.get("activation_mode")} == {a0}, "pass 2 activation-path leader"
+        # Pass 2 for the LVSs led from B, whose leader is serving: the rebuilds
+        # take the normal restart path, one at a time.
         assert sorted(bnd.calls("remote")) == sorted([("remote", a0, b1), ("remote", a1, b1),
-                                                      ("remote", a2, b1)])
-        assert sorted(bnd.calls("local")) == sorted([("local", a1, a1), ("local", a2, a1)])
+                                                      ("remote", a2, b1)]), "pass 2 remote rebuilds"
+        assert sorted(bnd.calls("local")) == sorted([("local", a1, a1), ("local", a2, a1)]), \
+            "pass 2 local rebuilds"
         assert {c.args[1].get_id() for c in bnd.non_leader.call_args_list
-                if not c.kwargs.get("activation_mode")} == {b2}
+                if not c.kwargs.get("activation_mode")} == {b2}, "pass 2 restart-path leader"
+        assert (len(bnd.calls(*RESTART_ROUTES)), bnd.overlaps) == (5, 0), "restart-path rebuilds overlap"
         # no activation-mode port-block of a leader of B
-        assert {c.args[0].get_id() for c in bnd.set_port.call_args_list} == {a0}
+        assert {c.args[0].get_id() for c in bnd.set_port.call_args_list} == {a0}, "port blocks"
 
-    def test_restart_path_rebuilds_never_overlap(self, db, rpcs, hub, adopt):
-        s = _shapes(db)
-        bnd = _activate(db, s)
-        assert len(bnd.calls(*RESTART_ROUTES)) == 5
-        assert bnd.overlaps == 0
+        # Pass 1 sets b0's status to ready while it rebuilds b0's leader on a0.
+        # The original status is restored before Pass 2.
+        assert bnd.b_at_pass2 == ("failed", "ready"), "b statuses at pass 2"
+        assert [_status(db, n) for n in s.a] == ["ready", "ready", "ready"], "a statuses"
+        assert (_status(db, s.b[0]), _status(db, s.b[1])) == ("failed", "ready"), "b statuses"
 
-    def test_owner_statuses_after_a_site_activation(self, db, rpcs, hub, adopt):
-        s = _shapes(db, b0_status="failed")
-        bnd = _activate(db, s)
-        # Pass 1 wrote b0 ``ready`` (its leader rebuilt on a0): restored before Pass 2
-        assert bnd.b_at_pass2 == ("failed", "ready")
-        assert [_status(db, n) for n in s.a] == ["ready", "ready", "ready"]
-        assert (_status(db, s.b[0]), _status(db, s.b[1])) == ("failed", "ready")
+        # Pass 3 wires only the LVS led from A
+        assert stack._hub_callers(hub, "recreate_hublvol") == [a0], "pass 3 hublvol"
+        assert [(c.args[0].get_id(), c.args[1].get_id()) for c in adopt.call_args_list] == [(a0, b0)], \
+            "pass 3 adopt"
+        for name in hub:
+            assert set(stack._hub_callers(hub, name)) <= {a0, a1, a2}, name
 
-    def test_a_late_marked_owner_ends_ready(self, db, rpcs, hub, adopt):
+        # Pass 4 opens after the record is cleared; the event follows it, and the flag ends
+        assert sorted(bnd.ana_view) == sorted([(a0, "", SITE_A), (b0, "", SITE_A)]), "pass 4"
+        assert [e[0] for e in bnd.log[-3:]] == ["ana", "ana", "event"], "event after pass 4"
+        assert bnd.log[-1] == ("event", SITE_A, SITE_A), "event"
+        cluster = _cluster(db, s)
+        assert (cluster.site_activation_site, cluster.site_activation_since,
+                cluster.site_activation_heartbeat) == ("", "", ""), "flag ended"
+
+        # The activation does not change the cluster status, assign physical
+        # labels, record activated nodes, or write any node of site B.
+        bnd.set_status.assert_not_called()
+        assert cluster.status == Cluster.STATUS_DEGRADED, "cluster status"
+        bnd.labels.assert_not_called()
+        bnd.recorded.assert_not_called()
+        assert set(bnd.writes) & {b0, b1, b2} == set(), "writes of B"
+
+    def test_late_marked_owner_ends_ready(self, db, rpcs, hub, adopt):
         # One worker at a time: a0's own Pass 2 (LVS_3) ends before a1's
         # rebuild of LVS_1 marks a0 ``in_creation``.
         s = _shapes(db)
@@ -364,7 +382,7 @@ class TestSiteScope:
         assert bnd.log.index(("remote", a0, s.b[1].get_id())) < bnd.log.index(("act", a1, a0))
         assert _status(db, s.a[0]) == "ready"
 
-    def test_a_held_owner_is_marked_per_rebuild(self, db, rpcs, hub, adopt):
+    def test_held_owner_is_marked_per_rebuild(self, db, rpcs, hub, adopt):
         """b0 serves from B while its LVS_2, led from A, is rebuilt on a1 and
         a2: its ``in_creation`` marker - the storage-node monitor skips such a
         node - spans each of those rebuilds, and b0 has its own status back at
@@ -382,22 +400,6 @@ class TestSiteScope:
         assert others == {"failed"}
         assert _status(db, s.b[0]) == "failed"
 
-    def test_pass3_wires_only_the_lvs_led_from_site(self, db, rpcs, hub, adopt):
-        s = _shapes(db)
-        a_ids = set(_ids(s.a))
-        _activate(db, s)
-        assert stack._hub_callers(hub, "recreate_hublvol") == [s.a[0].get_id()]
-        assert [(c.args[0].get_id(), c.args[1].get_id()) for c in adopt.call_args_list] == [
-            (s.a[0].get_id(), s.b[0].get_id())]
-        for name in hub:
-            assert set(stack._hub_callers(hub, name)) <= a_ids, name
-
-    def test_pass4_opens_after_the_record_is_cleared(self, db, rpcs, hub, adopt):
-        s = _shapes(db)
-        bnd = _activate(db, s)
-        assert sorted(bnd.ana_view) == sorted([(s.a[0].get_id(), "", SITE_A),
-                                               (s.b[0].get_id(), "", SITE_A)])
-
     @pytest.mark.parametrize("state", RECORD_STATES)
     def test_every_lvs_gets_its_catch_up_queued(self, db, rpcs, hub, adopt, state):
         s = _shapes(db, state)
@@ -405,24 +407,6 @@ class TestSiteScope:
         assert _resync_lvs(db, s) == ["LVS_1", "LVS_2", "LVS_3", "LVS_4"]
         cluster = _cluster(db, s)
         assert (cluster.lost_site, cluster.lost_site_state) == ("", "")
-
-    def test_the_event_follows_pass4_and_flag_ends(self, db, rpcs, hub, adopt):
-        s = _shapes(db)
-        bnd = _activate(db, s)
-        assert bnd.log[-1] == ("event", SITE_A, SITE_A)
-        assert [e[0] for e in bnd.log[-3:]] == ["ana", "ana", "event"]
-        cluster = _cluster(db, s)
-        assert (cluster.site_activation_site, cluster.site_activation_since,
-                cluster.site_activation_heartbeat) == ("", "", "")
-
-    def test_no_cluster_status_or_b_record_written(self, db, rpcs, hub, adopt):
-        s = _shapes(db)
-        bnd = _activate(db, s)
-        bnd.set_status.assert_not_called()
-        assert _cluster(db, s).status == Cluster.STATUS_DEGRADED
-        bnd.labels.assert_not_called()
-        bnd.recorded.assert_not_called()
-        assert set(bnd.writes) & set(_ids(s.b)) == set()
 
 
 # ---------------------------------------------------------------------------
@@ -448,7 +432,7 @@ class TestSiteFailures:
 
     @pytest.mark.parametrize("result", [False, RPCException("spdk gone")], ids=["false", "raised"])
     @pytest.mark.parametrize("route", list(FAILURES))
-    def test_a_failure_keeps_the_record_and_ends(self, db, rpcs, hub, adopt, route, result):
+    def test_failure_keeps_record_and_ends(self, db, rpcs, hub, adopt, route, result):
         s = _shapes(db, b0_status="ready")
         (kind, node_index, owner), failed_index = FAILURES[route]
         key = (kind, s.a[node_index].get_id(), _owner_id(s, owner))
@@ -463,7 +447,7 @@ class TestSiteFailures:
         if failed_index is not None:
             assert _status(db, s.a[failed_index]) == "failed"
 
-    def test_a_backup_setup_failure_keeps_b_status(self, db, rpcs, hub, adopt):
+    def test_backup_setup_failure_keeps_b_status(self, db, rpcs, hub, adopt):
         # Both leaders built (b0 written ``ready`` by its rebuild), then the S3
         # bdev of a0's backup raises past every pass.
         s = _shapes(db, b0_status="failed")
@@ -476,7 +460,7 @@ class TestSiteFailures:
         _nothing_returned(db, s, bnd)
         assert (_status(db, s.b[0]), _status(db, s.b[1])) == ("failed", "ready")
 
-    def test_a_failure_before_pass1_holds_no_owner(self, db, rpcs, hub, adopt):
+    def test_failure_before_pass1_holds_no_owner(self, db, rpcs, hub, adopt):
         # b0 carries a leaked ``in_creation`` the serving site's monitor reclaims
         # to ``ready`` while the connectivity wait runs; the wait then fails.
         s = _shapes(db, b0_status="in_creation")
@@ -493,7 +477,7 @@ class TestSiteFailures:
         assert _status(db, s.b[0]) == "ready"
 
     @pytest.mark.parametrize("result", [False, RPCException("spdk gone")], ids=["false", "raised"])
-    def test_a_failed_rebuild_gives_back_held_status(self, db, rpcs, hub, adopt, result):
+    def test_failed_rebuild_gives_back_held_status(self, db, rpcs, hub, adopt, result):
         """a1's rebuild of LVS_2 (owner b0, serving from B) fails: b0 has its
         own status back at every later rebuild of another LVS, before the pool
         of Pass 2 has joined."""
@@ -511,7 +495,7 @@ class TestSiteFailures:
         assert later == {"failed"}
         assert _status(db, s.b[0]) == "failed"
 
-    def test_a_later_ready_write_keeps_its_failure(self, db, rpcs, hub, adopt):
+    def test_later_ready_write_keeps_its_failure(self, db, rpcs, hub, adopt):
         # a1's own LVS_4 rebuild fails; a2's LVS_4 rebuild after it writes the
         # owner a1 ``ready`` (the non-leader helper's own status write).
         s = _shapes(db)
@@ -533,7 +517,7 @@ class TestSiteFailures:
 
 class TestRecordRefusal:
 
-    def test_a_node_failed_since_keeps_the_record(self, db, rpcs, hub, adopt):
+    def test_node_failed_since_keeps_record(self, db, rpcs, hub, adopt):
         s = _shapes(db)
 
         def _configure(bnd):
@@ -541,7 +525,7 @@ class TestRecordRefusal:
         bnd = _activate(db, s, expect=ValueError, configure=_configure)
         _nothing_returned(db, s, bnd)
 
-    def test_a_node_not_built_keeps_the_record(self, db, rpcs, hub, adopt):
+    def test_node_not_built_keeps_record(self, db, rpcs, hub, adopt):
         # a3 was shut down by an operator and comes ONLINE after Pass 2 took
         # its node set: no instance was built on it.
         s = _shapes(db)
@@ -554,7 +538,7 @@ class TestRecordRefusal:
         assert a3.get_id() not in {e[1] for e in bnd.log}
         _nothing_returned(db, s, bnd)
 
-    def test_a_suspension_during_enqueue_keeps_record(self, db, rpcs, hub, adopt):
+    def test_suspension_during_enqueue_keeps_record(self, db, rpcs, hub, adopt):
         s = _shapes(db)
         real_enqueue = tasks_controller.add_sync_resync_task
 
@@ -577,10 +561,9 @@ class TestMovingLvs:
     member answers (reconcile_lvs_move). Its instances on the site come back
     as non-leaders by main's restart path."""
 
-    @pytest.mark.parametrize("state", [DOWN, FENCING])
     @pytest.mark.parametrize("target", [SITE_A, SITE_B])
-    def test_a_site_owned_moving_lvs_takes_restart_path(self, db, rpcs, hub, adopt, target, state):
-        s = _shapes(db, state)
+    def test_site_owned_moving_lvs_takes_restart_path(self, db, rpcs, hub, adopt, target):
+        s = _shapes(db)
         _update(db, s.a[0], lvs_active_site=ops.lvs_moving_value(target))
         a0, a1 = s.a[0].get_id(), s.a[1].get_id()
 
@@ -597,7 +580,7 @@ class TestMovingLvs:
         assert (cluster.lost_site, cluster.lost_site_state) == ("", "")
 
     @pytest.mark.parametrize("target", [SITE_A, SITE_B])
-    def test_a_b_owned_moving_lvs_takes_restart_path(self, db, rpcs, hub, adopt, target):
+    def test_b_owned_moving_lvs_takes_restart_path(self, db, rpcs, hub, adopt, target):
         """b0 serves from B and is never held: no leader of LVS_2 is built,
         and b0 keeps its status throughout."""
         s = _shapes(db, b0_status="failed")
@@ -622,9 +605,9 @@ class TestBeginRefused:
         cluster = _cluster(db, s)
         assert (cluster.site_activation_site, cluster.site_activation_since) == ("", "")
 
-    @pytest.mark.parametrize("case", ["flag set", "draining", "no record"])
-    def test_a_refused_begin_runs_nothing(self, db, rpcs, hub, adopt, case):
-        s = _shapes(db, {"draining": DRAINING, "no record": ""}.get(case, DOWN))
+    @pytest.mark.parametrize("case", ["flag set", "draining"])
+    def test_refused_begin_runs_nothing(self, db, rpcs, hub, adopt, case):
+        s = _shapes(db, DRAINING if case == "draining" else DOWN)
         other = src.begin_site_activation(s.cid, SITE_A) if case == "flag set" else ""
         bnd = _activate(db, s, expect=ValueError)
         assert bnd.log == []
@@ -686,7 +669,7 @@ def _distinct(db, s, field, count, timeout=10.0):
 
 class TestHeartbeat:
 
-    def test_the_site_heartbeat_advances_while_held(self, db, rpcs, hub, adopt):
+    def test_site_heartbeat_advances_while_held(self, db, rpcs, hub, adopt):
         s = _shapes(db)
         with patch.object(cluster_ops, "ACTIVATION_HEARTBEAT_INTERVAL_SEC", 0.05), \
                 patch.object(monitor, "ACTIVATION_HEARTBEAT_STALE_SEC", 1), \
@@ -697,7 +680,7 @@ class TestHeartbeat:
             assert _cluster(db, s).site_activation_site == SITE_A
         assert held.errors == []
 
-    def test_a_failed_stamp_is_followed_by_a_later_one(self, db, rpcs, hub, adopt):
+    def test_failed_stamp_is_followed_by_later_one(self, db, rpcs, hub, adopt):
         s = _shapes(db)
         real_stamp = src.stamp_site_activation
         failures = [fdb.FDBError(1020)]
@@ -715,7 +698,7 @@ class TestHeartbeat:
             assert failures == [] and stamp.call_count >= 2
         assert held.errors == []
 
-    def test_a_full_activation_stamps_only_its_own(self, db, rpcs, hub, adopt):
+    def test_full_activation_stamps_only_its_own(self, db, rpcs, hub, adopt):
         s = _shapes(db, "")
         _set_cluster(db, s, status=Cluster.STATUS_SUSPENDED,
                      activated_node_ids=sorted(_ids(s.a) + _ids(s.b)))
@@ -745,7 +728,7 @@ def _cancel(db, s, how):
 class TestCancellation:
 
     @pytest.mark.parametrize("how", ["token", "suspended", "newer"])
-    def test_pass2_stops_at_the_next_checkpoint(self, db, rpcs, hub, adopt, how):
+    def test_pass2_stops_at_next_checkpoint(self, db, rpcs, hub, adopt, how):
         s = _shapes(db)
         newer = []
 
@@ -766,7 +749,7 @@ class TestCancellation:
             (SITE_A, newer[0]) if how == "newer" else ("", ""))
 
     @pytest.mark.parametrize("how", ["token", "suspended"])
-    def test_a_worker_behind_the_lock_never_starts(self, db, rpcs, hub, adopt, how):
+    def test_worker_behind_lock_never_starts(self, db, rpcs, hub, adopt, how):
         # Every worker's first LVS takes the restart path, behind one lock.
         # The first one holds it until another worker has passed its own
         # checkpoint, then the ground goes; that worker gets the lock next.
@@ -797,7 +780,7 @@ class TestCancellation:
         assert len(bnd.calls("act", *RESTART_ROUTES)) == 1
         assert _cluster(db, s).site_activation_site == ""
 
-    def test_the_connectivity_wait_stops_on_suspend(self, db, rpcs, hub, adopt):
+    def test_connectivity_wait_stops_on_suspend(self, db, rpcs, hub, adopt):
         s = _shapes(db)
         suspend = lambda node, **kwargs: (_set_cluster(db, s, status=Cluster.STATUS_SUSPENDED), [])[1]  # noqa: E731
         with patch.object(ops, "_connect_to_remote_devs", side_effect=suspend) as repair, \
@@ -808,7 +791,7 @@ class TestCancellation:
         cluster = _cluster(db, s)
         assert (cluster.lost_site, cluster.site_activation_site) == (SITE_A, "")
 
-    def test_the_wait_without_checkpoint_ignores_status(self, db):
+    def test_wait_without_checkpoint_ignores_status(self, db):
         s = _shapes(db)
         suspend = lambda node, **kwargs: (_set_cluster(db, s, status=Cluster.STATUS_SUSPENDED), [])[1]  # noqa: E731
         with patch.object(ops, "_connect_to_remote_devs", side_effect=suspend) as repair, \
@@ -825,7 +808,7 @@ class TestCancellation:
 
 class TestServingLeaderRelease:
 
-    def test_a_failed_local_rebuild_unblocks_the_leader(self, db, rpcs, hub, adopt, env):
+    def test_failed_local_rebuild_unblocks_leader(self, db, rpcs, hub, adopt, env):
         # a2 rebuilds its LVS_4 role behind b2 for real: b2's port is blocked,
         # then the examine on a2 raises.
         s = _shapes(db)
@@ -853,7 +836,7 @@ class TestLeaderRebuildRefusal:
                 patch.object(ops, "_rebuild_leader_off_owner", return_value=True) as off_owner:
             yield own, off_owner
 
-    def test_the_flag_token_admits_a_site_leader(self, db, built):
+    def test_flag_token_admits_site_leader(self, db, built):
         s = _shapes(db)
         token = src.begin_site_activation(s.cid, SITE_A)
         holder = activation_gate.SiteActivation(SITE_A, token)
@@ -862,18 +845,13 @@ class TestLeaderRebuildRefusal:
                                     activation_mode=True, site_activation=holder)
         assert [m.call_count for m in built] == [1, 1]
 
-    def test_activation_mode_alone_is_refused(self, db, built):
-        s = _shapes(db)
-        assert src.begin_site_activation(s.cid, SITE_A)
-        with pytest.raises(ops.LVSLeadershipElsewhereError, match="lost site"):
-            ops.recreate_lvstore(_fresh(db, s.a[0]), activation_mode=True)
-        assert [m.call_count for m in built] == [0, 0]
-
-    @pytest.mark.parametrize("case", ["stale token", "other site", "flag ended"])
-    def test_a_token_not_the_flags_is_refused(self, db, built, case):
+    @pytest.mark.parametrize("case", ["no holder", "stale token", "other site", "flag ended"])
+    def test_token_not_flags_is_refused(self, db, built, case):
+        """``activation_mode`` without the flag's own token is refused."""
         s = _shapes(db)
         token = src.begin_site_activation(s.cid, SITE_A)
-        holder = {"stale token": activation_gate.SiteActivation(SITE_A, "2026-01-01T00:00:00+00:00"),
+        holder = {"no holder": None,
+                  "stale token": activation_gate.SiteActivation(SITE_A, "2026-01-01T00:00:00+00:00"),
                   "other site": activation_gate.SiteActivation(SITE_B, token),
                   "flag ended": activation_gate.SiteActivation(SITE_A, token)}[case]
         if case == "flag ended":
@@ -882,7 +860,7 @@ class TestLeaderRebuildRefusal:
             ops.recreate_lvstore(_fresh(db, s.a[0]), activation_mode=True, site_activation=holder)
         assert [m.call_count for m in built] == [0, 0]
 
-    def test_the_grant_guard_refuses_the_site(self, db):
+    def test_grant_guard_refuses_site(self, db):
         s = _shapes(db)
         assert src.begin_site_activation(s.cid, SITE_A)
         with ops._sync_grant_guard(s.cid, "LVS_1", s.a[0].get_id(), s.a[0].get_id()) as ok:
@@ -895,7 +873,7 @@ class TestLeaderRebuildRefusal:
 
 class TestFullActivation:
 
-    def test_a_suspended_sync_cluster_reactivates(self, db, rpcs, hub, adopt):
+    def test_suspended_sync_cluster_reactivates(self, db, rpcs, hub, adopt):
         s = _shapes(db, "")
         _set_cluster(db, s, status=Cluster.STATUS_SUSPENDED,
                      activated_node_ids=sorted(_ids(s.a) + _ids(s.b)))
@@ -912,32 +890,23 @@ class TestFullActivation:
         assert (cluster.status, cluster.site_activation_site, cluster.site_activation_heartbeat) == (
             Cluster.STATUS_ACTIVE, "", "")
 
-    def test_a_fresh_activation_creates_every_lvstore(self, db, rpcs, hub, adopt):
+    @pytest.mark.parametrize("sync", [pytest.param(True, id="sync"), pytest.param(False, id="non-sync")])
+    def test_fresh_activation_creates_every_lvstore(self, db, rpcs, hub, adopt, sync):
+        """With sync replication: three nodes on each of two sites. Without it:
+        three nodes with no site."""
         cluster = stack._seed_cluster(db, ftt=1)
         cluster.status = Cluster.STATUS_UNREADY
+        cluster.sync_replication = sync
         cluster.write_to_db(db.kv_store)
-        a, b = stack._sites(db, cluster)
+        if sync:
+            a, b = stack._sites(db, cluster)
+        else:
+            a, b = [stack._seed_node(db, cluster, f"n{i}", "") for i in range(3)], []
         s = SimpleNamespace(cid=cluster.get_id(), a=a, b=b)
         bnd = _activate(db, s, site="")
         assert [c.args[1] for c in bnd.set_status.call_args_list] == [
             Cluster.STATUS_IN_ACTIVATION, Cluster.STATUS_ACTIVE]
         assert sorted(e[1] for e in bnd.calls("create")) == sorted(_ids(a) + _ids(b))
-        assert bnd.calls("p1", *RESTART_ROUTES, "event") == []
-        assert bnd.labels.called and bnd.recorded.called
-        assert _cluster(db, s).site_activation_site == ""
-
-    def test_a_fresh_non_sync_activation_creates_all(self, db, rpcs, hub, adopt):
-        cluster = stack._seed_cluster(db, ftt=1)
-        cluster.status = Cluster.STATUS_UNREADY
-        cluster.sync_replication = False
-        cluster.write_to_db(db.kv_store)
-        nodes = [stack._seed_node(db, cluster, f"n{i}", "") for i in range(3)]
-        s = SimpleNamespace(cid=cluster.get_id(), a=nodes, b=[])
-        bnd = _activate(db, s, site="")
-        assert _cluster(db, s).sync_replication is False
-        assert [c.args[1] for c in bnd.set_status.call_args_list] == [
-            Cluster.STATUS_IN_ACTIVATION, Cluster.STATUS_ACTIVE]
-        assert sorted(e[1] for e in bnd.calls("create")) == sorted(_ids(nodes))
         routes = [e[0] for e in bnd.log]
         assert "act" in routes and routes.index("act") > max(
             i for i, r in enumerate(routes) if r == "create")

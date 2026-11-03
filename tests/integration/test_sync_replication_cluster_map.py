@@ -83,6 +83,14 @@ def _layout(db, cluster, **host_fields):
     return a1, host, a3, b1, b2, b3
 
 
+#: A map push to one distrib fails in one of two ways: the RPC raises, or the
+#: client returns None for a JSON-RPC error.
+_FAILURES = [
+    pytest.param(RPCException("first fails"), id="exception"),
+    pytest.param(None, id="rejected"),
+]
+
+
 def _replica_nodes(cl_map):
     return {node_id for node_id, entry in cl_map["map_cluster"].items() if entry.get("replica")}
 
@@ -101,25 +109,21 @@ def _assert_buckets_agree(cl_map):
 
 class TestReplicaFlags:
 
-    def test_other_site_nodes_are_the_replica_zone(self, db):
+    def test_other_site_nodes_are_replica_zone(self, db):
+        """Each map marks the nodes outside its home site as replicas, so the
+        two home sites get opposite flags."""
         cluster = _seed_cluster(db)
         nodes = _layout(db, cluster)
         a1, host, a3, b1, b2, b3 = nodes
-        cl_map = distr_controller.get_distr_cluster_map(list(nodes), host, "d_a", home_site="site-a")
-        assert _replica_nodes(cl_map) == {b1.get_id(), b2.get_id(), b3.get_id()}
-        _assert_buckets_agree(cl_map)
-
-    def test_opposite_home_sites_invert_the_replica_flags(self, db):
-        cluster = _seed_cluster(db)
-        nodes = _layout(db, cluster)
-        host = nodes[1]
         map_a = distr_controller.get_distr_cluster_map(list(nodes), host, "d_a", home_site="site-a")
         map_b = distr_controller.get_distr_cluster_map(list(nodes), host, "d_b", home_site="site-b")
-        every = set(map_a["map_cluster"])
-        assert _replica_nodes(map_b) == every - _replica_nodes(map_a)
+        assert _replica_nodes(map_a) == {b1.get_id(), b2.get_id(), b3.get_id()}
+        assert _replica_nodes(map_b) == {a1.get_id(), host.get_id(), a3.get_id()}
+        assert set(map_a["map_cluster"]) == set(map_b["map_cluster"])
+        _assert_buckets_agree(map_a)
         _assert_buckets_agree(map_b)
 
-    def test_a_sync_map_without_a_home_site_is_refused(self, db):
+    def test_sync_map_without_home_site_is_refused(self, db):
         cluster = _seed_cluster(db)
         nodes = _layout(db, cluster)
         with pytest.raises(distr_controller.DistribHomeSiteError):
@@ -135,21 +139,17 @@ class TestReplicaFlags:
 
 class TestAffinityPerZone:
 
-    def test_replica_zone_target_is_the_replica_preference(self, db):
+    @pytest.mark.parametrize("distrib, home_site, present, absent", [
+        pytest.param("d_b", "site-b", "replica_ppln1", "ppln1", id="replica-zone"),
+        pytest.param("d_a", "site-a", "ppln1", "replica_ppln1", id="primary-zone"),
+    ])
+    def test_target_is_preference_of_its_zone(self, db, distrib, home_site, present, absent):
         cluster = _seed_cluster(db, affinity=True)
         nodes = _layout(db, cluster)
         host = nodes[1]
-        cl_map = distr_controller.get_distr_cluster_map(list(nodes), host, "d_b", home_site="site-b")
-        assert "ppln1" not in cl_map
-        assert list(cl_map["map_cluster"])[cl_map["replica_ppln1"]] == host.get_id()
-
-    def test_primary_zone_target_is_the_primary_preference(self, db):
-        cluster = _seed_cluster(db, affinity=True)
-        nodes = _layout(db, cluster)
-        host = nodes[1]
-        cl_map = distr_controller.get_distr_cluster_map(list(nodes), host, "d_a", home_site="site-a")
-        assert "replica_ppln1" not in cl_map
-        assert list(cl_map["map_cluster"])[cl_map["ppln1"]] == host.get_id()
+        cl_map = distr_controller.get_distr_cluster_map(list(nodes), host, distrib, home_site=home_site)
+        assert absent not in cl_map
+        assert list(cl_map["map_cluster"])[cl_map[present]] == host.get_id()
 
     def test_index_counts_emitted_nodes_only(self, db):
         cluster = _seed_cluster(db, affinity=True)
@@ -160,7 +160,7 @@ class TestAffinityPerZone:
         assert dedicated.get_id() not in cl_map["map_cluster"]
         assert list(cl_map["map_cluster"])[cl_map["ppln1"]] == host.get_id()
 
-    def test_a_target_outside_the_map_gets_no_preference(self, db):
+    def test_target_outside_map_gets_no_preference(self, db):
         cluster = _seed_cluster(db, affinity=True)
         dedicated = _seed_node(db, cluster, "sec", "site-a", is_secondary_node=True)
         nodes = [dedicated, *_layout(db, cluster)]
@@ -174,7 +174,7 @@ class TestAffinityPerZone:
 
 class TestSendersPerDistrib:
 
-    def test_full_map_goes_to_every_distrib_with_its_own_zones(self, db, rpcs):
+    def test_full_map_goes_to_each_distrib_with_own_zones(self, db, rpcs):
         cluster = _seed_cluster(db)
         a1, host, a3, b1, b2, b3 = _layout(db, cluster)
         assert distr_controller.send_cluster_map_to_node(host) is True
@@ -183,23 +183,20 @@ class TestSendersPerDistrib:
         assert _replica_nodes(sent["d_a"]) == {b1.get_id(), b2.get_id(), b3.get_id()}
         assert _replica_nodes(sent["d_b"]) == {a1.get_id(), host.get_id(), a3.get_id()}
 
-    def test_a_failed_distrib_does_not_stop_the_others(self, db, rpcs):
+    @pytest.mark.parametrize("failure", _FAILURES)
+    def test_failed_distrib_does_not_stop_others(self, db, rpcs, failure):
         cluster = _seed_cluster(db)
         host = _layout(db, cluster)[1]
         rpc = rpcs.setdefault(host.get_id(), MagicMock())
-        rpc.distr_send_cluster_map.side_effect = [RPCException("first fails"), True]
+        rpc.distr_send_cluster_map.side_effect = [failure, True]
         assert distr_controller.send_cluster_map_to_node(host) is False
         assert rpc.distr_send_cluster_map.call_count == 2
 
-    def test_a_rejected_distrib_map_counts_as_failed(self, db, rpcs):
+    def test_rejected_distrib_map_counts_as_failed(self, db, rpcs):
         # the RPC client hands a JSON-RPC error back as None, not as an exception
         cluster = _seed_cluster(db)
         host = _layout(db, cluster)[1]
         rpc = rpcs.setdefault(host.get_id(), MagicMock())
-        rpc.distr_send_cluster_map.side_effect = [None, True]
-        assert distr_controller.send_cluster_map_to_node(host) is False
-        assert rpc.distr_send_cluster_map.call_count == 2
-        rpc.distr_send_cluster_map.side_effect = None
         rpc.distr_send_cluster_map.return_value = None
         assert distr_controller.send_cluster_map_to_distr(host, "d_a") is False
 
@@ -223,25 +220,24 @@ class TestSendersPerDistrib:
         assert "replica" not in calls["d_b"]["map_cluster"][new.get_id()]
         assert "replica" not in calls["d_b"]["map_prob"][0]
 
-    def test_added_node_failure_on_one_distrib(self, db, rpcs):
+    @pytest.mark.parametrize("failure", _FAILURES)
+    def test_added_node_failure_on_one_distrib(self, db, rpcs, failure):
         cluster = _seed_cluster(db)
         host = _layout(db, cluster)[1]
         new = _seed_node(db, cluster, "b4", "site-b")
         rpc = rpcs.setdefault(host.get_id(), MagicMock())
-        rpc.distr_add_nodes.side_effect = [RPCException("first fails"), True]
+        rpc.distr_add_nodes.side_effect = [failure, True]
         assert distr_controller.send_cluster_map_add_node(new, host) is False
         assert rpc.distr_add_nodes.call_count == 2
 
-    def test_a_rejected_add_counts_as_failed(self, db, rpcs):
+    def test_rejected_add_device_counts_as_failed(self, db, rpcs):
         cluster = _seed_cluster(db)
         host = _layout(db, cluster)[1]
         new = _seed_node(db, cluster, "b4", "site-b")
         rpc = rpcs.setdefault(host.get_id(), MagicMock())
-        rpc.distr_add_nodes.side_effect = [None, True]
         rpc.distr_add_devices.side_effect = [True, None]
-        assert distr_controller.send_cluster_map_add_node(new, host) is False
         assert distr_controller.send_cluster_map_add_device(new.nvme_devices[0], host) is False
-        assert rpc.distr_add_nodes.call_count == 2 and rpc.distr_add_devices.call_count == 2
+        assert rpc.distr_add_devices.call_count == 2
 
     def test_added_device_is_sent_per_distrib(self, db, rpcs):
         cluster = _seed_cluster(db)
@@ -256,7 +252,7 @@ class TestSendersPerDistrib:
 
 class TestNonSyncSendersUnchanged:
 
-    def test_one_broadcast_without_a_name(self, db, rpcs):
+    def test_one_broadcast_without_name(self, db, rpcs):
         cluster = _seed_cluster(db, sync=False)
         nodes = [_seed_node(db, cluster, f"n{i}", "", distribs=[f"d_{i}"]) for i in range(3)]
         target, new = nodes[0], nodes[1]

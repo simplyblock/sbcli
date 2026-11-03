@@ -218,7 +218,7 @@ class TestDataPlaneDisconnectedPredicates(unittest.TestCase):
         self.assertFalse(absolute)
         self.assertFalse(quorum)
 
-    def test_fresh_takes_the_votes_now_and_refreshes_the_cache(self):
+    def test_fresh_takes_votes_now_and_refreshes_cache(self):
         from simplyblock_core.services import storage_node_monitor as mod
         target = _target()
         for predicate, expected in ((mod.is_node_data_plane_disconnected, False),

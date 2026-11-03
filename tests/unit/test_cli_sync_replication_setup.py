@@ -6,6 +6,8 @@ defaults it fills in for developer-only arguments, is the real one.
 import sys
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from simplyblock_cli import cli as cli_module
 from simplyblock_cli import clibase
 
@@ -36,31 +38,23 @@ def _add_node_call(argv):
     return ops.add_node.call_args
 
 
-def test_cluster_create_forwards_sync_replication():
-    call = _cluster_call("create", ["--ha-type", "ha", "--sync-replication"])
-    assert call.kwargs["sync_replication"] is True
+@pytest.mark.parametrize("subcommand, argv, expected", [
+    pytest.param("create", ["--ha-type", "ha", "--sync-replication"], True,
+                 id="cluster_create_forwards_sync_replication"),
+    pytest.param("create", ["--ha-type", "ha"], False, id="cluster_create_defaults_to_no_sync_replication"),
+    pytest.param("add", ["--ha-type", "ha", "--sync-replication"], True,
+                 id="cluster_add_forwards_sync_replication"),
+    pytest.param("add", ["--ha-type", "ha"], False, id="cluster_add_defaults_to_no_sync_replication"),
+])
+def test_cluster_sync_replication_flag(subcommand, argv, expected):
+    call = _cluster_call(subcommand, argv)
+    assert call.kwargs["sync_replication"] is expected
 
 
-def test_cluster_create_defaults_to_no_sync_replication():
-    call = _cluster_call("create", ["--ha-type", "ha"])
-    assert call.kwargs["sync_replication"] is False
-
-
-def test_cluster_add_forwards_sync_replication():
-    call = _cluster_call("add", ["--ha-type", "ha", "--sync-replication"])
-    assert call.kwargs["sync_replication"] is True
-
-
-def test_cluster_add_defaults_to_no_sync_replication():
-    call = _cluster_call("add", ["--ha-type", "ha"])
-    assert call.kwargs["sync_replication"] is False
-
-
-def test_add_node_forwards_site():
-    call = _add_node_call(["--site", "site-a"])
-    assert call.kwargs["site"] == "site-a"
-
-
-def test_add_node_without_site_passes_none():
-    call = _add_node_call([])
-    assert call.kwargs["site"] is None
+@pytest.mark.parametrize("argv, expected", [
+    pytest.param(["--site", "site-a"], "site-a", id="add_node_forwards_site"),
+    pytest.param([], None, id="add_node_without_site_passes_none"),
+])
+def test_add_node_site(argv, expected):
+    call = _add_node_call(argv)
+    assert call.kwargs["site"] == expected

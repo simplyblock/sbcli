@@ -34,7 +34,7 @@ def test_owners_include_own_local_and_remote_roles():
     assert [n.get_id() for n in distr_controller.lvs_owners_on_node(x, nodes)] == ["b1"]
 
 
-def test_a_node_with_no_stack_owns_nothing():
+def test_node_with_no_stack_owns_nothing():
     lone = _node("lone", "a")
     assert distr_controller.lvs_owners_on_node(lone, [lone]) == []
 
@@ -47,7 +47,7 @@ def test_missing_and_removed_owners_are_skipped(caplog):
     assert "ghost" in caplog.text
 
 
-def test_distribs_carry_the_home_site_of_their_owner():
+def test_distribs_carry_home_site_of_their_owner():
     a1 = _node("a1", "a", distribs=["d_a1_1", "d_a1_2"], remote=("", "b2", ""))
     b1 = _node("b1", "b", distribs=["d_b1"])
     b2 = _node("b2", "b", distribs=["d_b2"], secondary_of="b1")

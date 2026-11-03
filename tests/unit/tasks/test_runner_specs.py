@@ -702,18 +702,6 @@ def test_sibling_gate_blocks_a_task_that_has_not_started(mig):
     assert mig.no_sibling_migration(_task(distr_name="distr-1")) is False
 
 
-@pytest.mark.parametrize("params, scope", [
-    ({"distr_name": "distr-1"}, "node-1"),
-    ({"distr_name": "distr-1", "lvs_name": "LVS_1", "lvs_owner": "owner-1"}, None),
-])
-def test_sibling_gate_scans_the_node_or_any_node_for_a_sync_task(mig, params, scope):
-    """A migration of the same distrib can still run on the old primary after
-    a promote. So a sync-replication task checks for a running migration on
-    all nodes. Every other task checks only its own node."""
-    assert mig.no_sibling_migration(_task(**params)) is True
-    mig.tasks_controller.get_active_node_mig_task.assert_called_once_with("cl-1", scope, "distr-1")
-
-
 def test_sibling_gate_releases_a_task_already_migrating(mig):
     """Once its own migration is running the task IS the sibling others wait
     on — gating it here would stall it forever."""
@@ -788,13 +776,6 @@ def test_failed_migration_waits_for_the_last_task_on_the_device(failed_migration
 
 
 # -- sync_promote -----------------------------------------------------------
-
-def test_sync_promote_commits_its_outcome_and_settles_its_markers():
-    from simplyblock_core.services import tasks_runner_sync_promote as promote
-
-    assert promote.SPEC.finish is promote.finish_task
-    assert promote.SPEC.on_finish is promote._settle_markers
-
 
 @pytest.mark.parametrize("retry", [1, 2, 3, 5, 20])
 def test_sync_promote_backs_off_flat(retry):

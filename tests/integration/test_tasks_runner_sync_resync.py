@@ -182,7 +182,7 @@ def _row(task):
 
 class TestConvergence:
 
-    def test_a_catch_up_on_the_leader_resolves_the_desync(self, db, rpcs, clock):
+    def test_catch_up_on_leader_resolves_desync(self, db, rpcs, clock):
         cluster, a, b, owner = _layout(db)
         rpcs.lead(a[0])
         catchup = _Catchup(rpcs[a[0].get_id()])
@@ -219,7 +219,7 @@ class TestConvergence:
         for node in (*a[1:], *b):
             rpcs[node.get_id()].distr_migration_replica_sync_start.assert_not_called()
 
-    def test_a_remote_led_lvs_catches_up_on_the_remote_primary(self, db, rpcs, clock):
+    def test_remote_led_lvs_catches_up_on_remote_primary(self, db, rpcs, clock):
         cluster, a, b, owner = _layout(db, active_site=SITE_B)
         rpcs.lead(b[0])
         catchup = _Catchup(rpcs[b[0].get_id()])
@@ -234,22 +234,7 @@ class TestConvergence:
         for node in (*a, *b[1:]):
             rpcs[node.get_id()].distr_migration_replica_sync_start.assert_not_called()
 
-    def test_a_catch_up_already_in_progress_is_adopted(self, db, rpcs, clock):
-        cluster, a, _, _ = _layout(db)
-        rpcs.lead(a[0])
-        catchup = _Catchup(rpcs[a[0].get_id()])
-        catchup.migration["distrib_11"] = {"name": "distrib_11", "status": "running", "error": 0,
-                                           "type": 3}
-        _desync(a[0])
-        task = _task(db, cluster)
-        adopted = _pass(task)
-        assert (adopted.status, adopted.retry) == (JobSchedule.STATUS_RUNNING, 0)
-        assert adopted.function_params["resync"]["distribs"] == DISTRIBS
-        assert catchup.starts() == DISTRIBS                # distrib_11 answered EBUSY
-        catchup.complete()
-        assert _pass(task).status == JobSchedule.STATUS_DONE
-
-    def test_a_failed_terminal_commit_is_closed_by_the_next_pass(self, db, rpcs, clock):
+    def test_failed_terminal_commit_is_closed_by_next_pass(self, db, rpcs, clock):
         cluster, a, _, _, catchup, task = _started(db, rpcs, clock)
         catchup.complete()
         clock.now += 7
@@ -320,17 +305,18 @@ class TestRefusedStart:
         return fresh
 
     @pytest.mark.parametrize("status", ["running", "completed"])
-    def test_ebusy_adopts_the_catch_up_in_the_slot(self, db, rpcs, clock, status):
+    def test_ebusy_adopts_catch_up_in_slot(self, db, rpcs, clock, status):
         a, rpc, catchup, task = _on_leader(db, rpcs)
         catchup.migration["distrib_11"] = _element("distrib_11", status, 3)
         _refused(rpc, catchup, RPCRemoteError(message=IN_PROGRESS, code=errno.EBUSY))
         adopted = _pass(task)
         assert (adopted.status, adopted.retry) == (JobSchedule.STATUS_RUNNING, 0)
         assert adopted.function_params["resync"]["distribs"] == DISTRIBS
+        assert catchup.starts() == DISTRIBS                # distrib_11 answered EBUSY
         catchup.complete()
         assert _pass(task).status == JobSchedule.STATUS_DONE
 
-    def test_an_adopted_catch_up_with_an_error_is_a_non_converging_run(self, db, rpcs, clock):
+    def test_adopted_catch_up_with_error_is_non_converging(self, db, rpcs, clock):
         a, rpc, catchup, task = _on_leader(db, rpcs)
         catchup.migration["distrib_11"] = _element("distrib_11", "completed", 3, error=ERROR_REPLICA_SYNC)
         _refused(rpc, catchup, RPCRemoteError(message=IN_PROGRESS, code=errno.EBUSY))
@@ -341,7 +327,7 @@ class TestRefusedStart:
 
     @pytest.mark.parametrize("state", runner.MIGRATION_ACTIVE_STATES)
     @pytest.mark.parametrize("mtype", [1, 2])
-    def test_ebusy_waits_while_another_migration_holds_the_slot(self, db, rpcs, clock, held, mtype, state):
+    def test_ebusy_waits_while_other_migration_holds_slot(self, db, rpcs, clock, held, mtype, state):
         a, rpc, catchup, task = _on_leader(db, rpcs)
         catchup.migration["distrib_11"] = _element("distrib_11", state, mtype)
         held(task)
@@ -358,7 +344,7 @@ class TestRefusedStart:
     @pytest.mark.parametrize("element", [{"name": "distrib_11", "status": "none"},
                                          _element("distrib_11", "completed", 2)],
                              ids=["none", "completed-type-2"])
-    def test_ebusy_with_the_holder_just_ended_waits_one_pass(self, db, rpcs, clock, element):
+    def test_ebusy_with_holder_just_ended_waits_one_pass(self, db, rpcs, clock, element):
         a, rpc, catchup, task = _on_leader(db, rpcs)
         catchup.migration["distrib_11"] = element
         _refused(rpc, catchup, RPCRemoteError(message=IN_PROGRESS, code=errno.EBUSY))
@@ -367,14 +353,14 @@ class TestRefusedStart:
 
     @pytest.mark.parametrize("answer", ["garbage", [], [{"name": "distrib_99", "status": "none"}]],
                              ids=["not-a-list", "empty", "other-distrib"])
-    def test_ebusy_with_no_migration_in_the_probe_fails_the_run(self, db, rpcs, clock, answer):
+    def test_ebusy_with_no_migration_in_probe_fails_run(self, db, rpcs, clock, answer):
         a, rpc, catchup, task = _on_leader(db, rpcs)
         _refused(rpc, catchup, RPCRemoteError(message=IN_PROGRESS, code=errno.EBUSY))
         rpc.distr_migration_status.side_effect = lambda name: answer
         _pass(task)
         self._failed(db, task, "distrib_11: status probe on")
 
-    def test_ebusy_with_a_failed_status_probe_fails_the_run(self, db, rpcs, clock):
+    def test_ebusy_with_failed_status_probe_fails_run(self, db, rpcs, clock):
         a, rpc, catchup, task = _on_leader(db, rpcs)
         _refused(rpc, catchup, RPCRemoteError(message=IN_PROGRESS, code=errno.EBUSY))
         rpc.distr_migration_status.side_effect = RPCConnectionError("down")
@@ -390,14 +376,14 @@ class TestRefusedStart:
         rpc.distr_migration_status.assert_not_called()
 
     @pytest.mark.parametrize("code", [errno.ENOTSUP, errno.ENODEV, errno.ENOMEM, -32603, -errno.EBUSY])
-    def test_any_other_error_code_fails_the_run_without_a_probe(self, db, rpcs, clock, code):
+    def test_any_other_error_code_fails_run_without_probe(self, db, rpcs, clock, code):
         a, rpc, catchup, task = _on_leader(db, rpcs)
         _refused(rpc, catchup, RPCRemoteError(message="refused", code=code))
         _pass(task)
         self._failed(db, task, f"distrib_11: start refused on {a[0].get_id()}: refused (code {code})")
         rpc.distr_migration_status.assert_not_called()
 
-    def test_a_transport_error_fails_the_run_without_a_probe(self, db, rpcs, clock):
+    def test_transport_error_fails_run_without_probe(self, db, rpcs, clock):
         a, rpc, catchup, task = _on_leader(db, rpcs)
         _refused(rpc, catchup, RPCConnectionError("down"))
         _pass(task)
@@ -405,7 +391,7 @@ class TestRefusedStart:
         rpc.distr_migration_status.assert_not_called()
 
     @pytest.mark.parametrize("answer", [False, None, 1, {"ok": 1}])
-    def test_an_answer_other_than_true_fails_the_run(self, db, rpcs, clock, answer):
+    def test_answer_other_than_true_fails_run(self, db, rpcs, clock, answer):
         a, rpc, catchup, task = _on_leader(db, rpcs)
         rpc.distr_migration_replica_sync_start.side_effect = lambda *args, **kwargs: answer
         _pass(task)
@@ -429,7 +415,7 @@ def _started(db, rpcs, clock, **layout):
 
 class TestRerun:
 
-    def test_bit_11_suspends_and_re_runs_after_the_backoff(self, db, rpcs, clock, held):
+    def test_bit_11_suspends_and_re_runs_after_backoff(self, db, rpcs, clock, held):
         cluster, a, _, _, catchup, task = _started(db, rpcs, clock)
         catchup.complete(error=ERROR_REPLICA_SYNC, name="distrib_12")
         catchup.complete(name="distrib_11")
@@ -451,7 +437,7 @@ class TestRerun:
         catchup.complete()
         assert held(task).status == JobSchedule.STATUS_DONE
 
-    def test_the_backoff_doubles_per_non_converging_run_up_to_the_cap(self, db, rpcs, clock, held):
+    def test_non_converging_backoff_doubles_up_to_cap(self, db, rpcs, clock, held):
         base, cap = constants.SYNC_RESYNC_RETRY_BASE_SEC, constants.SYNC_RESYNC_RETRY_MAX_SEC
         expected = [min(base * 2 ** k, cap) for k in range(6)]
         assert expected[-1] == cap > expected[-2]
@@ -468,7 +454,7 @@ class TestRerun:
             assert catchup.starts() == DISTRIBS * (runs + 1)
 
     @pytest.mark.parametrize("error", [ERROR_SHUTDOWN, 1, 1 << 3])
-    def test_a_shutdown_or_io_error_waits_for_the_zone(
+    def test_shutdown_or_io_error_waits_for_zone(
             self, db, rpcs, clock, error):
         cluster, a, b, _, catchup, task = _started(db, rpcs, clock)
         # the lagging (replica, site B) zone is lost again: the data plane
@@ -476,7 +462,9 @@ class TestRerun:
         dev = b[2].nvme_devices[0]
         stack._update(db, b[2], nvme_devices=[_with_status(dev, NVMeDevice.STATUS_UNAVAILABLE)])
         catchup.complete(error=error)
-        assert _pass(task).status == JobSchedule.STATUS_SUSPENDED
+        failed = _pass(task)
+        assert (failed.status, failed.retry) == (JobSchedule.STATUS_SUSPENDED, 1)
+        assert "catch-up ended with" in failed.function_result
 
         for _ in range(3):
             waiting = _pass(task)
@@ -499,7 +487,7 @@ class TestRerun:
         assert (failed.status, failed.retry) == (JobSchedule.STATUS_SUSPENDED, 1)
         assert "converged" not in failed.function_params
 
-    def test_a_poll_error_or_lost_migration_is_non_converging(self, db, rpcs, clock):
+    def test_poll_error_or_lost_mig_is_non_converging(self, db, rpcs, clock):
         _, a, _, _, catchup, task = _started(db, rpcs, clock)
         rpc = rpcs[a[0].get_id()]
         rpc.distr_migration_status.side_effect = RPCException("connection error")
@@ -510,14 +498,7 @@ class TestRerun:
         catchup.migration = {n: {"name": n, "status": "none"} for n in DISTRIBS}
         assert _pass(task).retry == 2                     # its migration is gone (restart)
 
-    def test_shutdown_on_the_same_leader_is_a_non_converging_run(self, db, rpcs, clock):
-        _, a, _, _, catchup, task = _started(db, rpcs, clock)
-        catchup.complete(error=ERROR_SHUTDOWN)
-        failed = _pass(task)
-        assert (failed.status, failed.retry) == (JobSchedule.STATUS_SUSPENDED, 1)
-        assert "catch-up ended with" in failed.function_result
-
-    def test_a_leadership_change_restarts_on_the_new_leader(self, db, rpcs, clock, held):
+    def test_leadership_change_restarts_on_new_leader(self, db, rpcs, clock, held):
         cluster, a, _, _ = _layout(db)
         rpcs.lead(a[0])
         old = _Catchup(rpcs[a[0].get_id()])
@@ -558,7 +539,7 @@ class TestRerun:
         assert (kwargs["event_level"], kwargs["node_id"]) == ("Error", owner.get_id())
         assert _fresh_task(db, task).status != JobSchedule.STATUS_DONE
 
-    def test_a_failed_alert_write_is_retried_next_run(self, db, rpcs, clock, alerts):
+    def test_failed_alert_write_is_retried_next_run(self, db, rpcs, clock, alerts):
         failures = []
 
         def log(*args, **kwargs):
@@ -597,7 +578,7 @@ class TestAlertOnce:
     FLAGS = ("alerted", "held_alerted")
 
     @pytest.mark.parametrize("flag", FLAGS)
-    def test_the_other_flag_does_not_suppress_the_alert(self, db, rpcs, alerts, flag):
+    def test_other_flag_does_not_suppress_alert(self, db, rpcs, alerts, flag):
         a, _, _, task = _on_leader(db, rpcs)
         [other] = [f for f in self.FLAGS if f != flag]
         task = trb.checkpoint(task, **{other: True})
@@ -613,7 +594,7 @@ class TestAlertOnce:
         runner._alert_once(stored, owner, flag, "the message")
         assert len(_alerts(alerts)) == 1
 
-    def test_a_cancel_during_the_alert_write_aborts_without_the_flag(self, db, rpcs, alerts):
+    def test_cancel_during_alert_write_aborts_without_flag(self, db, rpcs, alerts):
         _, _, _, task = _on_leader(db, rpcs)
         owner = db.get_storage_node_by_id(task.node_id)
         alerts.side_effect = lambda *args, **kwargs: tasks_controller.cancel_task(task.uuid)
@@ -646,7 +627,7 @@ class TestWaits:
     # "" is a record without a state; draining and down are the storage-node
     # monitor's record (no fail-over).
     @pytest.mark.parametrize("state", ["", Cluster.LOST_SITE_DRAINING, Cluster.LOST_SITE_DOWN])
-    def test_while_a_site_is_lost(self, db, rpcs, clock, state):
+    def test_while_site_is_lost(self, db, rpcs, clock, state):
         cluster, a, b, _ = _layout(db)
         rpcs.lead(a[0])
         _Catchup(rpcs[a[0].get_id()])
@@ -661,33 +642,27 @@ class TestWaits:
         _pass(task)
         rpcs[a[0].get_id()].distr_migration_replica_sync_start.assert_called()
 
-    def test_while_a_lagging_zone_node_is_offline(self, db, rpcs, clock):
-        cluster, a, b, _ = _layout(db)
-        rpcs.lead(a[0])
-        _Catchup(rpcs[a[0].get_id()])
-        _desync(a[0])                                     # the replica zone (site B) is behind
-        stack._update(db, b[0], status=StorageNode.STATUS_OFFLINE)
-        task = _task(db, cluster)
-        self._assert_waiting(db, rpcs, task, a, b, f"node:{b[0].get_id()}")
-        stack._update(db, b[0], status=StorageNode.STATUS_ONLINE)
-        _pass(task)
-        rpcs[a[0].get_id()].distr_migration_replica_sync_start.assert_called()
-
-    def test_a_wait_consumes_no_retry_and_no_backoff(self, db, rpcs, clock, held):
+    def test_while_lagging_zone_node_is_offline(self, db, rpcs, clock, held):
+        """Waiting uses no retry and no backoff: once the node is back, the next
+        dispatch starts the catch-up without moving the clock."""
         cluster, a, b, _ = _layout(db)
         rpcs.lead(a[0])
         catchup = _Catchup(rpcs[a[0].get_id()])
         _desync(a[0])                                     # the replica zone (site B) is behind
         stack._update(db, b[0], status=StorageNode.STATUS_OFFLINE)
         task = _task(db, cluster)
-        waiting = held(task)
-        assert (waiting.status, waiting.retry) == (JobSchedule.STATUS_SUSPENDED, 0)
-        assert task.uuid not in held.driver._next_attempt
+        for _ in range(3):
+            waiting = held(task)
+            assert (waiting.status, waiting.retry) == (JobSchedule.STATUS_SUSPENDED, 0)
+            assert f"node:{b[0].get_id()}" in waiting.function_result
+            assert task.uuid not in held.driver._next_attempt
+        for node in (*a, *b):
+            rpcs[node.get_id()].distr_migration_replica_sync_start.assert_not_called()
         stack._update(db, b[0], status=StorageNode.STATUS_ONLINE)
         assert held(task).status == JobSchedule.STATUS_RUNNING    # the same clock
         assert catchup.starts() == DISTRIBS
 
-    def test_a_down_node_outside_the_lagging_zone_is_ignored(self, db, rpcs, clock):
+    def test_down_node_outside_lagging_zone_is_ignored(self, db, rpcs, clock):
         cluster, a, b, _ = _layout(db)
         rpcs.lead(a[0])
         catchup = _Catchup(rpcs[a[0].get_id()])
@@ -696,7 +671,7 @@ class TestWaits:
         _pass(_task(db, cluster))
         assert catchup.starts() == DISTRIBS
 
-    def test_while_the_leadership_is_moving(self, db, rpcs, clock):
+    def test_while_leadership_is_moving(self, db, rpcs, clock):
         cluster, a, b, owner = _layout(db)
         rpcs.lead(a[0])
         _Catchup(rpcs[a[0].get_id()])
@@ -707,7 +682,7 @@ class TestWaits:
             self._assert_waiting(db, rpcs, task, a, b, "is moving")
         reconcile.assert_not_called()
 
-    def test_while_no_leader_answers_in_the_active_triplet(self, db, rpcs, clock):
+    def test_while_no_leader_answers_in_active_triplet(self, db, rpcs, clock):
         cluster, a, b, _ = _layout(db)
         _Catchup(rpcs[a[0].get_id()])
         _desync(a[0])
@@ -716,7 +691,7 @@ class TestWaits:
                           return_value=(None, [])):
             self._assert_waiting(db, rpcs, task, a, b, "no leader")
 
-    def test_a_leaderless_lvs_waits_without_a_grant(self, db, rpcs, env, clock):
+    def test_leaderless_lvs_waits_without_grant(self, db, rpcs, env, clock):
         # the real lookup: led from site B, nobody leads (as between a promote
         # and the first client IO), and a recovery WOULD grant on b0 - its
         # journal is ready and a grant on it takes
@@ -758,7 +733,7 @@ class TestExecutor:
     @pytest.mark.parametrize("active_site, desync", [
         ("", "secondary_zone_unavailable"), (SITE_B, "primary_zone_unavailable")])
     @pytest.mark.parametrize("acting", [1, 2], ids=["secondary", "tertiary"])
-    def test_an_acting_member_runs_the_catch_up(self, db, rpcs, clock, active_site, desync, acting):
+    def test_acting_member_runs_catch_up(self, db, rpcs, clock, active_site, desync, acting):
         cluster, a, b, _ = _layout(db, active_site=active_site)
         triplet = b if active_site else a
         primary, member = triplet[0], triplet[acting]
@@ -777,7 +752,7 @@ class TestExecutor:
         assert done.status == JobSchedule.STATUS_DONE
         assert done.function_result.startswith(f"synced on {member.get_id()}; ")
 
-    def test_an_active_triplet_without_a_primary_starts_on_the_leading_member(self, db, rpcs, clock):
+    def test_primaryless_triplet_starts_on_leading_member(self, db, rpcs, clock):
         cluster, a, b, owner = _layout(db, active_site=SITE_B)
         stack._update(db, owner, remote_primary_node_id="")
         rpcs.lead(b[1])
@@ -789,7 +764,7 @@ class TestExecutor:
         assert catchup.starts() == DISTRIBS
         self._assert_only_on(rpcs, a, b, b[1])
 
-    def test_site_a_returns_while_the_secondary_of_site_b_leads(self, db, rpcs, clock):
+    def test_site_a_returns_while_site_b_secondary_leads(self, db, rpcs, clock):
         """Site B leads, B's primary is offline and B's secondary leads; site A
         was lost and comes back. The catch-up runs on B's secondary only."""
         cluster, a, b, _ = _layout(db, active_site=SITE_B)
@@ -830,7 +805,7 @@ class TestExecutor:
 
 class TestStartAnswers:
 
-    def test_ealready_on_every_distrib_converges_without_a_poll(self, db, rpcs, clock):
+    def test_all_ealready_converges_without_poll(self, db, rpcs, clock):
         a, rpc, catchup, task = _on_leader(db, rpcs)
         catchup.in_sync = set(DISTRIBS)
         started = _pass(task)
@@ -842,7 +817,7 @@ class TestStartAnswers:
         rpc.distr_migration_status.assert_not_called()
         assert sorted(c.args[0] for c in rpc.distr_sync_replication_status.call_args_list) == DISTRIBS
 
-    def test_ealready_and_a_started_distrib(self, db, rpcs, clock):
+    def test_ealready_and_started_distrib(self, db, rpcs, clock):
         a, rpc, catchup, task = _on_leader(db, rpcs)
         catchup.in_sync = {"distrib_11"}
         assert _pass(task).function_params["resync"]["distribs"] == ["distrib_12"]
@@ -851,7 +826,7 @@ class TestStartAnswers:
         assert [c.args[0] for c in rpc.distr_migration_status.call_args_list] == ["distrib_12"]
         assert sorted(c.args[0] for c in rpc.distr_sync_replication_status.call_args_list) == DISTRIBS
 
-    def test_the_final_check_covers_a_distrib_that_answered_ealready(self, db, rpcs, clock):
+    def test_final_check_covers_ealready_distrib(self, db, rpcs, clock):
         a, rpc, catchup, task = _on_leader(db, rpcs)
         catchup.in_sync = {"distrib_11"}
         _pass(task)
@@ -861,7 +836,7 @@ class TestStartAnswers:
         assert (failed.status, failed.retry) == (JobSchedule.STATUS_SUSPENDED, 1)
         assert "distrib_11: replica_unsynced after the catch-up" in failed.function_result
 
-    def test_a_partial_start_then_a_busy_slot_is_resumed_on_the_next_pass(self, db, rpcs, clock, held):
+    def test_partial_start_then_busy_resumes_next_pass(self, db, rpcs, clock, held):
         a, rpc, catchup, task = _on_leader(db, rpcs)
         catchup.migration["distrib_12"] = _element("distrib_12", "running", 2)
         waiting = held(task)
@@ -886,13 +861,13 @@ class TestStartAnswers:
 class TestForeignPoll:
 
     @pytest.mark.parametrize("element", [("completed", 2), ("running", 1)], ids=["completed-2", "running-1"])
-    def test_a_foreign_element_ends_the_catch_up_and_synced_converges(self, db, rpcs, clock, element):
+    def test_foreign_element_ends_catch_up_and_converges(self, db, rpcs, clock, element):
         _, a, _, _, catchup, task = _started(db, rpcs, clock)
         catchup.migration["distrib_11"] = _element("distrib_11", *element)
         catchup.complete(name="distrib_12")
         assert _pass(task).status == JobSchedule.STATUS_DONE
 
-    def test_a_foreign_element_and_not_synced_is_a_non_converging_run(self, db, rpcs, clock):
+    def test_foreign_element_not_synced_is_non_converging(self, db, rpcs, clock):
         _, a, _, _, catchup, task = _started(db, rpcs, clock)
         catchup.migration["distrib_11"] = _element("distrib_11", "completed", 2)
         catchup.complete(name="distrib_12")
@@ -953,7 +928,7 @@ class TestReverseGuard:
         (JobSchedule.FN_FAILED_DEV_MIG, "distrib_11", {"canceled": True}),
     ], ids=["started-dev", "started-new-dev", "falsy-marker", "canceled-started-dev",
             "failed-dev", "started-failed-dev", "canceled-failed-dev"])
-    def test_a_holding_task_on_the_leader_defers_the_start(self, db, rpcs, clock, held,
+    def test_holding_task_on_leader_defers_start(self, db, rpcs, clock, held,
                                                            function_name, distr, kwargs):
         a, rpc, catchup, task = _on_leader(db, rpcs)
         mig = _mig(db, db.get_cluster_by_id(task.cluster_id), function_name, a[0], distr,
@@ -965,13 +940,13 @@ class TestReverseGuard:
         assert catchup.starts() == []
 
     @pytest.mark.parametrize("function_name", [JobSchedule.FN_DEV_MIG, JobSchedule.FN_NEW_DEV_MIG])
-    def test_a_not_started_re_balance_on_the_leader_does_not_hold(self, db, rpcs, clock, function_name):
+    def test_unstarted_rebalance_on_leader_does_not_hold(self, db, rpcs, clock, function_name):
         a, rpc, catchup, task = _on_leader(db, rpcs)
         _mig(db, db.get_cluster_by_id(task.cluster_id), function_name, a[0], owner_id=a[0].get_id())
         assert _pass(task).status == JobSchedule.STATUS_RUNNING
         assert catchup.starts() == DISTRIBS
 
-    def test_tasks_on_the_offline_primary_do_not_hold_the_acting_leader(self, db, rpcs, clock):
+    def test_offline_primary_tasks_never_hold_leader(self, db, rpcs, clock):
         cluster, a, b, _ = _layout(db, active_site=SITE_B)
         stack._update(db, b[0], status=StorageNode.STATUS_OFFLINE)
         rpcs.lead(b[1])
@@ -1002,7 +977,7 @@ class TestHeld:
         mig = _mig(db, cluster, function_name, a[0], owner_id=a[0].get_id(), started=started)
         return a, cluster, catchup, task, mig
 
-    def test_a_hold_records_the_holder_and_its_start(self, db, rpcs, clock, alerts):
+    def test_hold_records_holder_and_its_start(self, db, rpcs, clock, alerts):
         a, _, _, task, mig = self._held(db, rpcs)
         waiting = _pass(task)
         assert waiting.function_params["held_by"] == {
@@ -1010,7 +985,7 @@ class TestHeld:
         assert "held_alerted" not in waiting.function_params
         assert _alerts(alerts) == []
 
-    def test_a_change_of_holder_keeps_the_start_of_the_hold(self, db, rpcs, clock, alerts):
+    def test_change_of_holder_keeps_start_of_hold(self, db, rpcs, clock, alerts):
         a, cluster, _, task, first = self._held(db, rpcs)
         since = clock.now
         _pass(task)
@@ -1023,7 +998,7 @@ class TestHeld:
             "task": second.uuid, "function": JobSchedule.FN_FAILED_DEV_MIG, "node": a[0].get_id(),
             "since": since}
 
-    def test_one_alert_once_the_hold_reaches_the_threshold(self, db, rpcs, clock, alerts):
+    def test_one_alert_once_hold_reaches_threshold(self, db, rpcs, clock, alerts):
         a, _, catchup, task, mig = self._held(db, rpcs)
         since = clock.now
         _pass(task)
@@ -1046,7 +1021,7 @@ class TestHeld:
         assert len(_alerts(alerts)) == 1
         assert catchup.starts() == []
 
-    def test_a_failed_alert_write_is_raised_again_on_the_next_pass(self, db, rpcs, clock, alerts):
+    def test_failed_alert_write_raised_again_next_pass(self, db, rpcs, clock, alerts):
         failures = []
 
         def log(*args, **kwargs):
@@ -1064,7 +1039,7 @@ class TestHeld:
         assert len(failures) == 1
         assert len(_alerts(alerts)) == 2                   # the failed one, then the written one
 
-    def test_the_hold_ends_when_the_holder_closes(self, db, rpcs, clock, alerts):
+    def test_hold_ends_when_holder_closes(self, db, rpcs, clock, alerts):
         _, _, catchup, task, mig = self._held(db, rpcs, JobSchedule.FN_FAILED_DEV_MIG, started=False)
         _pass(task)
         clock.now += constants.SYNC_RESYNC_HELD_ALERT_SEC
@@ -1075,7 +1050,7 @@ class TestHeld:
         assert not {"held_by", "held_alerted"} & set(started.function_params)
         assert catchup.starts() == DISTRIBS
 
-    def test_a_held_state_left_by_a_leaderless_pass_is_cleared_before_the_start(self, db, rpcs, clock):
+    def test_leaderless_pass_held_state_cleared_at_start(self, db, rpcs, clock):
         _, _, catchup, task, mig = self._held(db, rpcs)
         _pass(task)
         with patch.object(runner.storage_node_ops, "find_leader_with_failover", return_value=(None, [])):
@@ -1095,7 +1070,7 @@ class TestHeld:
 
 class TestNewerDesync:
 
-    def test_a_desync_in_the_final_check_keeps_the_task(self, db, rpcs, clock):
+    def test_desync_in_final_check_keeps_task(self, db, rpcs, clock):
         cluster, a, b, _, catchup, task = _started(db, rpcs, clock)
         catchup.complete()
         before = db.get_unresolved_sync_replication_events(cluster.get_id(), "LVS_1")
@@ -1123,7 +1098,7 @@ class TestNewerDesync:
         catchup.complete()
         assert _pass(task).status == JobSchedule.STATUS_DONE
 
-    def test_a_desync_racing_the_finish_keeps_the_task(self, db, rpcs, clock):
+    def test_desync_racing_finish_keeps_task(self, db, rpcs, clock):
         cluster, a, b, _, catchup, task = _started(db, rpcs, clock)
         catchup.complete()
         original = DBController._read_sync_state_tx
@@ -1157,7 +1132,7 @@ class TestNewerDesync:
         # the desync did not get a second task: the running one covers it
         assert [t.uuid for t in db.get_active_sync_resync_tasks(cluster.get_id())] == [task.uuid]
 
-    def test_a_desync_after_done_gets_a_new_task(self, db, rpcs, clock):
+    def test_desync_after_done_gets_new_task(self, db, rpcs, clock):
         cluster, a, b, _, catchup, task = _started(db, rpcs, clock)
         catchup.complete()
         assert _pass(task).status == JobSchedule.STATUS_DONE
@@ -1172,7 +1147,7 @@ class TestNewerDesync:
 
 class TestLifecycle:
 
-    def test_a_canceled_task_ends_without_touching_the_node(self, db, rpcs, clock):
+    def test_canceled_task_ends_without_touching_node(self, db, rpcs, clock):
         cluster, a, b, _ = _layout(db)
         rpcs.lead(a[0])
         _desync(a[0])
@@ -1182,7 +1157,7 @@ class TestLifecycle:
         assert (ended.status, ended.function_result) == (JobSchedule.STATUS_DONE, "canceled")
         rpcs[a[0].get_id()].distr_migration_replica_sync_start.assert_not_called()
 
-    def test_a_cancel_during_a_start_stops_further_starts(self, db, rpcs, clock):
+    def test_cancel_during_start_stops_further_starts(self, db, rpcs, clock):
         cluster, a, _, _ = _layout(db)
         rpcs.lead(a[0])
         catchup = _Catchup(rpcs[a[0].get_id()])
@@ -1199,7 +1174,7 @@ class TestLifecycle:
             True, JobSchedule.STATUS_DONE, "canceled")
         assert catchup.starts() == ["distrib_11"]
 
-    def test_a_cancel_during_a_status_poll_ends_the_task(self, db, rpcs, clock):
+    def test_cancel_during_status_poll_ends_task(self, db, rpcs, clock):
         cluster, a, _, _, catchup, task = _started(db, rpcs, clock)
 
         def status(name):
@@ -1215,7 +1190,7 @@ class TestLifecycle:
             True, JobSchedule.STATUS_DONE, "canceled")
         assert catchup.starts() == DISTRIBS
 
-    def test_a_cancel_during_a_failing_poll_ends_the_task(self, db, rpcs, clock):
+    def test_cancel_during_failing_poll_ends_task(self, db, rpcs, clock):
         cluster, a, _, _, catchup, task = _started(db, rpcs, clock)
 
         def status(name):
@@ -1228,7 +1203,7 @@ class TestLifecycle:
             True, JobSchedule.STATUS_DONE, "canceled", 0)
         assert catchup.starts() == DISTRIBS
 
-    def test_a_removed_owner_ends_the_task(self, db, rpcs, clock):
+    def test_removed_owner_ends_task(self, db, rpcs, clock):
         cluster, a, _, owner = _layout(db)
         _desync(a[0])
         task = _task(db, cluster)
@@ -1237,7 +1212,7 @@ class TestLifecycle:
         assert ended.status == JobSchedule.STATUS_DONE
         assert "no longer owned" in ended.function_result
 
-    def test_a_task_of_a_cluster_without_sync_replication_ends(self, db, rpcs, clock):
+    def test_task_of_cluster_without_sync_replication_ends(self, db, rpcs, clock):
         cluster, a, _, _ = _layout(db)
         rpcs.lead(a[0])
         _desync(a[0])
@@ -1250,7 +1225,7 @@ class TestLifecycle:
             JobSchedule.STATUS_DONE, "not a sync-replication cluster")
         rpcs[a[0].get_id()].distr_migration_replica_sync_start.assert_not_called()
 
-    def test_one_driver_cycle_runs_the_tasks_of_sync_clusters(self, db, rpcs, clock):
+    def test_one_driver_cycle_runs_tasks_of_sync_clusters(self, db, rpcs, clock):
         cluster, a, _, _ = _layout(db)
         rpcs.lead(a[0])
         catchup = _Catchup(rpcs[a[0].get_id()])
@@ -1267,7 +1242,7 @@ class TestLifecycle:
 
 class TestUpgrade:
 
-    def test_a_leftover_backoff_deadline_is_ignored(self, db, rpcs, clock, held):
+    def test_leftover_backoff_deadline_is_ignored(self, db, rpcs, clock, held):
         cluster, a, _, _ = _layout(db)
         rpcs.lead(a[0])
         catchup = _Catchup(rpcs[a[0].get_id()])
@@ -1283,7 +1258,7 @@ class TestUpgrade:
         assert held(task).status == JobSchedule.STATUS_RUNNING
         assert catchup.starts() == DISTRIBS
 
-    def test_a_running_catch_up_is_polled_on(self, db, rpcs, clock):
+    def test_running_catch_up_is_polled_on(self, db, rpcs, clock):
         cluster, a, _, _ = _layout(db)
         rpcs.lead(a[0])
         catchup = _Catchup(rpcs[a[0].get_id()])

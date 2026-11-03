@@ -71,7 +71,7 @@ def _aborts(_task):
     pytest.param({"retry": 3, "result": "boom"}, None, trb.Ending.GAVE_UP,
                  "max retry reached (3) after: boom", id="gave_up"),
 ])
-def test_finish_is_told_why_the_task_ends(seed, handler, ending, result):
+def test_finish_is_told_why_task_ends(seed, handler, ending, result):
     task = _seed(**seed)
     reached = MagicMock(side_effect=handler)
     calls = []
@@ -90,7 +90,7 @@ def test_finish_is_told_why_the_task_ends(seed, handler, ending, result):
     assert stored.function_result == result
 
 
-def test_a_hook_commits_done_with_domain_state_in_one_transaction():
+def test_hook_commits_done_and_domain_state_atomically():
     task = _seed()
     indexes = JobSchedule.active_indexes(db.kv_store)
 
@@ -122,7 +122,7 @@ def test_a_hook_commits_done_with_domain_state_in_one_transaction():
     assert seen == [(task.uuid, JobSchedule.STATUS_DONE, JobSchedule.STATUS_DONE, b"completed")]
 
 
-def test_a_hook_that_commits_nothing_leaves_the_task_running():
+def test_hook_that_commits_nothing_leaves_task_running():
     task = _seed()
     on_finish = MagicMock()
 
@@ -137,7 +137,7 @@ def _suspend(t):
     t.function_result = "re-armed"
 
 
-def test_a_re_armed_task_is_dispatched_again_at_once(cluster):
+def test_re_armed_task_is_dispatched_again_at_once(cluster):
     task = _seed()
     handler = MagicMock(return_value=None)
     on_finish = MagicMock()
@@ -173,7 +173,7 @@ def test_a_re_armed_task_is_dispatched_again_at_once(cluster):
     on_finish.assert_called_once()
 
 
-def test_a_raising_hook_propagates_and_leaves_the_task_open(cluster):
+def test_raising_hook_propagates_and_leaves_task_open(cluster):
     task = _seed()
     on_finish = MagicMock()
 
@@ -193,7 +193,7 @@ def test_a_raising_hook_propagates_and_leaves_the_task_open(cluster):
     on_finish.assert_not_called()
 
 
-def test_finish_done_refuses_a_done_task():
+def test_finish_done_refuses_done_task():
     task = _seed(status=JobSchedule.STATUS_DONE, result="earlier")
 
     assert trb.finish_done(task, "later") is None
@@ -203,7 +203,7 @@ def test_finish_done_refuses_a_done_task():
     assert stored.function_result == "earlier"
 
 
-def test_finish_done_finishes_a_canceled_task():
+def test_finish_done_finishes_canceled_task():
     task = _seed(status=JobSchedule.STATUS_RUNNING, canceled=True)
 
     committed = trb.finish_done(task, "canceled")
@@ -214,7 +214,7 @@ def test_finish_done_finishes_a_canceled_task():
         JobSchedule.STATUS_DONE, "canceled", True)
 
 
-def test_without_a_hook_the_driver_commits_done_itself():
+def test_without_hook_driver_commits_done_itself():
     task = _seed()
     on_finish = MagicMock()
 

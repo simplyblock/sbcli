@@ -72,9 +72,21 @@ def _cluster_status(lvs=()):
         computed_at=NOW, lvs=tuple(lvs))
 
 
+@pytest.mark.parametrize("command, method", [
+    pytest.param("sync-promote", "sync_promote_lvol", id="sync-promote"),
+    pytest.param("sync-demote", "sync_demote_lvol", id="sync-demote"),
+    pytest.param("sync-status", "volume_sync_status_by_id", id="sync-status"),
+])
+def test_volume_site_is_required(command, method):
+    controller, _, code = _run(["volume", command, VOLUME_ID])
+
+    assert code == 2
+    getattr(controller, method).assert_not_called()
+
+
 class TestVolumeSyncPromote:
 
-    def test_done_prints_the_connection_strings(self):
+    def test_done_prints_connection_strings(self):
         controller = MagicMock()
         controller.sync_promote_lvol.return_value = SyncPromoteResult(
             in_progress=False, connection_strings={VOLUME_ID: [_entry("10.0.1.10"), _entry("10.0.1.11")]})
@@ -97,12 +109,6 @@ class TestVolumeSyncPromote:
         controller.sync_promote_lvol.assert_called_once_with(VOLUME_ID, "site-b", force=True)
         assert "in progress" in output
         assert TASK_ID in output
-
-    def test_site_is_required(self):
-        controller, _, code = _run(["volume", "sync-promote", VOLUME_ID])
-
-        assert code == 2
-        controller.sync_promote_lvol.assert_not_called()
 
     def test_refusal_fails_with_its_message(self):
         controller = MagicMock()
@@ -129,7 +135,7 @@ class TestVolumeSyncDemote:
         controller.sync_demote_lvol.assert_called_once_with(VOLUME_ID, "site-a")
         assert output == f"Volume {VOLUME_ID} demoted on site site-a"
 
-    def test_not_served_there_is_a_no_op(self):
+    def test_not_served_there_is_no_op(self):
         controller = MagicMock()
         controller.sync_demote_lvol.return_value = []
 
@@ -137,12 +143,6 @@ class TestVolumeSyncDemote:
 
         assert code == 0
         assert "nothing to do" in output
-
-    def test_site_is_required(self):
-        controller, _, code = _run(["volume", "sync-demote", VOLUME_ID])
-
-        assert code == 2
-        controller.sync_demote_lvol.assert_not_called()
 
 
 class TestVolumeSyncStatus:
@@ -173,16 +173,10 @@ class TestVolumeSyncStatus:
         assert "primary" in output
         assert "peer_ready" in output
 
-    def test_site_is_required(self):
-        controller, _, code = _run(["volume", "sync-status", VOLUME_ID])
-
-        assert code == 2
-        controller.volume_sync_status_by_id.assert_not_called()
-
 
 class TestClusterSyncStatus:
 
-    def test_json_has_the_aggregate_and_every_lvs(self):
+    def test_json_has_aggregate_and_every_lvs(self):
         controller = MagicMock()
         controller.cluster_sync_status.return_value = _cluster_status(
             [_lvs(), _lvs(lvs_name="LVS_2", state="healthy", worst_status="synced", bytes_behind=0,

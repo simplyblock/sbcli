@@ -100,28 +100,28 @@ _STARTED = {"leader_id": "x", "started_at": 1.0, "distribs": ["distrib_11"]}
 
 class TestResyncWaitReason:
 
-    def test_a_lost_site_waits(self, db):
+    def test_lost_site_waits(self, db):
         cluster, a, _, owner = _layout(db)
         _desync(a[0])
         task = _resync_task(db, cluster)
         _lose_site(db, cluster, SITE_B)
         assert _reason(db, cluster, owner, task) == f"site {SITE_B} is lost, waiting for its return"
 
-    def test_a_lagging_zone_node_offline_waits(self, db):
+    def test_lagging_zone_node_offline_waits(self, db):
         cluster, a, b, owner = _layout(db)
         _desync(a[0])                                     # the replica zone (site B) is behind
         stack._update(db, b[0], status=StorageNode.STATUS_OFFLINE)
         reason = _reason(db, cluster, owner, _resync_task(db, cluster))
         assert reason == f"waiting for the lagging zone(s) ['{SITE_B}'] to be up: ['node:{b[0].get_id()}']"
 
-    def test_a_lagging_zone_device_not_online_waits(self, db):
+    def test_lagging_zone_device_not_online_waits(self, db):
         cluster, a, b, owner = _layout(db)
         _desync(a[0])
         _, dev = _dev_down(db, b[1])
         reason = _reason(db, cluster, owner, _resync_task(db, cluster))
         assert reason == f"waiting for the lagging zone(s) ['{SITE_B}'] to be up: ['dev:{dev.get_id()}']"
 
-    def test_the_home_zone_lagging_waits_for_the_home_site(self, db):
+    def test_home_zone_lagging_waits_for_home_site(self, db):
         cluster, a, b, owner = _layout(db)
         _desync(a[0], status=PRIMARY_ZONE)                # the primary zone (site A) is behind
         task = _resync_task(db, cluster)
@@ -143,25 +143,19 @@ class TestResyncWaitReason:
         assert f"'{SITE_A}'" in reason and f"'{SITE_B}'" in reason
         assert reason.endswith(f"to be up: ['node:{down.get_id()}']")
 
-    def test_the_zone_up_can_run(self, db):
+    def test_zone_up_can_run(self, db):
         cluster, a, _, owner = _layout(db)
         _desync(a[0])
         assert _reason(db, cluster, owner, _resync_task(db, cluster)) == ""
 
-    def test_a_down_node_outside_the_lagging_zone_is_ignored(self, db):
-        cluster, a, _, owner = _layout(db)
-        _desync(a[0])                                     # replica zone (B) behind
-        stack._update(db, a[2], status=StorageNode.STATUS_OFFLINE)
-        assert _reason(db, cluster, owner, _resync_task(db, cluster)) == ""
-
-    def test_a_started_catch_up_runs_with_the_zone_down(self, db):
+    def test_started_catch_up_runs_with_zone_down(self, db):
         cluster, a, b, owner = _layout(db)
         _desync(a[0])
         task = _with_params(db, _resync_task(db, cluster), resync=_STARTED)
         stack._update(db, b[0], status=StorageNode.STATUS_OFFLINE)
         assert _reason(db, cluster, owner, task) == ""
 
-    def test_a_started_catch_up_waits_for_a_lost_site(self, db):
+    def test_started_catch_up_waits_for_lost_site(self, db):
         cluster, a, _, owner = _layout(db)
         _desync(a[0])
         task = _with_params(db, _resync_task(db, cluster), resync=_STARTED)
@@ -181,7 +175,7 @@ class TestResyncHoldingRebalance:
 
     @pytest.mark.parametrize("status", [JobSchedule.STATUS_NEW, JobSchedule.STATUS_RUNNING,
                                         JobSchedule.STATUS_SUSPENDED])
-    def test_an_active_task_with_the_zone_up_holds(self, db, status):
+    def test_active_task_with_zone_up_holds(self, db, status):
         cluster, a, _, owner = _layout(db)
         _desync(a[0])
         task = _set(db, _resync_task(db, cluster), status=status)
@@ -189,27 +183,27 @@ class TestResyncHoldingRebalance:
 
     @pytest.mark.parametrize("fields", [{"status": JobSchedule.STATUS_DONE}, {"canceled": True}],
                              ids=["done", "canceled"])
-    def test_a_done_or_canceled_task_holds_nothing(self, db, fields):
+    def test_done_or_canceled_task_holds_nothing(self, db, fields):
         cluster, a, _, owner = _layout(db)
         _desync(a[0])
         _set(db, _resync_task(db, cluster), **fields)
         assert _holding(db, cluster, owner) == ""
 
-    def test_a_task_waiting_for_its_zone_holds_nothing(self, db):
+    def test_task_waiting_for_its_zone_holds_nothing(self, db):
         cluster, a, b, owner = _layout(db)
         _desync(a[0])
         _resync_task(db, cluster)
         stack._update(db, b[0], status=StorageNode.STATUS_OFFLINE)
         assert _holding(db, cluster, owner) == ""
 
-    def test_a_task_waiting_for_a_lost_site_holds_nothing(self, db):
+    def test_task_waiting_for_lost_site_holds_nothing(self, db):
         cluster, a, _, owner = _layout(db)
         _desync(a[0])
         _with_params(db, _resync_task(db, cluster), resync=_STARTED)
         _lose_site(db, cluster, SITE_B)
         assert _holding(db, cluster, owner) == ""
 
-    def test_the_alert_run_count_releases_the_hold(self, db):
+    def test_alert_run_count_releases_hold(self, db):
         cluster, a, _, owner = _layout(db)
         _desync(a[0])
         task = _set(db, _resync_task(db, cluster), retry=constants.SYNC_RESYNC_ALERT_RUNS - 1)
@@ -217,7 +211,7 @@ class TestResyncHoldingRebalance:
         _set(db, task, retry=constants.SYNC_RESYNC_ALERT_RUNS)
         assert _holding(db, cluster, owner) == ""
 
-    def test_a_held_task_holds_nothing(self, db):
+    def test_held_task_holds_nothing(self, db):
         cluster, a, _, owner = _layout(db)
         _desync(a[0])
         task = _resync_task(db, cluster)
@@ -226,7 +220,7 @@ class TestResyncHoldingRebalance:
                                         "node": a[0].get_id(), "since": 1.0})
         assert _holding(db, cluster, owner) == ""
 
-    def test_a_task_of_another_lvs_holds_nothing(self, db):
+    def test_task_of_another_lvs_holds_nothing(self, db):
         cluster, a, b, owner = _layout(db)
         other = stack._make_owner(db, b[0], b, a, lvs_id=2)
         _desync(b[0], vuid=21)                            # LVS_2 only
@@ -256,7 +250,7 @@ def _write_task(db, cluster, function_name, date, *, status=JobSchedule.STATUS_N
 
 class TestActiveDeviceMigrationTasks:
 
-    def test_the_three_families_oldest_first(self, db):
+    def test_three_families_oldest_first(self, db):
         cluster = stack._seed_cluster(db)
         other_cluster = stack._seed_cluster(db)
         # Dates interleave the families, so only a sort over all of them

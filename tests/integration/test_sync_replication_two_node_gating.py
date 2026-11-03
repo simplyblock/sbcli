@@ -52,21 +52,21 @@ def _flag(db, cluster):
     return db.get_cluster_by_id(cluster.get_id()).two_node_arbitration
 
 
-def test_enabling_the_flag_is_refused(core_db, layout):
+def test_enabling_flag_is_refused(core_db, layout):
     cluster, *_ = layout
     with pytest.raises(SyncReplicationUnsupportedError):
         cluster_ops.set_two_node_arbitration(cluster.get_id(), True)
     assert _flag(core_db, cluster) is False
 
 
-def test_the_private_cluster_set_is_refused(core_db, layout):
+def test_private_cluster_set_is_refused(core_db, layout):
     cluster, *_ = layout
     with pytest.raises(SyncReplicationUnsupportedError):
         cluster_ops.set_(cluster.get_id(), "two_node_arbitration", "True")
     assert _flag(core_db, cluster) is False
 
 
-def test_disabling_the_flag_is_allowed(core_db, layout):
+def test_disabling_flag_is_allowed(core_db, layout):
     cluster, *_ = layout
     cluster.two_node_arbitration = True
     cluster.write_to_db(core_db.kv_store)
@@ -74,7 +74,7 @@ def test_disabling_the_flag_is_allowed(core_db, layout):
     assert _flag(core_db, cluster) is False
 
 
-def test_a_regular_cluster_takes_the_flag(core_db):
+def test_regular_cluster_takes_flag(core_db):
     cluster = stack._seed_cluster(core_db)
     cluster.sync_replication = False
     cluster.write_to_db(core_db.kv_store)
@@ -82,7 +82,7 @@ def test_a_regular_cluster_takes_the_flag(core_db):
     assert _flag(core_db, cluster) is True
 
 
-def test_the_refusal_reads_the_record_it_writes(core_db):
+def test_refusal_reads_record_it_writes(core_db):
     # The record turns sync between the setter's own read and its
     # transaction: the check on the record the transaction writes refuses.
     cluster = stack._seed_cluster(core_db)

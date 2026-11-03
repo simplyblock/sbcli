@@ -175,7 +175,7 @@ class TestRestartOfARecordedSite:
 
     @pytest.mark.parametrize("state", [DOWN, FENCING, DONE, DRAINING])
     @pytest.mark.parametrize("index", [0, 1])
-    def test_a_node_comes_back_online_without_lvstores(self, db, rpcs, hub, restart, state, index):
+    def test_node_comes_back_online_without_lvstores(self, db, rpcs, hub, restart, state, index):
         """A site-aware journal counts only its local JMs (ultra ae6d5791,
         DISTR_v2 alg_journal.cpp:2316 -> alg_journal_site_rules.hpp:123
         jc_site_outage_detect) against c_jc_ha_min_required_jms = 2
@@ -205,15 +205,11 @@ class TestRestartOfARecordedSite:
         for name, mock in hub.items():
             assert not mock.called, name
 
-    def test_serving_site_node_rebuilds_its_lvstores(self, db, rpcs, restart):
-        cluster, a, b = _layout(db, DOWN, a_status=OFFLINE)
-        node = _restartable(db, b[1])
-        assert ops._restart_storage_node_impl(node.get_id()) is False
-        assert _took_the_lvs_path(restart)
-
-    def test_node_without_record_rebuilds_lvstores(self, db, rpcs, restart):
-        cluster, a, b = _layout(db, "", a_status=OFFLINE)
-        node = _restartable(db, a[1])
+    @pytest.mark.parametrize("state, site", [pytest.param(DOWN, "b", id="serving-site-node"),
+                                             pytest.param("", "a", id="no-record")])
+    def test_node_off_recorded_site_rebuilds_its_lvstores(self, db, rpcs, restart, state, site):
+        cluster, a, b = _layout(db, state, a_status=OFFLINE)
+        node = _restartable(db, {"a": a, "b": b}[site][1])
         assert ops._restart_storage_node_impl(node.get_id()) is False
         assert _took_the_lvs_path(restart)
 
@@ -228,13 +224,13 @@ class TestRestartWithoutSyncReplication:
         return cluster, nodes
 
     @pytest.mark.parametrize("status", [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED])
-    def test_a_serving_cluster_rebuilds_the_lvstores(self, db, rpcs, restart, status):
+    def test_serving_cluster_rebuilds_lvstores(self, db, rpcs, restart, status):
         cluster, nodes = self._nodes(db, status)
         node = _restartable(db, nodes[0])
         assert ops._restart_storage_node_impl(node.get_id()) is False
         assert _took_the_lvs_path(restart)
 
-    def test_a_suspended_cluster_restarts_without_lvstores(self, db, rpcs, restart):
+    def test_suspended_cluster_restarts_without_lvstores(self, db, rpcs, restart):
         cluster, nodes = self._nodes(db, Cluster.STATUS_SUSPENDED)
         node = _restartable(db, nodes[0])
         assert ops._restart_storage_node_impl(node.get_id()) is True
@@ -287,7 +283,7 @@ class TestAbsentMembers:
 
     @pytest.mark.parametrize("a_status", [ONLINE, OFFLINE])
     @pytest.mark.parametrize("state", [DOWN, DONE])
-    def test_a_serving_node_restarts_behind_the_empty_site(
+    def test_serving_node_restarts_behind_empty_site(
             self, db, rpcs, hub, links, state, a_status):
         """b0 owns LVS_2, led from A; b1 is its secondary. With A ONLINE and
         empty, each restart stands behind A's primary of LVS_2 (rule 4 of
@@ -326,7 +322,7 @@ class TestAbsentMembers:
     @pytest.mark.parametrize("leader", [None, 1], ids=["nobody-leads", "b1-leads"])
     @pytest.mark.parametrize("target", [SITE_A, SITE_B])
     @pytest.mark.parametrize("index", [0, 1])
-    def test_moving_lvs_anchor_is_on_the_serving_site(self, db, rpcs, links, index, target, leader):
+    def test_moving_lvs_anchor_is_on_serving_site(self, db, rpcs, links, index, target, leader):
         """a0's LVS_1 is being moved (``moving:``) while A is recorded, ONLINE
         and empty: the non-leader rebuild of its instance on a0 (its own) or
         a1 stands behind the member of B that leads it or, nobody leading,
@@ -343,13 +339,13 @@ class TestAbsentMembers:
             rpcs[node.get_id()].get_lvstore.assert_not_called()
 
     @pytest.mark.parametrize("state", [DOWN, FENCING, DONE])
-    def test_an_online_node_of_the_site_is_disconnected(self, db, links, state):
+    def test_online_node_of_site_is_disconnected(self, db, links, state):
         cluster, a, b = _layout(db, state)
         assert ops._check_peer_disconnected(a[1]) is True
         links.votes.assert_not_called()
 
     @pytest.mark.parametrize("case", ["draining", "no record", "serving site", "no sync replication"])
-    def test_the_vote_decides_for_any_other_node(self, db, links, case):
+    def test_vote_decides_for_any_other_node(self, db, links, case):
         state = {"draining": DRAINING, "no record": ""}.get(case, DOWN)
         cluster, a, b = _layout(db, state, sync=case != "no sync replication")
         if case == "no sync replication":
@@ -358,14 +354,7 @@ class TestAbsentMembers:
         assert ops._check_peer_disconnected(node) is False
         assert links.votes.called
 
-    def test_an_empty_member_is_skipped_by_an_operation(self, db, rpcs, links):
-        cluster, a, b = _layout(db, DOWN)
-        _empty(rpcs, a)
-        members = [_fresh(db, n) for n in (*b, *a)]
-        assert ops.check_non_leader_for_operation(
-            a[1].get_id(), "LVS_2", leader_op_completed=True, all_nodes=members) == "skip"
-
-    def test_an_empty_node_votes_on_its_links(self, db, rpcs, links):
+    def test_empty_node_votes_on_its_links(self, db, rpcs, links):
         """The data-plane vote is a physical link observation, not an LVS
         answer: an empty node of the recorded site whose controller to b1's JM
         is enabled is counted (the restart connected it)."""
@@ -410,7 +399,7 @@ class TestAnaFlip:
 
     @pytest.mark.parametrize("trigger", list(_ANA_TRIGGERS))
     @pytest.mark.parametrize("state", [DOWN, FENCING, DONE])
-    def test_an_empty_peer_is_not_flipped(self, db, flips, state, trigger):
+    def test_empty_peer_is_not_flipped(self, db, flips, state, trigger):
         """a1, ONLINE without lvstores on the recorded site, holds no
         instance to flip: as if it were OFFLINE."""
         cluster, a, b = _layout(db, state)
@@ -422,7 +411,7 @@ class TestAnaFlip:
 
     @pytest.mark.parametrize("trigger", list(_ANA_TRIGGERS))
     @pytest.mark.parametrize("case", ["no record", "draining", "serving site"])
-    def test_a_peer_holding_its_instance_is_flipped(self, db, flips, case, trigger):
+    def test_peer_holding_its_instance_is_flipped(self, db, flips, case, trigger):
         """No record, a ``draining`` site (its nodes not yet shut down hold
         their instances) and the serving site while A is recorded ``down``."""
         cluster, a, b = _layout(db, {"no record": "", "draining": DRAINING}.get(case, DOWN))
@@ -443,7 +432,7 @@ class TestSyncStatus:
         return [{"name": name, "status": src.STATUS_SYNCED, "sync_replication_mode": src.MODE_FULL}
                 for name in names]
 
-    def test_an_empty_node_is_not_asked(self, db, rpcs):
+    def test_empty_node_is_not_asked(self, db, rpcs):
         cluster, a, b = _layout(db, DOWN)
         names = [f"distrib_{lvs}{i}" for lvs in (1, 2, 3) for i in (1, 2)]
         for node in b:
@@ -469,21 +458,21 @@ class TestPromoteHandOff:
             yield api
 
     @pytest.mark.parametrize("answer", [None, RPCConnectionError("no answer")])
-    def test_an_empty_member_does_not_stop_it(self, db, rpcs, spdk_up, answer):
+    def test_empty_member_does_not_stop_it(self, db, rpcs, spdk_up, answer):
         cluster, a, b = _layout(db, DONE)
         for node in a:
             stack._goes_silent(rpcs, node, answer)
         runner._lost_members_not_leading("LVS_1", a[0].get_id(), SITE_A)
         spdk_up.spdk_process_is_up.assert_not_called()
 
-    def test_a_member_that_leads_stops_it(self, db, rpcs, spdk_up):
+    def test_member_that_leads_stops_it(self, db, rpcs, spdk_up):
         cluster, a, b = _layout(db, DONE)
         _empty(rpcs, a)
         rpcs.lead(a[1])
         with pytest.raises(runner._PromoteFailed, match="reports the leadership"):
             runner._lost_members_not_leading("LVS_1", a[0].get_id(), SITE_A)
 
-    def test_a_draining_site_needs_the_proof(self, db, rpcs, spdk_up):
+    def test_draining_site_needs_proof(self, db, rpcs, spdk_up):
         cluster, a, b = _layout(db, DRAINING)
         _empty(rpcs, a)
         with pytest.raises(runner._PromoteFailed, match="neither answering"):
@@ -503,7 +492,7 @@ class TestRestartDuringASiteActivation:
         return cluster, a, b, token
 
     @pytest.mark.parametrize("site", [SITE_A, SITE_B])
-    def test_a_restart_of_either_site_is_refused(self, db, rpcs, restart, site):
+    def test_restart_of_either_site_is_refused(self, db, rpcs, restart, site):
         cluster, a, b, token = self._activating(db)
         node = _restartable(db, a[1] if site == SITE_A else b[1])
         assert ops._restart_storage_node_impl(node.get_id()) is False

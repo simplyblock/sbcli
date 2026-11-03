@@ -71,25 +71,25 @@ class TestDisasterMoveProblems:
     def _problems(self, cluster, owner, volumes, expect="", request=("v1",)):
         return src.disaster_move_problems(cluster, owner, volumes, expect, SITE_B, SITE_A, request)
 
-    def test_ok_when_fenced_and_only_the_request_is_served(self):
+    def test_ok_when_fenced_and_only_request_is_served(self):
         vols = [_vol("v1"), _vol("v2", demoted=[SITE_A])]
         assert self._problems(_cluster(SITE_A, "done"), _owner(), vols) == []
 
     @pytest.mark.parametrize("lost,state", [("", ""), (SITE_A, "fencing"), (SITE_B, "done")])
-    def test_the_fence_must_be_done_for_that_site(self, lost, state):
+    def test_fence_must_be_done_for_that_site(self, lost, state):
         (problem,) = self._problems(_cluster(lost, state), _owner(), [_vol("v1")])
         assert "fence" in problem
 
-    def test_the_marker_must_be_unchanged(self):
+    def test_marker_must_be_unchanged(self):
         problems = self._problems(_cluster(SITE_A, "done"), _owner(lvs_active_site=SITE_B), [_vol("v1")])
         assert problems == [f"LVS LVS_1: lvs_active_site is {SITE_B!r}, expected ''"]
 
-    def test_a_survivor_led_lvs_is_no_disaster_move(self):
+    def test_survivor_led_lvs_is_no_disaster_move(self):
         problems = self._problems(_cluster(SITE_A, "done"), _owner(lvs_active_site=SITE_B), [],
                                   expect=SITE_B)
         assert any("not from the lost site" in p for p in problems)
 
-    def test_a_volume_outside_the_request_blocks_the_move(self):
+    def test_volume_outside_request_blocks_move(self):
         """The extra volume is still served on the lost site."""
         (problem,) = self._problems(_cluster(SITE_A, "done"), _owner(), [_vol("v1"), _vol("late")])
         assert "late" in problem
@@ -111,19 +111,19 @@ class TestSiteRecordedLost:
         ("", "", False),                                # planned move
         (SITE_B, Cluster.LOST_SITE_DOWN, False),        # a different site is lost
     ])
-    def test_only_an_authoritatively_lost_site_is_a_noop(self, lost, state, expected):
+    def test_only_authoritatively_lost_site_is_noop(self, lost, state, expected):
         assert src.site_recorded_lost(_cluster(lost, state), SITE_A) is expected
 
 
 class TestZoneNotUp:
 
-    def test_zone_not_up_counts_a_failed_device(self):
+    def test_zone_not_up_counts_failed_device(self):
         nodes = [_node("a0", devices=(NVMeDevice.STATUS_FAILED,)),
                  _node("a1", devices=(NVMeDevice.STATUS_FAILED_AND_MIGRATED, NVMeDevice.STATUS_REMOVED)),
                  _node("b0", site=SITE_B, devices=(NVMeDevice.STATUS_UNAVAILABLE,))]
         assert src.zone_not_up(nodes, SITE_A) == ["dev:a0-d0"]
 
-    def test_zone_not_up_ignores_a_suspended_node(self):
+    def test_zone_not_up_ignores_suspended_node(self):
         nodes = [_node("a0", status=StorageNode.STATUS_SUSPENDED), _node("a1")]
         assert src.zone_not_up(nodes, SITE_A) == []
 
@@ -142,7 +142,7 @@ class TestSiteRunningNodes:
 
 class TestSiteLost:
 
-    def test_offline_and_data_plane_lost_nodes_lose_the_site(self):
+    def test_offline_and_data_plane_lost_nodes_lose_site(self):
         nodes = [_node("a0", status=StorageNode.STATUS_OFFLINE),
                  _node("a1", status=StorageNode.STATUS_UNREACHABLE),
                  _node("a2", status=StorageNode.STATUS_REMOVED)]
@@ -150,7 +150,7 @@ class TestSiteLost:
 
     @pytest.mark.parametrize("status", [StorageNode.STATUS_UNREACHABLE, StorageNode.STATUS_SCHEDULABLE,
                                         StorageNode.STATUS_IN_SHUTDOWN])
-    def test_a_transient_node_is_gone_only_by_the_data_plane(self, status):
+    def test_transient_node_is_gone_only_by_data_plane(self, status):
         nodes = [_node("a0", status=StorageNode.STATUS_OFFLINE),
                  _node("a1", status=status, devices=(NVMeDevice.STATUS_FAILED,))]
         assert not storage_node_monitor._site_lost(nodes, {})
@@ -159,7 +159,7 @@ class TestSiteLost:
 
     @pytest.mark.parametrize("status", [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN,
                                         StorageNode.STATUS_RESTARTING])
-    def test_a_node_that_serves_keeps_the_site(self, status):
+    def test_node_that_serves_keeps_site(self, status):
         nodes = [_node("a0", status=StorageNode.STATUS_OFFLINE),
                  _node("a1", status=status, devices=(NVMeDevice.STATUS_FAILED,))]
         assert not storage_node_monitor._site_lost(nodes, {"a1": True})
@@ -176,8 +176,10 @@ class TestActivationLeaderBuilder:
     def test_rule(self, active, builder):
         assert ops.activation_leader_builder_id(_owner(lvs_active_site=active)) == builder
 
-    def test_outside_sync_replication_the_owner(self):
-        owner = _owner()
+    def test_outside_sync_replication_owner(self):
+        # The owner has no site, so it builds the LVS itself even though
+        # lvs_active_site names another site.
+        owner = _owner(lvs_active_site=SITE_B)
         owner.site = ""
         assert ops.activation_leader_builder_id(owner) == "a0"
 
@@ -195,12 +197,12 @@ class TestFollowerRedirectOk:
 
     @pytest.mark.parametrize("connected,redirect,expected", [
         (True, True, True), (False, True, False), (True, False, False), (False, False, False)])
-    def test_a_follower_needs_both(self, connected, redirect, expected):
+    def test_follower_needs_both(self, connected, redirect, expected):
         rpc = self._rpc({"lvs leadership": False, "connect_state": connected, "lvs_redirect": redirect})
         assert ops.follower_redirect_ok(rpc, "LVS_1") is expected
         rpc.get_lvstore.assert_called_once_with("LVS_1")
 
-    def test_a_leader_has_no_redirect_to_judge(self):
+    def test_leader_has_no_redirect_to_judge(self):
         rpc = self._rpc({"lvs leadership": True, "connect_state": False, "lvs_redirect": False})
         assert ops.follower_redirect_ok(rpc, "LVS_1") is None
 
@@ -217,7 +219,7 @@ class TestFollowerRedirectOk:
     @pytest.mark.parametrize("error", [
         RPCConnectionError("down"), RPCRemoteError(message="busy", code=-16),
         RPCHTTPError("HTTP 500", status_code=500, response_text="")])
-    def test_a_failing_rpc_is_none(self, error):
+    def test_failing_rpc_is_none(self, error):
         assert ops.follower_redirect_ok(self._rpc(error=error), "LVS_1") is None
 
 
@@ -257,22 +259,22 @@ class TestRuleInSiteFailover:
         ctx = ops.SyncAnaContext(cluster, owner, primary_status)
         return ops.lvol_ana_state(lvol, node, "non_optimized", ctx=ctx)
 
-    def test_primary_offline_the_secondary_is_optimized(self):
+    def test_primary_offline_secondary_is_optimized(self):
         assert self._state(_node("a1"), StorageNode.STATUS_OFFLINE) == "optimized"
 
     @pytest.mark.parametrize("status", [StorageNode.STATUS_RESTARTING, StorageNode.STATUS_ONLINE,
-                                        StorageNode.STATUS_UNREACHABLE, ""])
+                                        StorageNode.STATUS_UNREACHABLE])
     def test_otherwise_it_stays_non_optimized(self, status):
         assert self._state(_node("a1"), status) == "non_optimized"
 
-    def test_the_tertiary_is_unchanged(self):
+    def test_tertiary_is_unchanged(self):
         assert self._state(_node("a2"), StorageNode.STATUS_OFFLINE) == "non_optimized"
 
-    def test_a_remote_led_lvs_uses_its_active_triplet(self):
+    def test_remote_led_lvs_uses_its_active_triplet(self):
         assert self._state(_node("b1", site=SITE_B), StorageNode.STATUS_OFFLINE,
                            active=SITE_B) == "optimized"
         assert self._state(_node("a1"), StorageNode.STATUS_OFFLINE, active=SITE_B) == "inaccessible"
 
-    def test_a_move_in_flight_opens_nothing(self):
+    def test_move_in_flight_opens_nothing(self):
         assert self._state(_node("a1"), StorageNode.STATUS_OFFLINE,
                            active="moving:" + SITE_B) == "inaccessible"

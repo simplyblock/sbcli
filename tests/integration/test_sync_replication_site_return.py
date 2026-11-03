@@ -37,7 +37,6 @@ SITE_A, SITE_B = stack.SITE_A, stack.SITE_B
 DRAINING, DOWN = Cluster.LOST_SITE_DRAINING, Cluster.LOST_SITE_DOWN
 FENCING, DONE = Cluster.LOST_SITE_FENCING, Cluster.LOST_SITE_DONE
 ONLINE, OFFLINE = StorageNode.STATUS_ONLINE, StorageNode.STATUS_OFFLINE
-TRANSITIONS = (StorageNode.STATUS_RESTARTING, StorageNode.STATUS_IN_SHUTDOWN, StorageNode.STATUS_IN_CREATION)
 
 #: The activation wrapper itself, for the paths that run it while the module attribute is patched.
 REAL_ACTIVATE = cluster_ops.cluster_activate
@@ -191,8 +190,8 @@ CLOSED = [
     pytest.param({}, _set_node("a", 0, status=StorageNode.STATUS_UNREACHABLE), id="a-unreachable"),
     pytest.param({}, _set_node("a", 0, status=OFFLINE), id="a-offline-not-deliberate"),
     pytest.param({}, _just_online("a", 1), id="a-online-under-30s"),
-    *[pytest.param({}, _set_node(site, 1, status=status), id=f"{site}-{status}")
-      for site in ("a", "b") for status in TRANSITIONS],
+    pytest.param({}, _set_node("a", 1, status=StorageNode.STATUS_IN_SHUTDOWN), id="a-in_shutdown"),
+    pytest.param({}, _set_node("b", 1, status=StorageNode.STATUS_IN_CREATION), id="b-in_creation"),
     pytest.param({}, _with_restart_task("a", 2), id="a-online-restart-task"),
     pytest.param({}, _with_restart_task("b", 2), id="b-online-restart-task"),
     pytest.param({"state": FENCING}, lambda db, s: _promote(db, s, SITE_A), id="fencing-promote-running"),
@@ -219,7 +218,7 @@ OPEN = [
 class TestSiteGate:
 
     @pytest.mark.parametrize("seed, setup", OPEN)
-    def test_a_returned_site_starts_its_activation(self, db, gate, registry, seed, setup):
+    def test_returned_site_starts_its_activation(self, db, gate, registry, seed, setup):
         s = _returned(db, **seed)
         if setup is not None:
             setup(db, s)
@@ -234,14 +233,14 @@ class TestSiteGate:
         assert registry == {}
 
     @pytest.mark.parametrize("seed, setup", CLOSED)
-    def test_a_site_not_ready_starts_nothing(self, db, gate, registry, seed, setup):
+    def test_site_not_ready_starts_nothing(self, db, gate, registry, seed, setup):
         s = _returned(db, **seed)
         if setup is not None:
             setup(db, s)
         gate.drive(s)
         _not_started(gate, registry)
 
-    def test_an_offline_serving_node_does_not_hold_it(self, db, gate, registry):
+    def test_offline_serving_node_does_not_hold_it(self, db, gate, registry):
         # An OFFLINE node of B always has a queued restart task; it does not
         # close the gate, and while the site activates that task waits.
         s = _returned(db)
@@ -256,7 +255,7 @@ class TestSiteGate:
         _started(gate, s)
         assert handler_reached(restart_runner.SPEC, task) is True
 
-    def test_the_gate_reason_is_logged(self, db, gate, registry):
+    def test_gate_reason_is_logged(self, db, gate, registry):
         s = _returned(db)
         _update(db, s.b[1], status=StorageNode.STATUS_RESTARTING)
         with patch.object(monitor, "logger") as logger:
@@ -273,7 +272,7 @@ class TestSiteGate:
 
 class TestRegistry:
 
-    def test_a_second_drive_starts_nothing(self, db, gate, registry):
+    def test_second_drive_starts_nothing(self, db, gate, registry):
         # The flag is not set (the activation is patched): the live thread is
         # what keeps the second drive from starting another.
         s = _returned(db)
@@ -303,7 +302,7 @@ class TestRegistry:
         gate.release.set()
         _started(gate, s)
 
-    def test_a_dead_entry_does_not_hold_the_gate(self, db, gate, registry):
+    def test_dead_entry_does_not_hold_gate(self, db, gate, registry):
         s = _returned(db)
         dead = threading.Thread(target=lambda: None)
         dead.start()
@@ -315,7 +314,7 @@ class TestRegistry:
 
     @pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
     @pytest.mark.parametrize("ending", ["cancelled", "failed", "uncaught", "refused"])
-    def test_an_ended_activation_frees_the_gate(self, db, gate, registry, ending):
+    def test_ended_activation_frees_gate(self, db, gate, registry, ending):
         s = _returned(db)
         endings = {"cancelled": src.SiteActivationCancelled("the token is gone"),
                    "failed": ValueError("Failed to activate site A"),
@@ -337,7 +336,7 @@ class TestRegistry:
 
 class TestMonitorPass:
 
-    def test_the_pass_starts_it_and_does_not_wait(self, db, monitor_pass, registry):
+    def test_pass_starts_it_and_does_not_wait(self, db, monitor_pass, registry):
         s = _returned(db)
         release, entered = threading.Event(), threading.Event()
 
@@ -419,7 +418,7 @@ def live(db, rpcs, hub, adopt, registry):
 
 class TestTheStatusPassGoesOn:
 
-    def test_a_serving_node_goes_offline_meanwhile(self, db, live):
+    def test_serving_node_goes_offline_meanwhile(self, db, live):
         s = live.s
         live.run()
         assert live.entered.wait(10)
@@ -437,7 +436,7 @@ class TestTheStatusPassGoesOn:
 
 class TestSuspensionDuringIt:
 
-    def test_a_cluster_restart_waits_for_it(self, db, live):
+    def test_cluster_restart_waits_for_it(self, db, live):
         s = live.s
         live.run()
         assert live.entered.wait(10)

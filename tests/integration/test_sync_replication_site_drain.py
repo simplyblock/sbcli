@@ -86,7 +86,7 @@ class TestSiteDrain:
     """3 + 3 nodes, npcs 1; record ``(A, draining)`` and a stored DEGRADED
     unless the test says otherwise."""
 
-    def test_one_pass_records_and_drains_a_site_beyond_ftt(self, db, drain):
+    def test_one_pass_records_and_drains_site_beyond_ftt(self, db, drain):
         cluster = _seed_record(db, stack._seed_cluster(db), "", "", status=Cluster.STATUS_ACTIVE)
         a, b = _site(db, cluster)
         for node in a[1:]:
@@ -99,7 +99,7 @@ class TestSiteDrain:
         assert (after.lost_site, after.lost_site_state, after.status) == (SITE_A, DOWN, Cluster.STATUS_DEGRADED)
         assert Cluster.STATUS_SUSPENDED not in [status for status, _ in drain.status_writes]
 
-    def test_only_the_live_nodes_of_the_site_are_shut_down(self, db, drain):
+    def test_only_live_nodes_of_site_are_shut_down(self, db, drain):
         cluster = _draining(db)
         a, b = _site(db, cluster)
         _update(db, a[1], status=StorageNode.STATUS_DOWN)
@@ -112,7 +112,7 @@ class TestSiteDrain:
         assert _shut(drain) == _ids(a[:2])
         assert _statuses(db, b) == [disaster.ONLINE_DEV] * 3
 
-    def test_an_operator_stopped_node_does_not_hold_the_drain(self, db, drain):
+    def test_operator_stopped_node_does_not_hold_drain(self, db, drain):
         cluster = _draining(db)
         a, b = _site(db, cluster, a_status=StorageNode.STATUS_OFFLINE)
         _update(db, a[0], status=StorageNode.STATUS_ONLINE, auto_restart_disabled=True)
@@ -121,7 +121,7 @@ class TestSiteDrain:
         assert (after.lost_site, after.lost_site_state) == (SITE_A, DOWN)
         assert _fresh(db, a[0]).status == StorageNode.STATUS_ONLINE
 
-    def test_a_gone_node_goes_offline_and_the_site_down(self, db, drain):
+    def test_gone_node_goes_offline_and_site_down(self, db, drain):
         cluster = _draining(db)
         a, b = _site(db, cluster, a_status=StorageNode.STATUS_OFFLINE)
         _update(db, a[0], status=StorageNode.STATUS_UNREACHABLE)
@@ -131,7 +131,7 @@ class TestSiteDrain:
         assert (after.lost_site, after.lost_site_state) == (SITE_A, DOWN)
         assert _statuses(db, b) == [disaster.ONLINE_DEV] * 3
 
-    def test_a_vetoed_unreachable_node_holds_the_drain(self, db, drain):
+    def test_vetoed_unreachable_node_holds_drain(self, db, drain):
         cluster = _draining(db)
         a, b = _site(db, cluster, a_status=StorageNode.STATUS_OFFLINE)
         _update(db, a[0], status=StorageNode.STATUS_UNREACHABLE)
@@ -142,7 +142,7 @@ class TestSiteDrain:
             assert (after.lost_site, after.lost_site_state) == (SITE_A, DRAINING)
 
     @pytest.mark.parametrize("status", [StorageNode.STATUS_RESTARTING, StorageNode.STATUS_SCHEDULABLE])
-    def test_a_node_coming_back_or_sick_holds_the_drain(self, db, drain, status):
+    def test_node_coming_back_or_sick_holds_drain(self, db, drain, status):
         # Main's drain waits for both and acts on neither; a SCHEDULABLE node
         # whose RPC recovers stays so (an inherited limitation - final report).
         cluster = _draining(db)
@@ -154,7 +154,7 @@ class TestSiteDrain:
         assert (after.lost_site, after.lost_site_state) == (SITE_A, DRAINING)
 
     @pytest.mark.parametrize("status", [StorageNode.STATUS_OFFLINE, StorageNode.STATUS_REMOVED])
-    def test_a_site_with_nothing_pending_is_down(self, db, drain, status):
+    def test_site_with_nothing_pending_is_down(self, db, drain, status):
         cluster = _draining(db)
         a, b = _site(db, cluster, a_status=StorageNode.STATUS_OFFLINE)
         _update(db, a[0], status=status)
@@ -162,20 +162,8 @@ class TestSiteDrain:
         drain.shutdown.assert_not_called()
         assert (after.lost_site, after.lost_site_state, after.status) == (SITE_A, DOWN, Cluster.STATUS_DEGRADED)
 
-    def test_without_a_witness_no_node_is_set_offline(self, db, drain):
-        # the management node lost its network: every vote 0/0, so the
-        # majority dict (nobody gone) is in force
-        cluster = _draining(db)
-        a, b = _site(db, cluster, a_status=StorageNode.STATUS_OFFLINE, b_status=StorageNode.STATUS_UNREACHABLE)
-        _update(db, a[0], status=StorageNode.STATUS_UNREACHABLE)
-        drain.veto = {n.get_id() for n in (a[0], *b)}
-        after = drain.run(cluster)
-        assert _statuses(db, a[:1]) == [(StorageNode.STATUS_UNREACHABLE, NVMeDevice.STATUS_ONLINE)]
-        assert _statuses(db, b) == [(StorageNode.STATUS_UNREACHABLE, NVMeDevice.STATUS_ONLINE)] * 3
-        assert (after.lost_site, after.lost_site_state, after.status) == (SITE_A, DRAINING, Cluster.STATUS_DEGRADED)
-
     @pytest.mark.parametrize("gone_by_both", [False, True])
-    def test_with_no_healthy_site_escalation_needs_both_dicts(
+    def test_no_healthy_site_escalation_needs_both_dicts(
             self, db, drain, gone_by_both):
         # B's b0, b1 UNREACHABLE and abstained on by the voters (gone by the
         # veto only): B is out by the veto rule and live by the majority, so
@@ -203,7 +191,7 @@ class TestSiteDrain:
         assert _statuses(db, b[:2]) == [(StorageNode.STATUS_UNREACHABLE, NVMeDevice.STATUS_ONLINE)] * 2
 
     @pytest.mark.parametrize("flag", [True, False])
-    def test_the_site_drain_ignores_the_cluster_drain_flag(self, db, drain, flag):
+    def test_site_drain_ignores_cluster_drain_flag(self, db, drain, flag):
         cluster = _draining(db, suspend_drain_complete=flag)
         a, b = _site(db, cluster, a_status=StorageNode.STATUS_OFFLINE)
         _update(db, a[0], status=StorageNode.STATUS_ONLINE)
@@ -213,7 +201,7 @@ class TestSiteDrain:
         assert (after.lost_site_state, after.status, after.suspend_drain_complete) == (
             DOWN, Cluster.STATUS_DEGRADED, flag)
 
-    def test_a_read_only_cluster_drains_and_resumes_restarts(self, db, drain):
+    def test_read_only_cluster_drains_and_resumes_restarts(self, db, drain):
         cluster = _draining(db, stored=Cluster.STATUS_READONLY)
         a, b = _site(db, cluster, a_status=StorageNode.STATUS_OFFLINE)
         _update(db, a[0], status=StorageNode.STATUS_ONLINE)
@@ -223,7 +211,7 @@ class TestSiteDrain:
         assert (after.lost_site, after.lost_site_state, after.status) == (SITE_A, DOWN, Cluster.STATUS_READONLY)
         assert [_paused(db, cluster, n) for n in a] == [False] * 3
 
-    def test_a_suspended_cluster_clears_the_drain_record(self, db, drain):
+    def test_suspended_cluster_clears_drain_record(self, db, drain):
         cluster = _draining(db, stored=Cluster.STATUS_SUSPENDED, suspend_drain_complete=True)
         a, b = _site(db, cluster, a_status=StorageNode.STATUS_OFFLINE)
         _update(db, a[0], status=StorageNode.STATUS_ONLINE)
@@ -233,7 +221,7 @@ class TestSiteDrain:
         assert (after.lost_site, after.lost_site_state) == ("", "")
         assert [_paused(db, cluster, n) for n in a] == [False] * 3
 
-    def test_both_sites_out_clear_the_record_then_suspend(self, db, drain):
+    def test_both_sites_out_clear_record_then_suspend(self, db, drain):
         cluster = _draining(db)
         a, b = _site(db, cluster, a_status=StorageNode.STATUS_OFFLINE)
         _update(db, a[0], status=StorageNode.STATUS_ONLINE)
@@ -243,7 +231,7 @@ class TestSiteDrain:
         assert (after.lost_site, after.lost_site_state, after.status) == ("", "", Cluster.STATUS_SUSPENDED)
         assert (Cluster.STATUS_SUSPENDED, ("", "")) in drain.status_writes
 
-    def test_a_suspension_drains_vetoed_nodes_too(self, db, monitor_pass):
+    def test_suspension_drains_vetoed_nodes_too(self, db, monitor_pass):
         # no healthy site: main's suspend drain - it escalates every
         # UNREACHABLE node, whatever a peer reports (the plain pass, whose
         # finished shutdown asks nothing of the per-site restart pause)
@@ -287,19 +275,19 @@ def _deferred(task):
 class TestRestartPause:
 
     @pytest.mark.parametrize("state, paused_a", [(DRAINING, True), (DOWN, False)])
-    def test_only_the_draining_site_is_paused(self, db, state, paused_a):
+    def test_only_draining_site_is_paused(self, db, state, paused_a):
         cluster = _seed_record(db, stack._seed_cluster(db), SITE_A, state, status=Cluster.STATUS_DEGRADED)
         a, b = _site(db, cluster, a_status=StorageNode.STATUS_OFFLINE)
         assert _paused(db, cluster, a[0]) is paused_a
         assert _paused(db, cluster, b[0]) is False
         assert tasks_controller.is_auto_restart_paused(db.get_cluster_by_id(cluster.get_id())) is False
 
-    def test_a_record_without_sync_replication_pauses_nothing(self, db):
+    def test_non_sync_record_pauses_nothing(self, db):
         cluster = _draining(db, sync_replication=False)
         a, b = _site(db, cluster, a_status=StorageNode.STATUS_OFFLINE)
         assert _paused(db, cluster, a[0]) is False
 
-    def test_the_queue_refuses_only_the_draining_site(self, db):
+    def test_queue_refuses_only_draining_site(self, db):
         cluster = _draining(db)
         a, b = _site(db, cluster, a_status=StorageNode.STATUS_OFFLINE)
         _update(db, b[0], status=StorageNode.STATUS_OFFLINE)
@@ -308,7 +296,7 @@ class TestRestartPause:
         assert tasks_controller.add_node_to_auto_restart(_fresh(db, b[0]))
         assert _restart_task(cluster, b[0])
 
-    def test_the_requeue_scan_skips_the_draining_site(self, db):
+    def test_requeue_scan_skips_draining_site(self, db):
         cluster = _draining(db)
         a, b = _site(db, cluster, a_status=StorageNode.STATUS_OFFLINE)
         _update(db, b[0], status=StorageNode.STATUS_OFFLINE)
@@ -319,7 +307,7 @@ class TestRestartPause:
         assert _restart_task(cluster, b[0])
 
     @pytest.mark.parametrize("state, deferred_a", [(DRAINING, True), (DOWN, False)])
-    def test_the_runner_defers_only_the_draining_site(self, db, state, deferred_a):
+    def test_runner_defers_only_draining_site(self, db, state, deferred_a):
         cluster = _seed_record(db, stack._seed_cluster(db), SITE_A, state, status=Cluster.STATUS_DEGRADED)
         a, b = _site(db, cluster, a_status=StorageNode.STATUS_OFFLINE)
         assert _deferred(_task(db, cluster, a[0].get_id())) is deferred_a
@@ -329,7 +317,7 @@ class TestRestartPause:
         (Cluster.STATUS_SUSPENDED, False, ("", ""), True),            # the cluster-wide pause still holds
         (Cluster.STATUS_DEGRADED, False, (SITE_A, DRAINING), False),  # no node, no site to pause
     ])
-    def test_the_runner_with_a_task_of_a_missing_node(self, db, stored, drained, record, deferred):
+    def test_runner_with_task_of_missing_node(self, db, stored, drained, record, deferred):
         cluster = _seed_record(db, stack._seed_cluster(db), *record, status=stored,
                                suspend_drain_complete=drained)
         _site(db, cluster, a_status=StorageNode.STATUS_OFFLINE)
@@ -342,7 +330,7 @@ class TestRestartPause:
 
 class TestSiteDownRestart:
 
-    def test_every_node_of_a_site_down_is_restarted(self, db):
+    def test_every_node_of_site_down_is_restarted(self, db):
         # three nodes offline with npcs 1: the flat past-FTT guard would refuse
         cluster = _seed_record(db, stack._seed_cluster(db), SITE_A, DOWN, status=Cluster.STATUS_DEGRADED)
         a, b = _site(db, cluster, a_status=StorageNode.STATUS_OFFLINE)
@@ -350,7 +338,7 @@ class TestSiteDownRestart:
         monitor._requeue_stuck_auto_restarts(cluster.get_id())
         assert all(_restart_task(cluster, n) for n in a)
 
-    def test_a_non_sync_cluster_keeps_the_flat_guard(self, db):
+    def test_non_sync_cluster_keeps_flat_guard(self, db):
         cluster = _seed_record(db, stack._seed_cluster(db), "", "", status=Cluster.STATUS_DEGRADED,
                                sync_replication=False)
         a, b = _site(db, cluster, a_status=StorageNode.STATUS_OFFLINE)

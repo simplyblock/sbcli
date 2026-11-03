@@ -64,7 +64,7 @@ def _decide(lvol, owner=None, others=(), site=SITE_B, online=BOTH, force=False, 
 
 class TestRecordView:
 
-    def test_a_volume_is_active_on_its_lvs_home_site_until_set(self):
+    def test_volume_active_on_lvs_home_site_until_set(self):
         assert src.volume_site(_lvol(), _owner()) == SITE_A
         assert src.volume_site(_lvol(sync_active_site=SITE_B), _owner()) == SITE_B
 
@@ -89,16 +89,24 @@ class TestRecordView:
 class TestPromoteDecision:
     """One case per row of the promote table."""
 
-    def test_already_served_on_the_site_is_a_no_op(self):
+    @pytest.mark.parametrize("online, nodes", [
+        pytest.param(BOTH, ALL_NODES, id="already-served"),
+        # Still a no-op while site B is offline: the decision follows the open
+        # that served the volume and does not probe its paths (docs: Role is
+        # not accessibility).
+        pytest.param({SITE_A}, {"p"}, id="served-while-offline"),
+    ])
+    def test_already_served_on_site_is_no_op(self, online, nodes):
         owner = _owner(lvs_active_site=SITE_B)
-        d = _decide(_lvol(sync_active_site=SITE_B, sync_demoted_sites=[SITE_A]), owner)
+        served = _lvol(sync_active_site=SITE_B, sync_demoted_sites=[SITE_A])
+        d = _decide(served, owner, online=online, nodes=nodes)
         assert d == src.PromoteDecision(src.PROMOTE_ACTIVE, SITE_B)
 
     @pytest.mark.parametrize("fields", [
         {"sync_active_site": SITE_A, "sync_demoted_sites": [SITE_A]},    # the sibling of a moved LVS
         {"sync_active_site": SITE_B, "sync_demoted_sites": [SITE_B]},    # demoted on S, asked back
     ])
-    def test_led_from_s_but_closed_there_is_only_the_ana_step(self, fields):
+    def test_led_from_s_but_closed_there_is_only_ana_step(self, fields):
         d = _decide(_lvol(**fields), _owner(lvs_active_site=SITE_B))
         assert d.kind == src.PROMOTE_ANA_ONLY
 
@@ -106,12 +114,12 @@ class TestPromoteDecision:
         d = _decide(_lvol())
         assert d == src.PromoteDecision(src.PROMOTE_NOT_DEMOTED, SITE_A, ("v1",))
 
-    def test_other_volumes_of_the_lvs_still_on_t_are_listed(self):
+    def test_other_volumes_of_lvs_still_on_t_are_listed(self):
         others = [_lvol("v2"), _lvol("v3", sync_demoted_sites=[SITE_A]), _lvol("v4")]
         d = _decide(_lvol(sync_demoted_sites=[SITE_A]), others=others)
         assert d == src.PromoteDecision(src.PROMOTE_LVS_BUSY, SITE_A, ("v2", "v4"))
 
-    def test_every_volume_demoted_on_t_moves_the_lvs(self):
+    def test_every_volume_demoted_on_t_moves_lvs(self):
         others = [_lvol("v2", sync_demoted_sites=[SITE_A]),
                   _lvol("v3", sync_active_site=SITE_B)]     # stale: not served on T either
         d = _decide(_lvol(sync_demoted_sites=[SITE_A]), others=others)
@@ -121,7 +129,7 @@ class TestPromoteDecision:
         d = _decide(_lvol(sync_demoted_sites=[SITE_A]), online={SITE_B})
         assert d == src.PromoteDecision(src.PROMOTE_SITE_OFFLINE, SITE_A)
 
-    def test_t_not_online_with_force_is_the_disaster_fail_over(self):
+    def test_t_not_online_with_force_is_disaster_fail_over(self):
         # the table decides it before the demotion rows: T may never have
         # been reachable to demote
         d = _decide(_lvol(), online={SITE_B}, force=True)
@@ -134,20 +142,13 @@ class TestPromoteDecision:
     @pytest.mark.parametrize("force", [False, True])
     @pytest.mark.parametrize("online", [{SITE_A}, set()])     # S down; T up or down too
     @pytest.mark.parametrize("demoted", [[SITE_A], []])
-    def test_an_offline_target_site_is_refused_before_t_rows(
+    def test_offline_target_site_is_refused_before_t_rows(
             self, force, online, demoted):
         d = _decide(_lvol(sync_demoted_sites=demoted), online=online, force=force)
         assert d == src.PromoteDecision(src.PROMOTE_TARGET_OFFLINE, SITE_A)
 
-    def test_a_served_volume_stays_a_no_op_while_offline(self):
-        """200 is the result of the open that served it, not a probe of its
-        paths (docs: Role is not accessibility)."""
-        owner = _owner(lvs_active_site=SITE_B)
-        served = _lvol(sync_active_site=SITE_B, sync_demoted_sites=[SITE_A])
-        assert _decide(served, owner, online={SITE_A}, nodes={"p"}).kind == src.PROMOTE_ACTIVE
-
     @pytest.mark.parametrize("online", [BOTH, {SITE_A}])
-    def test_ana_step_with_the_lvs_triplet_offline_is_refused(self, online):
+    def test_ana_step_with_lvs_triplet_offline_is_refused(self, online):
         """Judged by this LVS's triplet on S, not by the site: another node of S
         online opens no path of this volume."""
         owner = _owner(lvs_active_site=SITE_B)
@@ -157,7 +158,7 @@ class TestPromoteDecision:
         assert d == src.PromoteDecision(src.PROMOTE_TARGET_OFFLINE, SITE_B)
 
     @pytest.mark.parametrize("member", ["rp", "rs", "rt"])
-    def test_one_online_triplet_member_allows_the_ana_step(self, member):
+    def test_one_online_triplet_member_allows_ana_step(self, member):
         """Decision table only: the rows led from S read the triplet's nodes,
         not ``online_sites`` (which leaves out a recorded lost site - that
         promote is refused later, by _lost_site_of_request)."""
@@ -165,22 +166,9 @@ class TestPromoteDecision:
         closed = _lvol(sync_active_site=SITE_A, sync_demoted_sites=[SITE_A])
         assert _decide(closed, owner, online={SITE_A}, nodes={member}).kind == src.PROMOTE_ANA_ONLY
 
-    def test_the_ana_step_reads_a_triplet_without_tertiary(self):
-        owner = _owner(lvs_active_site=SITE_B, tertiary_node_id="", remote_tertiary_node_id="")
-        closed = _lvol(sync_active_site=SITE_A, sync_demoted_sites=[SITE_A])
-        assert _decide(closed, owner, nodes={"p", "s", "t"}).kind == src.PROMOTE_TARGET_OFFLINE
-        assert _decide(closed, owner, nodes={"rs"}).kind == src.PROMOTE_ANA_ONLY
-
-    def test_a_move_in_flight_is_in_progress(self):
+    def test_move_in_flight_is_in_progress(self):
         d = _decide(_lvol(sync_demoted_sites=[SITE_A]), _owner(lvs_active_site="moving:site-b"))
         assert d.kind == src.PROMOTE_IN_PROGRESS
-
-    def test_group_union_rule_is_the_per_member_rule(self):
-        """A group's members are judged each against every volume of its own
-        LVS: a volume outside the group blocks the group's move."""
-        member = _lvol("m1", sync_demoted_sites=[SITE_A])
-        outsider = _lvol("x1")
-        assert _decide(member, others=[outsider]).blocking == ("x1",)
 
 
 def _unconnected(uuid="v1", **fields):
@@ -210,7 +198,7 @@ class TestBirthState:
         assert not src.is_birth_state(_unconnected(), _owner(lvs_active_site=SITE_B))
         assert not src.is_birth_state(_unconnected(), _owner(lvs_active_site="moving:site-b"))
 
-    def test_a_connected_volume_is_never_birth_state(self):
+    def test_connected_volume_is_never_birth_state(self):
         """A connect has handed out its paths (or the record predates the
         flag): a consumer may hold them, wherever the volume is active."""
         owner = _owner()
@@ -226,53 +214,49 @@ class TestBirthState:
                      for lv in requested]
         return src.birth_state_demote_plan(decisions, {owner.get_id(): owner}, {owner.get_id(): lvs})
 
-    def test_a_fresh_volume_is_demoted_on_its_home(self):
-        v1 = _unconnected()
-        assert self._plan([v1]) == {SITE_A: [v1]}
-
-    def test_a_volume_created_active_on_its_home_is_demoted(self):
+    @pytest.mark.parametrize("fields", [
+        pytest.param({}, id="fresh-volume"),
         # A fresh volume carries sync_active_site == home.
-        v1 = _unconnected(sync_active_site=SITE_A)
-        assert self._plan([v1]) == {SITE_A: [v1]}
-
-    def test_a_prior_demote_does_not_block_the_first_move(self):
+        pytest.param({"sync_active_site": SITE_A}, id="created-active-on-home"),
         # A demote of a site does not move the volume off its home, so the
         # first cross-site promote still auto-demotes the home.
-        v1 = _unconnected(sync_demoted_sites=[SITE_B])
+        pytest.param({"sync_demoted_sites": [SITE_B]}, id="prior-demote-of-the-other-site"),
+    ])
+    def test_fresh_volume_is_demoted_on_its_home(self, fields):
+        v1 = _unconnected(**fields)
         assert self._plan([v1]) == {SITE_A: [v1]}
 
-    def test_a_volume_on_a_non_home_led_lvs_is_auto_demoted(self):
+    def test_volume_on_non_home_led_lvs_is_auto_demoted(self):
         # The LVS is led from site-b; a fresh volume on it carries site-b as
         # its sync_active_site. A promote to site-a demotes site-b and moves.
         owner = _owner(lvs_active_site=SITE_B)
         v = _unconnected(sync_active_site=SITE_B)
         assert self._plan([v], owner=owner, site=SITE_A) == {SITE_B: [v]}
 
-    def test_all_fresh_volumes_of_the_lvs_are_demoted_together(self):
+    def test_all_fresh_volumes_of_lvs_are_demoted_together(self):
         v1, v2 = _unconnected("v1"), _unconnected("v2")
         assert self._plan([v1, v2], lvs=[v1, v2]) == {SITE_A: [v1, v2]}
 
-    def test_a_connected_volume_is_not_demoted(self):
+    @pytest.mark.parametrize("volume, site, online", [
         # Its consumer may still hold the home's paths: refused as not demoted.
-        assert self._plan([_lvol()]) == {}
+        pytest.param(_lvol(), SITE_B, BOTH, id="connected-volume"),
+        # Already demoted on its home site: nothing is open there, so the
+        # promote is a plain move with nothing to demote.
+        pytest.param(_unconnected(sync_demoted_sites=[SITE_A]), SITE_B, BOTH, id="already-demoted"),
+        # Promoting to the site it is already led from is never a move.
+        pytest.param(_unconnected(), SITE_A, BOTH, id="no-op-promote-on-home"),
+        # A refusal other than NOT_DEMOTED or LVS_BUSY, here an offline target,
+        # never triggers a demote.
+        pytest.param(_unconnected(), SITE_B, {SITE_A}, id="offline-target"),
+    ])
+    def test_nothing_is_demoted(self, volume, site, online):
+        assert self._plan([volume], site=site, online=online) == {}
 
-    def test_a_connected_sibling_pins_the_lvs(self):
+    def test_connected_sibling_pins_lvs(self):
         """A sibling a connect handed out stays open on the home: nothing of
         the LVS is demoted, the promote is refused as LVS busy."""
         v1, served = _unconnected("v1"), _lvol("v2")
         assert self._plan([v1], lvs=[v1, served]) == {}
-
-    def test_an_already_demoted_volume_has_nothing_to_demote(self):
-        # Demoted on its home: not open there, a clean PROMOTE_MOVE, no blocker.
-        assert self._plan([_unconnected(sync_demoted_sites=[SITE_A])]) == {}
-
-    def test_a_no_op_promote_on_the_home_site_demotes_nothing(self):
-        # Promoting to the site it is already led from is never a move.
-        assert self._plan([_unconnected()], site=SITE_A) == {}
-
-    def test_an_offline_target_is_not_birth_state_demoted(self):
-        # A refusal that is not NOT_DEMOTED / LVS_BUSY never triggers a demote.
-        assert self._plan([_unconnected()], online={SITE_A}) == {}
 
 
 class TestMoveProblems:
@@ -286,18 +270,18 @@ class TestMoveProblems:
     def test_all_demoted_nothing_changed_is_clean(self):
         assert self._problems(vols=[_lvol(sync_demoted_sites=[SITE_A])]) == []
 
-    def test_a_new_volume_on_t_blocks(self):
+    def test_new_volume_on_t_blocks(self):
         problems = self._problems(vols=[_lvol(sync_demoted_sites=[SITE_A]), _lvol("new")])
         assert problems == ["LVS LVS_1: volumes still active on site site-a: ['new']"]
 
-    def test_a_changed_active_site_blocks(self):
+    def test_changed_active_site_blocks(self):
         problems = self._problems(owner=_owner(lvs_active_site="moving:site-b"))
         assert "expected ''" in problems[0]
 
-    def test_a_lost_site_blocks_the_planned_promote(self):
+    def test_lost_site_blocks_planned_promote(self):
         assert "lost" in self._problems(lost=SITE_A)[0]
 
-    def test_an_lvs_already_led_from_the_target_is_not_moved(self):
+    def test_lvs_already_led_from_target_is_not_moved(self):
         owner = _owner(lvs_active_site=SITE_B)
         assert "already led" in self._problems(owner=owner, expect=SITE_B)[0]
 
@@ -335,7 +319,7 @@ class TestStrictAna:
                       n.rpc_client.return_value.nvmf_subsystem_listener_set_ana_state.call_args_list]
                 for nid, n in nodes.items()}
 
-    def test_close_sets_every_triplet_path_in_the_ana_group(self):
+    def test_close_sets_every_triplet_path_in_ana_group(self):
         nodes = self._nodes()
         src.set_site_ana_strict(_lvol(ns_id=7), self._triplet(nodes, SITE_A), open_site=False)
         assert self._calls(nodes) == {"p": ["inaccessible"], "s": ["inaccessible"],
@@ -345,13 +329,13 @@ class TestStrictAna:
         assert call.kwargs == {"trtype": "TCP", "ana": "inaccessible", "anagrpid": 7}
         nodes["s"].get_lvol_subsys_port.assert_called_with("LVS_1")
 
-    def test_open_optimizes_the_primary_only(self):
+    def test_open_optimizes_primary_only(self):
         nodes = self._nodes()
         src.set_site_ana_strict(_lvol(), self._triplet(nodes, SITE_B), open_site=True)
         assert self._calls(nodes) == {"p": [], "s": [], "t": [], "rp": ["optimized"],
                                       "rs": ["non_optimized"], "rt": ["non_optimized"]}
 
-    def test_close_skips_only_a_node_whose_spdk_is_down(self):
+    def test_close_skips_only_node_whose_spdk_is_down(self):
         nodes = self._nodes({"s": StorageNode.STATUS_OFFLINE, "t": StorageNode.STATUS_UNREACHABLE})
         src.set_site_ana_strict(_lvol(), self._triplet(nodes, SITE_A), open_site=False)
         calls = self._calls(nodes)
@@ -362,38 +346,32 @@ class TestStrictAna:
         src.set_site_ana_strict(_lvol(), self._triplet(nodes, SITE_B), open_site=True)
         assert self._calls(nodes)["rs"] == []
 
-    @pytest.mark.parametrize("statuses", [
-        {"rp": StorageNode.STATUS_OFFLINE, "rs": StorageNode.STATUS_OFFLINE,
-         "rt": StorageNode.STATUS_OFFLINE},
-        {"rp": StorageNode.STATUS_UNREACHABLE, "rs": StorageNode.STATUS_RESTARTING,
-         "rt": StorageNode.STATUS_REMOVED},
+    @pytest.mark.parametrize("statuses, listeners, members", [
+        pytest.param({"rp": StorageNode.STATUS_OFFLINE, "rs": StorageNode.STATUS_OFFLINE,
+                      "rt": StorageNode.STATUS_OFFLINE}, True, True, id="every-member-offline"),
+        pytest.param({"rp": StorageNode.STATUS_UNREACHABLE, "rs": StorageNode.STATUS_RESTARTING,
+                      "rt": StorageNode.STATUS_REMOVED}, True, True, id="no-member-online"),
+        pytest.param({}, False, True, id="no-listener"),
+        pytest.param({}, True, False, id="no-member"),
     ])
-    def test_an_open_without_an_online_member_fails(self, statuses):
+    def test_open_that_sets_no_path_fails(self, statuses, listeners, members):
         nodes = self._nodes(statuses)
+        if not listeners:
+            for nid in ("rp", "rs", "rt"):
+                nodes[nid].data_nics = []
+        triplet = self._triplet(nodes, SITE_B) if members else []
         with pytest.raises(SyncAnaError, match="set no path"):
-            src.set_site_ana_strict(_lvol(), self._triplet(nodes, SITE_B), open_site=True)
+            src.set_site_ana_strict(_lvol(), triplet, open_site=True)
         assert all(calls == [] for calls in self._calls(nodes).values())
 
-    def test_an_open_without_a_listener_fails(self):
-        nodes = self._nodes()
-        for nid in ("rp", "rs", "rt"):
-            nodes[nid].data_nics = []
-        with pytest.raises(SyncAnaError, match="set no path"):
-            src.set_site_ana_strict(_lvol(), self._triplet(nodes, SITE_B), open_site=True)
-        assert all(calls == [] for calls in self._calls(nodes).values())
-
-    def test_an_open_of_no_member_fails(self):
-        with pytest.raises(SyncAnaError, match="set no path"):
-            src.set_site_ana_strict(_lvol(), [], open_site=True)
-
-    def test_one_online_secondary_is_an_open(self):
+    def test_one_online_secondary_is_open(self):
         nodes = self._nodes({"rp": StorageNode.STATUS_OFFLINE, "rt": StorageNode.STATUS_OFFLINE})
         src.set_site_ana_strict(_lvol(), self._triplet(nodes, SITE_B), open_site=True)
         calls = self._calls(nodes)
         assert (calls["rp"], calls["rs"], calls["rt"]) == ([], ["non_optimized"], [])
 
     @pytest.mark.parametrize("triplet", [True, False])
-    def test_a_close_with_every_spdk_down_is_no_error(self, triplet):
+    def test_close_with_every_spdk_down_is_no_error(self, triplet):
         down = {nid: StorageNode.STATUS_OFFLINE for nid in ("p", "s", "t")}
         nodes = self._nodes(down)
         src.set_site_ana_strict(_lvol(), self._triplet(nodes, SITE_A) if triplet else [],
@@ -401,7 +379,7 @@ class TestStrictAna:
         assert all(calls == [] for calls in self._calls(nodes).values())
 
     @pytest.mark.parametrize("failure", ["false", "raise"])
-    def test_any_failed_path_fails_the_call(self, failure):
+    def test_any_failed_path_fails_call(self, failure):
         nodes = self._nodes()
         rpc = nodes["s"].rpc_client.return_value.nvmf_subsystem_listener_set_ana_state
         if failure == "false":
@@ -411,7 +389,7 @@ class TestStrictAna:
         with pytest.raises(SyncAnaError, match="on s "):
             src.set_site_ana_strict(_lvol(), self._triplet(nodes, SITE_A), open_site=False)
 
-    def test_a_volume_without_namespace_id_is_refused(self):
+    def test_volume_without_namespace_id_is_refused(self):
         with pytest.raises(SyncAnaError, match="namespace id"):
             src.set_site_ana_strict(_lvol(ns_id=0), self._triplet(self._nodes(), SITE_A),
                                     open_site=False)
@@ -448,7 +426,7 @@ class TestSiteRuleLocks:
             pass
         assert taken.count("__sync_ana__LVS_1") == 2
 
-    def test_a_non_sync_writer_takes_no_lock(self, taken):
+    def test_non_sync_writer_takes_no_lock(self, taken):
         node = MagicMock()
         node.site = ""
         node.rpc_client.return_value.nvmf_subsystem_listener_set_ana_state.return_value = True

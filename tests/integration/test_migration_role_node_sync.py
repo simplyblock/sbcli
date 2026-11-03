@@ -186,7 +186,7 @@ def _drive_all(db, tasks):
 
 class TestSwitchedLvs:
 
-    def test_a_serving_site_restart_rebalances_on_the_remote_primary(self, db, rpcs):
+    def test_serving_site_restart_rebalances_on_remote(self, db, rpcs):
         """Site B leads LVS_1, and b1 restarts. The sub-tasks of LVS_1 run on
         b0, which leads LVS_1. They finish when the status is ``completed``,
         and then the restart's master task closes. a0 is the passive owner and
@@ -197,6 +197,7 @@ class TestSwitchedLvs:
         _queue(db, cluster, JobSchedule.FN_DEV_MIG, b[1])
         tasks = _open(db, cluster, JobSchedule.FN_DEV_MIG)
         assert {t.node_id for t in tasks} == {b[0].get_id()}
+        assert [t.node_id for t in _open(db, cluster, JobSchedule.FN_DEV_MIG, owner_a)] == [b[0].get_id()] * 2
 
         assert [t.status for t in _drive_all(db, tasks)] == [DONE] * 4
         assert _started(rpcs, b[0], JobSchedule.FN_DEV_MIG) == placement.LVS_1_DISTRIBS + placement.LVS_2_DISTRIBS
@@ -207,8 +208,10 @@ class TestSwitchedLvs:
                     if t.function_name == JobSchedule.FN_BALANCING_AFTER_NODE_RESTART]
         assert master.status == DONE
 
-    @pytest.mark.parametrize("function_name", list(RUNNERS))
-    def test_every_family_runs_on_the_remote_primary(self, db, rpcs, function_name):
+    @pytest.mark.parametrize("function_name", [JobSchedule.FN_FAILED_DEV_MIG, JobSchedule.FN_NEW_DEV_MIG])
+    def test_every_other_family_runs_on_remote_primary(self, db, rpcs, function_name):
+        """The restart re-balance (FN_DEV_MIG) is checked by the serving-site
+        restart test above."""
         cluster, a, b, owner_a, _ = _layout(db)
         _leads(rpcs, b[0], "LVS_1", "LVS_2")
         _data_plane(rpcs, (*a, *b))
@@ -220,7 +223,7 @@ class TestSwitchedLvs:
         assert _started(rpcs, b[0], function_name) == placement.LVS_1_DISTRIBS
         _no_migration_rpc(rpcs, *a)
 
-    def test_the_owners_lvs_led_by_an_acting_secondary_waits(self, db, rpcs):
+    def test_owners_lvs_led_by_acting_secondary_waits(self, db, rpcs):
         """b0 leads its own LVS_2, but b1 leads LVS_1 (an in-site failover).
         The migration of LVS_1 does not start. The check asks about LVS_1,
         not about the LVS in b0's own lvstore field."""
@@ -255,7 +258,7 @@ class TestSwitchedLvs:
         assert {t.function_params["distr_name"]: t.node_id
                 for t in _open(db, cluster, JobSchedule.FN_DEV_MIG)}["distrib_11"] == b[0].get_id()
 
-    def test_the_passive_owner_returning_rebalances_on_the_serving_primary(self, db, rpcs):
+    def test_returning_passive_owner_rebalances_on_serving(self, db, rpcs):
         """Site A is lost, and LVS_1 is promoted to site B. When a0 returns,
         its restart queues the re-balance of LVS_1 on b0, and b0 runs it.
         Nothing runs on site A."""
@@ -278,7 +281,7 @@ class TestSwitchedLvs:
 class TestPromote:
 
     @pytest.mark.parametrize("function_name", list(RUNNERS))
-    def test_a_task_not_started_follows_the_promote(self, db, rpcs, function_name):
+    def test_task_not_started_follows_promote(self, db, rpcs, function_name):
         """A task is queued on b0, and then LVS_1 is promoted back to the home
         site. The first runner pass moves the task to a0 and starts nothing.
         The next pass runs it on a0."""
@@ -301,7 +304,7 @@ class TestPromote:
         assert _started(rpcs, a[0], function_name) == ["distrib_11"]
         _no_migration_rpc(rpcs, *b)
 
-    def test_a_started_task_is_polled_on_its_node_to_the_end(self, db, rpcs):
+    def test_started_task_is_polled_on_its_node_to_end(self, db, rpcs):
         """A migration starts on b0, and then LVS_1 is promoted back to the
         home site. b0 does not lead LVS_1 now, but the runner still polls the
         task on b0 until the status is ``completed``. The task does not move,
@@ -325,7 +328,7 @@ class TestPromote:
 
     @pytest.mark.parametrize("target", [SITE_A, SITE_B])
     @pytest.mark.parametrize("function_name", list(RUNNERS))
-    def test_a_move_in_flight_waits(self, db, rpcs, function_name, target):
+    def test_move_in_flight_waits(self, db, rpcs, function_name, target):
         cluster, a, b, owner_a, _ = _layout(db)
         _leads(rpcs, b[0], "LVS_1", "LVS_2")
         _data_plane(rpcs, (*a, *b))
@@ -348,7 +351,7 @@ class TestPromote:
 class TestUnswitched:
 
     @pytest.mark.parametrize("function_name", list(RUNNERS))
-    def test_home_led_runs_on_the_owner(self, db, rpcs, function_name):
+    def test_home_led_runs_on_owner(self, db, rpcs, function_name):
         cluster, a, b, owner_a, _ = _layout(db, active_site="")
         _leads(rpcs, a[0], "LVS_1")
         _data_plane(rpcs, (*a, *b))
@@ -360,7 +363,7 @@ class TestUnswitched:
         assert _started(rpcs, a[0], function_name) == placement.LVS_1_DISTRIBS
         _no_migration_rpc(rpcs, *b)
 
-    def test_without_sync_replication_the_owner_runs_under_its_own_lvs(self, db, rpcs):
+    def test_non_sync_owner_runs_under_its_own_lvs(self, db, rpcs):
         cluster, a, b = _non_sync(db)
         _leads(rpcs, a[0], "LVS_1")
         _data_plane(rpcs, (*a, *b))
@@ -371,7 +374,7 @@ class TestUnswitched:
         assert [t.status for t in _drive_all(db, tasks)] == [DONE, DONE]
         assert _started(rpcs, a[0], JobSchedule.FN_DEV_MIG) == placement.LVS_1_DISTRIBS
 
-    def test_without_sync_replication_a_non_leader_owner_waits(self, db, rpcs):
+    def test_non_sync_non_leader_owner_waits(self, db, rpcs):
         cluster, a, b = _non_sync(db)
         _leads(rpcs, a[0], "LVS_2")
         _data_plane(rpcs, (*a, *b))
@@ -391,7 +394,7 @@ class TestUnswitched:
 class TestBoundaries:
 
     @pytest.mark.parametrize("function_name", list(RUNNERS))
-    def test_a_sync_task_without_its_owner_is_aborted(self, db, rpcs, function_name):
+    def test_sync_task_without_its_owner_is_aborted(self, db, rpcs, function_name):
         cluster, a, b, _, _ = _layout(db)
         dev_id = placement._device(db, cluster, a[1])
         task = _write_task(db, cluster, function_name, b[0].get_id(), {"distr_name": "distrib_11"},
@@ -404,7 +407,7 @@ class TestBoundaries:
         _no_migration_rpc(rpcs, *a, *b)
 
     @pytest.mark.parametrize("function_name", list(RUNNERS))
-    def test_a_missing_owner_is_aborted(self, db, rpcs, function_name):
+    def test_missing_owner_is_aborted(self, db, rpcs, function_name):
         cluster, a, b, _, _ = _layout(db)
         dev_id = placement._device(db, cluster, a[1])
         task = _write_task(db, cluster, function_name, b[0].get_id(),
@@ -417,7 +420,7 @@ class TestBoundaries:
 
     @pytest.mark.parametrize("slot", placement.DANGLING_PEERS)
     @pytest.mark.parametrize("function_name", list(RUNNERS))
-    def test_a_missing_peer_does_not_stop_a_queued_task(self, db, rpcs, function_name, slot):
+    def test_missing_peer_does_not_stop_queued_task(self, db, rpcs, function_name, slot):
         """The tasks of LVS_1 are queued on b0. Then the secondary or tertiary
         id of its remote triplet names a node that does not exist. b0 is online
         and leads LVS_1, so it still starts and completes the tasks."""
@@ -436,7 +439,7 @@ class TestBoundaries:
 
     @pytest.mark.parametrize("status", list(StorageNode.DEPARTING_STATUSES))
     @pytest.mark.parametrize("function_name", [JobSchedule.FN_DEV_MIG, JobSchedule.FN_NEW_DEV_MIG])
-    def test_a_departing_primary_skips_the_rebalance(self, db, rpcs, function_name, status):
+    def test_departing_primary_skips_rebalance(self, db, rpcs, function_name, status):
         """b0 is the primary of the active triplets of both LVSs, and its
         removal starts after the tasks are queued. Every sub-task ends DONE
         with "skipped" and sends no RPC. No open task is left that would block
@@ -457,14 +460,8 @@ class TestBoundaries:
         tasks_runner_migration.update_master_tasks(cluster.get_id())
         assert migration_controller._can_add_lvol_migration(cluster.get_id())
 
-    def test_no_new_device_migration_is_queued_on_a_shut_down_primary(self, db):
-        cluster, a, b, owner_a, _ = _layout(db)
-        placement._status(db, b[0], StorageNode.STATUS_IN_REMOVAL)
-        _queue(db, cluster, JobSchedule.FN_NEW_DEV_MIG, b[1])
-        assert _open(db, cluster, JobSchedule.FN_NEW_DEV_MIG) == []
-
     @pytest.mark.parametrize("status", list(StorageNode.REMOVAL_SHUT_DOWN_STATUSES))
-    def test_a_failed_device_migration_of_a_shut_down_primary_moves_to_the_next_member(self, db, rpcs, status):
+    def test_shut_down_primary_failed_mig_to_next_member(self, db, rpcs, status):
         cluster, a, b, owner_a, _ = _layout(db)
         _data_plane(rpcs, (*a, *b))
         _queue(db, cluster, JobSchedule.FN_FAILED_DEV_MIG, a[1])
@@ -478,7 +475,7 @@ class TestBoundaries:
         assert _started(rpcs, b[1], JobSchedule.FN_FAILED_DEV_MIG) == ["distrib_11"]
         _no_migration_rpc(rpcs, *a, b[0], b[2])
 
-    def test_a_failed_device_migration_waits_while_the_whole_active_triplet_departs(self, db, rpcs):
+    def test_failed_mig_waits_while_active_triplet_departs(self, db, rpcs):
         cluster, a, b, owner_a, _ = _layout(db)
         _data_plane(rpcs, (*a, *b))
         _queue(db, cluster, JobSchedule.FN_FAILED_DEV_MIG, a[1])
@@ -507,13 +504,13 @@ def _queued_on_b0(db):
 
 class TestMove:
 
-    def test_the_move_wins_on_an_unchanged_row(self, db):
+    def test_move_wins_on_unchanged_row(self, db):
         _, a, b, _, task = _queued_on_b0(db)
         assert mig.move_unstarted_task(task, a[0].get_id()) is True
         assert db.get_task_by_id(task.uuid).node_id == a[0].get_id()
 
     @pytest.mark.parametrize("change", ["started", "canceled", "done", "moved"])
-    def test_the_move_loses_to_a_change_since_its_read(self, db, change):
+    def test_move_loses_to_change_since_its_read(self, db, change):
         """The move uses an old copy of the task. If the stored task was
         started, canceled, finished or moved since then, that change stays, and
         the task stays on the node of the stored task."""
@@ -535,7 +532,7 @@ class TestMove:
         assert after.node_id == node_id
         assert after.to_dict() == before.to_dict()
 
-    def test_a_moved_task_waits_behind_a_sibling_on_either_node(self, db, rpcs):
+    def test_moved_task_waits_for_sibling_on_either_node(self, db, rpcs):
         """The task has moved to a0. It waits while another migration of its
         distrib runs on a0, and also while one runs on b0. Only one task at a
         time migrates a sync-replication distrib, on all nodes together."""
@@ -616,7 +613,7 @@ SIBLINGS = [
 class TestStartedSiblingOnTheFormerPrimary:
 
     @pytest.mark.parametrize("started_fn, waiting_fn, via", HELD_BACK)
-    def test_the_new_primary_waits_for_the_run_on_the_former_one(self, db, rpcs, started_fn, waiting_fn, via):
+    def test_new_primary_waits_for_run_on_former_one(self, db, rpcs, started_fn, waiting_fn, via):
         """While the migration of distrib_11 runs on b0, another migration of
         distrib_11 on a0 does not start. The other distrib of LVS_1 is not
         blocked, and the runner keeps polling the migration on b0. When it
@@ -638,7 +635,7 @@ class TestStartedSiblingOnTheFormerPrimary:
         assert (fresh.status, fresh.node_id) == (DONE, a[0].get_id())
         assert _started(rpcs, a[0], waiting_fn) == ["distrib_11"]
 
-    def test_a_new_device_migration_waits_for_the_run_on_the_former_primary(self, db, rpcs):
+    def test_new_dev_mig_waits_for_run_on_former_primary(self, db, rpcs):
         """The test checks eligibility only. The new-device handler also waits
         while any recovery migration is open, so the handler alone cannot show
         which rule blocks the task."""
@@ -654,7 +651,7 @@ class TestStartedSiblingOnTheFormerPrimary:
         assert _eligible(db, spec, queued["distrib_11"], cluster)
 
     @pytest.mark.parametrize("waiting_fn, sibling_fn, status", SIBLINGS)
-    def test_a_sibling_on_another_node_holds_back_a_sync_task(self, db, waiting_fn, sibling_fn, status):
+    def test_sibling_on_another_node_holds_back_sync_task(self, db, waiting_fn, sibling_fn, status):
         cluster, a, b, owner_a, _ = _layout(db, active_site="")
         params = tasks_controller._sync_mig_params(owner_a, "distrib_11")
         task = _write_task(db, cluster, waiting_fn, a[0].get_id(), params)
@@ -673,7 +670,7 @@ class TestStartedSiblingOnTheFormerPrimary:
         assert _eligible(db, spec, task, cluster)
 
     @pytest.mark.parametrize("waiting_fn, sibling_fn, status", SIBLINGS)
-    def test_without_sync_replication_only_a_sibling_on_the_node_holds_back(self, db, waiting_fn, sibling_fn,
+    def test_non_sync_only_sibling_on_node_holds_back(self, db, waiting_fn, sibling_fn,
                                                                            status):
         cluster, a, b = _non_sync(db)
         task = _write_task(db, cluster, waiting_fn, a[0].get_id(), {"distr_name": "distrib_11"})
@@ -705,14 +702,14 @@ def _running_on_b0(db, rpcs):
 
 class TestNodeKeyed:
 
-    def test_the_running_node_refuses_its_shutdown(self, db, rpcs):
+    def test_running_node_refuses_its_shutdown(self, db, rpcs):
         _, a, b, _, _ = _running_on_b0(db, rpcs)
         allowed, reason = storage_node_ops.check_node_shutdown_preconditions(b[0].get_id())
         assert not allowed
         # The running one and the three sub-tasks queued beside it on b0.
         assert reason.startswith("Migration task found: 4 (device_migration)")
 
-    def test_the_owner_shuts_down_and_the_run_goes_on(self, db, rpcs):
+    def test_owner_shuts_down_and_run_goes_on(self, db, rpcs):
         cluster, a, b, _, task = _running_on_b0(db, rpcs)
         assert storage_node_ops.check_node_shutdown_preconditions(a[0].get_id()) == (True, "")
         assert tasks_controller.cancel_node_tasks(cluster.get_id(), a[0].get_id(), SHUTDOWN_CANCELS) == 0
@@ -721,7 +718,7 @@ class TestNodeKeyed:
         fresh = drive(tasks_runner_migration.SPEC, task)
         assert (fresh.status, fresh.canceled, fresh.node_id) == (DONE, False, b[0].get_id())
 
-    def test_the_remote_primarys_removal_cancels_what_is_placed_on_it(self, db):
+    def test_remote_primary_removal_cancels_its_tasks(self, db):
         """The removal shutdown of b0 cancels the sub-tasks on b0, including
         the tasks of a0's LVS. While the removal runs, the re-balance is not
         queued again. A cluster without sync replication does the same."""
@@ -736,13 +733,7 @@ class TestNodeKeyed:
         assert not tasks_controller.add_device_mig_task_for_node(b[1].get_id())
         assert _open(db, cluster, JobSchedule.FN_DEV_MIG) == []
 
-    def test_a_failed_device_requeue_after_the_removal_lands_on_the_next_member(self, db):
-        cluster, a, b, owner_a, _ = _layout(db)
-        placement._status(db, b[0], StorageNode.STATUS_IN_REMOVAL)
-        _queue(db, cluster, JobSchedule.FN_FAILED_DEV_MIG, a[1])
-        assert {t.node_id for t in _open(db, cluster, JobSchedule.FN_FAILED_DEV_MIG, owner_a)} == {b[1].get_id()}
-
-    def test_the_owner_is_left_out_of_the_status_count_while_its_expansion_runs_remotely(self, db, rpcs):
+    def test_remote_expansion_leaves_owner_out_of_count(self, db, rpcs):
         cluster, a, b, owner_a, _ = _layout(db)
         _leads(rpcs, b[0], "LVS_1", "LVS_2")
         _data_plane(rpcs, (*a, *b), status=IN_PROGRESS)
@@ -759,7 +750,7 @@ class TestNodeKeyed:
         assert [t.status for t in _drive_all(db, tasks)] == [DONE, DONE]
         assert not storage_node_monitor.is_new_migrated_node(cluster_id, stack._fresh(db, a[0]))
 
-    def test_without_sync_replication_the_status_count_keeps_to_the_executor(self, db):
+    def test_non_sync_status_count_keeps_to_executor(self, db):
         """Without sync replication, a new-device task for a device and distrib
         of a0 removes a0 from the node status count only when the task is on
         a0."""
@@ -778,7 +769,7 @@ class TestNodeKeyed:
 
 class TestCancelRacesTheMove:
 
-    def test_a_move_between_the_scan_and_the_cancel_is_not_canceled(self, db):
+    def test_move_between_scan_and_cancel_is_not_canceled(self, db):
         """The shutdown of b0 finds the task on b0, and then the runner moves
         the task to a0. The cancel sees that the task is not on b0 now, and
         does not cancel it."""
@@ -799,7 +790,7 @@ class TestCancelRacesTheMove:
         fresh = db.get_task_by_id(task.uuid)
         assert (fresh.node_id, fresh.canceled) == (a[0].get_id(), False)
 
-    def test_a_cancel_before_the_move_stops_it(self, db):
+    def test_cancel_before_move_stops_it(self, db):
         cluster, a, b, owner_a, task = _queued_on_b0(db)
         assert tasks_controller.cancel_node_tasks(cluster.get_id(), b[0].get_id(), SHUTDOWN_CANCELS) == 4
 
@@ -847,7 +838,7 @@ def _switched(db, rpcs, function_name):
 class TestResyncGate:
 
     @pytest.mark.parametrize("function_name", REBALANCE)
-    def test_a_rebalance_waits_for_a_catch_up_that_can_run(self, db, rpcs, function_name):
+    def test_rebalance_waits_for_catch_up_that_can_run(self, db, rpcs, function_name):
         """The wait consumes no retry and starts nothing. Once the catch-up is
         DONE, the tasks run."""
         cluster, a, b, owner_a, _ = _switched(db, rpcs, function_name)
@@ -866,7 +857,7 @@ class TestResyncGate:
         assert _started(rpcs, b[0], function_name) == placement.LVS_1_DISTRIBS
 
     @pytest.mark.parametrize("function_name", REBALANCE)
-    def test_a_catch_up_waiting_for_a_lost_site_holds_nothing(self, db, rpcs, function_name):
+    def test_catch_up_waiting_for_lost_site_holds_nothing(self, db, rpcs, function_name):
         cluster, a, b, owner_a, _ = _switched(db, rpcs, function_name)
         predicates._desync(a[0])
         resync = predicates._resync_task(db, cluster)
@@ -882,7 +873,7 @@ class TestResyncGate:
          "waiting for unavailable nodes/devices to recover before restarting migration: ['dev:{dev}']"),
         (JobSchedule.FN_NEW_DEV_MIG, 1, "Some devs are offline, retrying"),
     ])
-    def test_a_catch_up_waiting_for_its_lagging_zone_holds_nothing(self, db, rpcs, function_name, retry, result):
+    def test_catch_up_awaiting_lagging_zone_holds_nothing(self, db, rpcs, function_name, retry, result):
         """Site B lags, and a device of b2 is not online. The tasks pass the
         catch-up gate and stop at their own wait for the device."""
         cluster, a, b, owner_a, _ = _switched(db, rpcs, function_name)
@@ -900,7 +891,7 @@ class TestResyncGate:
 
     @pytest.mark.parametrize("release", ["alert_runs", "held"])
     @pytest.mark.parametrize("function_name", REBALANCE)
-    def test_a_catch_up_that_cannot_take_the_slot_holds_nothing(self, db, rpcs, function_name, release):
+    def test_catch_up_that_cannot_take_slot_holds_nothing(self, db, rpcs, function_name, release):
         """A catch-up that has failed SYNC_RESYNC_ALERT_RUNS runs, or one the
         resync runner records as held behind a device migration, does not hold
         the re-balance."""
@@ -917,7 +908,7 @@ class TestResyncGate:
         assert [t.status for t in _drive_all(db, _open(db, cluster, function_name, owner_a))] == [DONE, DONE]
         assert _started(rpcs, b[0], function_name) == placement.LVS_1_DISTRIBS
 
-    def test_a_catch_up_holds_only_its_own_lvs(self, db, rpcs):
+    def test_catch_up_holds_only_its_own_lvs(self, db, rpcs):
         """The restart of b1 queues the re-balance of LVS_1 and of LVS_2 on b0.
         Only LVS_2 has a catch-up: LVS_1 runs, LVS_2 waits."""
         cluster, a, b, owner_a, owner_b = _switched(db, rpcs, JobSchedule.FN_DEV_MIG)
@@ -929,7 +920,7 @@ class TestResyncGate:
             assert fresh.function_result == _catch_up_wait(fresh, resync)
         assert _started(rpcs, b[0], JobSchedule.FN_DEV_MIG) == placement.LVS_1_DISTRIBS
 
-    def test_a_failed_device_migration_never_waits(self, db, rpcs):
+    def test_failed_device_migration_never_waits(self, db, rpcs):
         cluster, a, b, owner_a, _ = _switched(db, rpcs, JobSchedule.FN_FAILED_DEV_MIG)
         resync = _resync(db, cluster, owner_a)
         assert _holding(db, cluster, owner_a) == resync.uuid
@@ -938,7 +929,7 @@ class TestResyncGate:
         assert [t.status for t in _drive_all(db, tasks)] == [DONE, DONE]
         assert _started(rpcs, b[0], JobSchedule.FN_FAILED_DEV_MIG) == placement.LVS_1_DISTRIBS
 
-    def test_a_started_rebalance_keeps_polling(self, db, rpcs):
+    def test_started_rebalance_keeps_polling(self, db, rpcs):
         """The catch-up is queued after the re-balance of distrib_11 started.
         The re-balance is polled on to the end and not started again."""
         cluster, a, b, owner_a, _ = _switched(db, rpcs, JobSchedule.FN_DEV_MIG)
@@ -988,7 +979,7 @@ OTHER_START_FAILURES = {
 class TestBusySlot:
 
     @pytest.mark.parametrize("function_name", list(RUNNERS))
-    def test_a_busy_slot_is_a_wait(self, db, rpcs, function_name):
+    def test_busy_slot_is_wait(self, db, rpcs, function_name):
         cluster, a, b, owner_a, _ = _switched(db, rpcs, function_name)
         task = _open(db, cluster, function_name, owner_a)[0]
         start = getattr(rpcs[b[0].get_id()], START_RPC[function_name])
@@ -1006,7 +997,7 @@ class TestBusySlot:
         assert start.call_count == 3
         assert _started(rpcs, b[0], function_name) == ["distrib_11"] * 3
 
-    def test_a_busy_slot_without_sync_replication_is_a_failed_attempt(self, db, rpcs):
+    def test_non_sync_busy_slot_is_failed_attempt(self, db, rpcs):
         cluster, a, b = _non_sync(db)
         _leads(rpcs, a[0], "LVS_1")
         _data_plane(rpcs, (*a, *b))
@@ -1021,7 +1012,7 @@ class TestBusySlot:
 
     @pytest.mark.parametrize("answer", list(OTHER_START_FAILURES))
     @pytest.mark.parametrize("function_name", [JobSchedule.FN_DEV_MIG, JobSchedule.FN_FAILED_DEV_MIG])
-    def test_any_other_start_failure_is_a_failed_attempt(self, db, rpcs, function_name, answer):
+    def test_any_other_start_failure_is_failed_attempt(self, db, rpcs, function_name, answer):
         cluster, a, b, owner_a, _ = _switched(db, rpcs, function_name)
         task = _open(db, cluster, function_name, owner_a)[0]
         OTHER_START_FAILURES[answer](getattr(rpcs[b[0].get_id()], START_RPC[function_name]))

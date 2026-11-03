@@ -259,13 +259,14 @@ def _nothing_done(db, spdk, layout):
     assert db.get_cluster_by_id(layout.cluster.get_id()).status == Cluster.STATUS_ACTIVE
 
 
-#: (a) the owner as the fail-back taker, (b) the remote primary - each with nobody leading
-#: and, as the twin a missing leadership must not differ from, with the taker leading.
+#: The owner as the fail-back taker is checked twice: with nobody leading, and
+#: with the taker leading as the reference that the leaderless case must match.
+#: The remote primary is checked only with nobody leading: no pass reads its
+#: instance, so its leadership cannot change the result.
 _states = pytest.mark.parametrize("site, leading", [
     pytest.param(SITE_A, False, id="fail-back-taker-nobody-leads"),
     pytest.param(SITE_A, True, id="fail-back-taker-leads"),
     pytest.param(SITE_B, False, id="remote-primary-nobody-leads"),
-    pytest.param(SITE_B, True, id="remote-primary-leads"),
 ])
 
 
@@ -313,7 +314,7 @@ class TestHealthPass:
             assert _fresh(db, node).health_check is True
             spdk[node.get_id()].bdev_nvme_attach_controller.assert_not_called()
 
-    def test_a_blocked_lvs_port_queues_its_port_allow_task(self, db, spdk):
+    def test_blocked_lvs_port_queues_its_port_allow_task(self, db, spdk):
         # the control of the "no task" assertion: the pass does queue one for a real finding
         layout = _Layout(db, spdk, SITE_A, leading=False)
         owner = layout.a[0]
@@ -359,7 +360,7 @@ class TestMonitorPass:
         # With every port open the monitor runs no check that lists the leadership.
         assert checks.own == [] and checks.sec == []
 
-    def test_a_blocked_lvs_port_takes_the_node_down(self, db, spdk):
+    def test_blocked_lvs_port_takes_node_down(self, db, spdk):
         # the control of the "no status change" assertion: a real finding does change it
         layout = _Layout(db, spdk, SITE_A, leading=False)
         owner = layout.a[0]

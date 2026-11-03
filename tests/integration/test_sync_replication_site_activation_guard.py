@@ -250,7 +250,7 @@ class TestObjectOperations:
     @pytest.mark.parametrize("op", OPS)
     @pytest.mark.parametrize("lvs", LED_FROM_A)
     @pytest.mark.parametrize("window", WINDOWS)
-    def test_an_lvs_led_from_the_site_is_refused(self, db, rpcs, window, lvs, op):
+    def test_lvs_led_from_site_is_refused(self, db, rpcs, window, lvs, op):
         """Refused with the predicate's text before the step after the gate;
         no RPC, the volume as it was."""
         cluster, a, b = _activating(db, window)
@@ -264,14 +264,14 @@ class TestObjectOperations:
     @pytest.mark.parametrize("op", OPS)
     @pytest.mark.parametrize("lvs", LED_FROM_B)
     @pytest.mark.parametrize("window", WINDOWS)
-    def test_an_lvs_led_from_the_other_site_passes(self, db, rpcs, window, lvs, op):
+    def test_lvs_led_from_other_site_passes(self, db, rpcs, window, lvs, op):
         cluster, a, b = _activating(db, window)
         passed, said = _attempt(db, cluster, _owners(a, b)[lvs], op)
         assert passed is True, said
 
     @pytest.mark.parametrize("op", OPS)
     @pytest.mark.parametrize("case", ["no flag", "ended", "non-sync"])
-    def test_without_a_site_activation_each_passes(self, db, rpcs, case, op):
+    def test_without_site_activation_each_passes(self, db, rpcs, case, op):
         """An LVS led from A goes on when no site activation runs."""
         cluster, a, b = _not_activating(db, case)
         for lvs in LED_FROM_A:
@@ -286,7 +286,7 @@ class TestObjectOperations:
 class TestNodeLevelOperations:
 
     @pytest.mark.parametrize("window", WINDOWS)
-    def test_a_full_activation_is_refused(self, db, window):
+    def test_full_activation_is_refused(self, db, window):
         cluster, a, b = _activating(db, window)
         with patch.object(cluster_ops, "set_cluster_status", side_effect=_Passed) as status:
             with pytest.raises(ValueError, match=HELD):
@@ -295,7 +295,7 @@ class TestNodeLevelOperations:
         assert db.get_cluster_by_id(cluster.get_id()).status == Cluster.STATUS_DEGRADED
 
     @pytest.mark.parametrize("window", WINDOWS)
-    def test_an_expansion_is_refused(self, db, window):
+    def test_expansion_is_refused(self, db, window):
         cluster, a, b = _activating(db, window)
         with patch.object(cluster_ops, "set_cluster_status", side_effect=_Passed) as status:
             with pytest.raises(ValueError, match=HELD):
@@ -304,7 +304,7 @@ class TestNodeLevelOperations:
         assert db.get_cluster_by_id(cluster.get_id()).status == Cluster.STATUS_DEGRADED
 
     @pytest.mark.parametrize("case", ["no flag", "ended", "non-sync"])
-    def test_activation_and_expansion_without_a_flag(self, db, case):
+    def test_activation_and_expansion_without_flag(self, db, case):
         """Both reach their first status write."""
         cluster, a, b = _not_activating(db, case)
         with patch.object(cluster_ops, "set_cluster_status", side_effect=_Passed):
@@ -314,7 +314,7 @@ class TestNodeLevelOperations:
                 cluster_ops.cluster_expand(cluster.get_id())
 
     @pytest.mark.parametrize("window", WINDOWS)
-    def test_a_node_add_waits(self, db, window):
+    def test_node_add_waits(self, db, window):
         """Not eligible: left untouched, as under IN_ACTIVATION."""
         cluster, a, b = _activating(db, window)
         task = _task(db, cluster, JobSchedule.FN_NODE_ADD, "", {"cluster_id": cluster.get_id()})
@@ -324,7 +324,7 @@ class TestNodeLevelOperations:
         _untouched(db, task)
 
     @pytest.mark.parametrize("window", WINDOWS)
-    def test_a_node_removal_waits(self, db, window):
+    def test_node_removal_waits(self, db, window):
         cluster, a, b = _activating(db, window)
         task = _task(db, cluster, JobSchedule.FN_NODE_REMOVAL, b[2].get_id())
         with patch.object(tasks_runner_node_removal.storage_node_ops, "node_removal_orchestrate") as remove, \
@@ -335,7 +335,7 @@ class TestNodeLevelOperations:
         assert (fresh.status, fresh.function_result, fresh.retry) == (JobSchedule.STATUS_SUSPENDED, HELD, 0)
 
     @pytest.mark.parametrize("case", ["no flag", "ended", "non-sync"])
-    def test_node_add_and_removal_run_without_a_flag(self, db, case):
+    def test_node_add_and_removal_run_without_flag(self, db, case):
         cluster, a, b = _not_activating(db, case)
         add_task = _task(db, cluster, JobSchedule.FN_NODE_ADD, "", {"cluster_id": cluster.get_id()})
         removal = _task(db, cluster, JobSchedule.FN_NODE_REMOVAL, b[2].get_id())
@@ -377,7 +377,7 @@ class TestMigrations:
 
     @pytest.mark.parametrize("kind", DEVICE_MIGRATIONS)
     @pytest.mark.parametrize("window", WINDOWS)
-    def test_a_device_migration_waits(self, db, rpcs, window, kind):
+    def test_device_migration_waits(self, db, rpcs, window, kind):
         """Cluster-wide: a task on b1 (serving site) is held before the step
         after the gate - suspended with no retry counted, so it resumes on the
         first pass after the activation."""
@@ -391,7 +391,7 @@ class TestMigrations:
 
     @pytest.mark.parametrize("kind", DEVICE_MIGRATIONS)
     @pytest.mark.parametrize("case", ["no flag", "ended", "non-sync"])
-    def test_a_device_migration_runs_without_a_flag(self, db, rpcs, case, kind):
+    def test_device_migration_runs_without_flag(self, db, rpcs, case, kind):
         runner, function_name = DEVICE_MIGRATIONS[kind]
         cluster, a, b = _not_activating(db, case)
         task = _device_migration_task(db, cluster, function_name, b[1])
@@ -399,7 +399,7 @@ class TestMigrations:
             with pytest.raises(_Passed):
                 drive(runner.SPEC, task)
 
-    def test_a_volume_migration_ends_unsupported(self, db):
+    def test_volume_migration_ends_unsupported(self, db):
         """A volume migration never runs on a sync-replication cluster, the
         flag set or not - it ends "not supported" before any status check."""
         cluster, a, b = _activating(db)
@@ -414,7 +414,7 @@ class TestMigrations:
         assert fresh.status == JobSchedule.STATUS_DONE
         assert "not supported on a sync-replication cluster" in fresh.function_result
 
-    def test_a_batch_migration_ends_unsupported(self, db):
+    def test_batch_migration_ends_unsupported(self, db):
         cluster, a, b = _activating(db)
         group = LVolMigrationGroup()
         group.uuid = str(uuid.uuid4())
@@ -436,7 +436,7 @@ class TestResync:
         assert task_id
         return db.get_task_by_id(task_id)
 
-    def test_the_resync_waits_after_the_record(self, db, rpcs):
+    def test_resync_waits_after_record(self, db, rpcs):
         """The record cleared, the flag still set: the catch-up of LVS_3 (led
         from B) waits for the activation to end, nothing started."""
         cluster, a, b = _activating(db, "cleared")
@@ -445,14 +445,14 @@ class TestResync:
         assert (fresh.status, fresh.function_result, fresh.retry) == (JobSchedule.STATUS_SUSPENDED, HELD, 0)
         _no_rpc(rpcs)
 
-    def test_the_resync_waits_on_the_record_first(self, db):
+    def test_resync_waits_on_record_first(self, db):
         cluster, a, b = _activating(db, "record")
         task = self._resync(db, cluster, b)
         fresh = drive(tasks_runner_sync_resync.SPEC, task)
         assert (fresh.status, fresh.function_result, fresh.retry) == (
             JobSchedule.STATUS_SUSPENDED, f"site {SITE_A} is lost, waiting for its return", 0)
 
-    def test_the_resync_goes_on_after_the_flag(self, db):
+    def test_resync_goes_on_after_flag(self, db):
         """The flag ended: the runner goes on to its next check (here the
         leadership of LVS_3 is moving)."""
         cluster, a, b = _activating(db, "cleared")
@@ -472,7 +472,7 @@ class TestBackupRunner:
 
     @pytest.mark.parametrize("lvs", LED_FROM_A)
     @pytest.mark.parametrize("window", WINDOWS)
-    def test_a_backup_on_an_lvs_led_from_a_waits(self, db, window, lvs):
+    def test_backup_on_lvs_led_from_a_waits(self, db, window, lvs):
         cluster, a, b = _activating(db, window)
         owner = _owners(a, b)[lvs]
         tasks = [_task(db, cluster, JobSchedule.FN_BACKUP, owner.get_id()),
@@ -486,7 +486,7 @@ class TestBackupRunner:
             _untouched(db, task)
 
     @pytest.mark.parametrize("lvs", LED_FROM_B)
-    def test_a_backup_on_an_lvs_led_from_b_runs(self, db, lvs):
+    def test_backup_on_lvs_led_from_b_runs(self, db, lvs):
         cluster, a, b = _activating(db)
         task = _task(db, cluster, JobSchedule.FN_BACKUP, _owners(a, b)[lvs].get_id())
         run = MagicMock()
@@ -495,7 +495,7 @@ class TestBackupRunner:
         run.assert_called_once()
 
     @pytest.mark.parametrize("case", ["no flag", "non-sync"])
-    def test_a_backup_runs_without_a_flag(self, db, case):
+    def test_backup_runs_without_flag(self, db, case):
         cluster, a, b = _not_activating(db, case)
         task = _task(db, cluster, JobSchedule.FN_BACKUP, a[0].get_id())
         run = MagicMock()
@@ -524,11 +524,11 @@ class TestBackupMerge:
         assert self._evaluated(db, cluster, a, b) == LED_FROM_B
 
     @pytest.mark.parametrize("case", ["no flag", "non-sync"])
-    def test_every_volume_is_evaluated_without_a_flag(self, db, case):
+    def test_every_volume_is_evaluated_without_flag(self, db, case):
         cluster, a, b = _not_activating(db, case)
         assert self._evaluated(db, cluster, a, b) == sorted(LED_FROM_A + LED_FROM_B)
 
-    def test_a_volume_without_its_owner_waits(self, db):
+    def test_volume_without_its_owner_waits(self, db):
         """b1's record is gone: its volume (LVS_3) is held like a node-level
         operation; a1's (LVS_4) is evaluated."""
         cluster, a, b = _activating(db)
@@ -552,7 +552,7 @@ class TestJcCompaction:
         return _task(db, cluster, JobSchedule.FN_JC_COMP_RESUME, node.get_id(), params, **fields)
 
     @pytest.mark.parametrize("window", WINDOWS)
-    def test_a_resume_of_a_group_led_from_a_waits(self, db, rpcs, window):
+    def test_resume_of_group_led_from_a_waits(self, db, rpcs, window):
         """b1 (its own LVS_3 led from B) resuming b0's JM group (LVS_2, led
         from A); a0's own group without a jm_vuid key; and a canceled, a
         retry-exhausted and an upgrade-held one - all untouched, no RPC."""
@@ -568,7 +568,7 @@ class TestJcCompaction:
             _untouched(db, task)
         _no_rpc(rpcs)
 
-    def test_a_resume_of_a_group_led_from_b_runs(self, db, rpcs):
+    def test_resume_of_group_led_from_b_runs(self, db, rpcs):
         """b0 (its own LVS_2 led from A) resuming b1's group (LVS_3), b2 the
         group of a1 (LVS_4, led from B) and b1 its own without a key."""
         cluster, a, b = _activating(db)
@@ -582,7 +582,7 @@ class TestJcCompaction:
         rpcs[b[1].get_id()].jc_suspend_compression.assert_called_once_with(jm_vuid=3, suspend=False)
 
     @pytest.mark.parametrize("case", ["no flag", "non-sync"])
-    def test_a_resume_runs_without_a_flag(self, db, rpcs, case):
+    def test_resume_runs_without_flag(self, db, rpcs, case):
         cluster, a, b = _not_activating(db, case)
         task = self._resume(db, cluster, b[1], 2)
         one_cycle(tasks_runner_jc_comp.SPEC)
@@ -620,7 +620,7 @@ class TestSyncTasks:
                      {"lvol_id": vol.get_id(), "op": op, "secondary_index": 1})
 
     @pytest.mark.parametrize("window", WINDOWS)
-    def test_tasks_on_an_lvs_led_from_a_wait(self, db, rpcs, window):
+    def test_tasks_on_lvs_led_from_a_wait(self, db, rpcs, window):
         """LVS_2 (b0, led from A): a delete on b2, a canceled delete (the
         owner's delete lock kept), a delete acted on by a1 (its own LVS_4 led
         from B) as the producer queues it, a register and a resize on b1."""
@@ -640,7 +640,7 @@ class TestSyncTasks:
         _no_rpc(rpcs)
 
     @pytest.mark.parametrize("window", WINDOWS)
-    def test_tasks_on_an_lvs_led_from_b_run(self, db, rpcs, window):
+    def test_tasks_on_lvs_led_from_b_run(self, db, rpcs, window):
         """LVS_3 (b1) and LVS_4 (a1, led from B): a delete, a register and a
         resize on b2 each run; so does a delete of LVS_4 acted on by b0 (its
         own LVS_2 led from A)."""
@@ -659,7 +659,7 @@ class TestSyncTasks:
         assert rpcs[b[2].get_id()].delete_lvol.call_count == 3
         rpcs[b[2].get_id()].bdev_lvol_resize.assert_called_once()
 
-    def test_a_delete_of_an_unowned_lvs_waits(self, db, rpcs):
+    def test_delete_of_unowned_lvs_waits(self, db, rpcs):
         """No node carries LVS_9: its delete is held like a node-level
         operation, whatever LVS its acting leader b1 owns."""
         cluster, a, b = _activating(db)
@@ -670,7 +670,7 @@ class TestSyncTasks:
         _no_rpc(rpcs)
 
     @pytest.mark.parametrize("case", ["no flag", "non-sync"])
-    def test_sync_tasks_run_without_a_flag(self, db, rpcs, case):
+    def test_sync_tasks_run_without_flag(self, db, rpcs, case):
         cluster, a, b = _not_activating(db, case)
         rpcs[b[2].get_id()].delete_lvol.return_value = True
         tasks = [self._delete(db, cluster, b[0], b[2]), self._op(db, cluster, b[0], b[1], "register")]
@@ -691,7 +691,7 @@ PHASE = StorageNode.RESTART_PHASE_PRE_BLOCK
 class TestRestartPhase:
 
     @pytest.mark.parametrize("window", WINDOWS)
-    def test_a_phase_on_the_site_is_honoured(self, db, window):
+    def test_phase_on_site_is_honoured(self, db, window):
         """a1 is ONLINE under a DEGRADED cluster; its phase of LVS_2 belongs to
         the activation's rebuild of it."""
         cluster, a, b = _activating(db, window)
@@ -699,60 +699,47 @@ class TestRestartPhase:
         assert ops.get_restart_phase(a[1].get_id(), "LVS_2") == PHASE
         assert _fresh(db, a[1]).restart_phases == {"LVS_2": PHASE}
 
-    def test_a_phase_on_the_other_site_is_cleared(self, db):
+    def test_phase_on_other_site_is_cleared(self, db):
         cluster, a, b = _activating(db)
         _update(db, b[1], restart_phases={"LVS_2": PHASE})
         assert ops.get_restart_phase(b[1].get_id(), "LVS_2") == ""
         assert not _fresh(db, b[1]).restart_phases
 
     @pytest.mark.parametrize("case", ["no flag", "ended", "non-sync"])
-    def test_a_phase_is_cleared_without_a_flag(self, db, case):
+    def test_phase_is_cleared_without_flag(self, db, case):
         cluster, a, b = _not_activating(db, case)
         _update(db, a[1], restart_phases={"LVS_2": PHASE})
         assert ops.get_restart_phase(a[1].get_id(), "LVS_2") == ""
         assert not _fresh(db, a[1]).restart_phases
 
     @pytest.mark.parametrize("window", WINDOWS)
-    def test_an_operation_queues_on_a_phase(self, db, rpcs, links, window):
+    def test_operation_queues_on_phase(self, db, rpcs, links, window):
         """check_non_leader_for_operation on a1 in a phase of LVS_2: "queue",
         before the absence of a node of the recorded site is judged."""
         cluster, a, b = _activating(db, window)
         _update(db, a[1], restart_phases={"LVS_2": PHASE})
         assert ops.check_non_leader_for_operation(a[1].get_id(), "LVS_2") == "queue"
 
-    def test_an_operation_skips_a_node_not_rebuilt(self, db, rpcs, links):
-        """a1 with no phase and no lvstore LVS_4 in its SPDK: absent, skipped."""
+    @pytest.mark.parametrize("probe, expected", [
+        pytest.param({"return_value": None}, "skip", id="not-rebuilt"),
+        pytest.param({"side_effect": RPCRemoteError(message="busy", code=-16)}, "skip",
+                     id="lvstore-probe-fails"),
+        pytest.param({"return_value": {"name": "LVS_4", "lvs leadership": False}}, "proceed",
+                     id="rebuilt"),
+    ])
+    def test_lvstore_probe_decides_while_record_stands(self, db, rpcs, links, probe, expected):
+        """a1 has no restart phase and the lost-site record exists, so the
+        lvstore probe of LVS_4 on a1 decides. The operation proceeds only when
+        the probe finds the instance that the site activation rebuilt. When
+        there is no lvstore, or the probe fails, the operation is skipped: a
+        failed probe does not prove that the instance exists."""
         cluster, a, b = _activating(db, "record")
-        rpcs[a[1].get_id()].get_lvstore.return_value = None
-        assert ops.check_non_leader_for_operation(a[1].get_id(), "LVS_4") == "skip"
+        rpcs[a[1].get_id()].get_lvstore.configure_mock(**probe)
+        assert ops.check_non_leader_for_operation(a[1].get_id(), "LVS_4") == expected
         rpcs[a[1].get_id()].get_lvstore.assert_called_with("LVS_4")
         links.votes.assert_not_called()
 
-    def test_an_operation_skips_a_node_whose_lvstore_cannot_be_told(self, db, rpcs, links):
-        """a1's SPDK does not answer the lvstore probe: not proof that it holds
-        LVS_4, skipped."""
-        cluster, a, b = _activating(db, "record")
-        rpcs[a[1].get_id()].get_lvstore.side_effect = RPCRemoteError(message="busy", code=-16)
-        assert ops.check_non_leader_for_operation(a[1].get_id(), "LVS_4") == "skip"
-        links.votes.assert_not_called()
-
-    def test_an_operation_reaches_a_rebuilt_node(self, db, rpcs, links):
-        """a1 with no phase whose SPDK holds LVS_4 (rebuilt by the site
-        activation) takes the operation while the record stands."""
-        cluster, a, b = _activating(db, "record")
-        rpcs[a[1].get_id()].get_lvstore.return_value = {"name": "LVS_4", "lvs leadership": False}
-        assert ops.check_non_leader_for_operation(a[1].get_id(), "LVS_4") == "proceed"
-        rpcs[a[1].get_id()].get_lvstore.assert_called_with("LVS_4")
-        links.votes.assert_not_called()
-
-    def test_a_rebuilt_node_is_skipped_without_a_flag(self, db, rpcs, links):
-        """With the record and no flag a1 is absent whatever its SPDK holds:
-        skipped, its SPDK never asked."""
-        cluster, a, b = _not_activating(db, "no flag")
-        assert ops.check_non_leader_for_operation(a[1].get_id(), "LVS_4") == "skip"
-        rpcs[a[1].get_id()].get_lvstore.assert_not_called()
-
-    def test_after_the_record_the_node_is_asked(self, db, rpcs, links):
+    def test_after_record_node_is_asked(self, db, rpcs, links):
         """The record cleared, no phase: a1 counts as connected (the vote) and
         its RPC decides."""
         cluster, a, b = _activating(db, "cleared")
@@ -761,14 +748,16 @@ class TestRestartPhase:
         asked.assert_called_once()
         assert links.votes.called
 
-    def test_without_a_flag_absence_comes_first(self, db, rpcs, links):
-        """With the record and no flag, a1 in a phase is skipped as absent -
-        its phase is never read."""
+    def test_without_flag_absence_comes_first(self, db, rpcs, links):
+        """With the lost-site record and no activation flag, a1 is skipped as
+        absent, even though it has a restart phase. Its phase is not read and
+        its SPDK is not asked."""
         cluster, a, b = _not_activating(db, "no flag")
         _update(db, a[1], restart_phases={"LVS_2": PHASE})
         with patch.object(ops, "get_restart_phase", wraps=ops.get_restart_phase) as phase:
             assert ops.check_non_leader_for_operation(a[1].get_id(), "LVS_2") == "skip"
         phase.assert_not_called()
+        rpcs[a[1].get_id()].get_lvstore.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -821,7 +810,7 @@ class TestRebuiltMembers:
     def _rebuilt(rpcs, a):
         rpcs[a[2].get_id()].get_lvstore.return_value = None
 
-    def test_a_snapshot_registers_on_rebuilt_members(self, db, rpcs, links):
+    def test_snapshot_registers_on_rebuilt_members(self, db, rpcs, links):
         cluster, a, b = _activating(db, "record")
         self._rebuilt(rpcs, a)
         _leader(rpcs, b[2])
@@ -834,7 +823,7 @@ class TestRebuiltMembers:
 
     @pytest.mark.parametrize("lvs", LED_FROM_A)
     @pytest.mark.parametrize("window", WINDOWS)
-    def test_a_group_led_from_the_site_is_refused(self, db, rpcs, window, lvs):
+    def test_group_led_from_site_is_refused(self, db, rpcs, window, lvs):
         """Refused with the predicate's text before the leader lookup; no RPC."""
         cluster, a, b = _activating(db, window)
         group = _group(db, cluster, _owners(a, b)[lvs])
@@ -845,7 +834,7 @@ class TestRebuiltMembers:
         _no_rpc(rpcs)
 
     @pytest.mark.parametrize("case", ["no flag", "ended", "non-sync"])
-    def test_a_group_passes_the_gate_without_a_flag(self, db, rpcs, case):
+    def test_group_passes_gate_without_flag(self, db, rpcs, case):
         """A group on an LVS led from A reaches the leader lookup."""
         cluster, a, b = _not_activating(db, case)
         group = _group(db, cluster, a[0])
@@ -854,7 +843,7 @@ class TestRebuiltMembers:
         assert ids is None and "No leader available" in err
         leader.assert_called_once()
 
-    def test_a_group_registers_on_rebuilt_members(self, db, rpcs, links):
+    def test_group_registers_on_rebuilt_members(self, db, rpcs, links):
         cluster, a, b = _activating(db, "record")
         self._rebuilt(rpcs, a)
         leader = _leader(rpcs, b[2])
@@ -866,7 +855,7 @@ class TestRebuiltMembers:
         leader.bdev_lvol_snapshot_group.assert_called_once()
         assert _registered(rpcs, a) == {a[1].get_id(), a[0].get_id()}
 
-    def test_a_group_waits_for_a_member_in_rebuild(self, db, rpcs, links):
+    def test_group_waits_for_member_in_rebuild(self, db, rpcs, links):
         """a0 in a restart phase of LVS_4: the generation is refused before the
         group RPC, nothing is deferred to the restart drain."""
         cluster, a, b = _activating(db, "record")
@@ -883,7 +872,7 @@ class TestRebuiltMembers:
         assert not _registered(rpcs, a)
         assert not db.get_snapshots(cluster.get_id())
 
-    def test_a_group_skips_the_recorded_site(self, db, rpcs, links):
+    def test_group_skips_recorded_site(self, db, rpcs, links):
         """With the record and no flag A's members hold no instance: the
         generation is taken on the leader alone, A's SPDK never asked."""
         cluster, a, b = _not_activating(db, "no flag")
@@ -920,7 +909,7 @@ class TestPromoteGate:
 
     @pytest.mark.parametrize("checkpoint", CHECKPOINTS)
     @pytest.mark.parametrize("state", [DOWN, DONE])
-    def test_the_gate_fails_on_the_activating_site(self, db, state, checkpoint):
+    def test_gate_fails_on_activating_site(self, db, state, checkpoint):
         """The site activation of A begins right before ``checkpoint``: the
         promote fails there, and the step after it never runs."""
         cluster, a, b = _four(db, state)
@@ -947,7 +936,7 @@ class TestPromoteGate:
         steps[after].assert_not_called()
 
     @pytest.mark.parametrize("state", [DOWN, DONE])
-    def test_the_gate_holds_without_a_flag(self, db, state):
+    def test_gate_holds_without_flag(self, db, state):
         """No site activation: every step runs."""
         cluster, a, b = _four(db, state)
         steps = {name: MagicMock(name=name) for name in
