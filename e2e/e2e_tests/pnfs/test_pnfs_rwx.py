@@ -321,6 +321,17 @@ class _PnfsBase(TestClusterBase):
                 "spec:\n"
                 f"{affinity}"
                 "  restartPolicy: Never\n"
+                # The metadata server runs mkfs.xfs as root and exports the
+                # result root-owned, so only root can create at the root of
+                # the mount. The fio image carries no USER directive and so
+                # already runs as root, which is why B-01 to B-04 never met
+                # this; the UBI image declares USER 1001 and run
+                # 41605523980 failed all three cases on
+                #   PermissionError: [Errno 13] ... '/spdkvol/b05-counter.bin'
+                # before a single assertion ran.
+                "  securityContext:\n"
+                "    runAsUser: 0\n"
+                "    runAsGroup: 0\n"
                 "  containers:\n"
                 "  - name: tools\n"
                 f"    image: {self.TOOLS_IMAGE}\n"
@@ -337,7 +348,29 @@ class _PnfsBase(TestClusterBase):
         self._wait_pods_running(names)
         if spread:
             self._assert_one_pod_per_node(names, f"({base})")
+        self._assert_mount_writable(names)
         return names
+
+    def _assert_mount_writable(self, pods):
+        """Fail here, naming the uid and the mode, rather than mid-case.
+
+        A pod that cannot write to the mount fails every later step with a
+        bare PermissionError on whatever file that step happened to touch,
+        which reads as three unrelated failures rather than one cause.
+        """
+        for pod in pods:
+            out, err = self.k8s_utils.exec_in_pod(
+                pod,
+                f"id -u; stat -c '%U:%G %a' {self.MOUNT} 2>/dev/null; "
+                f"touch {self.MOUNT}/.wtest-$(hostname) "
+                f"&& rm -f {self.MOUNT}/.wtest-$(hostname) "
+                f"&& echo WRITABLE || echo NOTWRITABLE")
+            if "WRITABLE" not in (out or "") or "NOTWRITABLE" in (out or ""):
+                raise PnfsProbeError(
+                    f"{pod} cannot write to {self.MOUNT}, so nothing this "
+                    f"case asserts would mean anything. This is the "
+                    f"harness, not the product: uid/owner/mode were "
+                    f"{(out or '').split() or '?'}{(' err=' + err[-200:]) if err else ''}")
 
     def _py(self, pod, script, timeout=300):
         """Run *script* with python3 in *pod* and return its stdout.
