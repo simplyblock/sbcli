@@ -66,6 +66,13 @@ class _PnfsBase(TestClusterBase):
         self.extra_claims = []
         self.shell_pods = []
         self.extra_namespaces = []
+        # A VolumeSnapshot and a StorageClass outlive the claim that made
+        # them, and neither shows up in a sweep that looks only at PVCs,
+        # pods and exports. B-10's pnfs-b10-snap and sb-pnfs-restore-sc sat
+        # on the lab for over an hour after the run that made them, and a
+        # retained snapshot still pins its backing lvol.
+        self.extra_snapshots = []
+        self.extra_storage_classes = []
         #: Callables run in reverse order at teardown. B-16 mutates the
         #: driver CR, and a mutation with no guaranteed undo on a shared
         #: lab is how a cluster stays broken for everyone after one test.
@@ -247,6 +254,8 @@ class _PnfsBase(TestClusterBase):
         self.k8s_utils.create_storage_class(
             name=self.sc_name, cluster_id=self.cluster_id, pool_name=pool,
             fs_type="pnfs")
+        if self.sc_name not in self.extra_storage_classes:
+            self.extra_storage_classes.append(self.sc_name)
         self.logger.info("[pnfs] StorageClass %s created with fstype=pnfs",
                          self.sc_name)
 
@@ -559,9 +568,25 @@ class _PnfsBase(TestClusterBase):
             except Exception as exc:                      # noqa: BLE001
                 self.logger.warning("[pnfs] could not delete claim %s: %s",
                                     claim, exc)
+        # Snapshots after the claims: a claim cloned from a snapshot pins
+        # it, so the other order leaves the snapshot wedged.
+        for snap in self.extra_snapshots:
+            try:
+                self.k8s_utils.delete_resource("volumesnapshot", snap)
+            except Exception as exc:                      # noqa: BLE001
+                self.logger.warning("[pnfs] could not delete snapshot %s: "
+                                    "%s", snap, exc)
+        for sc in self.extra_storage_classes:
+            try:
+                # delete_resource always passes -n, which kubectl
+                # ignores for a cluster-scoped kind.
+                self.k8s_utils.delete_resource("storageclass", sc)
+            except Exception as exc:                      # noqa: BLE001
+                self.logger.warning("[pnfs] could not delete "
+                                    "storageclass %s: %s", sc, exc)
         for ns in self.extra_namespaces:
             try:
-                self.k8s_utils.delete_resource("namespace", ns, namespace=None)
+                self.k8s_utils.delete_resource("namespace", ns)
             except Exception as exc:                      # noqa: BLE001
                 self.logger.warning("[pnfs] could not delete namespace %s: %s",
                                     ns, exc)
@@ -1143,6 +1168,7 @@ print("marker written")
 
         self.k8s_utils.create_volume_snapshot_class()
         self.k8s_utils.create_volume_snapshot("pnfs-b10-snap", "pnfs-b10")
+        self.extra_snapshots.append("pnfs-b10-snap")
         self.logger.info("[B-10] snapshot taken under an open mount")
 
         # A clone back into pNFS must be refused, not silently provisioned.
@@ -1164,6 +1190,7 @@ print("marker written")
         self.k8s_utils.create_storage_class(
             name=self.BLOCK_SC, cluster_id=self.cluster_id, pool_name=pool,
             fs_type="xfs")
+        self.extra_storage_classes.append(self.BLOCK_SC)
         self.k8s_utils.create_clone_pvc(
             "pnfs-b10-restore", self.CLAIM_SIZE, self.BLOCK_SC,
             "pnfs-b10-snap")
@@ -1327,6 +1354,7 @@ class PnfsMixedRwxRwoK8s(_PnfsBase):
         self.k8s_utils.create_storage_class(
             name=self.BLOCK_SC, cluster_id=self.cluster_id, pool_name=pool,
             fs_type="xfs")
+        self.extra_storage_classes.append(self.BLOCK_SC)
         self.k8s_utils.create_pvc(name="pnfs-b13-rwo", size="10Gi",
                                   storage_class=self.BLOCK_SC)
         self.extra_claims.append("pnfs-b13-rwo")
