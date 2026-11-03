@@ -2222,7 +2222,8 @@ class RPCClient:
         return self._request("bdev_lvol_set_migration_flag", lvol_name=name)
 
     def bdev_lvol_transfer(self, name, offset, batch_size, bdev_name, operation="migrate", lvol_id=0,
-                           allow_partial=False, priority_class=0, partial_base=0):
+                           allow_partial=False, priority_class=0, partial_base=0,
+                           cow_landing=False, applied=None):
         """
         Start an async blob transfer from *name* (source composite bdev) to the
         NVMe-oF bdev *bdev_name* attached on the caller's node.
@@ -2252,7 +2253,21 @@ class RPCClient:
         without changing the source's own class (0 = the source's own). An SPDK
         older than the parameter refuses the whole request, so it is retried
         once without it, which reads in the source's class as before.
+
+        *cow_landing* (delta transfers only) asks the source NOT to pre-allocate
+        the clusters the delta covers only partly: the destination's first
+        write into such a cluster copies it from the landing volume's base
+        (page copy on a copy-offload lvstore), so no bdev_lvol_merge_base is
+        needed afterwards. Pass it only when the landing volume was chained to
+        its base BEFORE the transfer and the destination has page copy. An SPDK
+        without the parameter refuses it as undecodable; the transfer is then
+        retried without it (the merge path).
+
+        *applied*, if a dict, receives ``cow_landing``: whether the request the
+        SPDK accepted carried it -- only then may the caller skip the merge.
         """
+        if applied is not None:
+            applied["cow_landing"] = False
         params = {
             "lvol_name": name,
             "lvol_id": lvol_id,
@@ -2268,19 +2283,28 @@ class RPCClient:
         # the class: each step back sends more, never less.
         attempts = []
         if allow_partial and partial_base:
-            attempts.append(dict(params, allow_partial=True, partial_base=int(partial_base),
-                                 **({"priority_class": priority_class} if priority_class else {})))
+            delta = dict(params, allow_partial=True, partial_base=int(partial_base),
+                         **({"priority_class": priority_class} if priority_class else {}))
+            if cow_landing:
+                attempts.append(dict(delta, cow_landing=True))
+            attempts.append(delta)
         if priority_class:
             attempts.append(dict(params, priority_class=priority_class))
-        for extra in attempts:
+        for i, extra in enumerate(attempts):
             try:
-                return self._request("bdev_lvol_transfer", **extra)
+                ret = self._request("bdev_lvol_transfer", **extra)
             except RPCRemoteError as e:
                 if "decode" not in str(e):
                     raise
+                nxt = attempts[i + 1] if i + 1 < len(attempts) else params
                 logger.warning("bdev_lvol_transfer: SPDK does not take %s; retrying %s without it",
-                               ", ".join(k for k in ("partial_base", "priority_class") if k in extra),
+                               ", ".join(k for k in ("cow_landing", "partial_base", "priority_class")
+                                         if k in extra and k not in nxt),
                                name)
+                continue
+            if applied is not None:
+                applied["cow_landing"] = bool(extra.get("cow_landing"))
+            return ret
         return self._request("bdev_lvol_transfer", **params)
 
     def bdev_lvol_merge_base(self, name, priority_class=None):

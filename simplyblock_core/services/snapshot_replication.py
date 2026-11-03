@@ -1011,6 +1011,12 @@ def process_snap_replicate_start(task, snapshot):
             fresh.status = SnapShot.STATUS_IN_REPLICATION
             fresh.write_to_db()
 
+    # Decided before xfer_submit_t is stamped: its presence without
+    # xfer_landing_submitted marks an attempt by a control plane older than
+    # this decision (see _cow_landing_decision).
+    cow_landing = _cow_landing_decision(task, remote_lv, remote_lv_node, allow_partial,
+                                        partial_base, offset)
+
     # 3 start replication
     xfer_timing.stamp("transfer_submit", snap=snapshot.get_id(),
                       lvol=snapshot.lvol.get_id(), size=snapshot.size)
@@ -1020,6 +1026,13 @@ def process_snap_replicate_start(task, snapshot):
     # snapshot's own class, which client reads through it use, is untouched.
     read_class = (constants.QOS_REPLICATION_WIRE_CLASS
                   if _replication_class_on(snode.cluster_id) else 0)
+    # Recorded before the submit: whatever this attempt writes, a later attempt
+    # into the same landing volume must not skip the pre-allocation (a cluster
+    # it allocated and partly filled would not be copied from the base).
+    task.function_params["xfer_landing_submitted"] = remote_lv.get_id()
+    task.function_params.pop("cow_landing", None)
+    task.write_to_db()
+    applied = {}
     snode.rpc_client().bdev_lvol_transfer(
         name=snapshot.snap_bdev,
         offset=offset,
@@ -1038,7 +1051,13 @@ def process_snap_replicate_start(task, snapshot):
         allow_partial=allow_partial,
         partial_base=partial_base,
         priority_class=read_class,
+        cow_landing=cow_landing,
+        applied=applied,
     )
+    if applied.get("cow_landing"):
+        # The landing volume is filled from its base by copy-on-write during
+        # the transfer: the finish skips bdev_lvol_merge_base.
+        task.function_params["cow_landing"] = remote_lv.get_id()
     task.status = JobSchedule.STATUS_RUNNING
     task.function_params["start_time"] = int(time.time())
     task.write_to_db()
@@ -1979,6 +1998,49 @@ def _partial_transfer_decision(task, snapshot, replicate_to_source, remote_lv,
     return allow_partial, partial_base
 
 
+def _cow_landing_decision(task, remote_lv, remote_lv_node, allow_partial, partial_base, offset):
+    """Whether this delta transfer may land merge-free (SPDK ``cow_landing``).
+
+    A delta writes only the dirty ranges of a partly covered cluster. Today the
+    source has the destination pre-allocate such clusters and a merge job fills
+    the rest from the base afterwards (bf11: 7.25 GB, 66 s per cycle). With
+    page copy on the destination the first write into an unallocated cluster
+    of a chained landing volume copies it from the base by metadata, so the
+    pre-allocation and the merge can go. Only when ALL of these hold:
+
+      * a real delta (allow_partial and a partial_base);
+      * the landing volume was chained onto its base BEFORE the transfer on the
+        receiving node (a deferred chain -- chain_deferred_to -- happens after,
+        and a copy-on-write before it would copy zeroes);
+      * the destination cluster has page copy (otherwise every such write
+        copies 2 MiB inline; the merge is cheaper);
+      * a fresh transfer (offset 0) and the first one into THIS landing
+        volume: an earlier attempt may have pre-allocated clusters and filled
+        them partly, and those would never be copied from the base.
+    """
+    if not (allow_partial and partial_base) or offset:
+        return False
+    landing = remote_lv.get_id()
+    if task.function_params.get("xfer_landing_submitted") == landing:
+        return False
+    if (task.function_params.get("xfer_submit_t")
+            and not task.function_params.get("xfer_landing_submitted")):
+        # submitted by an older control plane, into a landing volume nobody
+        # recorded: it may hold pre-allocated, partly filled clusters
+        return False
+    if task.function_params.get("chain_deferred_to"):
+        return False
+    if remote_lv_node.get_id() not in _prechained_nodes_for(task, remote_lv):
+        return False
+    try:
+        cluster = db.get_cluster_by_id(remote_lv_node.cluster_id)
+    except Exception as e:                                # noqa: BLE001
+        logger.warning("cow_landing: cluster of %s not readable (%s); merging instead",
+                       remote_lv_node.get_id(), e)
+        return False
+    return bool(getattr(cluster, "page_copy", False))
+
+
 def _deferred_partial_decision(task, snapshot, pred, remote_lv_node, source_node_id):
     """The transfer mode while *pred*'s copy is still being merged on the
     target: the landing volume stays unchained until the finish (see
@@ -2066,7 +2128,7 @@ def _discard_landing_for_retry(task, remote_lv, msg):
     except Exception as e:                                # noqa: BLE001
         logger.error("Failed to discard landing volume %s: %s", remote_lv.get_id(), e)
     for key in ("remote_lvol_id", "converted_nodes", "offset", "transfer_done",
-                "merged_landing", "chain_deferred_to"):
+                "merged_landing", "chain_deferred_to", "cow_landing"):
         task.function_params.pop(key, None)
     _suspend_for_retry(task, msg, backoff=True)
 
@@ -2112,6 +2174,11 @@ def _merge_landing(task, remote_lv, remote_snode):
     if not task.function_params.get("partial_base"):
         return "ok"
     if task.function_params.get("merged_landing") == remote_lv.get_id():
+        return "ok"
+    if task.function_params.get("cow_landing") == remote_lv.get_id():
+        # Merge-free landing: partly covered clusters were copied from the
+        # base on their first write (page copy); there is nothing to merge,
+        # and no merge record that a target restart could lose (-ESTALE).
         return "ok"
     rpc = remote_snode.rpc_client()
     try:
