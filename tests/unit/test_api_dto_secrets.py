@@ -92,6 +92,7 @@ def _build_cluster_dto():
         device_mode="nvme",
         inline_checksum=False,
         atomic_4k=False,
+        md_journal=False,
         secret=SecretStr("CLUSTER-SECRET"),
         tls_enabled=False,
         max_fault_tolerance=1,

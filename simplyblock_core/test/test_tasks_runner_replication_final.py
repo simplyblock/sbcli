@@ -124,6 +124,93 @@ def test_happy_path_returns_and_updates_state(monkeypatch):
     assert task.function_params["start_time"] <= task.function_params["end_time"]
 
 
+def _grouped_rep():
+    """A cutover-ready relationship whose source volume is in a consistency
+    group."""
+    rep = LVolReplication()
+    rep.state = LVolReplication.STATE_CUTOVER_PENDING
+    rep.cutover_proceed = True
+    rep.source_lvol = LVol()
+    rep.source_lvol.uuid = "LV1"
+    rep.source_lvol.group_id = "G1"
+    rep.target_lvol = LVol()
+    rep.target_lvol.uuid = "TLV1"
+    rep.target_cluster_id = "TC1"
+    return rep
+
+
+def _stored_volume(monkeypatch, uuid):
+    """The destination volume as the database holds it under ``uuid``: a
+    distinct object from the relationship's embedded copy."""
+    stored = LVol()
+    stored.uuid = uuid
+    stored.lvol_name = "stored-destination"
+    read = runner.db.get_lvol_by_id
+    monkeypatch.setattr(runner.db, "get_lvol_by_id",
+                        lambda lid: stored if lid == uuid else read(lid))
+    return stored
+
+
+def _reconstitute(monkeypatch, side_effect=None):
+    from simplyblock_core.controllers import consistency_group_controller
+    calls = []
+
+    def _record(source, dest, target_cluster_id):
+        calls.append((source, dest, target_cluster_id))
+        if side_effect is not None:
+            raise side_effect
+    monkeypatch.setattr(consistency_group_controller, "reconstitute_group_after_handoff", _record)
+    return calls
+
+
+def test_cutover_re_forms_the_consistency_group_on_the_destination(monkeypatch):
+    rep = _grouped_rep()
+    _install(monkeypatch, {"S1": _node("S1"), "T1": _node("T1")}, rep, (True, None))
+    stored = _stored_volume(monkeypatch, "TLV1")
+    calls = _reconstitute(monkeypatch)
+
+    task = _task()
+    assert runner.task_runner(task.frozen_view(), []) is None
+
+    assert len(calls) == 1
+    source, dest, target_cluster_id = calls[0]
+    assert (source, target_cluster_id) == (rep.source_lvol, "TC1")
+    assert dest is stored
+    assert task.function_result == "cutover done"
+
+
+def test_failback_re_forms_the_group_under_the_swapped_uuid(monkeypatch):
+    """The fail-back UUID swap runs first, so the member is keyed by the
+    volume's final UUID - the original source's."""
+    rep = _grouped_rep()
+    _install(monkeypatch, {"S1": _node("S1"), "T1": _node("T1")}, rep, (True, None))
+    monkeypatch.setattr(runner, "_swap_failback_lvol_uuid",
+                        lambda rep_, original_id: setattr(rep_.target_lvol, "uuid", original_id))
+    stored = _stored_volume(monkeypatch, "ORIG1")
+    calls = _reconstitute(monkeypatch)
+
+    task = _task(failback_source_lvol_id="ORIG1")
+    assert runner.task_runner(task.frozen_view(), []) is None
+
+    assert len(calls) == 1
+    source, dest, target_cluster_id = calls[0]
+    assert (source, target_cluster_id) == (rep.source_lvol, "TC1")
+    assert dest is stored
+
+
+def test_a_failed_group_re_form_does_not_fail_the_cutover(monkeypatch):
+    rep = _grouped_rep()
+    _install(monkeypatch, {"S1": _node("S1"), "T1": _node("T1")}, rep, (True, None))
+    calls = _reconstitute(monkeypatch, side_effect=RuntimeError("group gone"))
+
+    task = _task()
+    assert runner.task_runner(task.frozen_view(), []) is None
+
+    assert len(calls) == 1
+    assert rep.state == LVolReplication.STATE_CUTOVER_DONE
+    assert task.function_result == "cutover done"
+
+
 def test_a_failed_final_step_burns_a_retry_at_once(monkeypatch):
     """The target online, its hub attached, and the final step failing is
     not a connectivity problem: it fails the same way on every attempt

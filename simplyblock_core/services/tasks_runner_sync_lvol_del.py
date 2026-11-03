@@ -14,7 +14,12 @@ import time
 from typing import NoReturn
 
 from simplyblock_core import constants, db_controller, storage_node_ops, utils
-from simplyblock_core.controllers import events_controller, snapshot_controller
+from simplyblock_core.controllers import (
+    activation_gate,
+    events_controller,
+    snapshot_controller,
+    tasks_controller,
+)
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
@@ -43,6 +48,32 @@ def get_primary_node(task) -> StorageNode | None:
     if nodes:
         return nodes[0]
     return None
+
+
+def _site_activation_holds(cl, task) -> str:
+    """activation_gate.site_activation_blocks for the LVS a sync task works
+    on: the owner of its volume (FN_LVOL_SYNC_OP) or the LVS its bdev belongs
+    to (FN_LVOL_SYNC_DEL) - not ``primary_node``, which is the leader that
+    acted on the delete and may own another LVS. A sync delete whose LVS has no
+    owner is held like a node-level operation; a sync op whose volume is gone
+    is not - the task itself finishes it without an RPC."""
+    if not activation_gate.site_activation_blocks(cl):
+        return ""
+    if task.function_name == JobSchedule.FN_LVOL_SYNC_OP:
+        try:
+            lvol = db.get_lvol_by_id(task.function_params["lvol_id"])
+        except KeyError:
+            return ""
+        return tasks_controller.site_activation_holds(cl, lvol.node_id)
+    lvs_name = task.function_params.get("lvol_bdev_name", "").split("/")[0]
+    return tasks_controller.site_activation_holds_lvs(cl, lvs_name)
+
+
+def _is_eligible(task, cluster):
+    """Left untouched while the cluster is in_activation, or while a site
+    activation holds the LVS the task works on."""
+    return (cluster.status != Cluster.STATUS_IN_ACTIVATION
+            and not _site_activation_holds(cluster, task))
 
 
 def _is_already_gone(err):
@@ -142,6 +173,11 @@ def _run_sync_op(task):
         raise TaskAbort("node no longer hosts this lvol (topology moved)")
     if node.status != StorageNode.STATUS_ONLINE:
         raise TaskDefer(f"node is {node.status}, retrying")
+    if storage_node_ops._sync_site(node) and storage_node_ops.member_absent_on_recorded_site(
+            db.get_cluster_by_id(node.cluster_id), node):
+        # Sync replication: an ONLINE node of the site the cluster records
+        # lost holds no instance until its site activation builds them.
+        raise TaskDefer(f"node is on the recorded site {node.site} and holds no instance, retrying")
     if storage_node_ops.get_restart_phase(task.node_id, lvol.lvs_name):
         # The owning flow (restart/activation/expansion) re-registers
         # lvols itself; re-check once it has released the LVS.
@@ -284,7 +320,7 @@ SPEC = RunnerSpec(
     handler=process_task,
     on_finish=release_del_sync_lock,
     on_failure=alert_sync_delete_failure,
-    is_eligible=lambda task, cluster: cluster.status != Cluster.STATUS_IN_ACTIVATION,
+    is_eligible=_is_eligible,
     interval=3,
 )
 

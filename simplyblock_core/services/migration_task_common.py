@@ -6,12 +6,19 @@ drive the same data-plane operation — start a distr migration, then poll
 ``distr_migration_status`` until it settles — and differ only in what they
 migrate and when they are allowed to start.
 """
+import errno
 from datetime import UTC, datetime
 
-from simplyblock_core import db_controller, utils
-from simplyblock_core.controllers import tasks_controller
+from simplyblock_core import db_controller, storage_node_ops, utils
+from simplyblock_core.controllers import (
+    activation_gate,
+    sync_replication_controller,
+    tasks_controller,
+)
+from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.rpc_client import RPCRemoteError
 from simplyblock_core.services.task_runner_base import (
     TaskAbort,
     TaskDefer,
@@ -64,6 +71,12 @@ def defer_unless_operable(cluster):
     FAILED_AND_MIGRATED — which only this family sets. Refusing here would
     deadlock the removal against the status it set itself.
     """
+    # A running sync-replication site activation holds every migration. A hold,
+    # not a failure: no retry consumed and no backoff, so the migration resumes
+    # on the first pass after the activation ends.
+    site_activation = activation_gate.site_activation_blocks(cluster)
+    if site_activation:
+        raise TaskDefer(site_activation)
     if not cluster.allows_operation():
         raise TaskDefer(f"cluster is {cluster.status}, deferring until it allows operations")
 
@@ -88,6 +101,116 @@ def require_node(task):
         return db.get_storage_node_by_id(task.node_id)
     except KeyError:
         raise TaskAbort(f"Node not found: {task.node_id}")
+
+
+def place_on_role_node(task, snode):
+    """Make sure that a sync-replication migration task that has not started
+    is on the node that must run it.
+
+    That node is the primary of the LVS's active triplet
+    (tasks_controller.migration_role_node). A promote can change it after
+    the task was queued. When this function returns, ``task`` is on the
+    right node, and the runner continues on ``snode`` (the task's node) in
+    the same way as on a cluster without sync replication.
+
+    - A task on another node is moved to the right node and deferred. The
+      next runner pass checks it against the new node's start conditions.
+    - While the LVS is being moved, the task is deferred and stays where it is.
+    - When the primary is departing, a re-balance or new-device task is
+      skipped (it ends DONE). A failed-device task waits while every member of
+      the active triplet is departing.
+    - A started task stays on its node, and the runner polls it there.
+
+    A sync-replication task holds the LVS name and its owner (``lvs_name``,
+    ``lvs_owner``). A task on a sync-replication node without them is
+    aborted. All other tasks are not changed.
+    """
+    params = task.function_params
+    distr_name = params.get("distr_name")
+    if "lvs_owner" not in params:
+        if storage_node_ops._sync_site(snode):
+            raise TaskAbort(f"{task.function_name} of {distr_name} on {task.node_id} has no lvs_owner: "
+                            f"a sync-replication migration task must name its LVS owner")
+        return
+    if migration_started(task):
+        return
+
+    lvs_name = params["lvs_name"]
+    owner = _lvs_owner(params)
+    try:
+        placement = tasks_controller.migration_role_node(owner, task.function_name)
+    except KeyError as e:
+        raise TaskAbort(str(e))
+
+    if placement.reason == tasks_controller.PLACEMENT_MOVING:
+        raise TaskDefer(f"{lvs_name} (owner {owner.get_id()}) is being moved ({owner.lvs_active_site}); "
+                        f"placing {task.function_name} of {distr_name} once the move settles")
+    if placement.node is None:
+        members = storage_node_ops.lvs_active_triplet(owner).node_ids
+        if task.function_name == JobSchedule.FN_FAILED_DEV_MIG:
+            raise TaskDefer(f"every member of the active triplet of {lvs_name} ({', '.join(members)}) "
+                            f"is departing; waiting")
+        raise TaskAbort(f"skipped: primary {members[0]} of {lvs_name} is departing")
+
+    target_id = placement.node.get_id()
+    if target_id == task.node_id:
+        return
+    if move_unstarted_task(task, target_id):
+        raise TaskDefer(f"moved {task.function_name} of {distr_name} ({lvs_name}) from {task.node_id} "
+                        f"to {target_id}, the primary of its active triplet")
+    raise TaskDefer(f"{task.function_name} of {distr_name} ({lvs_name}) changed on {task.node_id} "
+                    f"while being moved to {target_id}")
+
+
+def _lvs_owner(params):
+    """The owner of the LVS a sync-replication migration task names."""
+    try:
+        return db.get_storage_node_by_id(params["lvs_owner"])
+    except KeyError:
+        raise TaskAbort(f"Owner {params['lvs_owner']} of {params['lvs_name']} not found")
+
+
+def defer_for_sync_resync(task):
+    """Raise :class:`TaskDefer` while a not-yet-started re-balance or
+    new-device migration of a sync-replication LVS must leave the migration
+    slot to the LVS's zone catch-up.
+
+    A distrib has one migration slot, shared in the order failure > resync >
+    re-balance. Only a catch-up that can run now holds the task
+    (sync_replication_controller.resync_holding_rebalance). A started
+    migration already holds the slot and is polled on; a task without
+    ``lvs_owner`` (no sync replication) is not affected. The failed-device
+    runner does not call this: a failed-device migration never waits for a
+    catch-up.
+    """
+    params = task.function_params
+    if "lvs_owner" not in params or migration_started(task):
+        return
+    resync = sync_replication_controller.resync_holding_rebalance(
+        db.get_cluster_by_id(task.cluster_id), _lvs_owner(params),
+        db.get_storage_nodes_by_cluster_id(task.cluster_id))
+    if resync:
+        raise TaskDefer(f"{params.get('distr_name')} ({params['lvs_name']}): "
+                        f"waiting for the zone catch-up {resync} to finish first")
+
+
+def move_unstarted_task(task, node_id):
+    """Move ``task`` to ``node_id`` in one atomic update. The move happens only
+    if the stored task is still open, not started, and on ``task.node_id``.
+    Return True if the task moved."""
+    old_node_id = task.node_id
+    won = {"ok": False}
+
+    def _mutate(fresh):
+        won["ok"] = False
+        if (fresh.status == JobSchedule.STATUS_DONE or fresh.canceled
+                or migration_started(fresh) or fresh.node_id != old_node_id):
+            return False
+        fresh.node_id = node_id
+        won["ok"] = True
+        return True
+
+    return db.atomic_update(task, _mutate) is not None and won["ok"]
 
 
 def nodes_settled(cluster_id, primaries_only=False):
@@ -194,9 +317,21 @@ def start_migration(task, start, **params):
     the handler would otherwise lose it and start a second migration. Any
     ``params`` are recorded in the same commit, so a marker can never land
     without the context written alongside it.
+
+    A sync-replication task (``lvs_owner``) whose start is answered EBUSY
+    defers: the distrib's migration slot is held by another migration (a
+    zone catch-up, or a migration of another task), and the task waits for
+    it without consuming a retry. Every other failure, and EBUSY of a task
+    without sync replication, is a failed attempt (``TaskRetry``).
     """
     try:
         started = start()
+    except RPCRemoteError as e:
+        if e.code == errno.EBUSY and "lvs_owner" in task.function_params:
+            raise TaskDefer(f"migration slot of {task.function_params['distr_name']} busy on "
+                            f"{task.node_id}, waiting") from e
+        logger.error(e)
+        started = False
     except Exception as e:
         logger.error(e)
         started = False
@@ -313,7 +448,9 @@ def report_migration_status(task, res, allow_all_errors=False, allowed_error_cod
 
 
 def no_sibling_migration(task):
-    """Eligibility: one migration at a time per node.
+    """Eligibility: only one migration of a distr runs at a time on a node.
+    For a sync-replication task, only one runs at a time on all nodes
+    together (tasks_controller.mig_scope_node).
 
     Only gates a task that has not started yet — once its own migration is
     running it is itself the sibling everything else waits on.
@@ -321,7 +458,8 @@ def no_sibling_migration(task):
     if migration_started(task):
         return True
     return not tasks_controller.get_active_node_mig_task(
-        task.cluster_id, task.node_id, task.function_params.get("distr_name"))
+        task.cluster_id, tasks_controller.mig_scope_node(task.node_id, task.function_params),
+        task.function_params.get("distr_name"))
 
 
 def allow_all_migration_errors(cluster_id, statuses):

@@ -14,6 +14,11 @@ EVENT_OBJ_CREATED = "OBJ_CREATED"
 EVENT_OBJ_DELETED = "OBJ_DELETED"
 EVENT_CAPACITY = "CAPACITY"
 EVENT_LIMIT_REACHED = "LIMIT_REACHED"
+#: A distrib reported an IO it could not serve from the chunks it can reach.
+EVENT_DISTR_IO_ERROR = "DISTR_IO_ERROR"
+#: A client LVS port was reopened FENCE_RELEASE_BUDGET times in one window
+#: and SPDK fenced it again each time; the control plane stopped reopening it.
+EVENT_FENCE_LOOP = "FENCE_LOOP"
 
 DOMAIN_CLUSTER = "cluster"
 DOMAIN_MANAGEMENT = "management"
@@ -26,7 +31,7 @@ CAUSED_BY_API = "api"
 CAUSED_BY_MONITOR = "monitor"
 
 
-def log_distr_event(cluster_id, node_id, event_dict):
+def log_distr_event(cluster_id, node_id, event_dict, level=EventObj.LEVEL_ERROR):
 
     ds = EventObj()
     ds.uuid = str(uuid.uuid4())
@@ -34,7 +39,7 @@ def log_distr_event(cluster_id, node_id, event_dict):
     ds.node_id = node_id
     ds.date = round(time.time()*1000)
     ds.domain = DOMAIN_DISTR
-    ds.event_level = EventObj.LEVEL_ERROR
+    ds.event_level = level
     ds.caused_by = CAUSED_BY_MONITOR
     ds.status = 'new'
 
@@ -50,7 +55,7 @@ def log_distr_event(cluster_id, node_id, event_dict):
     ds.object_dict = event_dict
 
     log_event_based_on_level(cluster_id, event_dict['event_type'], DOMAIN_DISTR,
-                         event_dict['status'], CAUSED_BY_MONITOR, EventObj.LEVEL_ERROR)
+                         event_dict['status'], CAUSED_BY_MONITOR, level)
 
     db_controller = DBController()
     ds.write_to_db(db_controller.kv_store)

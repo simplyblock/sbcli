@@ -30,6 +30,7 @@ class _Rec:
 
 class _Cluster:
     cap_warn = 80
+    sync_replication = False
 
     def get_id(self):
         return "CL1"

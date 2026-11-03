@@ -27,6 +27,7 @@ def _node(uuid="n1", cluster_id="c1"):
     n.uuid = uuid
     n.get_id = MagicMock(return_value=uuid)
     n.cluster_id = cluster_id
+    n.site = ""
     n.status = StorageNode.STATUS_ONLINE
     return n
 

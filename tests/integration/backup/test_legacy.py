@@ -332,15 +332,19 @@ class TestCreateS3Bdev(unittest.TestCase):
 
         MockRPC.assert_not_called()
 
+    @patch("simplyblock_core.controllers.backup.manifest.boto3.client")
     @patch("simplyblock_core.models.storage_node.RPCClient")
-    def test_bdev_s3_create_fails(self, MockRPC):
+    def test_bdev_s3_create_fails(self, MockRPC, _mock_boto3_client):
+        from simplyblock_core.rpc_client import RPCRemoteError
         mock_rpc = MockRPC.return_value
-        mock_rpc.bdev_s3_create.return_value = None
+        # The RPC client reports a failed call by raising, never by a None return.
+        mock_rpc.bdev_s3_create.side_effect = RPCRemoteError("error", code=-1)
 
         from simplyblock_core.controllers.backup.device import create_s3_bdev
         node = _node()
         with pytest.raises(RuntimeError):
             create_s3_bdev(node, _backup_config())
+        mock_rpc.bdev_s3_create.assert_called_once()
         mock_rpc.bdev_lvol_s3_bdev.assert_not_called()
 
     @patch("simplyblock_core.controllers.backup.manifest.boto3.client")

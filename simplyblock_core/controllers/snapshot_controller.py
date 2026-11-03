@@ -20,6 +20,7 @@ from tenacity import (
 
 from simplyblock_core import constants, utils
 from simplyblock_core.controllers import (
+    activation_gate,
     events_controller,
     lvol_controller,
     migration_controller,
@@ -30,7 +31,11 @@ from simplyblock_core.controllers import (
     tasks_controller,
 )
 from simplyblock_core.db_controller import DBController, SubsystemCapacityError
-from simplyblock_core.exceptions import ChainLockTimeout, PreconditionError
+from simplyblock_core.exceptions import (
+    ChainLockTimeout,
+    PreconditionError,
+    SyncLeadershipMovingError,
+)
 from simplyblock_core.kms import create_kms_connection, lvol_dek_path, pool_kek_name
 from simplyblock_core.kms._exceptions import KMSException
 from simplyblock_core.models.cluster import Cluster
@@ -235,8 +240,13 @@ def _find_lvs_leader(cluster_id, lvs_name, all_nodes):
     delegate to find_leader_with_failover, which owns the leaderless-LVS
     recovery (take-leadership on the configured primary) and the shared
     negative cache, so at most one recovery pass runs per NO_LEADER_TTL_SEC
-    even under a snapshot/clone-only workload."""
+    even under a snapshot/clone-only workload.
+
+    Sync replication: only the members of the LVS's active triplet are
+    probed, whatever the caller passed (storage_node_ops._lvs_leader_candidates,
+    resolved before the negative cache so an abandoned move is reconciled)."""
     from simplyblock_core.controllers import lvol_controller
+    from simplyblock_core.storage_node_ops import _lvs_leader_candidates
     from simplyblock_core.utils.ttl_cache import (
         LEADER_TTL_SEC,
         NO_LEADER_TTL_SEC,
@@ -244,6 +254,7 @@ def _find_lvs_leader(cluster_id, lvs_name, all_nodes):
         no_leader_cache,
     )
 
+    all_nodes = _lvs_leader_candidates(all_nodes, lvs_name).nodes
     key = (cluster_id, lvs_name)
     if no_leader_cache.get(key, NO_LEADER_TTL_SEC):
         logger.warning(
@@ -863,6 +874,11 @@ def add(lvol_id, snapshot_name, lock=True, all_snaps=None, all_lvols=None,
     cluster = db_controller.get_cluster_by_id(pool.cluster_id)
     if cluster.status not in cluster.MUTABLE_STATUSES:
         return False, f"Cluster is not active, status: {cluster.status}"
+    site_activation = activation_gate.site_activation_blocks(cluster, snode)
+    if site_activation:
+        msg = f"Cannot create snapshot on LVS {snode.lvstore}: {site_activation}"
+        logger.error(msg)
+        return False, msg
 
     # Pool- and cluster-level capacity admission: the snapshot is charged at
     # the source volume's UTILIZED size (see check_snapshot_capacity). This
@@ -1309,6 +1325,10 @@ def _delete_locked(snap, snapshot_uuid, force_delete=False, lock=True):
             logger.error(f"Cannot delete snapshot {snapshot_uuid}: cluster "
                          f"{cluster.get_id()} status is {cluster.status}")
             return False
+        site_activation = activation_gate.site_activation_blocks(cluster, snode) if snode else ""
+        if site_activation:
+            logger.error(f"Cannot delete snapshot {snapshot_uuid}: {site_activation}")
+            return False
 
     # Block deletion if the snapshot's parent volume is being migrated
     active_mig = migration_controller.get_active_migration_for_lvol(
@@ -1592,6 +1612,11 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
     cluster = db_controller.get_cluster_by_id(pool.cluster_id)
     if cluster.status not in cluster.MUTABLE_STATUSES:
         return False, f"Cluster is not active, status: {cluster.status}"
+    site_activation = activation_gate.site_activation_blocks(cluster, snode)
+    if site_activation:
+        msg = f"Cannot clone on LVS {snode.lvstore}: {site_activation}"
+        logger.error(msg)
+        return False, msg
 
     # Hard per-lvstore object cap (lvols + clones + snapshots).
     from simplyblock_core.controllers import lvol_controller as _lvol_ctrl
@@ -1800,7 +1825,7 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
             lvol, snode, bool(namespaced),
             standalone_nqn=cluster.nqn + ":lvol:" + lvol.uuid,
             standalone_namespace=pvc_namespace or "")
-    except SubsystemCapacityError as e:
+    except (SubsystemCapacityError, SyncLeadershipMovingError) as e:
         logger.error(str(e))
         return False, str(e)
 

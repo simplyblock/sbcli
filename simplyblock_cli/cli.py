@@ -155,9 +155,10 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             subcommand.add_argument('--enable-test-device', help='Enable creation of test device.', dest='enable_test_device', action='store_true')
         if self.developer_mode:
-            subcommand.add_argument('--disable-ha-jm', help='Disable HA JM for distrib creation. Default: `true`.', dest='enable_ha_jm', action='store_false')
-        subcommand.add_argument('--ha-jm-count', help='HA JM count. Defaults to 4 for FT=2 clusters, otherwise 3.', type=int, dest='ha_jm_count')
+            subcommand.add_argument('--disable-ha-jm', help='Disable HA JM for distrib creation. Default: `true`. Ignored on sync-replication clusters, which always use HA JM.', dest='enable_ha_jm', action='store_false')
+        subcommand.add_argument('--ha-jm-count', help='HA JM count. Defaults to 4 for FT=2 clusters or with failure domains, otherwise 3. On sync-replication clusters the count covers both sites: an even number up to 8, default 8 for FT=2 clusters or with failure domains, otherwise 6.', type=int, dest='ha_jm_count')
         subcommand.add_argument('--failure-domain', help='The failure-domain id (a non-negative integer identifying the rack/cabinet/DC) this node belongs to. Required when the cluster was created with --enable-failure-domain; must be omitted otherwise.', type=int, dest='failure_domain')
+        subcommand.add_argument('--site', help='The sync-replication site this node belongs to (1-63 characters from [A-Za-z0-9._-]). Required when the cluster was created with --sync-replication; must be omitted otherwise. All nodes of one host belong to the same site.', type=str, dest='site')
         subcommand.add_argument('--namespace', help='The Kubernetes namespace to deploy on.', type=str, dest='namespace')
         if self.developer_mode:
             subcommand.add_argument('--id-device-by-nqn', help='Use the device NQN instead of the serial number for identification. Default: `false`.', dest='id_device_by_nqn', action='store_true')
@@ -424,6 +425,7 @@ class CLIWrapper(CLIWrapperBase):
         self.init_cluster__replication_policy_remove(subparser)
         self.init_cluster__replication_policy_failover(subparser)
         self.init_cluster__replication_policy_snapshot(subparser)
+        self.init_cluster__sync_status(subparser)
 
 
     def init_cluster__create(self, subparser):
@@ -466,10 +468,12 @@ class CLIWrapper(CLIWrapperBase):
             subcommand.add_argument('--disable-monitoring', help='Disable monitoring stack, false by default. Default: `false`.', dest='disable_monitoring', action='store_true')
         subcommand.add_argument('--strict-node-anti-affinity', help='Enable strict node anti affinity for storage nodes. Never more than one chunk is placed on a node. This requires a minimum of _data-chunks-in-stripe + parity-chunks-in-stripe + 1_ nodes in the cluster.', dest='strict_node_anti_affinity', action='store_true')
         subcommand.add_argument('--enable-failure-domain', help='Enable failure-domain anti-affinity. Each storage node must then be added with a --failure-domain tag (rack/cabinet/DC); data, journal and secondary/tertiary copies are spread across distinct failure domains (best-effort). Deploy-time only: a cluster cannot be upgraded into this feature, it must be redeployed.', dest='enable_failure_domain', action='store_true')
+        subcommand.add_argument('--sync-replication', help='Enable site-level synchronous replication over exactly two sites. Each storage node must then be added with --site; every lvstore is replicated to the other site. Requires --ha-type ha. Deploy-time only: a cluster cannot be upgraded into this feature, it must be redeployed.', dest='sync_replication', action='store_true')
         subcommand.add_argument('--device-mode', help='Storage-device mode for the whole cluster. \'nvme\' (default): NVMe PCIe devices auto-detected and attached via the SPDK nvme driver. \'lblk\': arbitrary Linux block devices wrapped in SPDK AIO bdevs; devices are selected at \'sn configure\' by name or serial number. Deploy-time only; inter-node fabric (nvme-tcp/rdma) is unaffected.', type=str, default='nvme', dest='device_mode', choices=['nvme','lblk',])
         subcommand.add_argument('--enable-inline-checksum', help='Enable inline CRC checksum validation on every IO for silent-data-error protection. Cannot be enabled or disabled after cluster creation. Per-device alceml mode (md-on-device vs fallback) is auto-detected at add-node.', dest='inline_checksum', action='store_true')
         subcommand.add_argument('--4k_atomic', help='Declare that devices guarantee 4K write atomicity even with a <4K logical block size (e.g. AWS NVMe is 512B but atomic at 4K). Allows fallback-mode inline checksum on such devices by skipping the data-plane 4K block-size requirement. Only meaningful with --enable-inline-checksum. Cannot be changed after cluster creation.', dest='atomic_4k', action='store_true')
         subcommand.add_argument('--enable-page-copy', help='Do snapshot copy-on-write in the distribution layer as a metadata-only page copy instead of copying the cluster, and merge the copies back when a snapshot is deleted. Cannot be changed after cluster creation.', dest='page_copy', action='store_true')
+        subcommand.add_argument('--disable-md-journal', help='Create the cluster without the metadata journal, which otherwise protects blobstore metadata pages against a write torn by a power loss. Safe only when every device completes a 4K write whole: a 4K format, or an atomic write unit covering 4K. Cannot be enabled or disabled after cluster creation.', default=True, dest='md_journal', action='store_false')
         subcommand.add_argument('--name', '-n', help='Assigns a name to the newly created cluster.', type=str, dest='name')
         subcommand.add_argument('--qpair-count', help='The NVMe/TCP transport qpair count per logical volume. Default: `32`.', type=range_type(0, 128), default=32, dest='qpair_count')
         subcommand.add_argument('--client-qpair-count', help='The default NVMe/TCP transport qpair count per logical volume for client. Default: `3`.', type=range_type(0, 128), default=3, dest='client_qpair_count')
@@ -511,10 +515,12 @@ class CLIWrapper(CLIWrapperBase):
             subcommand.add_argument('--inflight-io-threshold', help='The number of inflight IOs allowed before the IO queuing starts. Default: `4`.', type=int, default=4, dest='inflight_io_threshold')
         subcommand.add_argument('--strict-node-anti-affinity', help='Enable strict node anti affinity for storage nodes. Never more than one chunk is placed on a node. This requires a minimum of _data-chunks-in-stripe + parity-chunks-in-stripe + 1_ nodes in the cluster."', dest='strict_node_anti_affinity', action='store_true')
         subcommand.add_argument('--enable-failure-domain', help='Enable failure-domain anti-affinity. Each storage node must then be added with a --failure-domain tag (rack/cabinet/DC); data, journal and secondary/tertiary copies are spread across distinct failure domains (best-effort). Deploy-time only: a cluster cannot be upgraded into this feature, it must be redeployed.', dest='enable_failure_domain', action='store_true')
+        subcommand.add_argument('--sync-replication', help='Enable site-level synchronous replication over exactly two sites. Each storage node must then be added with --site; every lvstore is replicated to the other site. Requires --ha-type ha. Deploy-time only: a cluster cannot be upgraded into this feature, it must be redeployed.', dest='sync_replication', action='store_true')
         subcommand.add_argument('--device-mode', help='Storage-device mode for the whole cluster. \'nvme\' (default): NVMe PCIe devices auto-detected and attached via the SPDK nvme driver. \'lblk\': arbitrary Linux block devices wrapped in SPDK AIO bdevs; devices are selected at \'sn configure\' by name or serial number. Deploy-time only; inter-node fabric (nvme-tcp/rdma) is unaffected.', type=str, default='nvme', dest='device_mode', choices=['nvme','lblk',])
         subcommand.add_argument('--enable-inline-checksum', help='Enable inline CRC checksum validation on every IO for silent-data-error protection. Cannot be enabled or disabled after cluster creation.', dest='inline_checksum', action='store_true')
         subcommand.add_argument('--4k_atomic', help='Declare that devices guarantee 4K write atomicity even with a <4K logical block size (e.g. AWS NVMe is 512B but atomic at 4K). Allows fallback-mode inline checksum on such devices by skipping the data-plane 4K block-size requirement. Only meaningful with --enable-inline-checksum. Cannot be changed after cluster creation.', dest='atomic_4k', action='store_true')
         subcommand.add_argument('--enable-page-copy', help='Do snapshot copy-on-write in the distribution layer as a metadata-only page copy instead of copying the cluster, and merge the copies back when a snapshot is deleted. Cannot be changed after cluster creation.', dest='page_copy', action='store_true')
+        subcommand.add_argument('--disable-md-journal', help='Create the cluster without the metadata journal, which otherwise protects blobstore metadata pages against a write torn by a power loss. Safe only when every device completes a 4K write whole: a 4K format, or an atomic write unit covering 4K. Cannot be enabled or disabled after cluster creation.', default=True, dest='md_journal', action='store_false')
         subcommand.add_argument('--name', '-n', help='Assigns a name to the newly created cluster.', type=str, dest='name')
         subcommand.add_argument('--client-data-nic', help='Network interface name from client to use for logical volume connection.', type=str, dest='client_data_nic')
         subcommand.add_argument('--use-backup', help='The path to JSON file with S3/MinIO backup configuration.', type=str, dest='use_backup')
@@ -776,6 +782,11 @@ class CLIWrapper(CLIWrapperBase):
         subcommand = self.add_sub_command(subparser, 'replication-policy-snapshot', 'Takes ONE crash-consistent snapshot of every volume in the policy\'s consistency group, as a new group generation')
         subcommand.add_argument('policy_id', help='Replication policy id (must be a consistency-group policy)', type=str)
 
+    def init_cluster__sync_status(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'sync-status', 'Shows the sync-replication status of a sync-replication cluster: the aggregate (the worst over all lvstores) and one row per lvstore')
+        subcommand.add_argument('cluster_id', help='Cluster id', type=str).completer = self._completer_get_cluster_list
+        subcommand.add_argument('--json', help='Print outputs in json format.', dest='json', action='store_true')
+
 
     def init_volume(self):
         subparser = self.add_command('volume', 'Logical Volume Commands', aliases=['lvol',])
@@ -805,6 +816,9 @@ class CLIWrapper(CLIWrapperBase):
         self.init_volume__replication_status(subparser)
         self.init_volume__replication_info(subparser)
         self.init_volume__replication_trigger(subparser)
+        self.init_volume__sync_promote(subparser)
+        self.init_volume__sync_demote(subparser)
+        self.init_volume__sync_status(subparser)
         self.init_volume__suspend(subparser)
         self.init_volume__resume(subparser)
         self.init_volume__clone_lvol(subparser)
@@ -878,6 +892,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('volume_id', help='The logical volume id.', type=str)
         subcommand.add_argument('--ctrl-loss-tmo', help='The control loss timeout for this volume.', type=int, dest='ctrl_loss_tmo')
         subcommand.add_argument('--host-nqn', help='Host NQN for DH-HMAC-CHAP authentication (required when volume has allowed hosts with secrets).', type=str, dest='host_nqn')
+        subcommand.add_argument('--site', help='Site whose paths to print (sync-replication clusters only, optional): defaults to the site the volume\'s LVS is led from; only the paths of that site\'s triplet.', type=str, dest='site')
 
     def init_volume__resize(self, subparser):
         subcommand = self.add_sub_command(subparser, 'resize', 'Resizes a logical volume.')
@@ -971,6 +986,23 @@ class CLIWrapper(CLIWrapperBase):
     def init_volume__replication_trigger(self, subparser):
         subcommand = self.add_sub_command(subparser, 'replication-trigger', 'Start replication for lvol')
         subcommand.add_argument('lvol_id', help='Logical volume id', type=str)
+
+    def init_volume__sync_promote(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'sync-promote', 'Sync-replication clusters: promotes a volume on a site (planned leadership move, or a disaster fail-over with --force); prints the connection strings of that site once done')
+        subcommand.add_argument('volume_id', help='The logical volume id.', type=str)
+        subcommand.add_argument('--site', help='The site to promote the volume on.', type=str, dest='site', required=True)
+        subcommand.add_argument('--force', help='Disaster fail-over: the site the volume is served from is lost.', dest='force', action='store_true')
+
+    def init_volume__sync_demote(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'sync-demote', 'Sync-replication clusters: demotes (fences) a volume on a site. A no-op when the volume is not served there; refused while the replicas are not in sync.')
+        subcommand.add_argument('volume_id', help='The logical volume id.', type=str)
+        subcommand.add_argument('--site', help='The site to demote the volume on.', type=str, dest='site', required=True)
+
+    def init_volume__sync_status(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'sync-status', 'Sync-replication clusters: shows the sync-replication status of a volume seen from a site (its role there and the cluster-wide state)')
+        subcommand.add_argument('volume_id', help='The logical volume id.', type=str)
+        subcommand.add_argument('--site', help='The site to look from.', type=str, dest='site', required=True)
+        subcommand.add_argument('--json', help='Print outputs in json format.', dest='json', action='store_true')
 
     def init_volume__suspend(self, subparser):
         subcommand = self.add_sub_command(subparser, 'suspend', 'Suspend lvol subsystems')
@@ -1773,6 +1805,8 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.cluster__replication_policy_failover(sub_command, args)
                 elif sub_command in ['replication-policy-snapshot']:
                     ret = self.cluster__replication_policy_snapshot(sub_command, args)
+                elif sub_command in ['sync-status']:
+                    ret = self.cluster__sync_status(sub_command, args)
                 else:
                     self.parser.print_help()
 
@@ -1839,6 +1873,12 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.volume__replication_info(sub_command, args)
                 elif sub_command in ['replication-trigger']:
                     ret = self.volume__replication_trigger(sub_command, args)
+                elif sub_command in ['sync-promote']:
+                    ret = self.volume__sync_promote(sub_command, args)
+                elif sub_command in ['sync-demote']:
+                    ret = self.volume__sync_demote(sub_command, args)
+                elif sub_command in ['sync-status']:
+                    ret = self.volume__sync_status(sub_command, args)
                 elif sub_command in ['suspend']:
                     ret = self.volume__suspend(sub_command, args)
                 elif sub_command in ['resume']:

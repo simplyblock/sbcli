@@ -506,6 +506,34 @@ services:
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
 
+  TasksRunnerSyncResync:
+    <<: *service-base
+    image: $SIMPLYBLOCK_DOCKER_IMAGE
+    command: "simplyblock-task-runner tasks-runner-sync-resync"
+    deploy:
+      placement:
+        constraints: [node.role == manager]
+    volumes:
+      - "/etc/foundationdb:/etc/foundationdb"
+    networks:
+      - hostnet
+    environment:
+      SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+
+  TasksRunnerSyncPromote:
+    <<: *service-base
+    image: $SIMPLYBLOCK_DOCKER_IMAGE
+    command: "simplyblock-task-runner tasks-runner-sync-promote"
+    deploy:
+      placement:
+        constraints: [node.role == manager]
+    volumes:
+      - "/etc/foundationdb:/etc/foundationdb"
+    networks:
+      - hostnet
+    environment:
+      SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+
   TasksRunnerLVolSyncDelete:
     <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE
