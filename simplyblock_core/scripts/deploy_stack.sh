@@ -14,6 +14,16 @@ export RETENTION_PERIOD=$8
 export LOG_LEVEL=$9
 export GRAFANA_ENDPOINT=${10}
 export DISABLE_MONITORING=${11}
+# Registry/proxy prefix for the third-party images in the compose files, e.g.
+# quay-proxy.grupawp.pl/docker.io. Normalised to end in exactly one '/' so the
+# compose files can write ${IMAGE_PREFIX}foundationdb/foundationdb:...; empty
+# keeps the images as written. $SIMPLYBLOCK_DOCKER_IMAGE arrives already prefixed.
+IMAGE_PREFIX=${12:-}
+IMAGE_PREFIX=${IMAGE_PREFIX%/}
+if [[ -n "$IMAGE_PREFIX" ]]; then
+   IMAGE_PREFIX="$IMAGE_PREFIX/"
+fi
+export IMAGE_PREFIX
 export DIR="$(dirname "$(realpath "$0")")"
 
 if [ -s "/etc/foundationdb/fdb.cluster" ]
