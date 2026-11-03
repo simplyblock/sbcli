@@ -372,6 +372,35 @@ def select_move_target(group, joining_lvol, lvols, *, node_max_subsystems,
     raise SubsystemLimitReached(node, node_max_subsystems)
 
 
+class SubsystemBusy(ColocationError):
+    """The subsystem a volume would leave is held by an active migration or
+    another subsystem move."""
+
+
+def select_leave_target(leaving_lvol, lvols, *, node_max_subsystems,
+                        node_subsystem_count=None, busy_nqns=(), reserved_fresh=0) -> MoveTarget:
+    """Where ``leaving_lvol`` goes when it leaves its consistency group: out of
+    the subsystem it shares, into a fresh one of its own, so the next group it
+    joins finds it alone. A volume no other live volume shares a subsystem with
+    has nothing to leave, and nothing moves.
+
+    Raises SubsystemBusy when the shared subsystem is ``busy``, and
+    SubsystemLimitReached when the node has no room for a fresh subsystem.
+    """
+    lid = leaving_lvol.get_id()
+    shared = any(_alive(lv) and lv.nqn == leaving_lvol.nqn and lv.get_id() != lid for lv in lvols)
+    if not shared:
+        return MoveTarget(leaving_lvol.nqn, False, [])
+    if leaving_lvol.nqn in set(busy_nqns):
+        raise SubsystemBusy(f"subsystem {leaving_lvol.nqn} is held by an active migration or move")
+    node = leaving_lvol.node_id
+    count = (node_subsystem_count if node_subsystem_count is not None
+             else count_node_subsystems(node, lvols))
+    if count + reserved_fresh < node_max_subsystems:
+        return MoveTarget("", True, [lid])
+    raise SubsystemLimitReached(node, node_max_subsystems)
+
+
 def predict_move_target(group, joining_lvol, lvols, migrate_ids, *, node_max_subsystems,
                         busy_nqns=(), reserved_fresh=0) -> MoveTarget:
     """:func:`select_move_target` against the state the pinned node has once

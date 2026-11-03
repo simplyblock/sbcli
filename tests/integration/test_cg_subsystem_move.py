@@ -417,3 +417,68 @@ def test_adding_a_namespace_to_a_subsystem_in_a_move_is_refused(db, world):
         ok, msg = lvol_controller.add_lvol_on_node(lv, db.get_storage_node_by_id("N1"))
     assert ok is False and "subsystem move" in msg
     bdev.assert_not_called()
+
+
+# --------------------------------------------------------------------------- #
+# Leaving the group's subsystem: a relabel to another group moves the volume
+# out of the subsystem it shares, into a fresh one of its own.
+# Regression/feature: 2026-11-03-cg-relabel-move
+# --------------------------------------------------------------------------- #
+
+def test_a_member_sharing_its_subsystem_leaves_alone_into_a_fresh_one(db, world):
+    group, _, _ = world
+    rec = mv.create_subsystem_move(group, "a2", "req-1", purpose="leave")
+    assert rec["purpose"] == "leave"
+    assert rec["target_is_new"] and rec["target_nqn"].startswith("nqn.cgmv:lvol:")
+    assert [(v["lvol_id"], v["source_nqn"], v["source_nsid"]) for v in rec["volumes"]] == [("a2", "A", 2)]
+    assert db.subsystem_move_reservations("N1") == ({"A", rec["target_nqn"]}, 1)
+
+
+def test_a_join_record_says_it_is_a_join(db, world):
+    group, _, _ = world
+    assert mv.create_subsystem_move(group, "j", "req-1")["purpose"] == "join"
+
+
+def test_a_member_alone_in_its_subsystem_has_nothing_to_leave(db, world):
+    group, _, _ = world
+    rec = mv.create_subsystem_move(group, "j", "req-1", purpose="leave")
+    assert rec["id"] == "" and rec["volumes"] == [] and rec["target_nqn"] == "J"
+    assert db.subsystem_move_reservations("N1") == (set(), 0)
+
+
+def test_a_volume_that_is_not_a_member_cannot_leave(db, world):
+    group, _, _ = world
+    _write_lvol(db, "x", "X", 1)
+    with pytest.raises(cgl.ColocationError, match="not a member"):
+        mv.create_subsystem_move(group, "x", "req-1", purpose="leave")
+
+
+def test_leaving_at_the_node_limit_is_refused_and_reserves_nothing(db, world):
+    group, _, _ = world
+    _write_node(db, "N1", max_lvol=2)
+    with pytest.raises(cgl.SubsystemLimitReached):
+        mv.create_subsystem_move(group, "a2", "req-1", purpose="leave")
+    assert db.subsystem_move_reservations("N1") == (set(), 0)
+
+
+def test_a_leave_is_idempotent_on_request_id(db, world):
+    group, _, _ = world
+    first = mv.create_subsystem_move(group, "a2", "req-1", purpose="leave")
+    assert mv.create_subsystem_move(group, "a2", "req-1", purpose="leave") == first
+    with pytest.raises(mv.MoveConflictError):
+        mv.create_subsystem_move(group, "a2", "req-2", purpose="leave")
+
+
+def test_committing_a_leave_repoints_only_the_leaver_and_keeps_the_source(db, world):
+    group, _, fakes = world
+    rec = mv.create_subsystem_move(group, "a2", "req-1", purpose="leave")
+    mv.prepare_subsystem_move(group, rec["id"])
+    mv.move_subsystem_move(group, rec["id"], deadline=int(time.time()) + 30)
+    mv.commit_subsystem_move(group, rec["id"])
+    t = rec["target_nqn"]
+    assert _nqns(db) == [("A", 1), (t, 1), ("J", 1)]
+    assert db.get_lvol_by_id("a2").namespace == "a2"
+    assert db.get_lvol_by_id("a2").max_namespace_per_subsys == 50
+    for f in fakes.values():
+        assert f.subsystems["A"] == {1: "a1"} and f.subsystems[t] == {1: "a2"}
+    assert db.subsystem_move_reservations("N1") == (set(), 0)

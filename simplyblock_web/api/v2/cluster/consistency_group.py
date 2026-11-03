@@ -190,14 +190,17 @@ def _conflict(reason: str, message: str, **extra) -> HTTPException:
 def create_subsystem_move(cluster: Cluster, group: ConsistencyGroupResource,
                           body: ConsistencyGroupSubsystemMoveCreateDTO) -> ConsistencyGroupSubsystemMoveDTO:
     """Bring the group into one subsystem now that ``lvol_id`` joined it
-    (design-cg-live-subsystem-flip §5, §9): picks the target and reserves it.
+    (design-cg-live-subsystem-flip §5, §9), or, with ``purpose`` ``leave``,
+    take ``lvol_id`` out of the subsystem it shares before it leaves the
+    group: picks the target and reserves it.
 
     409 ``SubsystemLimitReached`` (with ``node_id`` and ``limit``) when the
     group needs a fresh subsystem on a node at its limit, ``MoveConflict`` while
     another move or a migration is active, ``ColocationRefused`` for a volume
     that is not a member or a stretched cluster."""
     try:
-        record = cg_subsystem_move.create_subsystem_move(group, body.lvol_id, body.request_id)
+        record = cg_subsystem_move.create_subsystem_move(group, body.lvol_id, body.request_id,
+                                                          purpose=body.purpose)
     except cg_colocation.SubsystemLimitReached as e:
         raise _conflict("SubsystemLimitReached", str(e), node_id=e.node_id, limit=e.limit)
     except cg_subsystem_move.MoveConflictError as e:

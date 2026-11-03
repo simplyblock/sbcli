@@ -147,17 +147,28 @@ def _lvol_view(record, volume):
 # Create
 # --------------------------------------------------------------------------- #
 
-def create_subsystem_move(group, lvol_id, request_id):
-    """Choose where ``group`` ends up now that ``lvol_id`` joined it, and
-    reserve it. Returns the move record; one with an empty ``id`` and no
+PURPOSES = ("join", "leave")
+
+
+def create_subsystem_move(group, lvol_id, request_id, purpose="join"):
+    """Reserve a move of ``group``'s namespaces between subsystems.
+
+    ``purpose="join"`` chooses where the group ends up now that ``lvol_id``
+    joined it. ``purpose="leave"`` takes ``lvol_id``, still an open member,
+    out of the subsystem it shares and into a fresh one of its own, which is
+    how a relabeled volume leaves before it joins another group. Returns the
+    move record, carrying its ``purpose``; one with an empty ``id`` and no
     volumes when nothing has to move (the group's subsystem already holds the
-    volume, or the group shares no subsystem).
+    joiner, the group shares no subsystem, or the leaver shares none).
 
     Idempotent on ``request_id``. Raises MoveConflictError while another move
     or a migration is active, cg_colocation.SubsystemLimitReached when the
-    pinned node cannot take a fresh subsystem, and ColocationError for a
-    volume that is not an open member or a stretched cluster.
+    node cannot take a fresh subsystem, ColocationError for a volume that is
+    not an open member or a stretched cluster, and ValueError for an unknown
+    ``purpose``.
     """
+    if purpose not in PURPOSES:
+        raise ValueError(f"subsystem move purpose must be one of {PURPOSES}, not {purpose!r}")
     db = _db()
     group = _fresh(group)
     current = group.subsystem_move or {}
@@ -183,13 +194,22 @@ def create_subsystem_move(group, lvol_id, request_id):
     by_id = {lv.get_id(): lv for lv in lvols}
     joiner = by_id[lvol_id]
     reserved, fresh = _reserved_on_node(group.node_id)
-    target = cg_colocation.select_move_target(
-        group, joiner, lvols, node_max_subsystems=_node_limit(node),
-        busy_nqns=cg_colocation.busy_nqns(db, group.cluster_id, lvols) | set(reserved),
-        reserved_fresh=fresh)
+    busy = cg_colocation.busy_nqns(db, group.cluster_id, lvols) | set(reserved)
+    if purpose == "leave":
+        try:
+            target = cg_colocation.select_leave_target(
+                joiner, lvols, node_max_subsystems=_node_limit(node),
+                busy_nqns=busy, reserved_fresh=fresh)
+        except cg_colocation.SubsystemBusy as e:
+            raise MoveConflictError(str(e)) from e
+    else:
+        target = cg_colocation.select_move_target(
+            group, joiner, lvols, node_max_subsystems=_node_limit(node),
+            busy_nqns=busy, reserved_fresh=fresh)
     if not target.moving_ids:
-        return {"id": "", "request_id": request_id, "target_nqn": target.target_nqn,
-                "target_is_new": False, "namespaces_at": TARGET, "deadline": 0,
+        return {"id": "", "request_id": request_id, "purpose": purpose,
+                "target_nqn": target.target_nqn, "target_is_new": False,
+                "namespaces_at": TARGET, "deadline": 0,
                 "status": "done", "node_ids": [], "volumes": []}
 
     target_nqn = target.target_nqn
@@ -205,6 +225,7 @@ def create_subsystem_move(group, lvol_id, request_id):
     record = {
         "id": str(uuid_mod.uuid4()),
         "request_id": request_id,
+        "purpose": purpose,
         "target_nqn": target_nqn,
         "target_is_new": target.target_is_new,
         "namespaces_at": SOURCE,

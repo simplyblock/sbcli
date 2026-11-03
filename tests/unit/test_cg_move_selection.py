@@ -183,3 +183,49 @@ def test_the_preflight_counts_the_joiners_subsystem_on_the_pin():
         cgl.predict_move_target(g, lvols[3], lvols, ["j"], node_max_subsystems=3)
     t = cgl.predict_move_target(g, lvols[3], lvols, ["j"], node_max_subsystems=4)
     assert t.target_is_new and t.moving_ids == ["a1", "j"]
+
+
+# --------------------------------------------------------------------------- #
+# Leaving the group's subsystem (a relabel to another group)
+# Regression/feature: 2026-11-03-cg-relabel-move
+# --------------------------------------------------------------------------- #
+
+def _leave(leaver, lvols, limit=10, **kw):
+    return cgl.select_leave_target(leaver, lvols, node_max_subsystems=limit, **kw)
+
+
+def test_a_member_sharing_its_subsystem_leaves_into_a_fresh_one_alone():
+    lvols = [_lv("a1", "A"), _lv("v", "A", nsid=2), _lv("x", "A", nsid=3)]
+    t = _leave(lvols[1], lvols)
+    assert (t.target_nqn, t.target_is_new, t.moving_ids) == ("", True, ["v"])
+
+
+def test_a_member_alone_in_its_subsystem_moves_nothing():
+    lvols = [_lv("a1", "A"), _lv("v", "V", maxns=4)]
+    t = _leave(lvols[1], lvols)
+    assert (t.target_nqn, t.target_is_new, t.moving_ids) == ("V", False, [])
+
+
+def test_a_deleted_sibling_does_not_keep_the_leaver_in_its_subsystem():
+    lvols = [_lv("v", "A"), _lv("gone", "A", nsid=2, status=LVol.STATUS_IN_DELETION)]
+    t = _leave(lvols[0], lvols)
+    assert t.moving_ids == [] and t.target_nqn == "A"
+
+
+def test_leaving_at_the_node_subsystem_limit_is_refused():
+    lvols = [_lv("a1", "A"), _lv("v", "A", nsid=2), _lv("o", "O")]
+    with pytest.raises(cgl.SubsystemLimitReached):
+        _leave(lvols[1], lvols, limit=2)
+
+
+def test_fresh_subsystems_other_moves_reserved_count_against_the_limit():
+    lvols = [_lv("a1", "A"), _lv("v", "A", nsid=2)]
+    with pytest.raises(cgl.SubsystemLimitReached):
+        _leave(lvols[1], lvols, limit=2, reserved_fresh=1)
+    assert _leave(lvols[1], lvols, limit=3, reserved_fresh=1).target_is_new
+
+
+def test_leaving_a_subsystem_another_move_or_migration_holds_is_a_conflict():
+    lvols = [_lv("a1", "A"), _lv("v", "A", nsid=2)]
+    with pytest.raises(cgl.SubsystemBusy):
+        _leave(lvols[1], lvols, busy_nqns={"A"})

@@ -400,12 +400,12 @@ class TestSubsystemMoveRoutes:
         return route
 
     def test_create_returns_the_move(self, client, db, cluster, monkeypatch):
-        self._route(db, monkeypatch, create_subsystem_move=lambda g, lid, rid: dict(_MOVE_RECORD))
+        self._route(db, monkeypatch, create_subsystem_move=lambda g, lid, rid, **kw: dict(_MOVE_RECORD))
         resp = client.post(f'{BASE}/subsystem-moves', json={"lvol_id": "a1", "request_id": "r1"})
         assert resp.status_code == 200
         assert resp.json() == {"id": "M1", "request_id": "r1", "target_nqn": "nqn.t",
                                "target_is_new": True, "namespaces_at": "source", "deadline": 0,
-                               "status": "reserved",
+                               "status": "reserved", "purpose": "join",
                                "volumes": [{"lvol_id": "a1", "source_nqn": "nqn.a", "source_nsid": 1,
                                             "ns_uuid": "u1", "nguid": "g1", "target_nsid": 0}]}
 
@@ -413,7 +413,7 @@ class TestSubsystemMoveRoutes:
                                                                         monkeypatch):
         from simplyblock_core.controllers import cg_colocation
 
-        def refuse(g, lid, rid):
+        def refuse(g, lid, rid, **kw):
             raise cg_colocation.SubsystemLimitReached("N1", 500)
         self._route(db, monkeypatch, create_subsystem_move=refuse)
         resp = client.post(f'{BASE}/subsystem-moves', json={"lvol_id": "a1", "request_id": "r1"})
@@ -424,12 +424,34 @@ class TestSubsystemMoveRoutes:
     def test_create_while_another_move_is_active_is_409(self, client, db, cluster, monkeypatch):
         from simplyblock_core.controllers import cg_subsystem_move
 
-        def refuse(g, lid, rid):
+        def refuse(g, lid, rid, **kw):
             raise cg_subsystem_move.MoveConflictError("move M0 already active")
         self._route(db, monkeypatch, create_subsystem_move=refuse)
         resp = client.post(f'{BASE}/subsystem-moves', json={"lvol_id": "a1", "request_id": "r1"})
         assert resp.status_code == 409
         assert resp.json()["detail"]["reason"] == "MoveConflict"
+
+    def test_create_is_a_join_unless_the_request_says_leave(self, client, db, cluster, monkeypatch):
+        """Regression/feature: 2026-11-03-cg-relabel-move"""
+        seen = []
+
+        def create(g, lid, rid, purpose="join"):
+            seen.append(purpose)
+            return dict(_MOVE_RECORD, purpose=purpose)
+        self._route(db, monkeypatch, create_subsystem_move=create)
+        resp = client.post(f'{BASE}/subsystem-moves', json={"lvol_id": "a1", "request_id": "r1"})
+        assert resp.status_code == 200 and resp.json()["purpose"] == "join"
+        resp = client.post(f'{BASE}/subsystem-moves',
+                           json={"lvol_id": "a1", "request_id": "r2", "purpose": "leave"})
+        assert resp.status_code == 200 and resp.json()["purpose"] == "leave"
+        assert seen == ["join", "leave"]
+
+    def test_create_with_an_unknown_purpose_is_rejected(self, client, db, cluster, monkeypatch):
+        """Regression/feature: 2026-11-03-cg-relabel-move"""
+        self._route(db, monkeypatch)
+        resp = client.post(f'{BASE}/subsystem-moves',
+                           json={"lvol_id": "a1", "request_id": "r1", "purpose": "swap"})
+        assert resp.status_code == 422
 
     def test_a_request_without_a_request_id_is_rejected(self, client, db, cluster, monkeypatch):
         self._route(db, monkeypatch)

@@ -972,10 +972,15 @@ class ConsistencyGroupJoinPlanDTO(BaseModel):
 
 
 class ConsistencyGroupSubsystemMoveCreateDTO(BaseModel):
-    """Request body for a subsystem move: ``lvol_id`` is the member that just
-    joined. A retry with the same ``request_id`` answers with the same move."""
+    """Request body for a subsystem move. With ``purpose`` ``join`` (the
+    default), ``lvol_id`` is the member that just joined and the group is
+    brought into one subsystem. With ``leave``, ``lvol_id`` is a member about
+    to leave, and its namespace moves out of the subsystem it shares into a
+    fresh one of its own. A retry with the same ``request_id`` answers with
+    the same move."""
     lvol_id: str
     request_id: Annotated[str, Field(min_length=1, max_length=128)]
+    purpose: Literal["join", "leave"] = "join"
 
 
 class ConsistencyGroupSubsystemMoveVolumeDTO(BaseModel):
@@ -1001,12 +1006,14 @@ class ConsistencyGroupSubsystemMoveDTO(BaseModel):
     namespaces_at: str = "source"
     deadline: int = 0
     status: str = ""
+    purpose: str = "join"
     volumes: list[ConsistencyGroupSubsystemMoveVolumeDTO] = []
 
     @classmethod
     def from_record(cls, record: dict) -> "ConsistencyGroupSubsystemMoveDTO":
         fields = {k: record[k] for k in ("id", "request_id", "target_nqn", "target_is_new",
-                                         "namespaces_at", "deadline", "status") if k in record}
+                                         "namespaces_at", "deadline", "status", "purpose")
+                  if k in record}
         volumes = [ConsistencyGroupSubsystemMoveVolumeDTO(
             **{k: v[k] for k in ConsistencyGroupSubsystemMoveVolumeDTO.model_fields if k in v})
             for v in record.get("volumes") or []]
