@@ -150,6 +150,59 @@ def snode_orphaned_objects(node, orphans, caused_by=ec.CAUSED_BY_MONITOR):
         node_id=node.get_id())
 
 
+def snode_distrib_io_error(node, vuid, error, count, reported_by,
+                           caused_by=ec.CAUSED_BY_MONITOR):
+    """A distrib of ``node``'s lvstore reported an IO it could not serve.
+
+    Raised by the distrib event collector, debounced per (distrib, error) --
+    see ``constants.DISTR_ERROR_ALERT_DEBOUNCE_SEC``. LEVEL_ERROR because the
+    condition is silent otherwise: the lvstore keeps working until one of the
+    stripe's nodes goes down, and then every client IO on that stripe fails
+    on every node (prod, 2026-11-01: the first such event came two weeks
+    before the outage it predicted).
+    """
+    ec.log_event_cluster(
+        cluster_id=node.cluster_id,
+        domain=ec.DOMAIN_CLUSTER,
+        event=ec.EVENT_DISTR_IO_ERROR,
+        db_object=node,
+        caused_by=caused_by,
+        event_level=EventObj.LEVEL_ERROR,
+        message=(f"Distrib {vuid} on {node.lvstore} reported {error} x{count} "
+                 f"(seen by node {str(reported_by)[:8]}): an IO could not be "
+                 f"served from the chunks currently reachable, so at least one "
+                 f"stripe of {node.lvstore} has lost its redundancy. Volumes on "
+                 f"this lvstore fail that IO whenever one of the stripe's nodes "
+                 f"is down. Run 'sbctl cluster check' and involve support before "
+                 f"the next node restart."),
+        node_id=node.get_id())
+
+
+def snode_fence_loop_detected(node, port, lvstore, releases, window_sec,
+                              caused_by=ec.CAUSED_BY_MONITOR):
+    """The control plane stopped reopening a client port SPDK keeps fencing.
+
+    See ``models/fence_release.py``. LEVEL_ERROR: the port stays fenced until
+    the window rolls past, so clients of ``lvstore`` have no path through this
+    node meanwhile -- which they effectively did not have anyway, since SPDK
+    closed it again on every IO.
+    """
+    ec.log_event_cluster(
+        cluster_id=node.cluster_id,
+        domain=ec.DOMAIN_CLUSTER,
+        event=ec.EVENT_FENCE_LOOP,
+        db_object=node,
+        caused_by=caused_by,
+        event_level=EventObj.LEVEL_ERROR,
+        message=(f"Port {port} ({lvstore}) on this node was released {releases} "
+                 f"times in {window_sec}s and SPDK fenced it again each time: an "
+                 f"IO on {lvstore} fails on every node that takes leadership. "
+                 f"Leaving the port blocked for up to {window_sec}s instead of "
+                 f"feeding the loop. Check the 'distr error' events for the "
+                 f"affected distrib."),
+        node_id=node.get_id())
+
+
 def jm_repl_tasks_found(node, jm_vuid, caused_by=ec.CAUSED_BY_MONITOR):
     ec.log_event_cluster(
         cluster_id=node.cluster_id,
