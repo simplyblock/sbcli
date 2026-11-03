@@ -6,13 +6,19 @@ drive the same data-plane operation — start a distr migration, then poll
 ``distr_migration_status`` until it settles — and differ only in what they
 migrate and when they are allowed to start.
 """
+import errno
 from datetime import UTC, datetime
 
 from simplyblock_core import db_controller, storage_node_ops, utils
-from simplyblock_core.controllers import activation_gate, tasks_controller
+from simplyblock_core.controllers import (
+    activation_gate,
+    sync_replication_controller,
+    tasks_controller,
+)
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.rpc_client import RPCRemoteError
 from simplyblock_core.services.task_runner_base import (
     TaskAbort,
     TaskDefer,
@@ -130,10 +136,7 @@ def place_on_role_node(task, snode):
         return
 
     lvs_name = params["lvs_name"]
-    try:
-        owner = db.get_storage_node_by_id(params["lvs_owner"])
-    except KeyError:
-        raise TaskAbort(f"Owner {params['lvs_owner']} of {lvs_name} not found")
+    owner = _lvs_owner(params)
     try:
         placement = tasks_controller.migration_role_node(owner, task.function_name)
     except KeyError as e:
@@ -157,6 +160,38 @@ def place_on_role_node(task, snode):
                         f"to {target_id}, the primary of its active triplet")
     raise TaskDefer(f"{task.function_name} of {distr_name} ({lvs_name}) changed on {task.node_id} "
                     f"while being moved to {target_id}")
+
+
+def _lvs_owner(params):
+    """The owner of the LVS a sync-replication migration task names."""
+    try:
+        return db.get_storage_node_by_id(params["lvs_owner"])
+    except KeyError:
+        raise TaskAbort(f"Owner {params['lvs_owner']} of {params['lvs_name']} not found")
+
+
+def defer_for_sync_resync(task):
+    """Raise :class:`TaskDefer` while a not-yet-started re-balance or
+    new-device migration of a sync-replication LVS must leave the migration
+    slot to the LVS's zone catch-up.
+
+    A distrib has one migration slot, shared in the order failure > resync >
+    re-balance. Only a catch-up that can run now holds the task
+    (sync_replication_controller.resync_holding_rebalance). A started
+    migration already holds the slot and is polled on; a task without
+    ``lvs_owner`` (no sync replication) is not affected. The failed-device
+    runner does not call this: a failed-device migration never waits for a
+    catch-up.
+    """
+    params = task.function_params
+    if "lvs_owner" not in params or migration_started(task):
+        return
+    resync = sync_replication_controller.resync_holding_rebalance(
+        db.get_cluster_by_id(task.cluster_id), _lvs_owner(params),
+        db.get_storage_nodes_by_cluster_id(task.cluster_id))
+    if resync:
+        raise TaskDefer(f"{params.get('distr_name')} ({params['lvs_name']}): "
+                        f"waiting for the zone catch-up {resync} to finish first")
 
 
 def move_unstarted_task(task, node_id):
@@ -282,9 +317,21 @@ def start_migration(task, start, **params):
     the handler would otherwise lose it and start a second migration. Any
     ``params`` are recorded in the same commit, so a marker can never land
     without the context written alongside it.
+
+    A sync-replication task (``lvs_owner``) whose start is answered EBUSY
+    defers: the distrib's migration slot is held by another migration (a
+    zone catch-up, or a migration of another task), and the task waits for
+    it without consuming a retry. Every other failure, and EBUSY of a task
+    without sync replication, is a failed attempt (``TaskRetry``).
     """
     try:
         started = start()
+    except RPCRemoteError as e:
+        if e.code == errno.EBUSY and "lvs_owner" in task.function_params:
+            raise TaskDefer(f"migration slot of {task.function_params['distr_name']} busy on "
+                            f"{task.node_id}, waiting") from e
+        logger.error(e)
+        started = False
     except Exception as e:
         logger.error(e)
         started = False

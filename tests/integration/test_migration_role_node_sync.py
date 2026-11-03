@@ -13,17 +13,28 @@ mocked, and they answer the leadership question for each LVS name.
   cancellation at a shutdown) use the node that runs the task.
 - On a cluster without sync replication, the migration runs on the owner and
   the leadership check uses the owner's own LVS.
+- A re-balance or new-device migration that has not started waits while the
+  zone catch-up of its LVS can run (failure > resync > re-balance). A
+  failed-device migration never waits for it.
+- A start answered EBUSY (the distrib's migration slot is busy) is a wait for a
+  sync-replication task, and a failed attempt for any other task.
 """
+import errno
 import types
 import uuid
 from unittest.mock import patch
 
 import pytest
 
-from simplyblock_core import storage_node_ops
-from simplyblock_core.controllers import migration_controller, tasks_controller
+from simplyblock_core import constants, storage_node_ops
+from simplyblock_core.controllers import (
+    migration_controller,
+    sync_replication_controller,
+    tasks_controller,
+)
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.rpc_client import RPCConnectionError, RPCRemoteError
 from simplyblock_core.services import migration_task_common as mig
 from simplyblock_core.services import (
     storage_node_monitor,
@@ -34,6 +45,7 @@ from simplyblock_core.services import (
 from simplyblock_core.utils import ttl_cache
 from tests.integration import test_migration_placement_sync as placement
 from tests.integration import test_sync_replication_lvs_stack as stack
+from tests.integration import test_sync_resync_predicates as predicates
 from tests.integration.task_driver import drive, handler_reached
 
 SITE_A, SITE_B = stack.SITE_A, stack.SITE_B
@@ -794,3 +806,227 @@ class TestCancelRacesTheMove:
         assert mig.move_unstarted_task(task, a[0].get_id()) is False
         fresh = db.get_task_by_id(task.uuid)
         assert (fresh.node_id, fresh.canceled) == (b[0].get_id(), True)
+
+
+# ---------------------------------------------------------------------------
+# the migration slot: a re-balance waits behind a zone catch-up that can run
+# ---------------------------------------------------------------------------
+
+REBALANCE = [JobSchedule.FN_DEV_MIG, JobSchedule.FN_NEW_DEV_MIG]
+
+
+def _resync(db, cluster, owner):
+    """Queue the zone catch-up of ``owner``'s LVS. No zone event names a
+    lagging zone, so it can run."""
+    task_id = tasks_controller.add_sync_resync_task(cluster.get_id(), owner.get_id(), owner.lvstore)
+    assert task_id
+    return db.get_task_by_id(task_id)
+
+
+def _holding(db, cluster, owner):
+    return sync_replication_controller.resync_holding_rebalance(
+        db.get_cluster_by_id(cluster.get_id()), db.get_storage_node_by_id(owner.get_id()),
+        db.get_storage_nodes_by_cluster_id(cluster.get_id()))
+
+
+def _catch_up_wait(task, resync):
+    params = task.function_params
+    return (f"{params['distr_name']} ({params['lvs_name']}): "
+            f"waiting for the zone catch-up {resync.uuid} to finish first")
+
+
+def _switched(db, rpcs, function_name):
+    """Site B leads LVS_1; ``function_name`` tasks queued through b1."""
+    cluster, a, b, owner_a, owner_b = _layout(db)
+    _leads(rpcs, b[0], "LVS_1", "LVS_2")
+    _data_plane(rpcs, (*a, *b))
+    _queue(db, cluster, function_name, b[1])
+    return cluster, a, b, owner_a, owner_b
+
+
+class TestResyncGate:
+
+    @pytest.mark.parametrize("function_name", REBALANCE)
+    def test_a_rebalance_waits_for_a_catch_up_that_can_run(self, db, rpcs, function_name):
+        """The wait consumes no retry and starts nothing. Once the catch-up is
+        DONE, the tasks run."""
+        cluster, a, b, owner_a, _ = _switched(db, rpcs, function_name)
+        resync = _resync(db, cluster, owner_a)
+        tasks = _open(db, cluster, function_name, owner_a)
+
+        for _ in range(3):
+            for fresh in _drive_all(db, tasks):
+                assert (fresh.status, fresh.retry, fresh.node_id) == (SUSPENDED, 0, b[0].get_id())
+                assert fresh.function_result == _catch_up_wait(fresh, resync)
+                assert not mig.migration_started(fresh)
+        _no_migration_rpc(rpcs, *a, *b)
+
+        _set(db, resync, status=DONE)
+        assert [t.status for t in _drive_all(db, tasks)] == [DONE, DONE]
+        assert _started(rpcs, b[0], function_name) == placement.LVS_1_DISTRIBS
+
+    @pytest.mark.parametrize("function_name", REBALANCE)
+    def test_a_catch_up_waiting_for_a_lost_site_holds_nothing(self, db, rpcs, function_name):
+        cluster, a, b, owner_a, _ = _switched(db, rpcs, function_name)
+        predicates._desync(a[0])
+        resync = predicates._resync_task(db, cluster)
+        predicates._lose_site(db, cluster, SITE_A)
+        assert predicates._reason(db, cluster, owner_a, resync) == f"site {SITE_A} is lost, waiting for its return"
+        assert _holding(db, cluster, owner_a) == ""
+
+        assert [t.status for t in _drive_all(db, _open(db, cluster, function_name, owner_a))] == [DONE, DONE]
+        assert _started(rpcs, b[0], function_name) == placement.LVS_1_DISTRIBS
+
+    @pytest.mark.parametrize("function_name, retry, result", [
+        (JobSchedule.FN_DEV_MIG, 0,
+         "waiting for unavailable nodes/devices to recover before restarting migration: ['dev:{dev}']"),
+        (JobSchedule.FN_NEW_DEV_MIG, 1, "Some devs are offline, retrying"),
+    ])
+    def test_a_catch_up_waiting_for_its_lagging_zone_holds_nothing(self, db, rpcs, function_name, retry, result):
+        """Site B lags, and a device of b2 is not online. The tasks pass the
+        catch-up gate and stop at their own wait for the device."""
+        cluster, a, b, owner_a, _ = _switched(db, rpcs, function_name)
+        predicates._desync(a[0])
+        resync = predicates._resync_task(db, cluster)
+        _, dev = predicates._dev_down(db, b[2])
+        assert predicates._reason(db, cluster, owner_a, resync) == (
+            f"waiting for the lagging zone(s) ['{SITE_B}'] to be up: ['dev:{dev.get_id()}']")
+        assert _holding(db, cluster, owner_a) == ""
+
+        for fresh in _drive_all(db, _open(db, cluster, function_name, owner_a)):
+            assert (fresh.status, fresh.retry) == (SUSPENDED, retry)
+            assert fresh.function_result == result.format(dev=dev.get_id())
+        _no_migration_rpc(rpcs, *a, *b)
+
+    @pytest.mark.parametrize("release", ["alert_runs", "held"])
+    @pytest.mark.parametrize("function_name", REBALANCE)
+    def test_a_catch_up_that_cannot_take_the_slot_holds_nothing(self, db, rpcs, function_name, release):
+        """A catch-up that has failed SYNC_RESYNC_ALERT_RUNS runs, or one the
+        resync runner records as held behind a device migration, does not hold
+        the re-balance."""
+        cluster, a, b, owner_a, _ = _switched(db, rpcs, function_name)
+        resync = _resync(db, cluster, owner_a)
+        assert _holding(db, cluster, owner_a) == resync.uuid
+        if release == "alert_runs":
+            _set(db, resync, retry=constants.SYNC_RESYNC_ALERT_RUNS)
+        else:
+            _set(db, resync, function_params={**resync.function_params, "held_by": {
+                "task": "t", "function": JobSchedule.FN_DEV_MIG, "node": b[0].get_id(), "since": 1.0}})
+        assert _holding(db, cluster, owner_a) == ""
+
+        assert [t.status for t in _drive_all(db, _open(db, cluster, function_name, owner_a))] == [DONE, DONE]
+        assert _started(rpcs, b[0], function_name) == placement.LVS_1_DISTRIBS
+
+    def test_a_catch_up_holds_only_its_own_lvs(self, db, rpcs):
+        """The restart of b1 queues the re-balance of LVS_1 and of LVS_2 on b0.
+        Only LVS_2 has a catch-up: LVS_1 runs, LVS_2 waits."""
+        cluster, a, b, owner_a, owner_b = _switched(db, rpcs, JobSchedule.FN_DEV_MIG)
+        resync = _resync(db, cluster, owner_b)
+
+        assert [t.status for t in _drive_all(db, _open(db, cluster, JobSchedule.FN_DEV_MIG, owner_a))] == [DONE, DONE]
+        for fresh in _drive_all(db, _open(db, cluster, JobSchedule.FN_DEV_MIG, owner_b)):
+            assert (fresh.status, fresh.retry) == (SUSPENDED, 0)
+            assert fresh.function_result == _catch_up_wait(fresh, resync)
+        assert _started(rpcs, b[0], JobSchedule.FN_DEV_MIG) == placement.LVS_1_DISTRIBS
+
+    def test_a_failed_device_migration_never_waits(self, db, rpcs):
+        cluster, a, b, owner_a, _ = _switched(db, rpcs, JobSchedule.FN_FAILED_DEV_MIG)
+        resync = _resync(db, cluster, owner_a)
+        assert _holding(db, cluster, owner_a) == resync.uuid
+
+        tasks = _open(db, cluster, JobSchedule.FN_FAILED_DEV_MIG, owner_a)
+        assert [t.status for t in _drive_all(db, tasks)] == [DONE, DONE]
+        assert _started(rpcs, b[0], JobSchedule.FN_FAILED_DEV_MIG) == placement.LVS_1_DISTRIBS
+
+    def test_a_started_rebalance_keeps_polling(self, db, rpcs):
+        """The catch-up is queued after the re-balance of distrib_11 started.
+        The re-balance is polled on to the end and not started again."""
+        cluster, a, b, owner_a, _ = _switched(db, rpcs, JobSchedule.FN_DEV_MIG)
+        _data_plane(rpcs, (*a, *b), status=IN_PROGRESS)
+        task = _open(db, cluster, JobSchedule.FN_DEV_MIG, owner_a)[0]
+        assert drive(tasks_runner_migration.SPEC, task).status == RUNNING
+        _resync(db, cluster, owner_a)
+
+        fresh = drive(tasks_runner_migration.SPEC, task)
+        assert (fresh.status, fresh.retry, fresh.function_result) == (RUNNING, 0, "Status: running, progress:10")
+        rpcs[b[0].get_id()].distr_migration_status.return_value = COMPLETED
+        assert drive(tasks_runner_migration.SPEC, task).status == DONE
+        assert _started(rpcs, b[0], JobSchedule.FN_DEV_MIG) == ["distrib_11"]
+
+    def test_without_sync_replication_nothing_waits(self, db, rpcs):
+        """A catch-up record of LVS_1 that would hold a sync re-balance of a0's
+        LVS does not hold a re-balance without sync replication."""
+        cluster, a, b = _non_sync(db)
+        _leads(rpcs, a[0], "LVS_1")
+        _data_plane(rpcs, (*a, *b))
+        _queue(db, cluster, JobSchedule.FN_DEV_MIG, a[1])
+        resync = _resync(db, cluster, a[0])
+        assert _holding(db, cluster, a[0]) == resync.uuid
+
+        tasks = [t for t in _open(db, cluster, JobSchedule.FN_DEV_MIG) if t.node_id == a[0].get_id()]
+        assert [t.status for t in _drive_all(db, tasks)] == [DONE, DONE]
+        assert _started(rpcs, a[0], JobSchedule.FN_DEV_MIG) == placement.LVS_1_DISTRIBS
+
+
+# ---------------------------------------------------------------------------
+# a start answered EBUSY: the distrib's migration slot is busy
+# ---------------------------------------------------------------------------
+
+def _busy():
+    return RPCRemoteError("Migration is already in progress", code=errno.EBUSY)
+
+
+#: Start answers that are a failed attempt also for a sync-replication task.
+OTHER_START_FAILURES = {
+    "eagain": lambda start: setattr(start, "side_effect", RPCRemoteError("try again", code=errno.EAGAIN)),
+    "negative_ebusy": lambda start: setattr(start, "side_effect", RPCRemoteError("busy", code=-errno.EBUSY)),
+    "connection": lambda start: setattr(start, "side_effect", RPCConnectionError("Could not reach remote")),
+    "false": lambda start: setattr(start, "return_value", False),
+}
+
+
+class TestBusySlot:
+
+    @pytest.mark.parametrize("function_name", list(RUNNERS))
+    def test_a_busy_slot_is_a_wait(self, db, rpcs, function_name):
+        cluster, a, b, owner_a, _ = _switched(db, rpcs, function_name)
+        task = _open(db, cluster, function_name, owner_a)[0]
+        start = getattr(rpcs[b[0].get_id()], START_RPC[function_name])
+        start.side_effect = _busy()
+
+        for _ in range(2):
+            fresh = drive(RUNNERS[function_name].SPEC, task)
+            assert (fresh.status, fresh.retry) == (SUSPENDED, 0)
+            assert fresh.function_result == f"migration slot of distrib_11 busy on {b[0].get_id()}, waiting"
+            assert "migration" not in fresh.function_params
+            assert "migration_started" not in fresh.function_params
+
+        start.side_effect = None
+        assert drive(RUNNERS[function_name].SPEC, task).status == DONE
+        assert start.call_count == 3
+        assert _started(rpcs, b[0], function_name) == ["distrib_11"] * 3
+
+    def test_a_busy_slot_without_sync_replication_is_a_failed_attempt(self, db, rpcs):
+        cluster, a, b = _non_sync(db)
+        _leads(rpcs, a[0], "LVS_1")
+        _data_plane(rpcs, (*a, *b))
+        _queue(db, cluster, JobSchedule.FN_DEV_MIG, a[1])
+        task = [t for t in _open(db, cluster, JobSchedule.FN_DEV_MIG) if t.node_id == a[0].get_id()][0]
+        rpcs[a[0].get_id()].distr_migration_expansion_start.side_effect = _busy()
+
+        fresh = drive(tasks_runner_migration.SPEC, task)
+        assert (fresh.status, fresh.retry) == (SUSPENDED, 1)
+        assert fresh.function_result == "Failed to start device migration task, retry later"
+        assert "migration" not in fresh.function_params
+
+    @pytest.mark.parametrize("answer", list(OTHER_START_FAILURES))
+    @pytest.mark.parametrize("function_name", [JobSchedule.FN_DEV_MIG, JobSchedule.FN_FAILED_DEV_MIG])
+    def test_any_other_start_failure_is_a_failed_attempt(self, db, rpcs, function_name, answer):
+        cluster, a, b, owner_a, _ = _switched(db, rpcs, function_name)
+        task = _open(db, cluster, function_name, owner_a)[0]
+        OTHER_START_FAILURES[answer](getattr(rpcs[b[0].get_id()], START_RPC[function_name]))
+
+        fresh = drive(RUNNERS[function_name].SPEC, task)
+        assert (fresh.status, fresh.retry) == (SUSPENDED, 1)
+        assert fresh.function_result == "Failed to start device migration task, retry later"
+        assert "migration" not in fresh.function_params

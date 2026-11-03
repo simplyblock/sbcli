@@ -1,5 +1,5 @@
 """Pure rules of the sync-replication resync runner: how a
-``distr_migration_status`` element of a catch-up is judged, how long a
+``distr_migration_status`` element of a catch-up (type 3) is judged, how long a
 non-converging run backs off and how its driver spec is wired. The runner's flow (waits, start, poll, finish,
 re-runs, alert) runs against the real database in
 tests/integration/test_tasks_runner_sync_resync.py.
@@ -22,10 +22,17 @@ from simplyblock_core.services import tasks_runner_sync_resync as runner
     ({"status": "completed", "error": 1 << 8}, runner.OUTCOME_FAILED),
     ({"status": "completed", "error": 1}, runner.OUTCOME_FAILED),
     ({"status": "completed"}, runner.OUTCOME_FAILED),           # no error field: not a success
-    ({"status": "none"}, runner.OUTCOME_FAILED),                # lost with a restart
+    ({"status": "none"}, runner.OUTCOME_FAILED),                # lost with a restart; no type: not foreign
     ({"status": "failed"}, runner.OUTCOME_FAILED),
     (None, runner.OUTCOME_FAILED),
     ("garbage", runner.OUTCOME_FAILED),
+    # the catch-up is type 3; any other type has taken the slot after it ended
+    ({"status": "running", "error": 0, "type": 3}, runner.OUTCOME_RUNNING),
+    ({"status": "completed", "error": 0, "type": 3}, runner.OUTCOME_OK),
+    ({"status": "completed", "error": 1 << 11, "type": 3}, runner.OUTCOME_FAILED),
+    ({"status": "completed", "error": 0, "type": 2}, runner.OUTCOME_FOREIGN),
+    ({"status": "completed", "error": 1, "type": 2}, runner.OUTCOME_FOREIGN),
+    ({"status": "running", "error": 0, "type": 1}, runner.OUTCOME_FOREIGN),
 ])
 def test_migration_outcome(element, outcome):
     assert runner.migration_outcome(element) == outcome

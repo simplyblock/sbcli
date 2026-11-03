@@ -125,6 +125,12 @@ def lvs_owner_of_event(node: StorageNode, nodes: list[StorageNode],
     return None
 
 
+def other_site(owner: StorageNode, nodes: Iterable[StorageNode]) -> str:
+    """The site of ``owner``'s cluster that is not its own (the site of its
+    LVS's replica zone), or "" when no node of ``nodes`` is on another site."""
+    return next((n.site for n in nodes if n.site and n.site != owner.site), "")
+
+
 def lagging_sites(home_site: str, other_site: str,
                   events: Iterable[SyncReplicationEvent]) -> list[str]:
     """The sites whose zone the open zone events of an LVS name as behind, in
@@ -560,7 +566,7 @@ def zone_not_up(nodes: Iterable[StorageNode], site: str) -> list[str]:
     """What keeps ``site``'s zone from being fully up: its nodes that are not
     online and their devices that are not online (removed / migrated-away ones
     do not count, as for the other migration runners). A FAILED device counts:
-    its zone is not whole. Read by the resync runner."""
+    its zone is not whole. Read by resync_wait_reason."""
     down = []
     for node in nodes:
         if node.site != site or node.status in (StorageNode.STATUS_IN_CREATION,
@@ -574,6 +580,57 @@ def zone_not_up(nodes: Iterable[StorageNode], site: str) -> list[str]:
             if dev.status != NVMeDevice.STATUS_ONLINE:
                 down.append(f"dev:{dev.get_id()}")
     return down
+
+
+def resync_wait_reason(cluster: Cluster, owner: StorageNode, nodes: list[StorageNode],
+                       task: JobSchedule) -> str:
+    """Why the zone catch-up of ``owner``'s LVS (``task``, its FN_SYNC_RESYNC
+    task) cannot run now, or "" when it can. A lost site comes first: the
+    catch-up waits for its return, started or not. A catch-up that has not
+    started yet also waits until every zone the LVS's open zone events name
+    as behind is up (zone_not_up); a started one is polled on regardless.
+
+    Shared by the resync runner's start gate and the re-balance gate
+    (resync_holding_rebalance), so the two agree on when a resync can run."""
+    if cluster.lost_site:
+        return f"site {cluster.lost_site} is lost, waiting for its return"
+    if task.function_params.get("resync"):
+        return ""
+    zones = lagging_sites(owner.site, other_site(owner, nodes),
+                          DBController().get_unresolved_sync_replication_events(
+                              cluster.get_id(), owner.lvstore))
+    down = [item for site in zones for item in zone_not_up(nodes, site)]
+    if down:
+        return f"waiting for the lagging zone(s) {zones} to be up: {down}"
+    return ""
+
+
+def resync_holding_rebalance(cluster: Cluster, owner: StorageNode, nodes: list[StorageNode]) -> str:
+    """The uuid of the FN_SYNC_RESYNC task a not-yet-started re-balance of
+    ``owner``'s LVS waits for, or "" when it need not wait.
+
+    Only a resync that can run holds the re-balance: an active, not canceled
+    task of the LVS whose resync_wait_reason is "". A resync task lives
+    through a whole site outage, so its mere existence would freeze the
+    surviving site's re-balances for the length of the outage. Two more
+    resyncs do not hold it: one that has failed ``SYNC_RESYNC_ALERT_RUNS``
+    runs (its alert is raised; it must not keep the re-balance waiting
+    forever), and one the resync runner records as held (``held_by``) behind
+    a device-migration task, which a re-balance waiting on it would turn into
+    a wait cycle.
+
+    The LVS's leadership is not checked. A not-started FN_DEV_MIG of an LVS
+    nobody leads waits for a leader on its own; an FN_NEW_DEV_MIG has no such
+    check, so one whose resync can run waits here until a client IO makes a
+    leader."""
+    for task in DBController().get_active_sync_resync_tasks(cluster.get_id()):
+        if (task.canceled or task.function_params.get("lvs_name") != owner.lvstore
+                or task.retry >= constants.SYNC_RESYNC_ALERT_RUNS
+                or task.function_params.get("held_by")):
+            continue
+        if not resync_wait_reason(cluster, owner, nodes, task):
+            return task.uuid
+    return ""
 
 
 def lvs_active_on(owner: StorageNode, site: str) -> bool:

@@ -1627,6 +1627,24 @@ class RPCClient:
             params["keep_placed"] = True
         return self._request("distr_migration_expansion_start", **params)
 
+    def distr_migration_replica_sync_start(self, name, qos_high_priority=False, job_size=constants.MIG_JOB_SIZE,
+                                           jobs=constants.MIG_PARALLEL_JOBS):
+        """Start the sync-replication catch-up of one distrib (migration type 3, stage "resync").
+
+        A refusal raises ``RPCRemoteError`` whose ``code`` is a positive errno (EBUSY, EAGAIN,
+        EALREADY, ...).
+        """
+        params = {
+            "name": name,
+        }
+        if qos_high_priority:
+            params["qos_high_priority"] = qos_high_priority
+        if job_size:
+            params["job_size"] = job_size
+        if jobs:
+            params["jobs"] = jobs
+        return self._request("distr_migration_replica_sync_start", **params)
+
     def bdev_raid_add_base_bdev(self, raid_bdev, base_bdev):
         return self._request("bdev_raid_add_base_bdev",
                               raid_bdev=raid_bdev, base_bdev=base_bdev)

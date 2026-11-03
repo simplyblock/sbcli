@@ -1271,6 +1271,17 @@ class DBController(metaclass=Singleton):
         """Return all non-done FN_LVOL_MIG tasks for the given cluster."""
         return self._active_tasks(cluster_id, JobSchedule.FN_LVOL_MIG)
 
+    def get_active_device_migration_tasks(self, cluster_id: str) -> list[JobSchedule]:
+        """Every non-done FN_DEV_MIG, FN_NEW_DEV_MIG and FN_FAILED_DEV_MIG task
+        of the cluster, oldest first. Canceled tasks are included: a canceled
+        started migration still holds its result on the node until its runner
+        closes the task."""
+        return sorted(
+            (task for function_name in (JobSchedule.FN_DEV_MIG, JobSchedule.FN_NEW_DEV_MIG,
+                                        JobSchedule.FN_FAILED_DEV_MIG)
+             for task in self._active_tasks(cluster_id, function_name)),
+            key=lambda x: x.date)
+
     def _active_tasks(self, cluster_id: str, function_name: str) -> list[JobSchedule]:
         """Tasks of one kind that have not finished.
 

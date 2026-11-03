@@ -112,9 +112,10 @@ promote, the site record and the site activation flag), `simplyblock_core/servic
     That replica is wired to the hublvol like a member of the active triplet, subject to the same-site
     rule.
 - While a move is in flight (`moving:*`) no member of either triplet is rebuilt as a leader.
-- **The primary of the active triplet runs the migrations of the LVS.** This holds on either site.
-  The passive triplet runs no migrations. On a cluster without sync replication, the migrations run on
-  the LVS's owner, which is the primary of its only triplet.
+- **The primary of the active triplet runs the device migrations of the LVS.** This holds on either
+  site. The passive triplet runs no migrations. On a cluster without sync replication, the device
+  migrations run on the LVS's owner, which is the primary of its only triplet. The catch-up is the one
+  migration that runs on whichever member leads the active triplet (see the last item below).
   - Three kinds of migration are queued on the primary of the active triplet and run there: the
     re-balance after a node restart (device migration), the failed-device migration and the new-device
     migration.
@@ -133,10 +134,16 @@ promote, the site record and the site activation flag), `simplyblock_core/servic
     `pending_removal`. They wait there, because a migration runs only on an online node. When the
     removal sets a shut-down status (`migrating_devices` or later), the tasks move to the secondary of
     the active triplet. If the secondary is also departing, they move to the tertiary.
-  - The catch-up (see Resync in [Flows](#6-flows-for-the-operator)) also starts on this primary, and only
-    when the primary leads the LVS. During an in-site failover, a secondary or tertiary leads the LVS,
-    and the catch-up waits. If the leader changes while a catch-up runs, the run counts as not converged
-    and is started again under the same rule.
+  - Each distrib has one migration slot on a node, shared by the device migrations and the catch-up.
+    Starts take it in the order failure > catch-up > re-balance; a migration that already holds the slot
+    is never preempted, the others wait for it to end (see Resync in
+    [Flows](#6-flows-for-the-operator)).
+  - The catch-up (see Resync in [Flows](#6-flows-for-the-operator)) starts on the node that leads the
+    active triplet, whatever its role: the primary, or during an in-site failover the secondary or
+    tertiary that leads in its place. The runner never makes a leader; while nobody leads, the catch-up
+    waits. If a new member leads the active triplet while a catch-up runs, the runner drops what it
+    recorded of that catch-up and starts it again on the new leader. That restart is not a
+    non-converging run: it raises no retry count and no backoff.
 - **Between a promote and the first client IO on the new site nobody leads the LVS.** A promote hands
   the LVS off without granting the leadership (see [Promote](#promote)); the primary of the new active
   triplet takes it itself when the first IO arrives. Until then every instance reports "not leading".
@@ -666,7 +673,14 @@ that was not reloaded. Issue IO on a volume itself before resizing it.
   also when the other site leads the LVS. It follows the same start rules as on a cluster without sync
   replication: it waits for the cluster's recovery while a node is unavailable, and it starts when that
   primary leads the LVS. The passive triplet does not run it (see
-  [The active and the passive triplet](#the-active-and-the-passive-triplet));
+  [The active and the passive triplet](#the-active-and-the-passive-triplet)). Two start rules are
+  specific to sync replication, and they cover the new-device migration too. A re-balance or new-device
+  migration that has not started waits while the LVS has an open catch-up task (see Resync below) whose
+  own wait is over: no site is lost and, before it starts, the lagging zone is up. It does not wait for a
+  catch-up that has already had 5 non-converging runs, nor for one held behind an open device migration.
+  The LVS's leadership is not part of this check. And a start that the data plane answers with a busy
+  migration slot (EBUSY) is a wait, not a failed attempt: it consumes no retry and builds no backoff.
+  This also applies to a failed-device migration, which never waits for a catch-up before its start;
 - a node of a recorded site (any record state) comes back `ONLINE` **without lvstores**, as every node
   of a cluster that serves nothing does: its devices, its own journal (JM) and its links to the peers
   are brought up, no LVS instance is built. The site activation builds them once the site is back (see
@@ -752,12 +766,37 @@ assigned to another site or demoted on A stays closed.
 switchover in reverse (demote on B, promote on A). `POST .../failback` is not part of it (a no-op).
 
 **Resync, both directions**: a zone desync event (either zone: the home site's zone 0 or the replica
-zone) schedules one `FN_SYNC_RESYNC` task per LVS. It waits while a site is lost or the lagging zone's
-devices are not online. It also waits until the primary of the active triplet leads the LVS; while a
-secondary or tertiary leads, it keeps waiting. Then it starts the catch-up on that primary and polls it.
-A non-converging run is re-run with backoff (30 s doubling, at most 600 s) and raises one alert after 5
-such runs. It also waits while nobody leads the LVS (after a promote, until the first client IO): the
-runner never makes a leader. A site return schedules the catch-up of every LVS.
+zone) schedules one `FN_SYNC_RESYNC` task per LVS. A site return schedules the catch-up of every LVS.
+
+- **When it waits.** While a site is lost, and, before the catch-up has started, while the lagging zone's
+  devices are not online. It also waits while nobody leads the LVS (after a promote, until the first
+  client IO): the runner never makes a leader.
+- **Where it runs.** On the node that leads the LVS's active triplet, whatever its role (see
+  [The active and the passive triplet](#the-active-and-the-passive-triplet)). The runner starts the
+  catch-up there with `distr_migration_replica_sync_start`, one call per distrib of the LVS, and then
+  polls `distr_migration_status`. The data plane must provide that RPC: there is no fallback to the
+  expansion migration, which no longer catches a zone up, so on a data plane without it every run fails.
+  If a new member leads the active triplet during the catch-up, the catch-up is started again on it,
+  without counting a run.
+- **The migration slot.** The catch-up shares each distrib's one migration slot with the device
+  migrations, in the start order failure > catch-up > re-balance; nothing that holds the slot is stopped.
+  - The catch-up of the LVS does not start while the leader's node has an open failed-device migration
+    of any of its distribs (started or not), or a started re-balance or new-device migration of any of
+    them whose result the migration runner has not read yet. A task on another node does not hold it
+    back: the slot belongs to one node's data plane. While held, the task records the holder (`held_by`
+    in its parameters), and a hold that lasts 30 minutes raises one `SYNC_RESYNC_NOT_CONVERGING` alert
+    naming the holding task.
+  - A re-balance or new-device migration that has not started waits for the catch-up (see Node restart
+    above).
+  - Start answers per distrib: started; already synced (nothing to run, the final check covers it);
+    slot busy - the runner adopts a catch-up it finds in the slot, running or ended, and otherwise waits
+    for the other migration to end; sync status not loaded yet - it waits. Any other answer makes the run
+    a non-converging one. A wait counts no run.
+- **When it ends.** A catch-up whose slot has been taken by another migration type since has ended. When
+  every catch-up has ended, the leader must report every distrib of the LVS `synced`; then the task is
+  done, with the result `synced on <leader>; catch-up took <N>s`. Anything else is a non-converging run.
+  A non-converging run is re-run with backoff (30 s doubling, at most 600 s) and raises one
+  `SYNC_RESYNC_NOT_CONVERGING` alert after 5 such runs.
 
 ---
 
@@ -820,11 +859,11 @@ replication commands (`volume replication-start` / `-stop` / `-trigger` / ...) f
 - A promote does not stop a device migration that is already running (a re-balance after a restart, a
   failed-device or a new-device migration). There is no RPC that stops a running migration on the data
   plane. The migration keeps running on the old primary until it ends, and its task is polled there.
-  Only a migration task that has not started moves to the new primary. No other migration of the same
-  distrib starts while the task on the old primary is running.
-- During an in-site failover of the active triplet, its secondary or tertiary leads the LVS. The
-  catch-up of the LVS then waits until the primary leads again. The reason is that the catch-up uses
-  the same RPC as the re-balance, and the re-balance runs only on the primary.
+  Only a migration task that has not started moves to the new primary. No other device migration of the
+  same distrib starts while the task on the old primary is running. The catch-up is not held back by
+  that task: it checks only the tasks on the node that leads the LVS, because the migration slot belongs
+  to one node's data plane. Nor does the runner stop a catch-up whose node no longer leads the active
+  triplet (no RPC does): it starts a new one on the new leader.
 - Reads after a promote go to zone 0 while the home site is alive (local-zone reads are deferred).
 - Rejected on a sync cluster: lvol migration (single and batch), manual volume suspend / resume, the
   v1 `lvol/connect` (use the v2 connect), enabling two-node arbitration (v2 `PUT /clusters/{id}` with

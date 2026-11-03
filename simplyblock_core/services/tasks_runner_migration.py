@@ -49,6 +49,7 @@ def _wait_for_cluster_recovery(task, reason):
 def task_runner(task):
     snode = mig.require_node(task)
     mig.place_on_role_node(task, snode)
+    mig.defer_for_sync_resync(task)
 
     # Ahead of the online gate, which REMOVED also fails: a removed node never
     # comes back, so deferring on it would keep the task alive forever.

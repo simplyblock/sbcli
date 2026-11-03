@@ -976,9 +976,11 @@ MIG_JOB_SIZE = 64
 # re-runs a failed catch-up after BASE * 2^(runs-1) seconds, capped at MAX (its
 # backoff, held in memory: a restarted runner re-runs at once once the lagging
 # zone is up), and one alert is raised once ALERT_RUNS runs have not converged.
+# A catch-up held back by an open device migration on the leader for HELD_ALERT_SEC raises that alert once.
 SYNC_RESYNC_RETRY_BASE_SEC = 30
 SYNC_RESYNC_RETRY_MAX_SEC = 600
 SYNC_RESYNC_ALERT_RUNS = 5
+SYNC_RESYNC_HELD_ALERT_SEC = 1800
 
 # Sync-replication promote (tasks_runner_sync_promote): a failed or canceled
 # pass ends its task; a pass interrupted by an unexpected error is a retry of the

@@ -1,5 +1,6 @@
 """RPC payloads of the sync-replication additions, as posted on the wire: new
 params are sent only when set."""
+import errno
 import itertools
 import json
 from unittest.mock import MagicMock, patch
@@ -7,7 +8,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 from pydantic import SecretStr
 
-from simplyblock_core.rpc_client import RPCClient
+from simplyblock_core import constants
+from simplyblock_core.rpc_client import RPCClient, RPCRemoteError
 
 # RPCSessionPool caches a session per (host, port, ...): a port per client
 # keeps each test on the session it patched.
@@ -16,6 +18,15 @@ _ports = itertools.count(19100)
 
 def _response(result):
     payload = {"jsonrpc": "2.0", "id": 1, "result": result}
+    response = MagicMock()
+    response.status_code = 200
+    response.json.return_value = payload
+    response.text = json.dumps(payload)
+    return response
+
+
+def _error_response(code, message):
+    payload = {"jsonrpc": "2.0", "id": 1, "error": {"code": code, "message": message}}
     response = MagicMock()
     response.status_code = 200
     response.json.return_value = payload
@@ -106,3 +117,36 @@ def test_sync_replication_status_for_one_distrib():
     assert client.distr_sync_replication_status("distrib_1") == answer
     assert _posted(session) == [{"id": 1, "method": "distr_sync_replication_status",
                                  "params": {"name": "distrib_1"}}]
+
+
+def test_replica_sync_start_sends_name_and_defaults():
+    client, session = _client(True)
+    assert client.distr_migration_replica_sync_start("distrib_1") is True
+    assert _posted(session) == [{"id": 1, "method": "distr_migration_replica_sync_start",
+                                 "params": {"name": "distrib_1",
+                                            "job_size": constants.MIG_JOB_SIZE,
+                                            "jobs": constants.MIG_PARALLEL_JOBS}}]
+
+
+def test_replica_sync_start_sends_overrides():
+    client, session = _client(True)
+    assert client.distr_migration_replica_sync_start(
+        "distrib_1", qos_high_priority=True, job_size=128, jobs=8) is True
+    (sent,) = _posted(session)
+    assert sent["method"] == "distr_migration_replica_sync_start"
+    assert sent["params"] == {"name": "distrib_1", "qos_high_priority": True, "job_size": 128, "jobs": 8}
+
+
+def test_replica_sync_start_omits_zero_job_params():
+    client, session = _client(True)
+    client.distr_migration_replica_sync_start("distrib_1", job_size=0, jobs=0)
+    (sent,) = _posted(session)
+    assert sent["params"] == {"name": "distrib_1"}
+
+
+def test_replica_sync_start_busy_raises_positive_ebusy():
+    client, session = _client()
+    session.post.side_effect = [_error_response(16, "migration is already in progress")]
+    with pytest.raises(RPCRemoteError) as exc:
+        client.distr_migration_replica_sync_start("distrib_1")
+    assert exc.value.code == errno.EBUSY
