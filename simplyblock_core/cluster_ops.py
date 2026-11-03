@@ -534,8 +534,10 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
 
     logger.info("Deploying swarm stack ...")
     log_level = "DEBUG" if constants.LOG_WEB_DEBUG else "INFO"
-    scripts.deploy_stack(cli_pass.get_secret_value(), dev_ip, constants.SIMPLY_BLOCK_DOCKER_IMAGE, cluster.secret.get_secret_value(), cluster.uuid,
-                            log_del_interval, metrics_retention_period, log_level, cluster.grafana_endpoint, str(disable_monitoring))
+    scripts.deploy_stack(cli_pass.get_secret_value(), dev_ip, cluster.prefixed_image(constants.SIMPLY_BLOCK_DOCKER_IMAGE),
+                            cluster.secret.get_secret_value(), cluster.uuid,
+                            log_del_interval, metrics_retention_period, log_level, cluster.grafana_endpoint, str(disable_monitoring),
+                            cluster.container_image_prefix)
     logger.info("Deploying swarm stack > Done")
 
     logger.info("Configuring DB...")
@@ -2867,7 +2869,7 @@ def _grafana_provisioning_dirs(cluster_docker) -> tuple[str, str]:
     return os.path.dirname(sources[GRAFANA_DATASOURCE_TARGET]), sources[GRAFANA_ALERTING_TARGET]
 
 
-def _install_provisioning_on_all_managers(files: dict[str, str]) -> None:
+def _install_provisioning_on_all_managers(files: dict[str, str], image: str) -> None:
     """Write Grafana's provisioning files onto every management node.
 
     Grafana is constrained to node.role == manager and may be rescheduled to
@@ -2892,7 +2894,7 @@ def _install_provisioning_on_all_managers(files: dict[str, str]) -> None:
             node_docker = docker.DockerClient(
                 base_url=f"tcp://{node.docker_ip_port}", version="auto", timeout=60)
             node_docker.containers.run(
-                constants.SIMPLY_BLOCK_DOCKER_IMAGE, ["sh", "-c", script], user="root",
+                image, ["sh", "-c", script], user="root",
                 volumes=[f"{directory}:{directory}" for directory in volumes],
                 remove=True, detach=False)
             logger.info("Provisioning files written on %s", node.mgmt_ip)
@@ -2946,7 +2948,7 @@ def set_event_alerts(cluster_id, enabled=True, log_limit=None, interval=None, pe
         os.path.join(alerting_dir, utils.EVENT_ALERT_RULES_FILE):
             rendered[utils.EVENT_ALERT_RULES_FILE],
         datasource_path: rendered[utils.EVENT_ALERT_DATASOURCE_FILE],
-    })
+    }, cluster.prefixed_image(constants.SIMPLY_BLOCK_DOCKER_IMAGE))
 
     # --force recreates the task, which is what makes Grafana re-read
     # provisioning; a single-file bind mount also tracks the inode it started
@@ -3102,9 +3104,7 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
     logger.info("Updating mgmt cluster")
     if cluster.mode == "docker":
         cluster_docker = utils.get_docker_client(cluster_id)
-        service_image = constants.SIMPLY_BLOCK_DOCKER_IMAGE
-        if mgmt_image:
-            service_image = mgmt_image
+        service_image = cluster.prefixed_image(mgmt_image or constants.SIMPLY_BLOCK_DOCKER_IMAGE)
         logger.info(f"Pulling image {service_image}")
         pull_docker_image_with_retry(cluster_docker, service_image)
         service_names = []
@@ -3184,7 +3184,7 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
         apps_v1 = k8s_client.AppsV1Api()
         namespace = constants.K8S_NAMESPACE
         image_parts = ["simplyblock-io/simplyblock:", "simplyblock/simplyblock:", "simply-block/simplyblock:"]
-        service_image = mgmt_image or constants.SIMPLY_BLOCK_DOCKER_IMAGE
+        service_image = cluster.prefixed_image(mgmt_image or constants.SIMPLY_BLOCK_DOCKER_IMAGE)
         deployment_names = []
         # Update Deployments
         deployments = apps_v1.list_namespaced_deployment(namespace=namespace)
@@ -3251,9 +3251,7 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
         for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
             if node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
                 node_docker = docker.DockerClient(base_url=f"tcp://{node.mgmt_ip}:2375", version="auto", timeout=60 * 5)
-                img = constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE
-                if spdk_image:
-                    img = spdk_image
+                img = cluster.prefixed_image(spdk_image or constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
                 logger.info(f"Pulling image {img}")
                 pull_docker_image_with_retry(node_docker, img)
 

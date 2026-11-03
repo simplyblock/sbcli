@@ -98,6 +98,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand = self.add_sub_command(subparser, 'deploy', 'Prepares a host to be used as a storage node.')
         subcommand.add_argument('--ifname', help='Management interface name, e.g. eth0.', type=str, dest='ifname')
         subcommand.add_argument('--isolate-cores', help='Isolates cores in kernel args for the provided CPU mask. Default: `false`.', default=False, dest='isolate_cores', action='store_true')
+        subcommand.add_argument('--container-image-prefix', help='Registry/proxy prefix for the images pulled on this host, e.g. `quay-proxy.grupawp.pl/docker.io`.', type=str, dest='container_image_prefix')
 
     def init_storage_node__configure(self, subparser):
         subcommand = self.add_sub_command(subparser, 'configure', 'Prepare a configuration file to be used when adding the storage node.')
@@ -478,6 +479,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--nvmf-base-port', help='Base port for all NVMe-oF listeners (lvol, hublvol, device). Default: `4420`.', type=int, default=4420, dest='nvmf_base_port')
         subcommand.add_argument('--rpc-base-port', help='The base port for SPDK JSON-RPC. Default: `8080`.', type=int, default=8080, dest='rpc_base_port')
         subcommand.add_argument('--snode-api-port', help='The SNodeAPI/firewall port (one per host IP). Default: `50001`.', type=int, default=50001, dest='snode_api_port')
+        subcommand.add_argument('--container-image-prefix', help='Registry/proxy prefix for every container image the cluster pulls, e.g. `docker.io`.', type=str, dest='container_image_prefix')
         subcommand.add_argument('--max-subsys', help='Max number of nvmf subsystems per storage node. Cluster-wide; a node adopts it on its next restart.', type=int, default=0, dest='max_subsys')
         subcommand.add_argument('--hugepages-mem', help='Huge-page memory floor per storage node, e.g. 4G. Cluster-wide; a node adopts it on its next restart.', type=str, default='', dest='hugepages_mem')
         subcommand.add_argument('--vcpu-count', help='Absolute number of vCPUs SPDK gets on each storage node. A node with fewer than this + 1 cores is refused.', type=int, default=0, dest='vcpu_count')
