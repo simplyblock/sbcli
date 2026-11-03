@@ -57,6 +57,16 @@ from simplyblock_core.utils.nvme import HostConnectAuth, build_nvme_connect_entr
 
 logger = utils.get_logger(__name__)
 
+#: Refused at every point replication is enabled, because nothing downstream
+#: moves the volume's data encryption key to the destination cluster. Its
+#: replicated snapshots are ciphertext held beside a key path that was never
+#: written, so a fail-over clone either fails to build its crypto layer or
+#: comes up exporting blocks nothing can read.
+ENCRYPTED_REPLICATION_REFUSAL = (
+    "volume {} is encrypted: replication does not carry the encryption key to "
+    "the destination cluster, so the replicated copy cannot be read"
+)
+
 
 def rollback_create_record(lvol) -> None:
     """Erase a failed create's record — unless a blob outlived the attempt.
@@ -780,6 +790,10 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
             f"max_namespace_per_subsys={max_namespace_per_subsys} exceeds the "
             f"hard limit of {constants.MAX_NAMESPACES_PER_SUBSYSTEM} "
             f"namespaces per subsystem")
+    if use_crypto and (do_replicate or replication_cluster_id or replication_policy):
+        # Replication is wired inline below rather than through
+        # replication_start, so replication_start_error never sees this volume.
+        return False, ENCRYPTED_REPLICATION_REFUSAL.format(name)
     if replication_policy:
         # A consistency-group policy pins placement: every member must live in
         # ONE LVS, so a volume created under such a policy is forced onto the
@@ -1522,7 +1536,8 @@ def _create_bdev_stack(lvol, snode, is_primary=True):
                 ret = _create_crypto_lvol(rpc_client, lvol, cluster)
 
             elif type == "bdev_lvstore":
-                ret = rpc_client.create_lvstore(**params)
+                from simplyblock_core.storage_node_ops import lvstore_create_params
+                ret = rpc_client.create_lvstore(**lvstore_create_params(params))
 
             elif type == "bdev_lvol":
                 if is_primary:
@@ -4816,9 +4831,8 @@ def replication_start_error(lvol_id, replication_cluster_id=None, replication_po
       * a volume already replicating to one cluster keeps that destination,
         because a stop does not clear it, so another cluster is refused rather
         than silently ignored;
-      * an encrypted volume is not moved: a migration commit deletes the
-        source, and with it the only copy of the key, which no replication
-        carries to the target.
+      * an encrypted volume does not replicate at all, in either mode
+        (ENCRYPTED_REPLICATION_REFUSAL).
     """
     db_controller = DBController()
     try:
@@ -4826,9 +4840,8 @@ def replication_start_error(lvol_id, replication_cluster_id=None, replication_po
     except KeyError:
         return f"volume {lvol_id} does not exist"
 
-    if lvol.crypto_bdev and (mode or lvol.replication_mode) == "migration":
-        return (f"volume {lvol_id} is encrypted: a migration deletes the source and its key, "
-                f"and replication does not carry the key to the target")
+    if lvol.crypto_bdev:
+        return ENCRYPTED_REPLICATION_REFUSAL.format(lvol_id)
 
     if replication_pool_id and not replication_cluster_id:
         return "a replication pool needs replication_cluster_id naming its cluster"

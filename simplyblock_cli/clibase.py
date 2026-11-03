@@ -1951,6 +1951,7 @@ class CLIWrapperBase:
                 backup_config = json.load(f)
 
         atomic_4k = getattr(args, 'atomic_4k', False)
+        md_journal = getattr(args, 'md_journal', True)
         return cluster_ops.add_cluster(
             blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
             distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity,
@@ -1964,6 +1965,7 @@ class CLIWrapperBase:
             atomic_4k=atomic_4k,
             sync_replication=getattr(args, 'sync_replication', False),
             page_copy=getattr(args, 'page_copy', False),
+            md_journal=md_journal,
         )
 
     def cluster_create(self, args):
@@ -2006,6 +2008,7 @@ class CLIWrapperBase:
         enable_hang_device = getattr(args, "enable_hang_device", False)
         inline_checksum = getattr(args, 'inline_checksum', False)
         atomic_4k = getattr(args, 'atomic_4k', False)
+        md_journal = getattr(args, 'md_journal', True)
 
         max_fault_tolerance = min(distr_npcs, 2) if distr_npcs >= 1 else 1
         cluster_vip = getattr(args, 'cluster_vip', '')
@@ -2039,6 +2042,7 @@ class CLIWrapperBase:
             cluster_vip=cluster_vip,
             sync_replication=getattr(args, 'sync_replication', False),
             page_copy=getattr(args, 'page_copy', False),
+            md_journal=md_journal,
         )
 
     def query_yes_no(self, question, default="yes"):

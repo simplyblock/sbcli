@@ -168,20 +168,31 @@ class TestCreateCluster:
         assert response.status_code == 201
         assert cluster_ops.add_cluster.call_args.kwargs['hugepages_mem'] == 0
 
-    def test_passes_inline_checksum_and_atomic_4k(self, client, db, cluster, cluster_ops):
+    def test_passes_inline_checksum_atomic_4k_and_md_journal(self, client, db, cluster, cluster_ops):
         cluster_ops.add_cluster.return_value = CLUSTER_ID
 
         response = client.post('/api/v2/clusters/', json={
             'name': 'cluster-1', 'distr_ndcs': 1, 'distr_npcs': 2, **SIZING,
-            'inline_checksum': True, 'atomic_4k': True,
+            'inline_checksum': True, 'atomic_4k': True, 'md_journal': True,
         })
         response.raise_for_status()
 
         kwargs = cluster_ops.add_cluster.call_args.kwargs
         assert kwargs['inline_checksum'] is True
         assert kwargs['atomic_4k'] is True
+        assert kwargs['md_journal'] is True
 
-    def test_inline_checksum_and_atomic_4k_default_false(self, client, db, cluster, cluster_ops):
+    def test_refuses_atomic_4k_without_inline_checksum(self, client, db, cluster, cluster_ops):
+        response = client.post('/api/v2/clusters/', json={
+            'name': 'cluster-1', 'distr_ndcs': 1, 'distr_npcs': 2, **SIZING,
+            'atomic_4k': True,
+        })
+
+        assert response.status_code == 422
+        assert 'atomic_4k requires inline_checksum' in response.text
+        cluster_ops.add_cluster.assert_not_called()
+
+    def test_integrity_defaults(self, client, db, cluster, cluster_ops):
         cluster_ops.add_cluster.return_value = CLUSTER_ID
 
         response = client.post('/api/v2/clusters/', json={'name': 'cluster-1', 'distr_ndcs': 1, 'distr_npcs': 2, **SIZING})
@@ -190,6 +201,17 @@ class TestCreateCluster:
         kwargs = cluster_ops.add_cluster.call_args.kwargs
         assert kwargs['inline_checksum'] is False
         assert kwargs['atomic_4k'] is False
+        assert kwargs['md_journal'] is True
+
+    def test_md_journal_can_be_turned_off(self, client, db, cluster, cluster_ops):
+        cluster_ops.add_cluster.return_value = CLUSTER_ID
+
+        response = client.post('/api/v2/clusters/', json={
+            'name': 'cluster-1', 'distr_ndcs': 1, 'distr_npcs': 2, **SIZING, 'md_journal': False,
+        })
+        response.raise_for_status()
+
+        assert cluster_ops.add_cluster.call_args.kwargs['md_journal'] is False
 
 
     def test_workload_names_are_passed_through(self, client, db, cluster, cluster_ops):
