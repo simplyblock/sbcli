@@ -18,6 +18,7 @@ from simplyblock_core.controllers import (
     device_controller,
     events_controller,
     storage_events,
+    sync_replication_controller,
 )
 from simplyblock_core.models.events import EventObj
 from simplyblock_core.models.nvme_device import NVMeDevice
@@ -577,6 +578,20 @@ def start_event_collector_on_node(node_id):
                     if events:
                         logger.info(f"Found events: {len(events)}")
                         for event_dict in events:
+                            if event_dict.get('event_type') == sync_replication_controller.SYNC_EVENT_TYPE:
+                                # Sync-replication state changes are a
+                                # sequence, not repeats: each one is recorded
+                                # in batch order, never aggregated (the
+                                # latest remote-journal event of an LVS is its
+                                # state), and a journal event carries only
+                                # jm_vuid, which the grouping below drops.
+                                event = events_controller.log_distr_event(
+                                    snode.cluster_id, snode.get_id(), event_dict,
+                                    level=sync_replication_controller.sync_event_level(event_dict["status"]))
+                                sync_replication_controller.record_sync_event(snode.get_id(), event_dict)
+                                logger.info(f"Processed sync-replication event: {event.get_id()}")
+                                continue
+
                             # JC's remote-JM health events carry only jm_vuid:
                             # they used to fall into "Unknown event" below and
                             # were dropped. Log them, and hand them to the

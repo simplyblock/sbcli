@@ -993,6 +993,36 @@ qos_class_replication_weight_percent = 10
 MIG_PARALLEL_JOBS = 64
 MIG_JOB_SIZE = 64
 
+# Sync-replication resync (tasks_runner_sync_resync): the shared task driver
+# re-runs a failed catch-up after BASE * 2^(runs-1) seconds, capped at MAX (its
+# backoff, held in memory: a restarted runner re-runs at once once the lagging
+# zone is up), and one alert is raised once ALERT_RUNS runs have not converged.
+# A catch-up held back by an open device migration on the leader for HELD_ALERT_SEC raises that alert once.
+SYNC_RESYNC_RETRY_BASE_SEC = 30
+SYNC_RESYNC_RETRY_MAX_SEC = 600
+SYNC_RESYNC_ALERT_RUNS = 5
+SYNC_RESYNC_HELD_ALERT_SEC = 1800
+
+# Sync-replication promote (tasks_runner_sync_promote): a failed or canceled
+# pass ends its task; a pass interrupted by an unexpected error is a retry of the
+# shared task driver, which enforces this as the task's max_retry - at the
+# ceiling the task ends failed (its leadership moves settled).
+SYNC_PROMOTE_MAX_UNEXPECTED_ERRORS = 5
+
+# Sync-replication status (sync_replication_controller): the status endpoints
+# may serve an answer this many seconds old (the gates never do); one status
+# query per storage node is bounded by the RPC timeout.
+SYNC_STATUS_CACHE_SEC = 5
+SYNC_STATUS_RPC_TIMEOUT_SEC = 5
+
+#: Fewest ONLINE nodes of a site a site activation needs: a site-aware journal needs this many local JMs
+#: (ultra alg_journal.hpp:108 c_jc_ha_min_required_jms; jc_open refuses fewer, the JC aborts the node).
+SYNC_JC_MIN_LOCAL_JMS = 2
+
+#: ``StorageNode.lvs_active_site`` of an LVS whose leadership is being moved to
+#: the site after the prefix (sync replication promote): ``moving:<site>``.
+LVS_MOVING_PREFIX = "moving:"
+
 # Live volume migration constants
 LVOL_MIG_MAX_RETRIES = 5          # max retries before entering cleanup_target
 LVOL_MIG_DEADLINE_SEC = 3600  # 1-hour deadline (0 = no deadline)

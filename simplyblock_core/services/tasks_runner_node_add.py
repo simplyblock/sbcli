@@ -2,15 +2,18 @@ import socket
 import time
 
 from simplyblock_core import constants, db_controller, storage_node_ops, utils
+from simplyblock_core.controllers import activation_gate
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.services.task_runner_base import (
     RunnerSpec,
+    TaskAbort,
     TaskDefer,
     TaskRetry,
     serve,
     set_result,
 )
+from simplyblock_core.storage_node_ops import NodeSiteError
 
 logger = utils.get_logger(__name__)
 
@@ -86,11 +89,23 @@ def _wait_node_reachable(task):
     return True
 
 
+def _is_eligible(task, cluster):
+    """Waits while the cluster is in_activation, or while a site activation
+    runs."""
+    return (cluster.status != Cluster.STATUS_IN_ACTIVATION
+            and not activation_gate.site_activation_blocks(cluster))
+
+
 def process_task(task):
     try:
         res = storage_node_ops.add_node(**task.function_params)
         msg = f"Node add result: {res}"
         logger.info(msg)
+    except NodeSiteError as e:
+        # Invalid input, not a transient failure: no retry can succeed, so the
+        # task ends here with the reason recorded.
+        logger.error(f"Node add refused: {e}")
+        raise TaskAbort(f"invalid input: {e}")
     except Exception as e:
         logger.error(e)
         res, msg = False, f"Node add raised: {e}"
@@ -114,7 +129,7 @@ SPEC = RunnerSpec(
     name="tasks-runner-node-add",
     function_names=[JobSchedule.FN_NODE_ADD],
     handler=process_task,
-    is_eligible=lambda task, cluster: cluster.status != Cluster.STATUS_IN_ACTIVATION,
+    is_eligible=_is_eligible,
     concurrency=MAX_CONCURRENT_NODE_ADDS,
     exclusion_key=_node_addr,
 )

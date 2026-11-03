@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 import pytest
 
+from simplyblock_core import cluster_ops as real_cluster_ops
 from simplyblock_core import constants
 from simplyblock_core.models.arbitration import ClusterArbitration
 from simplyblock_core.models.storage_node import StorageNode
@@ -155,14 +156,60 @@ class TestRemediation:
         assert response.status_code == 422
 
 
+@pytest.fixture()
+def flag_ops(cluster_ops):
+    """``cluster_ops`` mocked, its arbitration check the real one."""
+    cluster_ops.check_two_node_arbitration.side_effect = real_cluster_ops.check_two_node_arbitration
+    return cluster_ops
+
+
 class TestClusterFlag:
 
-    def test_put_cluster_sets_the_arbitration_flag(self, client, db, cluster):
-        response = client.put(f'/api/v2/clusters/{CLUSTER_ID}/', json={'two_node_arbitration': True})
+    @pytest.mark.parametrize('sync, flag', [
+        pytest.param(False, True, id='enabling_on_a_regular_cluster'),
+        pytest.param(True, False, id='disabling_on_sync_replication'),
+    ])
+    def test_put_cluster_sets_arbitration_flag(self, client, cluster, flag_ops, sync, flag):
+        cluster.sync_replication = sync
+        response = client.put(f'/api/v2/clusters/{CLUSTER_ID}/', json={'two_node_arbitration': flag})
         assert response.status_code == 204
-        _applied(db, cluster)
-        assert cluster.two_node_arbitration is True
+        flag_ops.set_two_node_arbitration.assert_called_once_with(CLUSTER_ID, flag)
 
+    def test_refused_rename_sets_no_flag(self, client, cluster, flag_ops):
+        flag_ops.set_name.side_effect = ValueError("A cluster with the name 'taken' already exists")
+        with pytest.raises(ValueError):
+            client.put(f'/api/v2/clusters/{CLUSTER_ID}/',
+                       json={'name': 'taken', 'two_node_arbitration': True})
+        flag_ops.set_two_node_arbitration.assert_not_called()
+
+
+class TestClusterFlagOnSyncReplication:
+    """Two-node arbitration is refused on a sync-replication cluster: its six
+    instances per LVS have no HA state for the flag's port guards to read."""
+
+    @pytest.fixture()
+    def sync_cluster(self, cluster):
+        cluster.sync_replication = True
+        return cluster
+
+    def test_enabling_is_refused(self, client, sync_cluster, flag_ops):
+        response = client.put(f'/api/v2/clusters/{CLUSTER_ID}/', json={'two_node_arbitration': True})
+        assert response.status_code == 400
+        assert 'not supported on a sync-replication cluster' in response.json()['detail']['message']
+        flag_ops.set_two_node_arbitration.assert_not_called()
+
+    def test_refused_request_renames_nothing(self, client, sync_cluster, flag_ops):
+        response = client.put(f'/api/v2/clusters/{CLUSTER_ID}/',
+                              json={'name': 'renamed', 'two_node_arbitration': True})
+        assert response.status_code == 400
+        flag_ops.set_name.assert_not_called()
+        flag_ops.set_two_node_arbitration.assert_not_called()
+
+    def test_rename_alone_is_allowed(self, client, sync_cluster, flag_ops):
+        response = client.put(f'/api/v2/clusters/{CLUSTER_ID}/', json={'name': 'renamed'})
+        assert response.status_code == 204
+        flag_ops.set_name.assert_called_once_with(CLUSTER_ID, 'renamed')
+        flag_ops.set_two_node_arbitration.assert_not_called()
 
 # docs/design/two-node-kubernetes-fencing.md, section 3.5
 HOST_B = 'nqn.2014-08.org.nvmexpress:uuid:host-b'

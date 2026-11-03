@@ -57,3 +57,17 @@ def test_the_task_facing_wrapper_uses_the_gate():
     src = inspect.getsource(mig.require_active_cluster)
     assert "defer_unless_operable(cluster)" in src
     assert "TaskRetry" not in src
+
+
+def test_a_running_sync_site_activation_defers_on_an_active_cluster():
+    """A sync-replication site activation holds every migration while the
+    cluster itself stays operable: a deferral, no retry consumed."""
+    cluster = _cluster(Cluster.STATUS_ACTIVE)
+    cluster.sync_replication = True
+    cluster.site_activation_site = "site-a"
+    with pytest.raises(TaskDefer) as excinfo:
+        mig.defer_unless_operable(cluster)
+    assert not isinstance(excinfo.value, TaskRetry)
+    assert "site site-a is being activated" in str(excinfo.value)
+    cluster.site_activation_site = ""
+    mig.defer_unless_operable(cluster)

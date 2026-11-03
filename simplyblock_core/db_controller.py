@@ -47,6 +47,7 @@ from simplyblock_core.models.stats import (
     PoolStatObject,
 )
 from simplyblock_core.models.storage_node import NodeLVolDelLock, StorageNode
+from simplyblock_core.models.sync_replication import SyncReplicationEvent
 from simplyblock_core.utils import ttl_cache
 from simplyblock_core.utils.helpers import single_or_none
 
@@ -718,6 +719,542 @@ class DBController(metaclass=Singleton):
                 return objects
             begin = bytes(kvs[-1].key) + b'\x00'
 
+    def get_sync_replication_events(self, cluster_id: str, lvs_name: str) -> list[SyncReplicationEvent]:
+        """Every recorded sync-replication event of one LVS, in no particular order."""
+        return self.query(SyncReplicationEvent, 'cluster_id+lvs_name+resolved', cluster_id, lvs_name)
+
+    def get_unresolved_sync_replication_events(self, cluster_id: str, lvs_name: str) -> list[SyncReplicationEvent]:
+        """The not-yet-resolved sync-replication events of one LVS, in no particular order.
+
+        Judged by the LVS's watermarks as well as by the flags: an event they
+        say is over is not returned even while its flag is still being brought
+        in line (_resolve_covered_sync_events)."""
+        events = self.query(SyncReplicationEvent, 'cluster_id+lvs_name+resolved', cluster_id, lvs_name, False)
+        if not events:
+            return events
+        state = self.get_sync_state(cluster_id, lvs_name)
+        return [event for event in events if not self.sync_event_covered(event, state)]
+
+    #: One fixed-size key per LVS, outside the ``object/`` keyspace, that
+    #: serializes everything that changes the LVS's sync-replication state:
+    #:
+    #: - ``seq`` - the last receive_seq given out (the LVS's receive order);
+    #: - ``last_zone_seq`` - the receive_seq of its latest zone desync;
+    #: - ``journal_restored_seq`` - of its latest ``remote_journal_restored``:
+    #:   every drop received before it is over;
+    #: - ``zone_synced_seq`` - up to which receive_seq a completed catch-up has
+    #:   verified the zones equal: every zone desync up to it is over;
+    #: - ``resync_task`` - db key of its FN_SYNC_RESYNC task;
+    #: - ``promote_task`` - db key of its latest FN_SYNC_PROMOTE task
+    #:   (ensure_sync_promote_task): the key also serializes promote-task
+    #:   creation per LVS - a new one is refused while that task is in
+    #:   progress (sync_promote_task_blocks). It is not a record of what a
+    #:   caller's promote ended with: a later task replaces it (the outcome is
+    #:   kept per volume, ``LVol.sync_promote_failures``).
+    #:
+    #: The watermarks, not the records' ``resolved`` flags, say what is over:
+    #: the flags are brought in line afterwards in one small transaction per
+    #: record (_resolve_covered_sync_events), so no transaction ever touches a
+    #: number of records that grows with the length of an outage, and a flag
+    #: left behind by a crash is still read as resolved
+    #: (get_unresolved_sync_replication_events).
+    _SYNC_STATE_PREFIX = "sync_replication_state/"
+    _SYNC_STATE_DEFAULTS: ClassVar[dict] = {"seq": 0, "last_zone_seq": 0, "journal_restored_seq": 0,
+                                            "zone_synced_seq": 0, "resync_task": "", "promote_task": ""}
+
+    @staticmethod
+    def _sync_state_key(cluster_id, lvs_name) -> bytes:
+        return f"{DBController._SYNC_STATE_PREFIX}{cluster_id}/{lvs_name}".encode()
+
+    @staticmethod
+    def _parse_sync_state(raw) -> dict:
+        return {**DBController._SYNC_STATE_DEFAULTS, **(json.loads(bytes(raw)) if raw else {})}
+
+    @staticmethod
+    def _read_sync_state_tx(tr, key) -> dict:
+        raw = tr.get(key).wait()
+        return DBController._parse_sync_state(bytes(raw) if raw.present() else None)
+
+    def get_sync_state(self, cluster_id: str, lvs_name: str) -> dict:
+        """The LVS's sync-replication state record (see _SYNC_STATE_PREFIX)."""
+        return self._parse_sync_state(self.kv_store.get(self._sync_state_key(cluster_id, lvs_name)))
+
+    @staticmethod
+    def sync_event_covered(event: SyncReplicationEvent, state: dict) -> bool:
+        """Whether the watermarks of ``state`` (the event's LVS) say ``event``
+        is over. A record without a receive_seq (written before it existed) is
+        judged by its own flag only."""
+        seq = event.receive_seq
+        if seq <= 0:
+            return False
+        if event.kind == SyncReplicationEvent.KIND_REMOTE_JOURNAL_DROPPED:
+            return seq < state["journal_restored_seq"]
+        if event.kind == SyncReplicationEvent.KIND_ZONE_UNAVAILABLE:
+            return seq <= state["zone_synced_seq"]
+        return True
+
+    @staticmethod
+    def _put_tx(tr, obj, index_list):
+        """Write ``obj`` inside ``tr``, indices and watch keys included."""
+        BaseModel._write_tx(tr, obj.get_db_id().encode(),
+                            json.dumps(obj.to_dict(unwrap_secrets=True)).encode(),
+                            type(obj), obj, index_list, *obj._watch_keys())
+
+    def _record_sync_event_tx(self, tr, event, index_list, expect_seq):
+        stored = BaseModel._read_record(tr, event.get_db_id().encode(), SyncReplicationEvent)
+        if stored is not None:
+            return stored, False
+        state_key = self._sync_state_key(event.cluster_id, event.lvs_name)
+        state = self._read_sync_state_tx(tr, state_key)
+        if expect_seq is not None and state["seq"] != expect_seq:
+            return event, False
+        state["seq"] += 1
+        event.receive_seq = state["seq"]
+        if event.kind == SyncReplicationEvent.KIND_REMOTE_JOURNAL_RESTORED:
+            # The latest remote-journal event is the state: every drop of the
+            # LVS received before this one is over.
+            state["journal_restored_seq"] = event.receive_seq
+            event.resolved = True
+        else:
+            event.resolved = False
+            if event.kind == SyncReplicationEvent.KIND_ZONE_UNAVAILABLE:
+                state["last_zone_seq"] = event.receive_seq
+        self._put_tx(tr, event, index_list)
+        tr[state_key] = json.dumps(state).encode()
+        return event, True
+
+    def record_sync_replication_event(self, event: SyncReplicationEvent, *,
+                                      expect_seq: int | None = None) -> tuple[SyncReplicationEvent, bool]:
+        """Persist a sync-replication event with its ``receive_seq``, in ONE
+        transaction with the LVS's state key (_SYNC_STATE_PREFIX): the next
+        sequence number, the record and the watermarks. The only writer of
+        these records besides the flag clean-up of _resolve_covered_sync_events.
+
+        Per LVS the sequence is therefore the commit order: a reader always
+        sees a prefix of it, and a drop committing after a restored gets the
+        higher number (it is the later state) and stays open. A restored is
+        stored resolved and ends every drop received before it; their flags
+        follow right after.
+
+        ``event.uuid`` must identify the producer's event (the collector may
+        read an event again when its batch was not discarded): a record that
+        already exists is a replay and is returned as stored, with False,
+        without a new sequence number - a replayed old restored must not end
+        a drop received since.
+
+        With ``expect_seq`` the write is conditional: unless the LVS's last
+        receive_seq is still ``expect_seq`` (no event received since the
+        caller read it), nothing is written and ``(event, False)`` is returned
+        unchanged. For a state the caller observed itself (a live status
+        answer) that a concurrently received event may already contradict.
+        """
+        index_list = SyncReplicationEvent.active_indexes(self.kv_store)
+        event, recorded = fdb.transactional(DBController._record_sync_event_tx)(
+            self, self.kv_store, event, index_list, expect_seq)
+        if event.kind == SyncReplicationEvent.KIND_REMOTE_JOURNAL_RESTORED:
+            self._resolve_covered_sync_events(event.cluster_id, event.lvs_name)
+        return event, recorded
+
+    def _resolve_covered_sync_events(self, cluster_id: str, lvs_name: str) -> None:
+        """Set the ``resolved`` flag of every open event of the LVS that its
+        watermarks say is over, one small transaction per record (idempotent;
+        a concurrent writer never un-resolves a record)."""
+        state = self.get_sync_state(cluster_id, lvs_name)
+        for event in self.query(SyncReplicationEvent, 'cluster_id+lvs_name+resolved',
+                                cluster_id, lvs_name, False):
+            if self.sync_event_covered(event, state):
+                self.atomic_update(event, lambda e: setattr(e, "resolved", True))
+
+    def _ensure_sync_resync_task_tx(self, tr, task, lvs_name, index_list):
+        state_key = self._sync_state_key(task.cluster_id, lvs_name)
+        state = self._read_sync_state_tx(tr, state_key)
+        if state["resync_task"]:
+            current = BaseModel._read_record(tr, state["resync_task"].encode(), JobSchedule)
+            if (current is not None and current.status != JobSchedule.STATUS_DONE
+                    and not current.canceled):
+                return current.uuid, False
+        task.updated_at = str(datetime.datetime.now(datetime.UTC))
+        self._put_tx(tr, task, index_list)
+        state["resync_task"] = task.get_db_id()
+        tr[state_key] = json.dumps(state).encode()
+        return task.uuid, True
+
+    def ensure_sync_resync_task(self, task: JobSchedule, lvs_name: str) -> tuple[str, bool]:
+        """Create ``task`` (an FN_SYNC_RESYNC task for ``lvs_name``) unless the
+        LVS already has one that is neither done nor canceled - checked and
+        written in ONE transaction with the LVS's state key, so concurrent
+        callers never create two. Returns ``(uuid of the LVS's active task,
+        whether it is ``task``)``."""
+        return fdb.transactional(DBController._ensure_sync_resync_task_tx)(
+            self, self.kv_store, task, lvs_name, JobSchedule.active_indexes(self.kv_store))
+
+    def _finish_sync_resync_tx(self, tr, task_key, lvs_name, seq_limit, result, duration_sec,
+                               task_indexes):
+        task = BaseModel._read_record(tr, task_key, JobSchedule)
+        if task is None:
+            return False
+        state_key = self._sync_state_key(task.cluster_id, lvs_name)
+        state = self._read_sync_state_tx(tr, state_key)
+        state["zone_synced_seq"] = max(state["zone_synced_seq"], seq_limit)
+        newer = state["last_zone_seq"] > seq_limit
+        task.function_params.pop("resync", None)
+        task.function_params.pop("converged", None)
+        if newer:
+            task.status = JobSchedule.STATUS_SUSPENDED
+            task.function_result = "a newer zone desync arrived during the catch-up, re-running"
+        else:
+            task.status = JobSchedule.STATUS_DONE
+            task.function_result = result
+            task.function_params["duration_sec"] = duration_sec
+        task.updated_at = str(datetime.datetime.now(datetime.UTC))
+        self._put_tx(tr, task, task_indexes)
+        tr[state_key] = json.dumps(state).encode()
+        return not newer
+
+    def finish_sync_resync(self, task: JobSchedule, lvs_name: str, seq_limit: int,
+                           result: str, duration_sec: float) -> bool:
+        """Close a converged catch-up of ``lvs_name``, in ONE transaction with
+        the LVS's state key: every zone desync received up to ``seq_limit`` is
+        over (the ``synced`` answer was read after it), and ``task`` is DONE -
+        unless a zone desync was received after ``seq_limit`` (one that answer
+        does not cover): then the task goes back to SUSPENDED for a new run and
+        False is returned.
+
+        An event recorded before this commits is seen (its write conflicts
+        with this read); one recorded after it finds the task DONE when its
+        resync is ensured (ensure_sync_resync_task) and gets a new task.
+        """
+        done = fdb.transactional(DBController._finish_sync_resync_tx)(
+            self, self.kv_store, task.get_db_id().encode(), lvs_name, seq_limit, result,
+            duration_sec, JobSchedule.active_indexes(self.kv_store))
+        self._resolve_covered_sync_events(task.cluster_id, lvs_name)
+        return done
+
+    def get_active_sync_resync_tasks(self, cluster_id: str) -> list[JobSchedule]:
+        """Every non-done FN_SYNC_RESYNC task of the cluster, oldest first."""
+        return self._active_tasks(cluster_id, JobSchedule.FN_SYNC_RESYNC)
+
+    @staticmethod
+    def sync_promote_task_blocks(task: JobSchedule | None) -> bool:
+        """Whether ``task`` (the promote task recorded for an LVS) is still in
+        progress for the API and for a new promote: neither done nor
+        canceled. The runner also sees canceled ones until it has settled them
+        (get_active_sync_promote_tasks)."""
+        return task is not None and task.status != JobSchedule.STATUS_DONE and not task.canceled
+
+    def _ensure_sync_promote_task_tx(self, tr, task, lvs_names, index_list):
+        states = {}
+        for lvs_name in lvs_names:
+            state_key = self._sync_state_key(task.cluster_id, lvs_name)
+            state = self._read_sync_state_tx(tr, state_key)
+            if state["promote_task"]:
+                current = BaseModel._read_record(tr, state["promote_task"].encode(), JobSchedule)
+                if self.sync_promote_task_blocks(current):
+                    return current.uuid, False
+            states[state_key] = state
+        task.updated_at = str(datetime.datetime.now(datetime.UTC))
+        self._put_tx(tr, task, index_list)
+        for state_key, state in states.items():
+            state["promote_task"] = task.get_db_id()
+            tr[state_key] = json.dumps(state).encode()
+        return task.uuid, True
+
+    def ensure_sync_promote_task(self, task: JobSchedule, lvs_names: list[str]) -> tuple[str, bool]:
+        """Create ``task`` (an FN_SYNC_PROMOTE task over ``lvs_names``) unless
+        one of those LVS already has a promote task in progress
+        (sync_promote_task_blocks) - checked and written in ONE transaction
+        with every LVS's state key, so two concurrent promotes never both
+        start. Returns ``(uuid of the blocking or new task, whether it is
+        ``task``)``."""
+        return fdb.transactional(DBController._ensure_sync_promote_task_tx)(
+            self, self.kv_store, task, list(lvs_names), JobSchedule.active_indexes(self.kv_store))
+
+    #: ``outcome`` values of finish_sync_promote_task.
+    PROMOTE_FAILED = "failed"
+    PROMOTE_SUCCEEDED = "succeeded"
+
+    def _finish_sync_promote_task_tx(self, tr, task_key, result, outcome, task_indexes, lvol_indexes):
+        task = BaseModel._read_record(tr, task_key, JobSchedule)
+        if task is None or task.status == JobSchedule.STATUS_DONE:
+            return False
+        params = task.function_params
+        publish = outcome is not None and not task.canceled
+        # Every state key is read (conflict ranges): a replacement task
+        # created concurrently makes this retry and see it.
+        pointers = [self._read_sync_state_tx(tr, self._sync_state_key(task.cluster_id, lvs_name))["promote_task"]
+                    for lvs_name in sorted(params.get("owners") or {})]
+        publish = publish and all(p == task.get_db_id() for p in pointers)
+        if publish:
+            site = params["site"]
+            entry = {"task_id": task.uuid, "reason": result}
+
+            def _outcome(v):
+                if v.status == LVol.STATUS_DELETED:
+                    return False
+                failures = dict(v.sync_promote_failures or {})
+                if outcome == self.PROMOTE_FAILED:
+                    failures[site] = entry
+                elif site in failures:
+                    del failures[site]
+                else:
+                    return False
+                v.sync_promote_failures = failures
+                return True
+            for lvol_id in params.get("lvol_ids") or []:
+                self._atomic_update_tx(tr, LVol().get_db_id(lvol_id).encode(), LVol, _outcome, lvol_indexes)
+        task.status = JobSchedule.STATUS_DONE
+        task.function_result = result
+        task.updated_at = str(datetime.datetime.now(datetime.UTC))
+        self._put_tx(tr, task, task_indexes)
+        return True
+
+    def finish_sync_promote_task(self, task: JobSchedule, result: str, outcome: str | None) -> bool:
+        """Record the end of promote task ``task`` - DONE with ``result`` - and
+        its outcome for the caller, in ONE transaction that reads the task
+        and every LVS state key of it fresh:
+
+        - already DONE -> nothing (returns False; a repeat never publishes
+          again, so an outcome a caller consumed is not resurrected);
+        - ``outcome`` (PROMOTE_FAILED / PROMOTE_SUCCEEDED), the task not
+          canceled and still the recorded promote task of each of its LVS ->
+          each volume of its ``lvol_ids`` gets ``sync_promote_failures[site] =
+          {task_id, reason: result}`` (failed) or loses that entry
+          (succeeded; no newer task of that LVS exists, so it is older);
+        - canceled, superseded or ``outcome`` None -> no volume is written;
+        - the task -> DONE.
+
+        No state shows DONE without the outcomes or the outcomes without DONE;
+        an interrupted transaction commits nothing and a retry (the task is
+        not DONE) judges everything again. Returns whether it ended the task."""
+        return fdb.transactional(DBController._finish_sync_promote_task_tx)(
+            self, self.kv_store, task.get_db_id().encode(), result, outcome,
+            JobSchedule.active_indexes(self.kv_store), LVol.active_indexes(self.kv_store))
+
+    def consume_sync_promote_failure(self, lvol: LVol, site: str) -> dict | None:
+        """Take the unreported failed promote of ``lvol`` to ``site``
+        (``{task_id, reason}``) off the FRESH volume record, or None when it
+        has none. Field-scoped: of concurrent callers exactly one gets an
+        entry."""
+        taken: dict = {}
+
+        def _take(v):
+            taken.clear()    # atomic_update may replay this on a conflict
+            entry = (v.sync_promote_failures or {}).get(site)
+            if not entry:
+                return False
+            taken.update(entry)
+            v.sync_promote_failures = {k: e for k, e in v.sync_promote_failures.items() if k != site}
+            return True
+        if self.atomic_update(lvol, _take) is None:
+            return None
+        return dict(taken) or None
+
+    def get_sync_promote_task(self, cluster_id: str, lvs_name: str) -> JobSchedule | None:
+        """The promote task last recorded for ``lvs_name``, or None."""
+        key = self.get_sync_state(cluster_id, lvs_name)["promote_task"]
+        if not key:
+            return None
+        raw = self.kv_store.get(key.encode())
+        return JobSchedule().from_dict(json.loads(bytes(raw))) if raw is not None else None
+
+    #: One key per (cluster, site), outside the ``object/`` keyspace, that
+    #: serializes the site-level fence of that site (FN_SYNC_SITE_FENCE):
+    #:
+    #: - ``fence_task`` - db key of its latest fence task
+    #:   (ensure_sync_site_fence_task): a new one is refused while that task
+    #:   is in progress (sync_promote_task_blocks - neither done nor canceled);
+    #: - ``reported`` - the uuid of the last failed fence task whose failure
+    #:   a fence call was answered with (consume_sync_site_fence_failure), so
+    #:   a failure is reported once.
+    _SYNC_SITE_PREFIX = "sync_replication_site/"
+    _SYNC_SITE_DEFAULTS: ClassVar[dict] = {"fence_task": "", "reported": ""}
+
+    @staticmethod
+    def _sync_site_key(cluster_id, site) -> bytes:
+        return f"{DBController._SYNC_SITE_PREFIX}{cluster_id}/{site}".encode()
+
+    @staticmethod
+    def _read_sync_site_tx(tr, key) -> dict:
+        raw = tr.get(key).wait()
+        return {**DBController._SYNC_SITE_DEFAULTS, **(json.loads(bytes(raw)) if raw.present() else {})}
+
+    def _ensure_sync_site_fence_task_tx(self, tr, task, site, index_list):
+        key = self._sync_site_key(task.cluster_id, site)
+        state = self._read_sync_site_tx(tr, key)
+        if state["fence_task"]:
+            current = BaseModel._read_record(tr, state["fence_task"].encode(), JobSchedule)
+            if self.sync_promote_task_blocks(current):
+                return current.uuid, False
+        task.updated_at = str(datetime.datetime.now(datetime.UTC))
+        self._put_tx(tr, task, index_list)
+        state["fence_task"] = task.get_db_id()
+        tr[key] = json.dumps(state).encode()
+        return task.uuid, True
+
+    def ensure_sync_site_fence_task(self, task: JobSchedule, site: str) -> tuple[str, bool]:
+        """Create ``task`` (an FN_SYNC_SITE_FENCE task for ``site``) unless the
+        site already has a fence task in progress - checked and written in
+        ONE transaction with the site's key, so concurrent fence calls never
+        create two. Returns ``(uuid of the in-progress or new task, whether it
+        is ``task``)``."""
+        return fdb.transactional(DBController._ensure_sync_site_fence_task_tx)(
+            self, self.kv_store, task, site, JobSchedule.active_indexes(self.kv_store))
+
+    def get_sync_site_fence_task(self, cluster_id: str, site: str) -> JobSchedule | None:
+        """The fence task last recorded for ``site``, or None."""
+        raw = self.kv_store.get(self._sync_site_key(cluster_id, site))
+        key = {**self._SYNC_SITE_DEFAULTS, **(json.loads(bytes(raw)) if raw else {})}["fence_task"]
+        if not key:
+            return None
+        raw = self.kv_store.get(key.encode())
+        return JobSchedule().from_dict(json.loads(bytes(raw))) if raw is not None else None
+
+    def _consume_sync_site_fence_failure_tx(self, tr, key):
+        state = self._read_sync_site_tx(tr, key)
+        if not state["fence_task"]:
+            return None
+        task = BaseModel._read_record(tr, state["fence_task"].encode(), JobSchedule)
+        if (task is None or task.status != JobSchedule.STATUS_DONE
+                or task.function_params.get("fenced") or state["reported"] == task.uuid):
+            return None
+        state["reported"] = task.uuid
+        tr[key] = json.dumps(state).encode()
+        return {"task_id": task.uuid, "reason": task.function_result}
+
+    def consume_sync_site_fence_failure(self, cluster_id: str, site: str) -> dict | None:
+        """Take the unreported failure of ``site``'s latest fence task
+        (``{task_id, reason}``): the task ended without fencing the site
+        (failed, canceled, given up) and no call was answered with it yet.
+        None otherwise. One transaction on the site's key: of concurrent
+        callers exactly one gets it."""
+        return fdb.transactional(DBController._consume_sync_site_fence_failure_tx)(
+            self, self.kv_store, self._sync_site_key(cluster_id, site))
+
+    def get_active_sync_site_fence_tasks(self, cluster_id: str) -> list[JobSchedule]:
+        """Every FN_SYNC_SITE_FENCE task of the cluster that is not done,
+        oldest first - canceled ones included."""
+        return self._active_tasks(cluster_id, JobSchedule.FN_SYNC_SITE_FENCE)
+
+    def get_active_sync_promote_tasks(self, cluster_id: str) -> list[JobSchedule]:
+        """Every FN_SYNC_PROMOTE task of the cluster that is not done, oldest
+        first - canceled ones included: the runner still has to settle the
+        leadership moves they own."""
+        return self._active_tasks(cluster_id, JobSchedule.FN_SYNC_PROMOTE)
+
+    def _lvols_of_node_tx(self, tr, node_id) -> list[LVol]:
+        """The volumes whose ``node_id`` is ``node_id``, read in ``tr`` WITH
+        conflict ranges: a volume written by a concurrent transaction (its
+        index entry, or its record when the index is not ready) makes ``tr``
+        retry."""
+        idx = indices.get_index(LVol, 'node_id')
+        if self.index_state(LVol, idx) == indices.STATE_READY:
+            ids = [idx.entry_id(LVol, bytes(key), bytes(value))
+                   for key, value in tr.get_range_startswith(idx.prefix(LVol, (node_id,)))]
+            out = []
+            for lvol_id in ids:
+                lvol = BaseModel._read_record(tr, LVol().get_db_id(lvol_id).encode(), LVol)
+                if lvol is not None:
+                    out.append(lvol)
+            return out
+        return [lvol for lvol in LVol().read_from_db(tr, id=" ") if lvol.node_id == node_id]
+
+    def _begin_sync_promote_moves_tx(self, tr, task_key, cluster_id, moves, target_site, check,
+                                     node_indexes, task_indexes, now):
+        from simplyblock_core import storage_node_ops
+        task = BaseModel._read_record(tr, task_key, JobSchedule)
+        if task is None or task.status == JobSchedule.STATUS_DONE or task.canceled:
+            return ["the promote task is no longer active"]
+        cluster = BaseModel._read_record(tr, Cluster().get_db_id(cluster_id).encode(), Cluster)
+        if cluster is None:
+            return [f"cluster {cluster_id} not found"]
+        problems: list[str] = []
+        owners = {}
+        for lvs_name, (owner_id, expect) in sorted(moves.items()):
+            holder = self._lvstore_lock_holder_tx(
+                tr, cluster_id, storage_node_ops._grant_lock_name(lvs_name), now)
+            if holder:
+                problems.append(f"LVS {lvs_name}: a leadership grant is in progress ({holder})")
+                continue
+            owner = BaseModel._read_record(tr, StorageNode().get_db_id(owner_id).encode(), StorageNode)
+            if owner is None:
+                problems.append(f"LVS {lvs_name}: owner {owner_id} not found")
+                continue
+            problems += check(cluster, owner, self._lvols_of_node_tx(tr, owner_id), expect)
+            owners[lvs_name] = owner
+        if problems:
+            return problems
+        moving = storage_node_ops.lvs_moving_value(target_site)
+        for owner in owners.values():
+            self._atomic_update_tx(tr, owner.get_db_id().encode(), StorageNode,
+                                   lambda n: setattr(n, "lvs_active_site", moving), node_indexes)
+        # Merged: an LVS a resumed pass marked earlier (not re-marked now)
+        # keeps its entry, so a failure still undoes its marker directly.
+        task.function_params["moves"] = {**(task.function_params.get("moves") or {}),
+                                         **{lvs_name: expect for lvs_name, (_, expect) in moves.items()}}
+        task.updated_at = str(datetime.datetime.now(datetime.UTC))
+        self._put_tx(tr, task, task_indexes)
+        return []
+
+    def begin_sync_promote_moves(self, task: JobSchedule, moves: dict[str, tuple[str, str]],
+                                 target_site: str, check) -> list[str]:
+        """The DB side of a sync promote, in ONE transaction and without any
+        RPC: re-check what the promote requires and mark every LVS of
+        ``moves`` (``{lvs: (owner id, lvs_active_site expected now)}``) as
+        moving to ``target_site``.
+
+        Read in the transaction: the task (still active), the cluster, each
+        LVS's grant lock (a leadership grant holding it refuses the move, one
+        acquiring it later sees the marker - storage_node_ops._lvs_grant_lock),
+        each owner and each owner's volumes (with conflict ranges, so a
+        concurrent volume create or clone makes this retry and be judged).
+        ``check(cluster, owner, volumes, expect)`` returns the problems of one
+        LVS (a pure function: it may run several times). With none at all,
+        every owner's ``lvs_active_site`` becomes ``moving:<target_site>`` and
+        the task records ``moves`` (``{lvs: expect}``, the journal its
+        clean-up restores from; merged into the entries it already holds) - in
+        the same transaction.
+        Returns the problems; nothing is written when there are any."""
+        return fdb.transactional(DBController._begin_sync_promote_moves_tx)(
+            self, self.kv_store, task.get_db_id().encode(), task.cluster_id, dict(moves),
+            target_site, check, StorageNode.active_indexes(self.kv_store),
+            JobSchedule.active_indexes(self.kv_store), int(time.time()))
+
+    def _clear_lost_site_tx(self, tr, cluster_id, lost_site, allowed_states, node_ids, check,
+                            cluster_indexes):
+        cluster_key = Cluster().get_db_id(cluster_id).encode()
+        cluster = BaseModel._read_record(tr, cluster_key, Cluster)
+        if cluster is None:
+            return [f"cluster {cluster_id} not found"]
+        if cluster.lost_site != lost_site or cluster.lost_site_state not in allowed_states:
+            return [(f"lost site is {cluster.lost_site!r} ({cluster.lost_site_state!r}), expected "
+                     f"{lost_site!r} in {sorted(allowed_states)}")]
+        nodes = []
+        for node_id in node_ids:
+            node = BaseModel._read_record(tr, StorageNode().get_db_id(node_id).encode(), StorageNode)
+            if node is not None:
+                nodes.append(node)
+        problems = check(cluster, nodes)
+        if problems:
+            return problems
+
+        def _clear(c):
+            c.lost_site = ""
+            c.lost_site_state = ""
+        self._atomic_update_tx(tr, cluster_key, Cluster, _clear, cluster_indexes)
+        return []
+
+    def clear_lost_site(self, cluster_id: str, lost_site: str, allowed_states, node_ids, check) -> list[str]:
+        """The last step of a sync-replication site return, in ONE transaction:
+        the cluster still records ``lost_site`` in one of ``allowed_states``,
+        and ``check(cluster, nodes)`` - a pure function over the records of
+        ``node_ids`` read in the same transaction - finds nothing; then
+        ``lost_site`` / ``lost_site_state`` are cleared. A node or device that
+        failed since the caller's own checks makes it refuse. Returns the
+        problems; nothing is written when there are any."""
+        return fdb.transactional(DBController._clear_lost_site_tx)(
+            self, self.kv_store, cluster_id, lost_site, tuple(allowed_states), list(node_ids), check,
+            Cluster.active_indexes(self.kv_store))
+
     def get_job_tasks(self, cluster_id: str, reverse: bool = True, limit: int = 0, *, source=None) -> list[JobSchedule]:
         if source is not None:
             ret = [t for t in source if t.cluster_id == cluster_id]
@@ -753,6 +1290,17 @@ class DBController(metaclass=Singleton):
     def get_active_migration_tasks(self, cluster_id: str) -> list[JobSchedule]:
         """Return all non-done FN_LVOL_MIG tasks for the given cluster."""
         return self._active_tasks(cluster_id, JobSchedule.FN_LVOL_MIG)
+
+    def get_active_device_migration_tasks(self, cluster_id: str) -> list[JobSchedule]:
+        """Every non-done FN_DEV_MIG, FN_NEW_DEV_MIG and FN_FAILED_DEV_MIG task
+        of the cluster, oldest first. Canceled tasks are included: a canceled
+        started migration still holds its result on the node until its runner
+        closes the task."""
+        return sorted(
+            (task for function_name in (JobSchedule.FN_DEV_MIG, JobSchedule.FN_NEW_DEV_MIG,
+                                        JobSchedule.FN_FAILED_DEV_MIG)
+             for task in self._active_tasks(cluster_id, function_name)),
+            key=lambda x: x.date)
 
     def _active_tasks(self, cluster_id: str, function_name: str) -> list[JobSchedule]:
         """Tasks of one kind that have not finished.
@@ -985,6 +1533,22 @@ class DBController(metaclass=Singleton):
         transactional = fdb.transactional(DBController._release_lvstore_lock_tx)
         transactional(self, self.kv_store, cluster_id, lvs_name, owner)
 
+    def _lvstore_lock_holder_tx(self, tr, cluster_id, lvs_name, now):
+        """The live holder of the per-lvstore lock ``lvs_name`` read in ``tr``,
+        or "" when it is free (absent, or its heartbeat went stale). Reading it
+        inside a caller's transaction makes that transaction conflict with a
+        concurrent acquire."""
+        lock = LVStoreMutationLock()
+        lock.cluster_id = cluster_id
+        lock.lvs_name = lvs_name
+        raw = tr.get(lock.get_db_id().encode()).wait()
+        if not raw.present():
+            return ""
+        existing = LVStoreMutationLock().from_dict(json.loads(raw))
+        if (now - existing.heartbeat_at) > constants.LVSTORE_MUTATION_LOCK_TTL_SEC:
+            return ""
+        return existing.owner
+
     def watch_lvstore_lock(self, cluster_id, lvs_name):
         """Return an FDB watch future that fires when the lock key changes
         (release, reclaim, heartbeat), or None when no DB connection exists.
@@ -1105,8 +1669,31 @@ class DBController(metaclass=Singleton):
                 lvol.allowed_hosts = standalone_allowed_hosts
 
         tr.set(alloc_key, str(seq + 1).encode())
+        self._claim_sync_active_site_tx(tr, lvol, host_node)
         lvol.write_to_db(tr)
         return target is not None
+
+    @staticmethod
+    def _claim_sync_active_site_tx(tr, lvol, host_node):
+        """Sync replication: a volume is created on the site its LVS is led
+        from, read from the owner record IN the claim transaction - a promote
+        marking the LVS ``moving:`` (begin_sync_promote_moves) conflicts with
+        it - and refused while the move is in flight. The volume starts as
+        never connected (``sync_never_connected``). No read outside sync
+        replication."""
+        from simplyblock_core import storage_node_ops
+        from simplyblock_core.exceptions import SyncLeadershipMovingError
+        if not storage_node_ops._sync_site(host_node):
+            return
+        owner = BaseModel._read_record(tr, StorageNode().get_db_id(lvol.node_id).encode(), StorageNode)
+        if owner is None:
+            raise KeyError(f"LVS owner {lvol.node_id} not found")
+        if owner.lvs_active_site.startswith(storage_node_ops.LVS_MOVING_PREFIX):
+            raise SyncLeadershipMovingError(
+                f"the leadership of {owner.lvstore} is being moved ({owner.lvs_active_site}); "
+                f"retry the volume creation once the move has completed")
+        lvol.sync_active_site = storage_node_ops.lvs_active_site_of(owner)
+        lvol.sync_never_connected = True
 
     def claim_lvol_ns_slot(self, lvol, host_node, namespaced, standalone_nqn,
                            standalone_namespace="", standalone_allowed_hosts=None,
