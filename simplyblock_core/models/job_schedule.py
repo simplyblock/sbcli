@@ -95,7 +95,11 @@ class JobSchedule(BaseModel):
     # whose hand-off never started; an LVS whose hand-off started keeps its
     # marker for the next promote call, a leader lookup and the storage-node
     # monitor (reconcile_lvs_move).
-    # One pass, no retry: the caller's next promote call judges again.
+    # One pass per run: a failed or refused promote ends the task and the
+    # caller's next promote call judges again; a run an unexpected error
+    # interrupts is retried by the shared task driver, which gives up after
+    # SYNC_PROMOTE_MAX_UNEXPECTED_ERRORS such errors (the task's max_retry,
+    # tasks_controller.add_sync_promote_task).
     FN_SYNC_PROMOTE = "sync_promote"
     # Sync replication: catch up the lagging zone of one LVS after a zone
     # desync (tasks_runner_sync_resync). ``node_id`` is the owner of the LVS,

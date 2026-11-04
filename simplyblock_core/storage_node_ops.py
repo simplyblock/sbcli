@@ -13975,7 +13975,8 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
     # restarting node (snode) — snode's JM is expected to be disconnected on peers
     # during restart, so including it would cause false negatives. The peers
     # are those of the leader's triplet: the home one, unless a sync-replication
-    # LVS is led from its remote triplet (lost home site).
+    # LVS is led from its remote triplet (after a promote to the remote site: a
+    # planned switchover or a disaster fail-over).
     _, leader_triplet_secondary, leader_triplet_tertiary = lvs_triplet_of(
         primary_node, leader_node.get_id())
     lvs_peer_ids_excl_snode = [sid for sid in [leader_triplet_secondary, leader_triplet_tertiary]
@@ -14572,8 +14573,8 @@ def _release_lvs_subsys_port_on_peers(lvs_node, exclude_node_id, db_controller):
     stayed port-blocked for 10m12s. Calling this on any recreate failure
     guarantees the port is reopened. Idempotent: 'allow' is a no-op when the
     port is not blocked. On a sync-replication cluster the leader of the LVS
-    may be a member of its remote triplet (a lost home site), so those are
-    covered too.
+    may be a member of its remote triplet (after a promote to the remote site:
+    a planned switchover or a disaster fail-over), so those are covered too.
     """
     try:
         port = lvs_node.get_lvol_subsys_port(lvs_node.lvstore)

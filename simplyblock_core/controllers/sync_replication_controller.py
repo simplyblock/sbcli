@@ -1813,9 +1813,12 @@ def demote_site_volumes(db: DBController, cluster_id: str, lost_site: str,
 
 @dataclass(frozen=True)
 class SyncPromoteResult:
-    """The answer to a promote call: still in progress (the promote task, or a
-    leadership move in flight) or done, with the connection entries of every
-    volume on the promoted site (``{volume id: connect_lvol entries}``)."""
+    """The answer to a promote call: in progress - a promote task of one of the
+    requested LVS that is neither done nor canceled (``task_id``), a task
+    suspended between retries included - or done, with the connection entries
+    of every volume on the promoted site (``{volume id: connect_lvol
+    entries}``). A leadership move no promote task owns is never in progress:
+    the call settles it or refuses (SyncPromoteRefusedError)."""
     in_progress: bool
     task_id: str = ""
     connection_strings: dict | None = None
