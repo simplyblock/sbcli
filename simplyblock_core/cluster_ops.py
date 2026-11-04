@@ -545,22 +545,19 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
 
     if clusters:
         cfg = db_controller.get_deploy_config()
-        cluster.mode = cfg.mode
         cluster.db_connection = cfg.db_connection
         cluster.grafana_secret = cfg.grafana_secret
         cluster.grafana_endpoint = cfg.grafana_endpoint
         cluster.disable_monitoring = cfg.disable_monitoring
     else:
         # Bootstrapping the very first cluster of a fresh deployment: no
-        # DeployConfig exists yet (only the docker-swarm create_cluster()
-        # path writes one), so derive the cluster-wide settings here and
-        # persist them as the DeployConfig every later add_cluster() call
+        # DeployConfig exists yet, so derive the cluster-wide settings here
+        # and persist them as the DeployConfig every later add_cluster() call
         # will read.
         logger.info("No previous clusters found, bootstrapping first cluster")
         enable_monitoring = os.environ.get("ENABLE_MONITORING", "")
         monitoring_secret = SecretStr(os.environ.get("MONITORING_SECRET", ""))
 
-        cluster.mode = "kubernetes"
         cluster.disable_monitoring = enable_monitoring != "true"
         logger.info("Retrieving foundationdb connection string...")
         cluster.db_connection = utils.get_fdb_cluster_string(constants.FDB_CONFIG_NAME, constants.K8S_NAMESPACE)
@@ -572,14 +569,13 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
             raise ValueError("monitoring_secret is required")
         cluster.grafana_endpoint = constants.GRAFANA_K8S_ENDPOINT
 
-        mgmt_node_ops.add_mgmt_node("0.0.0.0", "kubernetes", cluster.uuid)
+        mgmt_node_ops.add_mgmt_node("0.0.0.0", cluster.uuid)
 
         if not cluster.disable_monitoring:
             _set_max_result_window(constants.OS_K8S_ENDPOINT)
             _add_graylog_input(constants.GRAYLOG_K8S_ENDPOINT, cluster.grafana_secret)
 
         cfg = DeployConfig()
-        cfg.mode = cluster.mode
         cfg.grafana_endpoint = cluster.grafana_endpoint
         cfg.grafana_secret = cluster.grafana_secret
         cfg.db_connection = cluster.db_connection
@@ -589,8 +585,7 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
     if not cluster.disable_monitoring:
         _create_update_user(cluster.uuid, cluster.grafana_endpoint, cluster.grafana_secret, cluster.secret)
 
-    if cluster.mode == "kubernetes":
-        utils.patch_prometheus_configmap(cluster.uuid, cluster.secret.get_secret_value())
+    utils.patch_prometheus_configmap(cluster.uuid, cluster.secret.get_secret_value())
 
     cluster.distr_ndcs = distr_ndcs
     cluster.distr_npcs = distr_npcs

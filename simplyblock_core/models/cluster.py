@@ -149,7 +149,6 @@ class Cluster(BaseModel):
     # a device can be made to "hang" on demand (see device_controller device-hang).
     enable_hang_device: bool = False
     grafana_endpoint: str = ""
-    mode: str = "docker"
     grafana_secret: SecretStr = SecretStr("")
     contact_point: str = ""
     ha_type: str = "single"
@@ -507,7 +506,6 @@ class DeployConfig(BaseModel):
     grafana_endpoint: str = ""
     db_connection: SecretStr = SecretStr("")
     grafana_secret: SecretStr = SecretStr("")
-    mode: str = "docker"
     disable_monitoring: bool = False
 
     def get_id(self):

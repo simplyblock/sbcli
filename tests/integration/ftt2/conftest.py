@@ -155,7 +155,6 @@ def ftt2_env(ensure_db, mock_rpc_servers):
     cluster.full_page_unmap = False
     cluster.fabric_tcp = True
     cluster.fabric_rdma = False
-    cluster.mode = "k8s"
     cluster.qpair_count = 1
     cluster.write_to_db(db.kv_store)
 

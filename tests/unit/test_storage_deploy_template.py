@@ -25,8 +25,6 @@ def _render_storage_deploy(tls_provider: str) -> str:
         HOSTNAME="node-a",
         NAMESPACE="simplyblock",
         SIMPLYBLOCK_DOCKER_IMAGE="proxy:test",
-        GRAYLOG_SERVER_IP="10.0.0.20",
-        MODE="kubernetes",
         CLUSTER_ID="cluster1",
         SSD_PCIE="none",
         PCI_ALLOWED="",

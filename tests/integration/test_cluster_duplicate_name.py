@@ -49,24 +49,21 @@ def _clean_keyspace(db):
     yield
 
 
-def _seed_cluster(db, uuid="cluster-1", name="test-cluster", mode="docker"):
+def _seed_cluster(db, uuid="cluster-1", name="test-cluster"):
     """Persist a real Cluster to FDB and return it."""
     c = Cluster()
     c.uuid = uuid
     c.cluster_name = name
-    c.mode = mode
     c.status = Cluster.STATUS_ACTIVE
     c.write_to_db(db.kv_store)
     return c
 
 
-def _seed_deploy_config(db, mode="docker"):
-    """Persist a real DeployConfig to FDB, mirroring what create_cluster()
-    writes for a docker deployment (or what add_cluster() now bootstraps for
-    the first kubernetes cluster) — add_cluster() requires one to exist for
-    any cluster after the first."""
+def _seed_deploy_config(db):
+    """Persist a real DeployConfig to FDB, mirroring what add_cluster()
+    bootstraps for the first cluster — add_cluster() requires one to exist
+    for any cluster after the first."""
     cfg = DeployConfig()
-    cfg.mode = mode
     cfg.grafana_endpoint = "http://grafana.example"
     cfg.grafana_secret = SecretStr("graf-secret")
     cfg.db_connection = SecretStr("db-conn")
@@ -117,9 +114,9 @@ class TestAddClusterDuplicateName:
             _add_cluster("beta")
 
     def test_succeeds_and_persists_when_name_is_unique(self, db):
-        # An existing docker cluster + its DeployConfig makes add_cluster
-        # inherit the shared mode/connection and skip the k8s/first-cluster
-        # provisioning branch entirely — only the grafana-user side-effect
+        # An existing cluster + its DeployConfig makes add_cluster inherit
+        # the shared connection and skip the first-cluster provisioning
+        # branch entirely — only the grafana-user side-effect
         # (a real HTTP call) needs mocking.
         _seed_cluster(db, uuid="cluster-1", name="other-cluster")
         _seed_deploy_config(db)
@@ -146,7 +143,7 @@ class TestAddClusterDuplicateName:
 
     def test_bootstraps_deploy_config_for_first_cluster(self, db, monkeypatch):
         # No clusters and no DeployConfig yet: add_cluster() must bootstrap
-        # kubernetes mode itself (deriving the FDB connection string,
+        # the deployment itself (deriving the FDB connection string,
         # registering the mgmt node) and persist the result as the
         # DeployConfig subsequent add_cluster() calls will read.
         monkeypatch.delenv("ENABLE_MONITORING", raising=False)
@@ -157,14 +154,12 @@ class TestAddClusterDuplicateName:
              patch("simplyblock_core.cluster_ops._create_update_user"):
             new_id = _add_cluster("first-cluster")
 
-        mock_add_mgmt.assert_called_once_with("0.0.0.0", "kubernetes", new_id)
+        mock_add_mgmt.assert_called_once_with("0.0.0.0", new_id)
 
         stored = db.get_cluster_by_id(new_id)
-        assert stored.mode == "kubernetes"
         assert stored.db_connection.get_secret_value() == "fdb-conn-string"
 
         cfg = db.get_deploy_config()
-        assert cfg.mode == "kubernetes"
         assert cfg.db_connection.get_secret_value() == "fdb-conn-string"
 
     def test_concurrent_calls_for_same_name_create_only_one_cluster(self, db):

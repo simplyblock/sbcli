@@ -350,6 +350,10 @@ class World:
             n.rpc_port = 8080
             n.rpc_username, n.rpc_password = "u", SecretStr("p")
             n.api_endpoint = "%s:5000" % n.mgmt_ip
+            # Every node is k8s-managed now (no docker mode): a simulated
+            # node that never adopts a CR would permanently block its own
+            # auto-restart (tasks_controller.add_node_to_auto_restart).
+            n.cr_namespace = "sim"
             nic = IFace()
             nic.uuid, nic.if_name, nic.ip4_address = str(_uuid.uuid4()), "eth0", ip
             nic.trtype, nic.net_type = "TCP", "data"

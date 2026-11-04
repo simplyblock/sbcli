@@ -2,7 +2,6 @@ import logging
 
 from simplyblock_core import constants, utils
 from simplyblock_core.controllers import events_controller as ec
-from simplyblock_core.db_controller import DBController
 
 logger = logging.getLogger()
 
@@ -31,8 +30,6 @@ def pool_updated(pool):
 
 
 def pool_status_change(pool, new_state, old_status):
-    db_controller = DBController()
-    cluster = db_controller.get_cluster_by_id(pool.cluster_id)
     ec.log_event_cluster(
         cluster_id=pool.cluster_id,
         domain=ec.DOMAIN_CLUSTER,
@@ -42,12 +39,11 @@ def pool_status_change(pool, new_state, old_status):
         message=f"Pool status changed from {old_status} to {new_state}",
         node_id=pool.cluster_id)
 
-    if cluster.mode == "kubernetes":
-        utils.patch_cr_status(
-            group=constants.CR_GROUP,
-            version=constants.CR_VERSION,
-            plural=pool.cr_plural,
-            namespace=pool.cr_namespace,
-            name=pool.cr_name,
-            status_patch={"status": new_state})
+    utils.patch_cr_status(
+        group=constants.CR_GROUP,
+        version=constants.CR_VERSION,
+        plural=pool.cr_plural,
+        namespace=pool.cr_namespace,
+        name=pool.cr_name,
+        status_patch={"status": new_state})
 

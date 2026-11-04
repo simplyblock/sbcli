@@ -129,7 +129,7 @@ class SNodeClient:
     def spdk_process_start(self, l_cores, spdk_mem, spdk_image=None, spdk_debug=None, cluster_ip=None,
                            fdb_connection: SecretStr | None = None, namespace=None, server_ip=None, rpc_port=None,
                            rpc_username=None, rpc_password: SecretStr | None = None, multi_threading_enabled=False, timeout=0, ssd_pcie=None,
-                           total_mem=None, system_mem=None, cluster_mode=None, socket=0, cluster_id=None,
+                           total_mem=None, system_mem=None, socket=0, cluster_id=None,
                            spdk_proxy_image=None, mcp_max_unavailable=None, spdk_proxy_tls_secret=None,
                            networks=None, pod_network=False, published_ports=None):
         params = {
@@ -161,8 +161,8 @@ class SNodeClient:
             params["total_mem"] = total_mem
         if system_mem:
             params["system_mem"] = system_mem
-        if cluster_mode:
-            params["cluster_mode"] = cluster_mode
+        # Agents older than the docker-mode removal require this field.
+        params["cluster_mode"] = "kubernetes"
         params["socket"] = socket
         if cluster_id:
             params["cluster_id"] = cluster_id

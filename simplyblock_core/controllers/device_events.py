@@ -22,23 +22,21 @@ def _device_event(device, message, caused_by, event):
         node_id=device.get_id(),
         storage_id=device.cluster_device_order)
 
-    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
-    if cluster.mode == "kubernetes":
-        total_devices = len(snode.nvme_devices)
-        online_devices = 0
-        for dev in snode.nvme_devices:
-            if dev.status == NVMeDevice.STATUS_ONLINE:
-                online_devices += 1
-        utils.patch_cr_node_status(
-            group=constants.CR_GROUP,
-            version=constants.CR_VERSION,
-            plural=snode.cr_plural,
-            namespace=snode.cr_namespace,
-            name=snode.cr_name,
-            node_uuid=snode.get_id(),
-            node_mgmt_ip=snode.mgmt_ip,
-            updates={"devices": f"{total_devices}/{online_devices}"},
-        )
+    total_devices = len(snode.nvme_devices)
+    online_devices = 0
+    for dev in snode.nvme_devices:
+        if dev.status == NVMeDevice.STATUS_ONLINE:
+            online_devices += 1
+    utils.patch_cr_node_status(
+        group=constants.CR_GROUP,
+        version=constants.CR_VERSION,
+        plural=snode.cr_plural,
+        namespace=snode.cr_namespace,
+        name=snode.cr_name,
+        node_uuid=snode.get_id(),
+        node_mgmt_ip=snode.mgmt_ip,
+        updates={"devices": f"{total_devices}/{online_devices}"},
+    )
 
 
 def device_create(device, caused_by=ec.CAUSED_BY_CLI):

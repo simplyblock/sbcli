@@ -28,7 +28,13 @@ _NoWaitRetrying = functools.partial(Retrying, sleep=lambda _: None)
 
 
 class TestAbortStartedSpdk(unittest.TestCase):
-    """The cleanup helper itself, on the node-agent path (docker mode)."""
+    """The cleanup helper itself, on the node-agent fallback path."""
+
+    def setUp(self):
+        no_api = patch.object(storage_node_ops.utils, "get_k8s_core_client",
+                              side_effect=RuntimeError("not in cluster"))
+        no_api.start()
+        self.addCleanup(no_api.stop)
 
     def test_kills_the_pod(self):
         api = MagicMock()
@@ -52,7 +58,7 @@ class TestAbortStartedSpdk(unittest.TestCase):
 
 
 class TestAbortStartedSpdkInKubernetes(unittest.TestCase):
-    """In kubernetes mode the teardown must not depend on the node agent.
+    """The teardown must not depend on the node agent.
 
     The agent runs ON the host being abandoned, and the commonest reason
     add_node aborts after starting SPDK is that the host went away -- an
@@ -74,18 +80,13 @@ class TestAbortStartedSpdkInKubernetes(unittest.TestCase):
         with patch.object(storage_node_ops.utils, "get_k8s_core_client",
                           return_value=self.k8s):
             storage_node_ops._abort_started_spdk(
-                self.api, rpc_port, cluster_id, "boom", cluster_mode="kubernetes")
+                self.api, rpc_port, cluster_id, "boom")
 
     def test_deletes_the_pod_through_the_api_server_not_the_agent(self):
         self._run()
         deleted = [c.args[0] for c in self.k8s.delete_namespaced_pod.call_args_list]
         self.assertIn("snode-spdk-pod-4436-cluste", deleted)
         self.api.spdk_process_kill.assert_not_called()
-
-    def test_also_removes_the_fluentd_companion(self):
-        self._run()
-        deleted = [c.args[0] for c in self.k8s.delete_namespaced_pod.call_args_list]
-        self.assertIn("simplyblock-fluentd-4436-cluste", deleted)
 
     def test_a_pod_that_is_already_gone_counts_as_cleaned_up(self):
         self.k8s.delete_namespaced_pod = MagicMock(
@@ -103,7 +104,7 @@ class TestAbortStartedSpdkInKubernetes(unittest.TestCase):
         with patch.object(storage_node_ops.utils, "get_k8s_core_client",
                           side_effect=RuntimeError("not in cluster")):
             storage_node_ops._abort_started_spdk(
-                self.api, 4436, "cluster-1abcdef", "boom", cluster_mode="kubernetes")
+                self.api, 4436, "cluster-1abcdef", "boom")
         self.api.spdk_process_kill.assert_called_once()
 
     def test_a_pod_that_never_disappears_is_not_reported_as_cleaned_up(self):
@@ -115,14 +116,6 @@ class TestAbortStartedSpdkInKubernetes(unittest.TestCase):
         self.k8s.list_namespaced_pod = MagicMock(return_value=still_there)
         with patch.object(storage_node_ops, "Retrying", _NoWaitRetrying):
             self._run()
-        self.api.spdk_process_kill.assert_called_once()
-
-    def test_docker_mode_never_touches_the_api_server(self):
-        with patch.object(storage_node_ops.utils, "get_k8s_core_client",
-                          return_value=self.k8s):
-            storage_node_ops._abort_started_spdk(
-                self.api, 4436, "cluster-1abcdef", "boom", cluster_mode="docker")
-        self.k8s.delete_namespaced_pod.assert_not_called()
         self.api.spdk_process_kill.assert_called_once()
 
 

@@ -345,7 +345,6 @@ class SPDKParams(BaseModel):
     spdk_image: str = Field(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
     spdk_proxy_image: str | None = Field(constants.SIMPLY_BLOCK_DOCKER_IMAGE)
     cluster_ip: str = Field(pattern=utils.IP_PATTERN)
-    cluster_mode: str
     socket: int | None = Field(None, ge=0)
     cluster_id: str
     mcp_max_unavailable: int | None = Field(None)
@@ -503,8 +502,6 @@ def spdk_process_start(body: SPDKParams):
             'NAMESPACE': namespace,
             'FDB_CONNECTION': body.fdb_connection,
             'SIMPLYBLOCK_DOCKER_IMAGE': body.spdk_proxy_image,
-            'GRAYLOG_SERVER_IP': body.cluster_ip,
-            'MODE': body.cluster_mode,
             'CLUSTER_ID': first_six_cluster_id,
             'SSD_PCIE': ssd_pcie_params,
             'PCI_ALLOWED': ssd_pcie_list,
@@ -754,16 +751,6 @@ def spdk_process_kill(query: utils.RPCPortParams):
             # 2026-07-28).
             logger.error(f"Failed to delete pod {pod_name}: {e.body}")
             return utils.get_response(False, f"Failed to delete pod {pod_name}: {e.body}")
-
-    fluent_pod_name = f"simplyblock-fluentd-{query.rpc_port}-{first_six_cluster_id}"
-    try:
-        k8s_core_v1.read_namespaced_pod(fluent_pod_name, namespace)
-        logger.info(f"Deleting fluent pod {fluent_pod_name}")
-        k8s_core_v1.delete_namespaced_pod(fluent_pod_name, namespace)
-    except ApiException as e:
-        if e.status != 404:
-            # Best-effort companion log pod; don't fail the whole call over it.
-            logger.warning(f"Failed to delete fluent pod {fluent_pod_name}: {e.body}")
 
     max_retries = 10
     found = True

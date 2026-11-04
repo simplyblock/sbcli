@@ -44,7 +44,7 @@ def deploy_mgmt_node(cluster_ip, cluster_id, mgmt_ip, cluster_secret: SecretStr)
         return False
 
     logger.info("Adding management node object")
-    node_id = add_mgmt_node(dev_ip, "kubernetes", cluster_id)
+    node_id = add_mgmt_node(dev_ip, cluster_id)
 
     # check if ha setting is required
     nodes = db_controller.get_mgmt_nodes()
@@ -108,9 +108,8 @@ def deploy_mgmt_node(cluster_ip, cluster_id, mgmt_ip, cluster_secret: SecretStr)
     return node_id
 
 
-def add_mgmt_node(mgmt_ip, mode, cluster_id=None):
+def add_mgmt_node(mgmt_ip, cluster_id=None):
     db_controller = DBController()
-    hostname = ""
 
     for node in db_controller.get_mgmt_nodes():
         if node.mgmt_ip == mgmt_ip:
@@ -119,11 +118,8 @@ def add_mgmt_node(mgmt_ip, mode, cluster_id=None):
 
     node = MgmtNode()
     node.uuid = str(uuid.uuid4())
-    node.hostname = hostname
-    node.docker_ip_port = f"{mgmt_ip}:2375"
     node.cluster_id = cluster_id
     node.mgmt_ip = mgmt_ip
-    node.mode = mode
     node.status = MgmtNode.STATUS_ONLINE
     node.create_dt = str(datetime.datetime.now())
 

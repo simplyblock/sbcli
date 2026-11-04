@@ -31,7 +31,6 @@ def _make_cluster_record(uuid: str, ftt: int):
     c = Cluster()
     c.uuid = uuid
     c.cluster_name = f"sim-cluster-{uuid[:8]}"
-    c.mode = "docker"
     c.ha_type = "ha"
     c.max_fault_tolerance = ftt
     c.distr_ndcs = 2

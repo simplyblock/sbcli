@@ -3805,8 +3805,8 @@ class _SpdkPodStillPresent(Exception):
 
 
 def _delete_spdk_pod_via_k8s(rpc_port, cluster_id):
-    """Delete the SPDK pod (and its fluentd companion) straight from the
-    Kubernetes API, without routing the request through the node agent.
+    """Delete the SPDK pod straight from the Kubernetes API, without routing
+    the request through the node agent.
 
     ``snode_api.spdk_process_kill`` already does exactly this work -- see
     ``spdk_process_kill`` in
@@ -3826,7 +3826,6 @@ def _delete_spdk_pod_via_k8s(rpc_port, cluster_id):
     """
     six = utils.first_six_chars(cluster_id)
     pod_name = f"snode-spdk-pod-{rpc_port}-{six}"
-    fluent_pod_name = f"simplyblock-fluentd-{rpc_port}-{six}"
     namespace = constants.K8S_NAMESPACE
 
     try:
@@ -3843,17 +3842,6 @@ def _delete_spdk_pod_via_k8s(rpc_port, cluster_id):
         logger.info(f"SPDK pod {pod_name} was already gone")
     except Exception as e:
         return False, f"failed to delete pod {pod_name}: {e}"
-
-    # Companion log shipper: best effort, never fails the teardown. It holds
-    # no hugepages, so leaving it behind does not block a later add.
-    try:
-        k8s_core.delete_namespaced_pod(fluent_pod_name, namespace)
-        logger.info(f"Deleted fluentd pod {fluent_pod_name}")
-    except ApiException as e:
-        if e.status != 404:
-            logger.warning(f"Failed to delete fluentd pod {fluent_pod_name}: {e.body}")
-    except Exception as e:
-        logger.warning(f"Failed to delete fluentd pod {fluent_pod_name}: {e}")
 
     # Confirm it is really gone. Same budget as the agent-side implementation.
     try:
@@ -3913,7 +3901,7 @@ def _delete_spdk_service(snode, rpc_port, cluster_id):
         logger.warning("The Service of the node on port %s was not deleted: %s", rpc_port, e)
 
 
-def _abort_started_spdk(snode_api, rpc_port, cluster_id, reason, cluster_mode=None):
+def _abort_started_spdk(snode_api, rpc_port, cluster_id, reason):
     """Tear down the SPDK pod add_node just started, before bailing out.
 
     Between ``spdk_process_start`` and the point the StorageNode record is
@@ -3926,12 +3914,11 @@ def _abort_started_spdk(snode_api, rpc_port, cluster_id, reason, cluster_mode=No
     (observed on fresh 12-node deploys 2026-09-08 and 2026-09-11; recovery
     was a manual delete of the unowned pod).
 
-    In kubernetes mode the teardown goes straight to the API server
+    The teardown goes straight to the API server
     (``_delete_spdk_pod_via_k8s``) rather than through the node agent,
     because the agent runs ON the host we are abandoning and is routinely
     unreachable in exactly this situation. The agent call remains the
-    fallback, and the only path in docker mode, where the control plane has
-    no way to reach the container itself.
+    fallback.
 
     The rpc_port reservation is deliberately NOT released: it has no release
     API and ages out by TTL (see reserve_cluster_nvmf_port), and dropping it
@@ -3940,22 +3927,21 @@ def _abort_started_spdk(snode_api, rpc_port, cluster_id, reason, cluster_mode=No
     """
     logger.error(f"add_node aborting after SPDK start: {reason}")
 
-    if cluster_mode == "kubernetes":
-        # A pod-network add created a Service before the pod, and nothing names
-        # it once the add is abandoned. Best effort: a node on the host network
-        # has none and the delete answers not-found.
-        ok, err = _delete_spdk_service_via_k8s(rpc_port, cluster_id)
-        if not ok:
-            logger.warning(f"The Service of the aborted add on port {rpc_port} was not deleted: {err}")
-        ok, err = _delete_spdk_pod_via_k8s(rpc_port, cluster_id)
-        if ok:
-            logger.info(
-                f"Cleaned up SPDK pod on port {rpc_port} after failed add_node "
-                f"(direct Kubernetes delete)")
-            return
-        logger.warning(
-            f"Direct Kubernetes teardown of the SPDK pod on port {rpc_port} failed "
-            f"({err}); falling back to the node agent")
+    # A pod-network add created a Service before the pod, and nothing names
+    # it once the add is abandoned. Best effort: a node on the host network
+    # has none and the delete answers not-found.
+    ok, err = _delete_spdk_service_via_k8s(rpc_port, cluster_id)
+    if not ok:
+        logger.warning(f"The Service of the aborted add on port {rpc_port} was not deleted: {err}")
+    ok, err = _delete_spdk_pod_via_k8s(rpc_port, cluster_id)
+    if ok:
+        logger.info(
+            f"Cleaned up SPDK pod on port {rpc_port} after failed add_node "
+            f"(direct Kubernetes delete)")
+        return
+    logger.warning(
+        f"Direct Kubernetes teardown of the SPDK pod on port {rpc_port} failed "
+        f"({err}); falling back to the node agent")
 
     try:
         ok, err = snode_api.spdk_process_kill(rpc_port, cluster_id)
@@ -4588,7 +4574,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                 # storage device.
                 ssd_pcie=(ssd_pcie if not lblk_mode
                           else [constants.LBLK_PCI_ALLOWED_PLACEHOLDER]),
-                total_mem=total_mem, system_mem=minimum_sys_memory, cluster_mode=cluster.mode,
+                total_mem=total_mem, system_mem=minimum_sys_memory,
                 socket=node_socket, cluster_id=cluster_id, spdk_proxy_image=spdk_proxy_image,
                 mcp_max_unavailable=mcp_max_unavailable,
                 spdk_proxy_tls_secret=cluster.spdk_proxy_tls_secret, networks=networks,
@@ -4597,14 +4583,12 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
 
         except Exception as e:
             # spdk_process_start may have created the pod before raising.
-            _abort_started_spdk(snode_api, rpc_port, cluster_id, str(e),
-                                cluster_mode=cluster.mode)
+            _abort_started_spdk(snode_api, rpc_port, cluster_id, str(e))
             return False
 
         if not results:
             _abort_started_spdk(snode_api, rpc_port, cluster_id,
-                                f"Failed to start spdk: {err}",
-                                cluster_mode=cluster.mode)
+                                f"Failed to start spdk: {err}")
             return False
         number_of_alceml_devices = node_config.get("number_of_alcemls")
         # Increase number of alcemls by one for the JM
@@ -4663,8 +4647,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                 data_nics = storage_network.from_report(results)
             except (ValueError, KeyError, TypeError) as e:
                 _abort_started_spdk(snode_api, rpc_port, cluster_id,
-                                    f"The SPDK pod reported no usable interfaces: {e}",
-                                    cluster_mode=cluster.mode)
+                                    f"The SPDK pod reported no usable interfaces: {e}")
                 return False
             active_tcp = True
             names = []
@@ -4694,8 +4677,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
 
         if not active_tcp and not active_rdma:
             _abort_started_spdk(snode_api, rpc_port, cluster_id,
-                                "No usable storage network interface found.",
-                                cluster_mode=cluster.mode)
+                                "No usable storage network interface found.")
             return False
 
         hostname = node_info['hostname'] + f"_{rpc_port}"
@@ -9455,7 +9437,7 @@ def _restart_storage_node_impl(
             # DPDK and SPDK's nvme driver could claim kernel NVMe disks.
             ssd_pcie=(snode.ssd_pcie if not lblk_mode
                       else [constants.LBLK_PCI_ALLOWED_PLACEHOLDER]),
-            total_mem=total_mem, system_mem=minimum_sys_memory, cluster_mode=cluster.mode,
+            total_mem=total_mem, system_mem=minimum_sys_memory,
             socket=snode.socket, cluster_id=snode.cluster_id,
             spdk_proxy_image=snode.spdk_proxy_image,
             spdk_proxy_tls_secret=snode.spdk_proxy_tls_secret, networks=snode.networks,

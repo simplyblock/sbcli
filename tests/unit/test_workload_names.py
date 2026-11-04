@@ -104,7 +104,7 @@ def test_starting_spdk_sends_the_spdk_proxy_secret():
 def test_a_node_agent_asked_without_a_secret_mounts_the_constant_one():
     params = SPDKParams(
         server_ip="10.0.0.1", rpc_port=8080, rpc_username="u", rpc_password="p",
-        l_cores="0-1", namespace=None, cluster_ip="10.0.0.2", cluster_mode="kubernetes",
+        l_cores="0-1", namespace=None, cluster_ip="10.0.0.2",
         cluster_id="c1")
 
     assert params.spdk_proxy_tls_secret == "simplyblock-spdk-proxy-tls"

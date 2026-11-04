@@ -52,7 +52,6 @@ def _seed_cluster(db, *, sync=True, status=Cluster.STATUS_UNREADY, activated=(),
     cluster.distr_npcs = 1
     cluster.max_fault_tolerance = 1
     cluster.activated_node_ids = list(activated)
-    cluster.mode = "docker"
     cluster.cluster_vip = "10.0.0.1"
     cluster.spdk_vcpu_count = spdk_vcpu_count
     cluster.write_to_db(db.kv_store)
@@ -88,7 +87,6 @@ def _seed_two_sites(db, cluster, per_site=3, *, b_status=StorageNode.STATUS_ONLI
 
 def _seed_deploy_config(db):
     cfg = DeployConfig()
-    cfg.mode = "docker"
     cfg.disable_monitoring = True
     cfg.grafana_endpoint = "http://grafana.example"
     cfg.grafana_secret = SecretStr("graf-secret")
