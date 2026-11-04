@@ -38,10 +38,8 @@ class CLIWrapper(CLIWrapperBase):
 
     def init_storage_node(self):
         subparser = self.add_command('storage-node', 'Storage Node Commands', aliases=['sn',])
-        self.init_storage_node__deploy(subparser)
         self.init_storage_node__configure(subparser)
         self.init_storage_node__configure_upgrade(subparser)
-        self.init_storage_node__deploy_cleaner(subparser)
         self.init_storage_node__clean_devices(subparser)
         self.init_storage_node__add_node(subparser)
         self.init_storage_node__delete(subparser)
@@ -94,11 +92,6 @@ class CLIWrapper(CLIWrapperBase):
         self.init_storage_node__get_device_health_info(subparser)
 
 
-    def init_storage_node__deploy(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'deploy', 'Prepares a host to be used as a storage node.')
-        subcommand.add_argument('--ifname', help='Management interface name, e.g. eth0.', type=str, dest='ifname')
-        subcommand.add_argument('--isolate-cores', help='Isolates cores in kernel args for the provided CPU mask. Default: `false`.', default=False, dest='isolate_cores', action='store_true')
-
     def init_storage_node__configure(self, subparser):
         subcommand = self.add_sub_command(subparser, 'configure', 'Prepare a configuration file to be used when adding the storage node.')
         subcommand.add_argument('--nodes-per-socket', help='The number of each node to be added per each socket. Default: `1`.', type=int, default=1, dest='nodes_per_socket')
@@ -121,9 +114,6 @@ class CLIWrapper(CLIWrapperBase):
 
     def init_storage_node__configure_upgrade(self, subparser):
         subcommand = self.add_sub_command(subparser, 'configure-upgrade', 'Upgrade the automated configuration file with new changes of cpu mask or storage devices.')
-
-    def init_storage_node__deploy_cleaner(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'deploy-cleaner', 'Cleans a previous simplyblock deploy (local run).')
 
     def init_storage_node__clean_devices(self, subparser):
         subcommand = self.add_sub_command(subparser, 'clean-devices', 'Clean devices stored in /etc/simplyblock/sn_config_file (local run)')
@@ -373,7 +363,6 @@ class CLIWrapper(CLIWrapperBase):
 
     def init_cluster(self):
         subparser = self.add_command('cluster', 'Cluster Commands')
-        self.init_cluster__create(subparser)
         self.init_cluster__add(subparser)
         self.init_cluster__op_stop(subparser)
         self.init_cluster__op_start(subparser)
@@ -427,67 +416,6 @@ class CLIWrapper(CLIWrapperBase):
         self.init_cluster__replication_policy_snapshot(subparser)
         self.init_cluster__sync_status(subparser)
 
-
-    def init_cluster__create(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'create', 'Creates a new cluster.')
-        if self.developer_mode:
-            subcommand.add_argument('--page_size', help='The size of a data page in bytes. Default: `2097152`.', type=int, default=2097152, dest='page_size')
-        if self.developer_mode:
-            subcommand.add_argument('--CLI_PASS', help='The password for CLI SSH connection.', type=SecretStr, dest='CLI_PASS')
-        subcommand.add_argument('--cap-warn', help='The capacity warning level in percent. Default: `89`.', type=int, default=89, dest='cap_warn')
-        subcommand.add_argument('--cap-crit', help='The capacity critical level in percent. Default: `99`.', type=int, default=99, dest='cap_crit')
-        subcommand.add_argument('--prov-cap-warn', help='The capacity warning level in percent. Default: `250`.', type=int, default=250, dest='prov_cap_warn')
-        subcommand.add_argument('--prov-cap-crit', help='The capacity critical level in percent. Default: `500`.', type=int, default=500, dest='prov_cap_crit')
-        subcommand.add_argument('--ifname', help='Management interface name, e.g. eth0.', type=str, dest='ifname')
-        subcommand.add_argument('--mgmt-ip', help='Management IP address to use for the node (e.g., 192.168.1.10).', type=str, dest='mgmt_ip')
-        subcommand.add_argument('--tls-secret-name', help='Name of the Kubernetes TLS Secret to be used by the Ingress for HTTPS termination (e.g., my-tls-secret).', type=str, dest='tls_secret')
-        subcommand.add_argument('--log-del-interval', help='The logging retention policy. Default: `3d`.', type=str, default='3d', dest='log_del_interval')
-        subcommand.add_argument('--metrics-retention-period', help='Retention period for I/O statistics (Prometheus). Default: `7d`.', type=str, default='7d', dest='metrics_retention_period')
-        subcommand.add_argument('--contact-point', help='**Deprecated since: 26.3** Do not use this parameter: The alerting notification configuration got extended and uses --alerting-config-path\n\nThe email or slack webhook url to be used for alerting.', type=str, dest='contact_point')
-        subcommand.add_argument('--grafana-endpoint', help='The endpoint url for Grafana.', type=str, default='', dest='grafana_endpoint')
-        subcommand.add_argument('--data-chunks-per-stripe', help='The erasure coding schema parameter k (distributed raid). Default: `1`.', type=int, default=1, dest='distr_ndcs')
-        subcommand.add_argument('--parity-chunks-per-stripe', help='The erasure coding schema parameter n (distributed raid). Default: `1`.', type=int, default=1, dest='distr_npcs')
-        if self.developer_mode:
-            subcommand.add_argument('--distr-bs', help='The (Dev) distrb bdev block size. Default: `4096`.', type=int, default=4096, dest='distr_bs')
-        if self.developer_mode:
-            subcommand.add_argument('--distr-chunk-bs', help='The (Dev) distrb bdev chunk block size. Default: `4096`.', type=int, default=4096, dest='distr_chunk_bs')
-        subcommand.add_argument('--ha-type', help='Logical volume HA type (single, ha), default is cluster ha type. Default: `ha`.', type=str, default='ha', dest='ha_type', choices=['single','ha',])
-        subcommand.add_argument('--is-single-node', help='For single-node clusters only. Default: `false`.', default=False, dest='is_single_node', action='store_true')
-        subcommand.add_argument('--mode', help='The environment to deploy management services. Default: `docker`.', type=str, default='docker', dest='mode', choices=['docker','kubernetes',])
-        subcommand.add_argument('--ingress-host-source', help='Ingress host source: \'hostip\' for node IP, \'loadbalancer\' for external LB, or \'dns\' for custom domain. Default: `hostip`.', type=str, default='hostip', dest='ingress_host_source', choices=['hostip','loadbalancer','dns',])
-        subcommand.add_argument('--dns-name', help='Fully qualified DNS name to use as the Ingress host (required if --ingress-host-source=dns).', type=str, default='', dest='dns_name')
-        subcommand.add_argument('--enable-node-affinity', help='Enable node affinity for storage nodes.', dest='enable_node_affinity', action='store_true')
-        if self.developer_mode:
-            subcommand.add_argument('--enable-hang-device', help='Insert a delay bdev per device for hang injection (chaos testing).', dest='enable_hang_device', action='store_true')
-        subcommand.add_argument('--fabric', help='The NVMe fabric to use (specify: `tcp`, `rdma`, `tcp,rdma`). Default: `tcp`.', type=str, default='tcp', dest='fabric', choices=['tcp','rdma','tcp,rdma',])
-        if self.developer_mode:
-            subcommand.add_argument('--max-queue-size', help='The max size the queue will grow. Default: `128`.', type=int, default=128, dest='max_queue_size')
-        if self.developer_mode:
-            subcommand.add_argument('--inflight-io-threshold', help='The number of inflight IOs allowed before the IO queuing starts. Default: `4`.', type=int, default=4, dest='inflight_io_threshold')
-        if self.developer_mode:
-            subcommand.add_argument('--disable-monitoring', help='Disable monitoring stack, false by default. Default: `false`.', dest='disable_monitoring', action='store_true')
-        subcommand.add_argument('--strict-node-anti-affinity', help='Enable strict node anti affinity for storage nodes. Never more than one chunk is placed on a node. This requires a minimum of _data-chunks-in-stripe + parity-chunks-in-stripe + 1_ nodes in the cluster.', dest='strict_node_anti_affinity', action='store_true')
-        subcommand.add_argument('--enable-failure-domain', help='Enable failure-domain anti-affinity. Each storage node must then be added with a --failure-domain tag (rack/cabinet/DC); data, journal and secondary/tertiary copies are spread across distinct failure domains (best-effort). Deploy-time only: a cluster cannot be upgraded into this feature, it must be redeployed.', dest='enable_failure_domain', action='store_true')
-        subcommand.add_argument('--sync-replication', help='Enable site-level synchronous replication over exactly two sites. Each storage node must then be added with --site; every lvstore is replicated to the other site. Requires --ha-type ha. Deploy-time only: a cluster cannot be upgraded into this feature, it must be redeployed.', dest='sync_replication', action='store_true')
-        subcommand.add_argument('--device-mode', help='Storage-device mode for the whole cluster. \'nvme\' (default): NVMe PCIe devices auto-detected and attached via the SPDK nvme driver. \'lblk\': arbitrary Linux block devices wrapped in SPDK AIO bdevs; devices are selected at \'sn configure\' by name or serial number. Deploy-time only; inter-node fabric (nvme-tcp/rdma) is unaffected.', type=str, default='nvme', dest='device_mode', choices=['nvme','lblk',])
-        subcommand.add_argument('--enable-inline-checksum', help='Enable inline CRC checksum validation on every IO for silent-data-error protection. Cannot be enabled or disabled after cluster creation. Per-device alceml mode (md-on-device vs fallback) is auto-detected at add-node.', dest='inline_checksum', action='store_true')
-        subcommand.add_argument('--4k_atomic', help='Declare that devices guarantee 4K write atomicity even with a <4K logical block size (e.g. AWS NVMe is 512B but atomic at 4K). Allows fallback-mode inline checksum on such devices by skipping the data-plane 4K block-size requirement. Only meaningful with --enable-inline-checksum. Cannot be changed after cluster creation.', dest='atomic_4k', action='store_true')
-        subcommand.add_argument('--enable-page-copy', help='Do snapshot copy-on-write in the distribution layer as a metadata-only page copy instead of copying the cluster, and merge the copies back when a snapshot is deleted. Cannot be changed after cluster creation.', dest='page_copy', action='store_true')
-        subcommand.add_argument('--disable-md-journal', help='Create the cluster without the metadata journal, which otherwise protects blobstore metadata pages against a write torn by a power loss. Safe only when every device completes a 4K write whole: a 4K format, or an atomic write unit covering 4K. Cannot be enabled or disabled after cluster creation.', default=True, dest='md_journal', action='store_false')
-        subcommand.add_argument('--name', '-n', help='Assigns a name to the newly created cluster.', type=str, dest='name')
-        subcommand.add_argument('--qpair-count', help='The NVMe/TCP transport qpair count per logical volume. Default: `32`.', type=range_type(0, 128), default=32, dest='qpair_count')
-        subcommand.add_argument('--client-qpair-count', help='The default NVMe/TCP transport qpair count per logical volume for client. Default: `3`.', type=range_type(0, 128), default=3, dest='client_qpair_count')
-        subcommand.add_argument('--client-data-nic', help='Network interface name from client to use for logical volume connection.', type=str, dest='client_data_nic')
-        subcommand.add_argument('--use-backup', help='The path to JSON file with S3/MinIO backup configuration.', type=str, dest='use_backup')
-        subcommand.add_argument('--nvmf-base-port', help='Base port for all NVMe-oF listeners (lvol, hublvol, device). Default: `4420`.', type=int, default=4420, dest='nvmf_base_port')
-        subcommand.add_argument('--rpc-base-port', help='The base port for SPDK JSON-RPC. Default: `8080`.', type=int, default=8080, dest='rpc_base_port')
-        subcommand.add_argument('--snode-api-port', help='The SNodeAPI/firewall port (one per host IP). Default: `50001`.', type=int, default=50001, dest='snode_api_port')
-        subcommand.add_argument('--max-subsys', help='Max number of nvmf subsystems per storage node. Cluster-wide; a node adopts it on its next restart.', type=int, default=0, dest='max_subsys')
-        subcommand.add_argument('--hugepages-mem', help='Huge-page memory floor per storage node, e.g. 4G. Cluster-wide; a node adopts it on its next restart.', type=str, default='', dest='hugepages_mem')
-        subcommand.add_argument('--vcpu-count', help='Absolute number of vCPUs SPDK gets on each storage node. A node with fewer than this + 1 cores is refused.', type=int, default=0, dest='vcpu_count')
-        subcommand.add_argument('--hashicorp-vault-url', help='Hashicorp vault URL for storing encryption keys for this cluster', type=str, dest='hashicorp_vault_url')
-        subcommand.add_argument('--alerting-config-path', help='Path to the YAML alerting configuration file. Takes precedence over --contact-point.', type=str, dest='alerting_config_path')
-        subcommand.add_argument('--cluster-vip', help='Cluster Virtual IP, this is the load balancer IP or domain, would be used for the cluster logging ingress.', type=str, dest='cluster_vip')
 
     def init_cluster__add(self, subparser):
         subcommand = self.add_sub_command(subparser, 'add', 'Adds a new cluster.')
@@ -1065,10 +993,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('cluster_ip', help='The cluster IP address.', type=str)
         subcommand.add_argument('cluster_id', help='The cluster id.', type=str)
         subcommand.add_argument('cluster_secret', help='The cluster secret.', type=SecretStr)
-        subcommand.add_argument('--ifname', help='The management interface name.', type=str, dest='ifname')
         subcommand.add_argument('--mgmt-ip', help='Management IP address to use for the node (e.g., 192.168.1.10).', type=str, dest='mgmt_ip')
-        subcommand.add_argument('--mode', help='The environment to deploy management services. Default: `docker`.', type=str, default='docker', dest='mode', choices=['docker','kubernetes',])
-        subcommand.add_argument('--alerting-config-path', help='Path to the YAML alerting configuration file. Takes precedence over --contact-point.', type=str, dest='alerting_config_path')
 
     def init_control_plane__list(self, subparser):
         subcommand = self.add_sub_command(subparser, 'list', 'Lists all control plane nodes.')
@@ -1525,14 +1450,10 @@ class CLIWrapper(CLIWrapperBase):
         try:
             if args.command in ['storage-node', 'sn']:
                 sub_command = args_dict['storage-node']
-                if sub_command in ['deploy']:
-                    ret = self.storage_node__deploy(sub_command, args)
-                elif sub_command in ['configure']:
+                if sub_command in ['configure']:
                     ret = self.storage_node__configure(sub_command, args)
                 elif sub_command in ['configure-upgrade']:
                     ret = self.storage_node__configure_upgrade(sub_command, args)
-                elif sub_command in ['deploy-cleaner']:
-                    ret = self.storage_node__deploy_cleaner(sub_command, args)
                 elif sub_command in ['clean-devices']:
                     ret = self.storage_node__clean_devices(sub_command, args)
                 elif sub_command in ['add-node']:
@@ -1678,20 +1599,7 @@ class CLIWrapper(CLIWrapperBase):
 
             elif args.command in ['cluster']:
                 sub_command = args_dict['cluster']
-                if sub_command in ['create']:
-                    if not self.developer_mode:
-                        args.page_size = 2097152
-                        args.CLI_PASS = None
-                        args.distr_bs = 4096
-                        args.distr_chunk_bs = 4096
-                        args.enable_hang_device = None
-                        args.max_queue_size = 128
-                        args.inflight_io_threshold = 4
-                        args.disable_monitoring = False
-                    if getattr(args, 'contact_point', None) is not None:
-                        raise ValueError("Deprecated parameter '--contact-point' cannot be used: The alerting notification configuration got extended and uses --alerting-config-path")
-                    ret = self.cluster__create(sub_command, args)
-                elif sub_command in ['add']:
+                if sub_command in ['add']:
                     if not self.developer_mode:
                         args.page_size = 2097152
                         args.distr_bs = 4096

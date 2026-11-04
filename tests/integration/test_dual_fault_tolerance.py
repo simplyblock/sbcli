@@ -4,7 +4,7 @@ test_dual_fault_tolerance.py – unit tests for the dual fault tolerance
 
 Tests cover:
   - Cluster model max_fault_tolerance field
-  - create_cluster / add_cluster validation rules
+  - add_cluster validation rules
   - get_secondary_nodes exclude_ids parameter
   - cluster_activate dual secondary assignment
   - DB controller extended secondary lookup
@@ -127,58 +127,6 @@ class TestStorageNodeModel(unittest.TestCase):
     def test_tertiary_node_id_stored(self):
         n = _node("n1", tertiary_node_id="sec-2")
         assert n.tertiary_node_id == "sec-2"
-
-
-# ===========================================================================
-# 3. create_cluster validation
-# ===========================================================================
-
-class TestCreateClusterValidation(unittest.TestCase):
-
-    @patch("simplyblock_core.cluster_ops.db_controller")
-    def test_max_ft_2_requires_ha_type(self, mock_db):
-        import simplyblock_core.cluster_ops as ops
-        with self.assertRaises(ValueError) as ctx:
-            ops.create_cluster(
-                4096, 2097152, "pass", 89, 99, 250, 500,
-                "eth0", "10.0.0.1", "3d", "7d", "", "",
-                1, 2, 4096, 4096, "single", "docker", False,
-                32, 3, 128, 4, False, False, "test",
-                None, "hostip", "", "tcp", False, "",
-                max_fault_tolerance=2,
-            )
-        assert "ha_type='ha'" in str(ctx.exception)
-
-    @patch("simplyblock_core.cluster_ops.db_controller")
-    def test_max_ft_2_requires_npcs_ge_2(self, mock_db):
-        import simplyblock_core.cluster_ops as ops
-        with self.assertRaises(ValueError) as ctx:
-            ops.create_cluster(
-                4096, 2097152, "pass", 89, 99, 250, 500,
-                "eth0", "10.0.0.1", "3d", "7d", "", "",
-                1, 1, 4096, 4096, "ha", "docker", False,
-                32, 3, 128, 4, False, False, "test",
-                None, "hostip", "", "tcp", False, "",
-                max_fault_tolerance=2,
-            )
-        assert "distr_npcs >= 2" in str(ctx.exception)
-
-    @patch("simplyblock_core.cluster_ops.db_controller")
-    def test_max_ft_1_no_validation_error(self, mock_db):
-        """max_fault_tolerance=1 should not hit the new validation even with single ha_type."""
-        import simplyblock_core.cluster_ops as ops
-        # Will fail later (e.g. on the erasure coding scheme), but not on max_ft validation
-        with self.assertRaises(ValueError) as ctx:
-            ops.create_cluster(
-                4096, 2097152, "pass", 89, 99, 250, 500,
-                "eth0", "10.0.0.1", "3d", "7d", "", "",
-                0, 0, 4096, 4096, "single", "docker", False,
-                32, 3, 128, 4, False, False, "test",
-                None, "hostip", "", "tcp", False, "",
-                max_fault_tolerance=1,
-            )
-        # Should fail on the unsupported (0, 0) scheme, not on max_ft
-        assert "erasure coding scheme" in str(ctx.exception)
 
 
 # ===========================================================================

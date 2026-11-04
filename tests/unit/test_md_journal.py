@@ -40,7 +40,7 @@ class TestClusterFlag(unittest.TestCase):
         self.assertFalse(Cluster({'inline_checksum': True}).md_journal)
 
     def test_both_create_paths_default_on(self):
-        for create in (cluster_ops.create_cluster, cluster_ops.add_cluster, cluster_ops._add_cluster_impl):
+        for create in (cluster_ops.add_cluster, cluster_ops._add_cluster_impl):
             with self.subTest(create=create.__name__):
                 self.assertIs(inspect.signature(create).parameters['md_journal'].default, True)
 
@@ -53,15 +53,11 @@ class TestCLI(unittest.TestCase):
         cli_module.CLIWrapper.__init__(wrapper)
         return wrapper.parser.parse_args(list(argv))
 
-    def test_create_and_add_journal_by_default(self):
-        for command in ("create", "add"):
-            with self.subTest(command=command):
-                self.assertIs(self._parse("cluster", command).md_journal, True)
+    def test_add_journals_by_default(self):
+        self.assertIs(self._parse("cluster", "add").md_journal, True)
 
     def test_disable_turns_it_off(self):
-        for command in ("create", "add"):
-            with self.subTest(command=command):
-                self.assertIs(self._parse("cluster", command, "--disable-md-journal").md_journal, False)
+        self.assertIs(self._parse("cluster", "add", "--disable-md-journal").md_journal, False)
 
 
 class TestCreateLvstoreRPC(unittest.TestCase):
@@ -136,14 +132,6 @@ class TestAtomic4kNeedsInlineChecksum(unittest.TestCase):
             cluster_ops.add_cluster(
                 4096, 2097152, 0, 0, 0, 0, 1, 1, 4096, 4096, "ha", False, 256,
                 128, 4, False, False, "",
-                inline_checksum=False, atomic_4k=True)
-
-    def test_create_cluster_refuses_atomic_4k_alone(self):
-        with self.assertRaisesRegex(ValueError, "atomic_4k requires inline_checksum"):
-            cluster_ops.create_cluster(
-                4096, 2097152, "", 0, 0, 0, 0, "eth0", "", 0, "", "", "", 1, 1,
-                4096, 4096, "ha", "kubernetes", False, 256, 256, 128, 4, False,
-                False, "", None, "", "", "tcp", False, "",
                 inline_checksum=False, atomic_4k=True)
 
 

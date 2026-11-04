@@ -5,10 +5,8 @@ import json
 import re
 import sys
 import time
-from pathlib import Path
 from typing import Any
 
-from simplyblock_cli.alerting_config_parser import parse_alerting_config
 from simplyblock_core import cluster_ops, constants, db_controller, utils
 from simplyblock_core import mgmt_node_ops as mgmt_ops
 from simplyblock_core import storage_node_ops as storage_ops
@@ -190,10 +188,6 @@ class CLIWrapperBase:
     def add_sub_command(self, parent_parser, command, help, usage=None):
         return parent_parser.add_parser(command, description=help, help=help, usage=usage)
 
-    def storage_node__deploy(self, sub_command, args):
-        isolate_cores = args.isolate_cores
-        return storage_ops.deploy(args.ifname, isolate_cores)
-
     def storage_node__configure_upgrade(self, sub_command, args):
         storage_ops.upgrade_automated_deployment_config()
 
@@ -280,10 +274,6 @@ class CLIWrapperBase:
             calculate_hp_only=args.calculate_hp_only, number_of_devices=number_of_devices,
             lblk_selection=lblk_selection, jm_percent=int(getattr(args, 'jm_percent', 3) or 3),
             inline_checksum=getattr(args, 'inline_checksum', False))
-
-    def storage_node__deploy_cleaner(self, sub_command, args):
-        storage_ops.deploy_cleaner()
-        return True  # remove once CLI changed to exceptions
 
     def storage_node__clean_devices(self, sub_command, args):
         storage_ops.clean_devices(args.config_path, format_4k=args.format_4k)
@@ -599,9 +589,6 @@ class CLIWrapperBase:
         # The controller returns a dict (the v2 API serializes it through a
         # DTO); rendering it for the terminal is the CLI's job.
         return _format_json(device_controller.get_device_health_info(args.device_id))
-
-    def cluster__create(self, sub_command, args):
-        return self.cluster_create(args)
 
     def cluster__add(self, sub_command, args):
         return self.cluster_add(args)
@@ -1349,12 +1336,8 @@ class CLIWrapperBase:
         cluster_id = args.cluster_id
         cluster_ip = args.cluster_ip
         cluster_secret = args.cluster_secret
-        ifname = args.ifname
         mgmt_ip = args.mgmt_ip
-        mode = args.mode
-        alert_config = parse_alerting_config(
-            Path(args.alerting_config_path) if args.alerting_config_path else None)
-        return mgmt_ops.deploy_mgmt_node(cluster_ip, cluster_id, ifname, mgmt_ip, cluster_secret, mode, alert_config)
+        return mgmt_ops.deploy_mgmt_node(cluster_ip, cluster_id, mgmt_ip, cluster_secret)
 
     def control_plane__list(self, sub_command, args):
         return _format_result(mgmt_ops.list_mgmt_nodes(), json=args.json)
@@ -1963,83 +1946,6 @@ class CLIWrapperBase:
             device_mode=device_mode,
             inline_checksum=inline_checksum,
             atomic_4k=atomic_4k,
-            sync_replication=getattr(args, 'sync_replication', False),
-            page_copy=getattr(args, 'page_copy', False),
-            md_journal=md_journal,
-        )
-
-    def cluster_create(self, args):
-        page_size_in_blocks = args.page_size
-        blk_size = 4096
-        CLI_PASS = args.CLI_PASS
-        cap_warn = args.cap_warn
-        cap_crit = args.cap_crit
-        prov_cap_warn = args.prov_cap_warn
-        prov_cap_crit = args.prov_cap_crit
-        ifname = args.ifname
-        mgmt_ip = args.mgmt_ip
-        distr_ndcs = args.distr_ndcs
-        distr_npcs = args.distr_npcs
-        distr_bs = args.distr_bs
-        distr_chunk_bs = args.distr_chunk_bs
-        ha_type = args.ha_type
-        mode = args.mode
-        log_del_interval = args.log_del_interval
-        metrics_retention_period = args.metrics_retention_period
-        contact_point = args.contact_point
-        grafana_endpoint = args.grafana_endpoint
-        enable_node_affinity = args.enable_node_affinity
-        qpair_count = args.qpair_count
-        client_qpair_count = args.client_qpair_count
-        max_queue_size = args.max_queue_size
-        inflight_io_threshold = args.inflight_io_threshold
-        disable_monitoring = args.disable_monitoring
-        strict_node_anti_affinity = args.strict_node_anti_affinity
-        name = args.name
-        tls_secret = args.tls_secret
-        ingress_host_source = args.ingress_host_source
-        dns_name = args.dns_name
-        is_single_node = args.is_single_node
-        fabric = args.fabric
-        client_data_nic = args.client_data_nic
-        enable_failure_domain = getattr(args, 'enable_failure_domain', False)
-        device_mode = getattr(args, 'device_mode', 'nvme')
-        # Private (developer-mode-only) arg: absent unless sbctl was run with --dev.
-        enable_hang_device = getattr(args, "enable_hang_device", False)
-        inline_checksum = getattr(args, 'inline_checksum', False)
-        atomic_4k = getattr(args, 'atomic_4k', False)
-        md_journal = getattr(args, 'md_journal', True)
-
-        max_fault_tolerance = min(distr_npcs, 2) if distr_npcs >= 1 else 1
-        cluster_vip = getattr(args, 'cluster_vip', '')
-
-        backup_config = None
-        if args.use_backup:
-            with open(args.use_backup, 'r') as f:
-                backup_config = json.load(f)
-
-        return cluster_ops.create_cluster(
-            blk_size, page_size_in_blocks,
-            CLI_PASS, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
-            ifname, mgmt_ip, log_del_interval, metrics_retention_period, contact_point, grafana_endpoint,
-            distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, mode, enable_node_affinity,
-            qpair_count, client_qpair_count, max_queue_size, inflight_io_threshold, disable_monitoring,
-            strict_node_anti_affinity, name, tls_secret, ingress_host_source, dns_name, fabric, is_single_node, client_data_nic,
-            max_fault_tolerance=max_fault_tolerance,
-            backup_config=backup_config,
-            nvmf_base_port=args.nvmf_base_port, rpc_base_port=args.rpc_base_port, snode_api_port=args.snode_api_port,
-            hashicorp_vault_settings=HashicorpVaultSettings({"base_url": args.hashicorp_vault_url}) if args.hashicorp_vault_url else None,
-            enable_failure_domain=enable_failure_domain,
-            device_mode=device_mode,
-            enable_hang_device=enable_hang_device,
-            max_subsys=args.max_subsys or 0,
-            hugepages_mem=utils.parse_size(args.hugepages_mem) if args.hugepages_mem else 0,
-            spdk_vcpu_count=args.vcpu_count or 0,
-            alert_config=parse_alerting_config(
-                Path(args.alerting_config_path) if args.alerting_config_path else None),
-            inline_checksum=inline_checksum,
-            atomic_4k=atomic_4k,
-            cluster_vip=cluster_vip,
             sync_replication=getattr(args, 'sync_replication', False),
             page_copy=getattr(args, 'page_copy', False),
             md_journal=md_journal,

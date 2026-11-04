@@ -135,32 +135,6 @@ class TestClusterCreate:
             _add_cluster("bad-cl", sync_replication=True, **kwargs)
         assert {c.get_id() for c in db.get_clusters()} == before
 
-    @pytest.mark.parametrize("kwargs, message", [
-        ({"ha_type": "single", "is_single_node": False}, "ha_type='ha'"),
-        ({"ha_type": "ha", "is_single_node": True}, "single-node"),
-    ])
-    def test_create_cluster_refuses_before_deploying(self, db, kwargs, message):
-        with patch("simplyblock_core.cluster_ops.scripts") as scripts, \
-                patch("simplyblock_core.cluster_ops.docker") as docker, \
-                patch("simplyblock_core.cluster_ops.mgmt_node_ops") as mgmt, \
-                patch("simplyblock_core.cluster_ops.utils.get_iface_ip", return_value="10.0.0.1"):
-            with pytest.raises(ValueError, match=message):
-                cluster_ops.create_cluster(
-                    blk_size=4096, page_size_in_blocks=2, cli_pass=SecretStr("pass"),
-                    cap_warn=80, cap_crit=90, prov_cap_warn=80, prov_cap_crit=90, ifname="eth0",
-                    mgmt_ip=None, log_del_interval=7, metrics_retention_period=30,
-                    contact_point=None, grafana_endpoint=None, distr_ndcs=1, distr_npcs=1,
-                    distr_bs=4096, distr_chunk_bs=4096, mode="docker", enable_node_affinity=False,
-                    qpair_count=4, client_qpair_count=4, max_queue_size=128,
-                    inflight_io_threshold=64, disable_monitoring=True,
-                    strict_node_anti_affinity=False, name="sync-create", tls_secret=None,
-                    ingress_host_source=None, dns_name=None, fabric="tcp", client_data_nic="",
-                    sync_replication=True, **kwargs)
-        assert scripts.mock_calls == []
-        assert docker.mock_calls == []
-        assert mgmt.mock_calls == []
-        assert db.get_clusters() == []
-
 
 # ---------------------------------------------------------------------------
 # SyncReplicationEvent accessors

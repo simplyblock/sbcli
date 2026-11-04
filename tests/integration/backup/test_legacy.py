@@ -1218,13 +1218,13 @@ class TestCLIBackupArgs(unittest.TestCase):
         self.assertTrue(hasattr(cli, 'init_backup__policy_attach'))
         self.assertTrue(hasattr(cli, 'init_backup__policy_detach'))
 
-    def test_use_backup_on_cluster_create(self):
-        """Verify --use-backup flag is registered on cluster create."""
+    def test_use_backup_on_cluster_add(self):
+        """Verify --use-backup flag is registered on cluster add."""
         import sys
         sys.argv = ['sbcli']
         from simplyblock_cli.cli import CLIWrapper
         cli = CLIWrapper()
-        self.assertTrue(hasattr(cli, 'init_cluster__create'))
+        self.assertTrue(hasattr(cli, 'init_cluster__add'))
 
 
 # ===========================================================================

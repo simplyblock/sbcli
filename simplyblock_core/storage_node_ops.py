@@ -7,10 +7,8 @@ import json
 import logging
 import math
 import os
-import platform
 import re
 import socket
-import subprocess
 import threading
 import time
 import uuid
@@ -37,16 +35,11 @@ from simplyblock_core import (
     constants,
     distr_controller,
     jm_raid,
-    scripts,
     storage_network,
     utils,
 )
 from simplyblock_core import db_controller as db_module
 from simplyblock_core import rpc_client as rpc_client_module
-from simplyblock_core.constants import (
-    LINUX_DRV_MASS_STORAGE_ID,
-    LINUX_DRV_MASS_STORAGE_NVME_TYPE_ID,
-)
 from simplyblock_core.controllers import (
     activation_gate,
     device_controller,
@@ -11328,50 +11321,6 @@ def generate_automated_deployment_config(max_lvol, max_prov, sockets_to_use, nod
     return True
 
 
-def deploy(ifname, isolate_cores=False):
-    if not ifname:
-        ifname = "eth0"
-
-    dev_ip = utils.get_iface_ip(ifname)
-    if not dev_ip:
-        logger.error(f"Error getting interface ip: {ifname}")
-        return False
-    try:
-        nodes_config = utils.load_config(constants.NODES_CONFIG_FILE)
-        logger.info("Config loaded successfully.")
-    except FileNotFoundError:
-        logger.error("Error: Config file not found!")
-        return False
-    except json.JSONDecodeError:
-        logger.error("Error: Config file is not valid JSON!")
-        return False
-    all_isolated_cores = utils.validate_config(nodes_config)
-    if not all_isolated_cores:
-        return False
-    logger.info("Config Validated successfully.")
-
-    logger.info("NVMe SSD devices found on node:")
-    for line in subprocess.check_output(["lspci", "-Dnn"], text=True).splitlines():
-        if f"[{LINUX_DRV_MASS_STORAGE_ID:02x}{LINUX_DRV_MASS_STORAGE_NVME_TYPE_ID:02x}]".lower() in line.lower():
-            logger.info(line.strip())
-
-    logger.info("Installing dependencies...")
-    scripts.install_deps(mode="docker")
-
-    logger.info(f"Node IP: {dev_ip}")
-    scripts.configure_docker(dev_ip)
-
-    start_storage_node_api_container(dev_ip)
-
-    if isolate_cores:
-        utils.generate_realtime_variables_file(all_isolated_cores)
-        utils.run_tuned()
-        arch = platform.machine().lower()
-        if "arm" in arch or "aarch64" in arch:
-            utils.run_grubby(all_isolated_cores)
-    return f"{dev_ip}:5000"
-
-
 def start_storage_node_api_container(node_ip, cluster_ip=None):
     node_docker = docker.DockerClient(base_url=f"tcp://{node_ip}:2375", version="auto", timeout=60 * 5)
     # node_docker = docker.DockerClient(base_url='unix://var/run/docker.sock', version="auto", timeout=60 * 5)
@@ -11421,10 +11370,6 @@ def start_storage_node_api_container(node_ip, cluster_ip=None):
     logger.info(f"Pulling image {constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE}")
     pull_docker_image_with_retry(node_docker, constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
     return True
-
-
-def deploy_cleaner():
-    scripts.deploy_cleaner()
 
 
 def clean_devices(config_path, format=True, force=False, format_4k=False):

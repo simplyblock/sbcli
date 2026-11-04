@@ -7,8 +7,6 @@ Tests cover:
   - add_cluster() raises ValueError when a cluster with the same name exists
   - add_cluster() succeeds (and persists) when the name is unique
   - add_cluster() skips the uniqueness check when name is None
-  - create_cluster() raises ValueError when a cluster with the same name exists
-  - create_cluster() succeeds (and persists) when no clusters exist yet
   - set_name() raises ValueError when another cluster already has the name
   - set_name() allows renaming a cluster to its own current name
   - set_name() persists a unique new name
@@ -18,10 +16,7 @@ Tests cover:
 
 The database layer is NOT mocked: real ``Cluster`` objects are written to
 FoundationDB through ``DBController`` and read back through the same code
-paths ``cluster_ops`` uses. Only side-effects *above* the DB (docker swarm,
-deploy scripts, mgmt-node provisioning, interface-IP lookup) are mocked, and
-only for ``create_cluster`` — whose duplicate-name guard is the sole part
-exercised for the "raises" case, so those mocks never engage there.
+paths ``cluster_ops`` uses.
 """
 
 import threading
@@ -208,73 +203,6 @@ class TestAddClusterDuplicateName:
         matching = [c for c in db.get_clusters() if c.cluster_name == "race-cluster"]
         assert len(matching) == 1
         assert matching[0].get_id() == results[0]
-
-
-# ---------------------------------------------------------------------------
-# create_cluster()
-# ---------------------------------------------------------------------------
-
-def _create_cluster(name):
-    return cluster_ops.create_cluster(
-        blk_size=4096,
-        page_size_in_blocks=2,
-        cli_pass=SecretStr("pass"),
-        cap_warn=80,
-        cap_crit=90,
-        prov_cap_warn=80,
-        prov_cap_crit=90,
-        ifname="eth0",
-        mgmt_ip=None,
-        log_del_interval=7,
-        metrics_retention_period=30,
-        contact_point=None,
-        grafana_endpoint=None,
-        distr_ndcs=1,
-        distr_npcs=1,
-        distr_bs=4096,
-        distr_chunk_bs=4096,
-        ha_type="single",
-        mode="docker",
-        enable_node_affinity=False,
-        qpair_count=4,
-        client_qpair_count=4,
-        max_queue_size=128,
-        inflight_io_threshold=64,
-        disable_monitoring=True,
-        strict_node_anti_affinity=False,
-        name=name,
-        tls_secret=None,
-        ingress_host_source=None,
-        dns_name=None,
-        fabric="tcp",
-        is_single_node=True,
-        client_data_nic="",
-    )
-
-
-class TestCreateClusterDuplicateName:
-
-    def test_raises_when_name_already_exists(self, db):
-        # The duplicate-name guard fires before any docker/deploy work, so no
-        # infra mocking is needed — the ValueError is raised straight away.
-        _seed_cluster(db, uuid="cluster-1", name="first-cluster")
-
-        with pytest.raises(ValueError, match="first-cluster"):
-            _create_cluster("first-cluster")
-
-    def test_succeeds_and_persists_when_no_clusters_exist(self, db):
-        # No pre-existing cluster → the guard passes and create_cluster runs
-        # its full docker deploy flow. Mock only the side-effects above the DB
-        # (docker swarm, deploy scripts, mgmt-node provisioning, iface lookup);
-        # the cluster is still written to and read back from the real FDB.
-        with patch("simplyblock_core.cluster_ops.scripts"), \
-             patch("simplyblock_core.cluster_ops.docker"), \
-             patch("simplyblock_core.cluster_ops.mgmt_node_ops"), \
-             patch("simplyblock_core.cluster_ops.utils.get_iface_ip", return_value="10.0.0.1"):
-            new_id = _create_cluster("brand-new")
-
-        stored = db.get_cluster_by_id(new_id)
-        assert stored.cluster_name == "brand-new"
 
 
 # ---------------------------------------------------------------------------

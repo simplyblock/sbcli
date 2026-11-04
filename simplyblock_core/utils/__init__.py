@@ -1109,67 +1109,6 @@ def get_next_dev_port(cluster_id):
     return get_next_nvmf_port(cluster_id)
 
 
-def generate_realtime_variables_file(isolated_cores, realtime_variables_file_path="/etc/tuned/realtime-variables.conf"):
-    """
-    Generate or update the realtime-variables.conf file.
-    Args:
-        isolated_cores (set): set of isolated cores to write.
-        file_path (str): Path to the file.
-    """
-    # Ensure the directory exists
-    core_list = ",".join(map(str, isolated_cores))
-    tuned_dir = "/etc/tuned/realtime"
-    os.makedirs(tuned_dir, exist_ok=True)
-
-    # Create tuned.conf
-    tuned_conf_content = f"""[main]
-include=latency-performance
-[bootloader]
-cmdline_add=isolcpus={core_list} nohz_full={core_list} rcu_nocbs={core_list}
-"""
-
-    tuned_conf_path = f"{tuned_dir}/tuned.conf"
-    with open(tuned_conf_path, "w") as f:
-        f.write(tuned_conf_content)
-    content = f"isolated_cores={core_list}\n"
-    try:
-        subprocess.run(
-            ["sudo", "tee", realtime_variables_file_path],
-            input=content.encode("utf-8"),
-            stdout=subprocess.DEVNULL,  # Suppress standard output
-            stderr=subprocess.PIPE,  # Capture standard error
-            check=True  # Raise an error if command fails
-        )
-        logger.info(f"Successfully wrote to {realtime_variables_file_path}")
-    except subprocess.CalledProcessError as e:
-        logger.error(f"Error writing to file: {e}")
-
-
-def run_tuned():
-    try:
-        subprocess.run(
-            ["sudo", "tuned-adm", "profile", "realtime"],
-            check=True
-        )
-        logger.info("Successfully run the tuned adm profile")
-    except subprocess.CalledProcessError:
-        logger.warning("Error running the tuned adm profile")
-
-
-def run_grubby(core_list):
-    isolated_cores = ",".join(map(str, core_list))
-    core_args = f"isolcpus={isolated_cores} nohz_full={isolated_cores} rcu_nocbs={isolated_cores}"
-
-    try:
-        subprocess.run(
-            ["sudo", "grubby", "--update-kernel=All", f"--args={core_args}"],
-            check=True
-        )
-        logger.info("Successfully run the grubby command")
-    except subprocess.CalledProcessError:
-        logger.warning("Error running the grubby command")
-
-
 def parse_thread_siblings():
     """Parse the thread siblings from the sysfs topology."""
     siblings = {}
@@ -4908,32 +4847,3 @@ def dump_json(data, unwrap_secrets: bool = False, **kwargs):
     return json.dumps(data, cls=_SecretAwareEncoder, unwrap_secrets=unwrap_secrets, **kwargs)
 
 
-def query_yes_no(question, default="yes")-> bool:
-    """Ask a yes/no question via raw_input() and return their answer.
-
-    "question" is a string that is presented to the user.
-    "default" is the presumed answer if the user just hits <Enter>.
-            It must be "yes" (the default), "no" or None (meaning
-            an answer is required of the user).
-
-    The "answer" return value is True for "yes" or False for "no".
-    """
-    valid = {"yes": True, "y": True, "ye": True, "no": False, "n": False}
-    if default is None:
-        prompt = " [y/n] "
-    elif default == "yes":
-        prompt = " [Y/n] "
-    elif default == "no":
-        prompt = " [y/N] "
-    else:
-        raise ValueError("invalid default answer: '%s'" % default)
-
-    while True:
-        sys.stdout.write(question + prompt)
-        choice = str(input()).lower()
-        if default is not None and choice == "":
-            return valid[default]
-        elif choice in valid:
-            return valid[choice]
-        else:
-            sys.stdout.write("Please respond with 'yes' or 'no' " "(or 'y' or 'n').\n")

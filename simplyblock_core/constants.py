@@ -33,7 +33,6 @@ KVD_DB_BACKUP_PATH = "file:///etc/foundationdb/backup"
 SPK_DIR = '/home/ec2-user/spdk'
 LOG_LEVEL = logging.INFO
 LOG_WEB_LEVEL = logging.INFO
-LOG_WEB_DEBUG = True if LOG_WEB_LEVEL == logging.DEBUG else False
 
 INSTALL_DIR = os.path.dirname(os.path.realpath(__file__))
 

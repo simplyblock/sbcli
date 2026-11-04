@@ -1,4 +1,4 @@
-"""The CLI forwards --sync-replication (cluster create / add) and --site (sn add-node).
+"""The CLI forwards --sync-replication (cluster add) and --site (sn add-node).
 
 Driven through the generated ``CLIWrapper.run()`` so the dispatch, including the
 defaults it fills in for developer-only arguments, is the real one.
@@ -16,7 +16,7 @@ CLUSTER_ID = "2c1e0a3b-77b2-4a5e-9d0e-6f3b8c2a1d55"
 
 def _run(argv, module_attr, return_value="ok"):
     ops = MagicMock()
-    for name in ("create_cluster", "add_cluster", "add_node"):
+    for name in ("add_cluster", "add_node"):
         getattr(ops, name).return_value = return_value
     with patch.object(sys, "argv", ["sbctl", *argv]), \
             patch.object(clibase, module_attr, ops), \
@@ -25,11 +25,10 @@ def _run(argv, module_attr, return_value="ok"):
     return ops
 
 
-def _cluster_call(subcommand, argv):
-    ops = _run(["cluster", subcommand, *argv], "cluster_ops")
-    target = ops.create_cluster if subcommand == "create" else ops.add_cluster
-    target.assert_called_once()
-    return target.call_args
+def _cluster_call(argv):
+    ops = _run(["cluster", "add", *argv], "cluster_ops")
+    ops.add_cluster.assert_called_once()
+    return ops.add_cluster.call_args
 
 
 def _add_node_call(argv):
@@ -38,16 +37,13 @@ def _add_node_call(argv):
     return ops.add_node.call_args
 
 
-@pytest.mark.parametrize("subcommand, argv, expected", [
-    pytest.param("create", ["--ha-type", "ha", "--sync-replication"], True,
-                 id="cluster_create_forwards_sync_replication"),
-    pytest.param("create", ["--ha-type", "ha"], False, id="cluster_create_defaults_to_no_sync_replication"),
-    pytest.param("add", ["--ha-type", "ha", "--sync-replication"], True,
+@pytest.mark.parametrize("argv, expected", [
+    pytest.param(["--ha-type", "ha", "--sync-replication"], True,
                  id="cluster_add_forwards_sync_replication"),
-    pytest.param("add", ["--ha-type", "ha"], False, id="cluster_add_defaults_to_no_sync_replication"),
+    pytest.param(["--ha-type", "ha"], False, id="cluster_add_defaults_to_no_sync_replication"),
 ])
-def test_cluster_sync_replication_flag(subcommand, argv, expected):
-    call = _cluster_call(subcommand, argv)
+def test_cluster_sync_replication_flag(argv, expected):
+    call = _cluster_call(argv)
     assert call.kwargs["sync_replication"] is expected
 
 
