@@ -410,7 +410,7 @@ SIMPLY_BLOCK_DOCKER_IMAGE = get_config_var(
 SIMPLY_BLOCK_CLI_NAME = get_config_var(
         "SIMPLY_BLOCK_COMMAND_NAME", "sbcli")
 SIMPLY_BLOCK_SPDK_ULTRA_IMAGE = get_config_var(
-        "SIMPLY_BLOCK_SPDK_ULTRA_IMAGE", "public.ecr.aws/simply-block/ultra:main-latest")
+        "SIMPLY_BLOCK_SPDK_ULTRA_IMAGE", "registry.simplyblock.ai/ultra:main-latest")
 SIMPLY_BLOCK_VERSION = __version__
 
 GELF_PORT = 12202
