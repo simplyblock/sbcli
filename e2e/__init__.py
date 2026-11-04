@@ -1046,6 +1046,16 @@ def get_stress_tests():
         LblkResilientStressK8s,
         LblkOutageMatrixDocker,
         LblkOutageMatrixK8s,
+        # Track A: the same k8s outage loops on a shared pNFS claim. These
+        # have to be HERE and not only in get_pnfs_stress_tests(), because
+        # stress.py resolves --testname against get_stress_tests() +
+        # get_backup_stress_tests() and nothing else. Registering them only
+        # in ALL_TESTS and their own group is what made run 41919726297 die
+        # with "Test 'PnfsRwxRapidNoGapK8s' not found" after a 75-minute
+        # cluster bring-up.
+        PnfsRwxFailoverK8s,
+        PnfsRwxRapidNoGapK8s,
+        PnfsRwxResilientK8s,
         ProductLimits_Docker,
         ProductLimits_K8s,
         ProductLimits_70TiB_Docker,

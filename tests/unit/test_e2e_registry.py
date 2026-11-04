@@ -107,12 +107,95 @@ def test_imported_group_classes_resolve(source):
     A name that is listed but never imported raises NameError at import
     time for the whole suite, not just for that group.
     """
-    imported = set(re.findall(r"^\s+(\w+),\s*$", source, re.M))
+    imported = set(re.findall(r"^\s+(\w+),\s*$", source, re.MULTILINE))
     imported |= {m.group(1) for m in
-                 re.finditer(r"^from [\w.]+ import (\w+)$", source, re.M)}
+                 re.finditer(r"^from [\w.]+ import (\w+)$", source, re.MULTILINE)}
     unknown = sorted({
         n for names in _group_functions(source).values() for n in names
         if n not in imported
     })
     assert not unknown, (
         f"a group returns these but nothing imports them: {unknown}")
+
+
+def _names_in_function(source, func_name):
+    """Every Name in every list/tuple literal inside *func_name*."""
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == func_name:
+            out = set()
+            for sub in ast.walk(node):
+                if isinstance(sub, (ast.List, ast.Tuple)):
+                    out |= {e.id for e in sub.elts if isinstance(e, ast.Name)}
+            return out
+    return set()
+
+
+def _e2e_py_group_functions():
+    """Group functions e2e.py dispatches, read from its keyword map.
+
+    A group reachable this way does not need to be in get_stress_tests():
+    e2e.py resolves it from its own map and the class from ALL_TESTS.
+    migration-stress and replication-stress are exactly that case, so a
+    guard that ignores this flags two groups that are correctly registered.
+    """
+    e2e_main = E2E_INIT.parent / "e2e.py"
+    if not e2e_main.is_file():
+        pytest.skip(f"{e2e_main} not present")
+    tree = ast.parse(e2e_main.read_text(encoding="utf-8"))
+    names = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Dict):
+            for v in node.values:
+                if isinstance(v, ast.Name) and v.id.startswith("get_"):
+                    names.add(v.id)
+    return names
+
+
+def test_stress_classes_are_reachable_from_stress_py(source):
+    """A stress.py-dispatched class must be in the registry stress.py reads.
+
+    stress.py resolves --testname against
+
+        get_stress_tests() + get_backup_stress_tests()
+
+    and nothing else -- not ALL_TESTS, not the class's own group. So a soak
+    registered in ALL_TESTS and in its own group is still "not found" when
+    the stress workflow dispatches it.
+
+    Not hypothetical: run 41919726297 spent 75 minutes building a cluster
+    and then died on
+
+        Test 'PnfsRwxRapidNoGapK8s' not found.
+
+    because the three Track A classes were in ALL_TESTS and in
+    get_pnfs_stress_tests() but not in get_stress_tests().
+
+    Groups e2e.py dispatches from its own keyword map are exempt, because
+    that runner resolves the class from ALL_TESTS instead.
+    """
+    groups = _group_functions(source)
+    # Not _group_functions(): it only reads a literal `return [...]`, and
+    # get_stress_tests() assigns `tests = [...]` and returns the name. Read
+    # every list literal in the function body instead, or the reachable set
+    # comes back empty and the guard flags everything.
+    reachable = _names_in_function(source, "get_stress_tests")
+    reachable |= _names_in_function(source, "get_backup_stress_tests")
+    by_e2e_py = _e2e_py_group_functions()
+
+    missing = []
+    for name, classes in groups.items():
+        if not name.endswith("_stress_tests"):
+            continue
+        if name in ("get_stress_tests", "get_backup_stress_tests"):
+            continue
+        if name in by_e2e_py:
+            continue
+        for cls in classes:
+            if cls not in reachable:
+                missing.append(f"{cls} (listed only in {name}())")
+
+    assert not missing, (
+        "these stress classes cannot be dispatched by stress.py, which "
+        "reads get_stress_tests() + get_backup_stress_tests() and nothing "
+        "else: " + ", ".join(sorted(missing)))
