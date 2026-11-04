@@ -1739,6 +1739,28 @@ jobs:
             export NODE_AGENT_IMAGE="${SB_REPO}:${SB_TAG}"
             export SPDK_PROXY_IMAGE="${SB_REPO}:${SB_TAG}"
           fi
+          # The spdk_image input used to stop here: it was echoed into the run
+          # summary and never exported, so shape_images() saw SPDK_IMAGE empty,
+          # wrote no spec.images.spdk, and verify_spdk_image() took its
+          # "nothing requested" branch and only listed what came up. Every run
+          # silently got constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE whatever the
+          # dispatch asked for -- run 41820326906 asked for
+          # simplyblock/spdk:main-latest and got ultra:main-latest, which is
+          # how it ended up on an SPDK with no md_journal RPC parameter while
+          # the control plane had been sending one since 2026-11-03.
+          #
+          # Qualified first, because the CRD's image pattern admits only
+          # quay.io/simplyblock-io, docker.io/simplyblock and
+          # public.ecr.aws/simply-block. This workflow's own default is the
+          # bare "simplyblock/spdk:main-latest", so exporting the input
+          # unchanged would make shape_images() refuse every default dispatch.
+          if [ -n "${SPDK_IMAGE}" ]; then
+            case "${SPDK_IMAGE}" in
+              */*/*) ;;
+              simplyblock/*) SPDK_IMAGE="docker.io/${SPDK_IMAGE}" ;;
+            esac
+            export SPDK_IMAGE
+          fi
           # One field, two operations: the operator resolves it to a 4K reformat
           # on an NVMe cluster and a wipefs on a block one.
           export FORCE_DRIVE_FORMAT="${FORCE_FORMAT_4K}"
