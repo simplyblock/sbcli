@@ -25,8 +25,9 @@ BATCH_MIGRATE
     Main calls bdev_lvol_batch_final_step with all lvols ordered by ns_id.
     batch_result is set to True on success, False on failure.
 CLEANUP_SOURCE
-    Workers delete their own source bdevs/snaps.  Main performs the ANA flip
-    and source subsystem teardown, then waits for cleanup_source_done.
+    Workers delete their own source bdevs/snaps.  Main performs the ANA flip,
+    waits for cleanup_source_done, then deletes the snapshots workers deferred
+    (source_snaps_deferred) and tears down the source subsystem.
 CLEANUP_TARGET  (failure / cancel path)
     Main signals batch_result=False; workers go to CLEANUP_TARGET and delete
     their target snaps.  Main deletes the target subsystem.
@@ -116,6 +117,15 @@ class LVolMigrationGroup(BaseModel):
 
     # migration_ids that have completed CLEANUP_SOURCE.
     cleanup_source_done: list[str] = default_factory(list)
+
+    # snap_uuid → source composite bdev name ("<lvstore>/<bdev>") of each
+    # snapshot a worker could not delete from the source during its own
+    # CLEANUP_SOURCE only because group siblings still cloned from it there.
+    # The owning worker runs before those siblings have moved, so the
+    # orchestrator deletes these once, after the cleanup_source barrier.
+    # The name is recorded because by then _apply_migration_to_db has already
+    # repointed the snapshot record at the target.
+    source_snaps_deferred: dict = default_factory(dict)
 
     # Written by the main orchestrator after bdev_lvol_batch_final_step.
     # None = call not yet made; True = success; False = failure.
