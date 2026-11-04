@@ -37,13 +37,16 @@ needs_dash = pytest.mark.skipif(
     os.name != "posix" or not shutil.which("dash"), reason="dash is not installed")
 
 
-def _script(hostname="worker-1"):
+def _job(hostname="worker-1"):
     env = Environment(loader=PackageLoader("simplyblock_web", "templates"), trim_blocks=True, lstrip_blocks=True)
-    job = yaml.safe_load(env.get_template("oc_storage_cpu_topology.yaml.j2").render(
+    return yaml.safe_load(env.get_template("oc_storage_cpu_topology.yaml.j2").render(
         CORE_JOBNAME="snode-core-" + hostname, NAMESPACE="simplyblock", CLUSTER_ID="ac85c3",
         HOSTNAME=hostname, MCP_MAX_UNAVAILABLE=4, RESERVED_SYSTEM_CPUS="0-1", NSOCKET=0,
         OPENSHIFT_MCP="worker"))
-    container = job["spec"]["template"]["spec"]["containers"][0]
+
+
+def _script(hostname="worker-1"):
+    container = _job(hostname)["spec"]["template"]["spec"]["containers"][0]
     assert container["command"] == ["/bin/sh", "-c"]
     return container["args"][0]
 
@@ -208,7 +211,9 @@ if verb == "get":
         if name not in s["kcs"]:
             fail('Error from server (NotFound): kubeletconfigs.machineconfiguration.openshift.io "%s" not found' % name)
         failed = s["reject_kubeletconfig"]
-        if "Failure" in jsonpath:
+        if "reservedSystemCPUs" in jsonpath:
+            print(s["kcs"][name].get("reservedSystemCPUs", ""))
+        elif "Failure" in jsonpath:
             print("True" if failed else "")
         elif "conditions" in jsonpath:
             print(json.dumps([{"type": "Failure" if failed else "Success", "status": "True",
@@ -232,6 +237,13 @@ elif verb in ("create", "apply"):
         if name not in s["mcs"]:
             s["mcs"].append(name)
     elif kind == "KubeletConfig":
+        race = s.get("race_kc")
+        if race and race["name"] == name and verb == "create":
+            # Another master's job created it between this job's lookup and
+            # its create.
+            s["kcs"][name] = race["settings"]
+            s["master_kcs"].append(name)
+            s["race_kc"] = None
         if name in s["kcs"] and verb == "create":
             fail('Error from server (AlreadyExists): kubeletconfigs.machineconfiguration.openshift.io "%s" already exists' % name)
         new = name not in s["kcs"]
@@ -282,7 +294,7 @@ save()
 def _state(**overrides):
     state = {"pools": {}, "mcs": [], "kcs": {}, "render_after": 2, "generated_suffix": "", "masters": [],
              "kc_label": "storage-cpumanager-ac85c3", "kc_name": "storage-kubelet-ac85c3",
-             "master_ours_name": "99-master-generated-kubelet", "master_kcs": [],
+             "master_ours_name": "99-master-generated-kubelet", "master_kcs": [], "race_kc": None,
              "reject_kubeletconfig": False, "fail_get_pool": 0, "fail_get_hosts": 0}
     state.update(overrides)
     return state
@@ -309,7 +321,8 @@ def _run(tmp_path, state, hostname="worker-1", marker=False):
         marker_path.touch()
     script = (_script(hostname)
               .replace("/var/simplyblock/.cpu_topology_applied", str(marker_path))
-              .replace("/tmp/mcp.yaml", str(tmp_path / "mcp.yaml")))
+              .replace("/tmp/mcp.yaml", str(tmp_path / "mcp.yaml"))
+              .replace("/tmp/mcp-master-kc.yaml", str(tmp_path / "mcp-master-kc.yaml")))
     env = dict(os.environ, PATH=str(bin_dir) + os.pathsep + os.environ["PATH"], FAKE_STATE=str(state_dir))
     proc = subprocess.run(["dash", "-c", script], capture_output=True, text=True, env=env)
     final = json.loads((state_dir / "state.json").read_text())
@@ -515,7 +528,8 @@ def test_a_foreign_kubelet_config_on_the_masters_is_left_alone(tmp_path):
 @needs_dash
 def test_a_rerun_on_a_master_finds_its_kubelet_config_and_the_render(tmp_path):
     proc, state, calls = _run(tmp_path, _state(
-        masters=["master-3"], kcs={KC: {}, MASTER_KC: {}}, master_kcs=[MASTER_KC], mcs=[MC], render_after=0,
+        masters=["master-3"], kcs={KC: {}, MASTER_KC: {"reservedSystemCPUs": "0-1"}}, master_kcs=[MASTER_KC],
+        mcs=[MC], render_after=0,
         pools={"master": _master_pool(generated=[["99-master-generated-kubelet", MASTER_KC]])}),
         hostname="master-3")
     assert proc.returncode == 0, proc.stdout + proc.stderr
@@ -530,3 +544,33 @@ def test_a_worker_leaves_the_master_pool_alone(tmp_path):
     assert MASTER_KC not in state["kcs"]
     assert state["pools"]["master"]["labels"] == {MASTER_POOL_LABEL: ""}
     assert state["pools"][POOL]["values"] == ["worker-1"]
+
+
+@needs_dash
+def test_a_master_whose_reserved_cpus_differ_stops_the_job(tmp_path):
+    """One reserved set applies to every master. A master whose own differs
+    stops, rather than run its control plane and SPDK on another host's
+    layout."""
+    proc, state, calls = _run(tmp_path, _state(
+        masters=["master-3"], kcs={MASTER_KC: {"reservedSystemCPUs": "0-3"}}, master_kcs=[MASTER_KC],
+        pools={"master": _master_pool()}), hostname="master-3")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "0-3" in proc.stdout and "0-1" in proc.stdout
+    assert state["kcs"][MASTER_KC] == {"reservedSystemCPUs": "0-3"}
+
+
+@needs_dash
+def test_a_master_kubelet_config_a_concurrent_master_created_is_reused(tmp_path):
+    """Two masters' jobs can both find no master KubeletConfig. The second
+    create fails, and the job goes on with the one the first created."""
+    proc, state, calls = _run(tmp_path, _state(
+        masters=["master-3"], race_kc={"name": MASTER_KC, "settings": {"reservedSystemCPUs": "0-1"}},
+        pools={"master": _master_pool()}), hostname="master-3")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "MCP master has rendered 99-master-generated-kubelet" in proc.stdout
+
+
+def test_a_refusal_fails_the_job_at_once():
+    """A refusal is final: retried in place it only crash-loops until the
+    agent's wait times out, with the reason in a dead pod's log."""
+    assert _job()["spec"]["backoffLimit"] == 0
