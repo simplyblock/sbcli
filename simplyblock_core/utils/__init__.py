@@ -103,11 +103,6 @@ def get_system_id():
     return out
 
 
-def get_hostname():
-    out, _, _ = shell_utils.run_command("hostname -s")
-    return out
-
-
 def get_ips():
     out, _, _ = shell_utils.run_command("hostname -I")
     return out

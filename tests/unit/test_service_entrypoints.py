@@ -106,7 +106,7 @@ class TestPathInvocationContract(unittest.TestCase):
         "snapshot_replication", "spdk_http_proxy_server", "storage_node_monitor",
         "tasks_cluster_status", "tasks_runner_backup", "backup_merge_service",
         "tasks_runner_batch_migration", "tasks_runner_cluster_expand",
-        "tasks_runner_failed_migration", "tasks_runner_fdb_backup",
+        "tasks_runner_failed_migration",
         "tasks_runner_jc_comp", "tasks_runner_lvol_migration",
         "tasks_runner_migration", "tasks_runner_new_dev_migration",
         "tasks_runner_node_add", "tasks_runner_node_removal",
@@ -178,10 +178,10 @@ class TestTaskRunnerDispatcher(unittest.TestCase):
 
     def test_serves_the_named_spec(self):
         with mock.patch.object(task_runners, "serve") as serve, \
-                mock.patch.object(sys, "argv", ["simplyblock-task-runner", "tasks-runner-fdb-backup"]):
+                mock.patch.object(sys, "argv", ["simplyblock-task-runner", "tasks-runner-jc-comp"]):
             task_runners.main()
 
-        import simplyblock_core.services.tasks_runner_fdb_backup as runner
+        import simplyblock_core.services.tasks_runner_jc_comp as runner
         serve.assert_called_once_with(runner.SPEC)
 
     def test_a_runner_not_on_the_driver_is_started_through_its_own_main(self):

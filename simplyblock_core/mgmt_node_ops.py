@@ -8,7 +8,6 @@ import requests
 from kubernetes import client as k8s_client
 from pydantic import SecretStr
 
-import docker
 from simplyblock_core import constants, utils
 from simplyblock_core.controllers import mgmt_events
 from simplyblock_core.db_controller import DBController
@@ -112,8 +111,6 @@ def deploy_mgmt_node(cluster_ip, cluster_id, mgmt_ip, cluster_secret: SecretStr)
 def add_mgmt_node(mgmt_ip, mode, cluster_id=None):
     db_controller = DBController()
     hostname = ""
-    if mode == "docker":
-        hostname = utils.get_hostname()
 
     for node in db_controller.get_mgmt_nodes():
         if node.mgmt_ip == mgmt_ip:
@@ -165,14 +162,6 @@ def remove_mgmt_node(uuid):
 
     logging.info("Removing mgmt node")
     snode.remove(db_controller.kv_store)
-    if snode.mode == "docker":
-        logger.info("Leaving swarm...")
-        node_docker = docker.DockerClient(base_url=f"tcp://{snode.docker_ip_port}", version="auto")
-        node_docker.swarm.leave(force=True)
-
-    elif snode.mode == "kubernetes":
-        utils.load_kube_config_with_fallback()
-        
     mgmt_events.mgmt_remove(snode)
     logging.info("done")
 

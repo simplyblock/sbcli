@@ -5,8 +5,6 @@ from datetime import datetime, timedelta
 from prometheus_api_client import PrometheusConnect
 
 from simplyblock_core import constants
-from simplyblock_core.db_controller import DBController
-from simplyblock_core.models.mgmt_node import MgmtNode
 
 logger = logging.getLogger()
 
@@ -19,22 +17,7 @@ class PromClientException(Exception):
 class PromClient:
 
     def __init__(self, cluster_id):
-        db_controller = DBController()
-        cluster_ip = None
-        prometheus_port = None
-        cluster = db_controller.get_cluster_by_id(cluster_id)
-        if cluster.mode == "docker":
-            for node in db_controller.get_mgmt_nodes():
-                if node.cluster_id == cluster_id and node.status == MgmtNode.STATUS_ONLINE:
-                    cluster_ip = node.mgmt_ip
-                    prometheus_port = "9090"
-                    break
-            if cluster_ip is None:
-                raise PromClientException("Cluster has no online mgmt nodes")
-        else:
-            cluster_ip = constants.PROMETHEUS_STATEFULSET_NAME
-            prometheus_port = constants.PROMETHEUS_STATEFULSET_PORT
-        self.ip_address = f"{cluster_ip}:{prometheus_port}"
+        self.ip_address = f"{constants.PROMETHEUS_STATEFULSET_NAME}:{constants.PROMETHEUS_STATEFULSET_PORT}"
         self.url = 'http://%s/' % self.ip_address
         self.client = PrometheusConnect(url=self.url, disable_ssl=True)
 
@@ -152,29 +135,6 @@ class PromClient:
             mt_values_list = [v[1] for v in mt_values]
             data_out.append({"key": metric_key,"metric": mt_info, "values": mt_values_list})
         return data_out
-
-    def get_node_filesystem_metrics(self, history=None):
-        params = {
-            "mountpoint": "/",
-             "job": "node",
-             "fstype!": "rootfs",
-        }
-        metrics_lst = ["avail_bytes", "size_bytes"]
-        node_stats = {}
-        try:
-            for metric in metrics_lst:
-                params[metric] = ""
-                response_list = self.get_raw_metric(f"node_filesystem_{metric}", params, history)
-                for m_data in response_list:
-                    node_name = m_data["metric"]["instance"]
-                    if node_name not in node_stats:
-                        node_stats[node_name] = {metric: m_data["values"]}
-                    else:
-                        node_stats[node_name][metric] = m_data["values"]
-        except Exception as e:
-            logger.error(f"Error getting node filesystem metrics: {e}")
-            return []
-        return node_stats
 
     def get_api_metrics(self, history=None):
         params = {

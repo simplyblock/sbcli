@@ -1,5 +1,4 @@
 
-import os
 import time
 from datetime import datetime
 
@@ -14,25 +13,7 @@ logger = utils.get_logger(__name__)
 db = db_controller.DBController()
 
 
-# ----- Backend Abstractions -----
-
-class NodeBackend:
-    def get_reachable_nodes(self) -> list[str]:
-        raise NotImplementedError
-
-
-class DockerNodeBackend(NodeBackend):
-    def get_reachable_nodes(self) -> list[str]:
-        client = utils.get_docker_client()
-        reachable = []
-        for node in client.nodes.list(filters={"role": "manager"}):
-            addr = node.attrs["ManagerStatus"]["Addr"].split(":")[0]
-            if node.attrs["ManagerStatus"]["Reachability"] == "reachable":
-                reachable.append(addr)
-        return reachable
-
-
-class K8sNodeBackend(NodeBackend):
+class K8sNodeBackend:
     def __init__(self):
         from kubernetes import client, config
         try:
@@ -88,17 +69,7 @@ def set_node_offline(node):
 def main():
     logger.info("Starting Mgmt node monitor")
 
-    backend_type = os.getenv("BACKEND_TYPE", "docker").lower()
-    backend: NodeBackend
-
-    if backend_type == "docker":
-        backend = DockerNodeBackend()
-    elif backend_type == "k8s":
-        backend = K8sNodeBackend()
-    else:
-        raise ValueError(f"Unsupported BACKEND_TYPE '{backend_type}', use 'docker' or 'k8s'")
-
-    logger.info(f"Using backend: {backend_type}")
+    backend = K8sNodeBackend()
 
     while True:
         try:

@@ -29,7 +29,6 @@ GiB=1024*1024*1024
 KVD_DB_VERSION = 730
 KVD_DB_FILE_PATH = os.getenv('FDB_CLUSTER_FILE', '/etc/foundationdb/fdb.cluster')
 KVD_DB_TIMEOUT_MS = 10000
-KVD_DB_BACKUP_PATH = "file:///etc/foundationdb/backup"
 SPK_DIR = '/home/ec2-user/spdk'
 LOG_LEVEL = logging.INFO
 LOG_WEB_LEVEL = logging.INFO
@@ -892,8 +891,6 @@ LVO_MAX_NAMESPACES_PER_SUBSYS=32
 
 CR_GROUP = "storage.simplyblock.io"
 CR_VERSION  = "v1alpha2"
-
-MONITORING_GRAFANA_SERVICE = "monitoring_grafana"
 
 GRAFANA_K8S_ENDPOINT = "http://simplyblock-grafana:3000"
 GRAYLOG_K8S_ENDPOINT = "http://simplyblock-graylog:9000"

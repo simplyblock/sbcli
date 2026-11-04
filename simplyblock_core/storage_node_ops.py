@@ -4418,11 +4418,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         if cluster.cluster_vip:
             cluster_ip = cluster.cluster_vip
         else:
-            if cluster.mode == "docker":
-                cluster_docker = utils.get_docker_client(cluster_id)
-                cluster_ip = cluster_docker.info()["Swarm"]["NodeAddr"]
-            else:
-                cluster_ip = utils.get_k8s_node_ip()
+            cluster_ip = utils.get_k8s_node_ip()
 
         rpc_user, rpc_pass = utils.generate_rpc_user_and_pass()
         mgmt_info = utils.get_mgmt_ip(node_info, iface_name, networks, pod_network)
@@ -8639,12 +8635,11 @@ def _fail_and_migrate_node_devices(removed_node: StorageNode):
 
 
 def _finalize_node_removal(removed_node: StorageNode):
-    """Best-effort host cleanup before the node is flipped to REMOVED: leave the
-    docker swarm and wipe GPT partitions. Mirrors the tail of the legacy
+    """Best-effort host cleanup before the node is flipped to REMOVED: stop
+    SPDK and wipe GPT partitions. Mirrors the tail of the legacy
     offline-removal path."""
     db_controller = DBController()
     removed_node = db_controller.get_storage_node_by_id(removed_node.get_id())
-    cluster = db_controller.get_cluster_by_id(removed_node.cluster_id)
 
     # Case A/B (_teardown_replicas_of_primary, _relocate_replicas_hosted_on)
     # already cleared this node's forward/back-reference fields as they
@@ -8659,16 +8654,6 @@ def _finalize_node_removal(removed_node: StorageNode):
     if removed_node.lvstore_ports:
         removed_node.lvstore_ports = {}
         removed_node.write_to_db()
-
-    if cluster.mode == "docker":
-        logger.info("Leaving swarm...")
-        try:
-            cluster_docker = utils.get_docker_client(removed_node.cluster_id)
-            for node in cluster_docker.nodes.list():
-                if node.attrs["Status"] and removed_node.mgmt_ip in node.attrs["Status"]["Addr"]:
-                    node.remove(force=True)
-        except Exception:
-            pass
 
     try:
         if health_controller._check_node_api(removed_node):
@@ -9405,11 +9390,7 @@ def _restart_storage_node_impl(
     if cluster.cluster_vip:
         cluster_ip = cluster.cluster_vip
     else:
-        if cluster.mode == "docker":
-            cluster_docker = utils.get_docker_client(snode.cluster_id)
-            cluster_ip = cluster_docker.info()["Swarm"]["NodeAddr"]
-        else:
-            cluster_ip = utils.get_k8s_node_ip()
+        cluster_ip = utils.get_k8s_node_ip()
 
     total_mem = minimum_hp_memory
     for n in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
