@@ -542,8 +542,38 @@ REPL_CUTOVER_PROCEED_TIMEOUT_SEC = 120
 # stops.
 REPL_CUTOVER_CONVERGE_TARGET_SEC = 2.0
 # Safety bound: a volume written faster than it replicates never converges, so
-# stop and freeze rather than looping forever.
+# stop and freeze rather than looping forever -- but only when the freeze can
+# succeed (REPL_CUTOVER_FREEZE_MAX_ROUND_SEC); otherwise rounds continue until
+# shrink_deadline.
 REPL_CUTOVER_MAX_SHRINK_ROUNDS = 12
+# Hard limit SPDK puts on bdev_lvol_transfer_final_step: the final step's
+# terminate_timeout is armed when it starts and fails the transfer ("Task
+# transfer terminate timeout ...", transfer_state 'Failed') once it passes.
+# It is a compile-time constant in the SPDK fork
+# (SPDK_LVOL_TRANSFER_TERMINATE_TIMEOUT, lib/lvol/lvol.c), NOT an RPC
+# parameter: keep this mirror in sync with it.
+REPL_CUTOVER_FINAL_STEP_LIMIT_SEC = 12
+# Freeze only when the last convergence round took at most this fraction of the
+# final-step limit. The last round's duration is the best available estimate of
+# how long the frozen final delta takes to copy, but the final delta also
+# carries everything written between that round and the freeze (clone build,
+# preconnect gate), and the final step does metadata work of its own. Half the
+# limit (6s) leaves that margin and also stays inside the client's 8s
+# fast_io_fail_tmo. bf12 2026-11-03: rounds of 16-30s froze "anyway" and every
+# final step failed at the 12s limit.
+REPL_CUTOVER_FREEZE_SAFE_FRACTION = 0.5
+REPL_CUTOVER_FREEZE_MAX_ROUND_SEC = (REPL_CUTOVER_FINAL_STEP_LIMIT_SEC
+                                     * REPL_CUTOVER_FREEZE_SAFE_FRACTION)
+# A shrink deadline reached without a round short enough to freeze abandons
+# the endgame instead of freezing into a certain failure: the lvstore claim is
+# released, the volume replicates on its ordinary cadence, and the endgame is
+# retried after this long (the abandon burns one attempt of the task's budget).
+REPL_CUTOVER_ENDGAME_BACKOFF_SEC = 300
+# How long after its freeze_started_at stamp a cutover counts as freezing (and
+# so is spared by a plan cancel or a policy detach). A freeze is bounded by the
+# final-step limit plus fence/restore RPCs; a stamp older than this is a pass
+# that died mid-freeze.
+REPL_CUTOVER_FREEZE_GUARD_SEC = 120
 # When to stop converging in the open and take the lvstore for the endgame.
 # A round completing within this multiple of the target means the delta is
 # nearly converged, so the exclusive window that follows will be short. Claiming
@@ -656,6 +686,25 @@ REPL_RETRY_BACKOFF_MAX_SEC = 600
 # the task table per pass, and polling a database at 5Hz to detect an event is
 # the wrong shape. Sub-second reaction lives in the RPC-based inline wait.
 REPL_CUTOVER_ACTIVE_POLL_SEC = 1.0
+# How often the snapshot replication runner looks for a converging cutover's
+# next shrink snapshot (snapshot_replication._EndgameWake). A point read of
+# each converging cutover's own task row -- never the task table -- and only
+# while one converges. Without it the snapshot waited for the runner's next
+# pass: TASK_EXEC_INTERVAL_SEC, ~12 s of every ~21 s round on bed bf12
+# (2026-11-03).
+REPL_ENDGAME_WAKE_POLL_SEC = 0.2
+# Build the cutover clone (and the replication record the operator's preconnect
+# keys on) when the endgame STARTS instead of after the last round, so the
+# operator's preconnect runs in parallel with the convergence rounds and the
+# freeze follows the last round immediately. The clone is then based on an
+# older copy than the last round's; the final step re-chains it onto the
+# newest copy (bdev_lvol_transfer_final_step's snapshot_name ->
+# spdk_lvol_chain on the receiver, bdev_lvol_add_clone on the peers), and the
+# record follows. Off by default until verified on a bed: the re-chain of a
+# clone onto a newer snapshot leaves the open reference spdk_bs_chain_snapshot
+# _clone never drops on the old parent, which the post-cutover prune then
+# deletes (see the special_delete open_ref history).
+REPL_CUTOVER_EARLY_PREPARE = False
 
 SPDK_PROXY_MULTI_THREADING_ENABLED=True
 SPDK_PROXY_TIMEOUT=60*5
