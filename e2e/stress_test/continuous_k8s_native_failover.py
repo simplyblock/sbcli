@@ -1346,6 +1346,25 @@ class K8sNativeFailoverTest(TestClusterBase):
 
     # ── PVC + FIO creation ───────────────────────────────────────────────────
 
+    # ── volume-shape hooks ───────────────────────────────────────────────
+    #
+    # create_pvcs_with_fio() decides the StorageClass and access mode inline.
+    # These two let a subclass change that decision without copying the
+    # hundred-odd lines around it. Both return what the base already chose,
+    # so overriding nothing changes nothing.
+
+    def _pvc_class_for(self, index, existing_count, sc_name, fs_type):
+        """(storage_class, fs_type) for PVC *index*. Default: unchanged."""
+        return sc_name, fs_type
+
+    def _pvc_access_modes(self):
+        """Access modes for the PVCs this soak creates.
+
+        None means "leave it to create_pvc", which is ReadWriteOnce. The
+        pNFS soaks return ("ReadWriteMany",); nothing else should.
+        """
+        return
+
     def create_pvcs_with_fio(self, count: int, node_ids: list[str] | None = None,
                              storage_class: str | None = None):
         """Create *count* PVCs via K8s and start FIO on each.
@@ -1375,6 +1394,14 @@ class K8sNativeFailoverTest(TestClusterBase):
             else:
                 sc_name = random.choice([self.STORAGE_CLASS_NAME, self.XFS_STORAGE_CLASS_NAME])
             fs_type = "xfs" if sc_name == self.XFS_STORAGE_CLASS_NAME else "ext4"
+            # Two hooks so a subclass can change what kind of volume this loop
+            # soaks without reimplementing the loop. Both default to exactly
+            # what the line above decided, so every existing caller is
+            # unaffected. The pNFS soaks override them to get one shared
+            # ReadWriteMany claim instead of N private ReadWriteOnce ones.
+            sc_name, fs_type = self._pvc_class_for(i, existing_count,
+                                                   sc_name, fs_type)
+            access_modes = self._pvc_access_modes()
 
             self.logger.info(
                 f"[create_pvc] Creating PVC {pvc_name} ({i+1}/{count}) SC={sc_name} fs={fs_type}"
@@ -1388,6 +1415,7 @@ class K8sNativeFailoverTest(TestClusterBase):
                 self.k8s_utils.create_pvc(
                     pvc_name, self.pvc_size, sc_name,
                     node_id=target_node,
+                    **({"access_modes": access_modes} if access_modes else {}),
                 )
                 self.k8s_utils.wait_pvc_bound(pvc_name, timeout=300)
             except Exception as exc:
