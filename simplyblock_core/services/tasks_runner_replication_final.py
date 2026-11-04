@@ -1256,7 +1256,7 @@ def _revert_cutover_relationship(replication_id):
         # The record was created for THIS cutover's clone, which is being
         # discarded: leaving it named would make get_relationship report a
         # deleted volume as the target (and the operator connect to it).
-        rep.target_lvol = None
+        rep.target_lvol = None  # type: ignore[assignment]
         rep.target_nqn = ""
         rep.target_ns_id = 0
         rep.write_to_db(db.kv_store)

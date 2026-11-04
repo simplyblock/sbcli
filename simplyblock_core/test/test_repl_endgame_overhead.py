@@ -20,6 +20,12 @@ from simplyblock_core.services import tasks_runner_replication_final as final
 from simplyblock_core.services.task_runner_base import TaskDefer, TaskRetry
 
 
+def _add(lst, item, ret):
+    """Append and return *ret*: a side_effect that records its calls."""
+    lst.append(item)
+    return ret
+
+
 def _final(uuid="F1", status=JobSchedule.STATUS_RUNNING, canceled=False, **params):
     t = JobSchedule()
     t.uuid = uuid
@@ -143,7 +149,7 @@ class TestPickupLatency(unittest.TestCase):
     def setUp(self):
         self.now = [1000.0]
         patch.object(sr.time, "time", lambda: self.now[0]).start()
-        self.slept = []
+        self.slept: list = []
 
         def _sleep(s):
             self.slept.append(s)
@@ -156,10 +162,10 @@ class TestPickupLatency(unittest.TestCase):
         self.db = _TaskDB([self.cut, _repl("R1", "S1", JobSchedule.STATUS_DONE),
                            _repl("R2", "S2")])
         patch.object(sr, "db", self.db).start()
-        self.dispatched = []
+        self.dispatched: list = []
         patch.object(sr, "_dispatch",
-                     side_effect=lambda t, *a: self.dispatched.append(
-                         (t.uuid, self.now[0] - 1000.0)) or True).start()
+                     side_effect=lambda t, *a: _add(
+                         self.dispatched, (t.uuid, self.now[0] - 1000.0), True)).start()
         self.addCleanup(patch.stopall)
 
     def test_the_next_round_is_dispatched_within_a_poll_interval(self):
@@ -186,10 +192,10 @@ class TestRunnerPass(unittest.TestCase):
             pass
         cut = _final(cutover_lvs="LVS_1", shrink_snap_id="S1")
         db = _TaskDB([_repl("R0", "S0"), cut, _repl("R1", "S1")])
-        order = []
+        order: list = []
         with patch.object(sr, "db", db), \
                 patch.object(sr, "task_runner",
-                             side_effect=lambda t: order.append(t.uuid) or True), \
+                             side_effect=lambda t: _add(order, t.uuid, True)), \
                 patch.object(sr.time, "sleep", side_effect=_Stop()):
             with self.assertRaises(_Stop):
                 sr.main()
@@ -287,7 +293,7 @@ class TestLandingPrestage(unittest.TestCase):
 class TestShrinkSnapshotNames(unittest.TestCase):
 
     def setUp(self):
-        self.added = []
+        self.added: list = []
 
         def _add(lvol, name, **kw):
             self.added.append(name)

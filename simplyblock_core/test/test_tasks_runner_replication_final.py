@@ -668,9 +668,9 @@ def test_a_spent_budget_releases_the_clone_and_the_relationship(monkeypatch):
     the plan's failed volume holds nothing."""
     rep = _pending_rep(monkeypatch)
     monkeypatch.setattr(runner, "db", _FakeDB({}, rep))
-    deleted = []
+    deleted: list = []
     monkeypatch.setattr(runner, "_delete_cutover_clone",
-                        lambda clone_id: deleted.append(clone_id) or False)
+                        lambda clone_id: (deleted.__iadd__([clone_id]), False)[1])
     assert runner.SPEC.on_finish is runner._cleanup_unfinished_cutover
 
     task = _task(tgt_lvol_id="CLONE1")
