@@ -66,7 +66,7 @@ class _Clock:
 class TestConvergence(unittest.TestCase):
     """_shrink_step loops until a round is fast, without leaving the pass."""
 
-    def _run(self, round_times, max_rounds=None, exclusive=True):
+    def _run(self, round_times, max_rounds=None, exclusive=True, deadline=10 ** 9):
         """Drive _shrink_step with round i taking round_times[i] seconds.
 
         exclusive=True means the task already holds its lvstore, which is the
@@ -75,7 +75,7 @@ class TestConvergence(unittest.TestCase):
         """
         clock = _Clock()
         task = _task(shrink_snap_id="S0", shrink_round=1,
-                     shrink_deadline=10 ** 9, lvol_id="LV1")
+                     shrink_deadline=deadline, lvol_id="LV1")
         if exclusive:
             task.function_params["cutover_lvs"] = "LVS_1"
         task.function_params["shrink_started_at"] = clock.now
@@ -182,14 +182,111 @@ class TestConvergence(unittest.TestCase):
                 runner._shrink_step(task.frozen_view(), _lvol())
         self.assertIn("disappeared", str(caught.exception))
 
-    def test_the_deadline_still_bounds_the_phase(self):
-        """The deadline bounds the phase by handing over to the freeze, not by
-        failing: proceeding with a slightly larger residual always beats
-        burning a retry on another 900-second shrink window."""
+    def test_the_deadline_hands_over_when_the_last_round_fits_the_final_step(self):
+        """An expired deadline still freezes when the residual can be copied
+        inside SPDK's final-step limit: a slightly larger residual beats
+        another shrink window."""
+        clock = _Clock()
+        task = _task(shrink_snap_id="S0", shrink_round=3, shrink_deadline=0,
+                     lvol_id="LV1", cutover_lvs="LVS_1",
+                     shrink_round_times=[9.0, 3.0],
+                     shrink_started_at=clock.now - 1.0,
+                     shrink_round_done_at=clock.now - 1.0)
+        with patch.object(runner.time, "time", clock), \
+             patch.object(runner, "_shrink_round_done", return_value=False):
+            runner._shrink_step(task.frozen_view(), _lvol())   # returns => hands over
+        self.assertEqual(task.function_params["cutover_lvs"], "LVS_1")
+
+    def test_the_deadline_abandons_the_endgame_rather_than_freeze_into_a_failure(self):
+        """bf12 2026-11-03: rounds of 16-30s, "freezing anyway", and every
+        final step failed at SPDK's 12s terminate timeout with the source
+        fenced. A deadline reached with a round that long backs off instead:
+        no freeze, the lvstore released, the round state reset so the next
+        endgame starts fresh, and one attempt burned so it cannot loop
+        forever."""
+        clock = _Clock()
+        task = _task(shrink_snap_id="S4", shrink_round=4, shrink_deadline=0,
+                     lvol_id="LV1", cutover_lvs="LVS_1", cutover_group="",
+                     shrink_round_times=[30.0, 22.06],
+                     shrink_started_at=clock.now - 2.0,
+                     shrink_round_done_at=clock.now - 2.0)
+        with patch.object(runner.time, "time", clock), \
+             patch.object(runner, "_shrink_round_done", return_value=False):
+            with self.assertRaises(TaskRetry) as caught:
+                runner._shrink_step(task.frozen_view(), _lvol())
+        self.assertIn("22.06s", str(caught.exception))
+        p = task.function_params
+        self.assertNotIn("cutover_lvs", p, "the lvstore must be released")
+        for key in runner._ENDGAME_ROUND_PARAMS:
+            self.assertNotIn(key, p, f"{key} must not survive into the next endgame")
+        self.assertEqual(p["endgame_retry_after"],
+                         int(clock.now) + constants.REPL_CUTOVER_ENDGAME_BACKOFF_SEC)
+        self.assertGreater(p["shrink_deadline"], p["endgame_retry_after"],
+                           "the next endgame needs a deadline of its own")
+        self.assertIn("22.06s", p["last_error"])
+
+    def test_an_unmeasured_endgame_is_not_frozen_at_the_deadline(self):
+        """No round measured at all is not "fast enough to freeze"."""
         task = _task(shrink_snap_id="S0", shrink_round=1,
                      shrink_deadline=0, lvol_id="LV1")
         with patch.object(runner, "_shrink_round_done", return_value=False):
-            runner._shrink_step(task.frozen_view(), _lvol())   # returns => hands over
+            with self.assertRaises(TaskRetry):
+                runner._shrink_step(task.frozen_view(), _lvol())
+
+    def test_a_long_round_in_flight_counts_against_the_freeze(self):
+        """The round still in flight is part of the estimate once it has run
+        longer than the last completed one."""
+        clock = _Clock()
+        task = _task(shrink_snap_id="S3", shrink_round=3, shrink_deadline=0,
+                     lvol_id="LV1", shrink_round_times=[1.5],
+                     shrink_started_at=clock.now - 20.0,
+                     shrink_round_done_at=clock.now - 20.5)
+        with patch.object(runner.time, "time", clock), \
+             patch.object(runner, "_shrink_round_done", return_value=False):
+            with self.assertRaises(TaskRetry):
+                runner._shrink_step(task.frozen_view(), _lvol())
+
+    def test_the_round_cap_does_not_freeze_a_round_the_final_step_cannot_copy(self):
+        """Past the round cap a round longer than the safe final-step window
+        keeps converging -- here until the deadline, which then abandons."""
+        slow = constants.REPL_CUTOVER_FREEZE_MAX_ROUND_SEC + 10.0
+        outcome, task, taken, _ = self._run([slow] * 50, max_rounds=3,
+                                            deadline=1000 + 10 * slow)
+        self.assertIsInstance(outcome, TaskRetry,
+                              "never a freeze with a residual this large")
+        self.assertGreater(len(taken), 3, "rounds continue past the cap")
+        self.assertNotIn("cutover_lvs", task.function_params)
+
+    def test_the_round_cap_freezes_a_round_that_fits_the_final_step(self):
+        fits = constants.REPL_CUTOVER_FREEZE_MAX_ROUND_SEC - 1.0
+        outcome, task, taken, _ = self._run([fits] * 20, max_rounds=3)
+        self.assertIsNone(outcome)
+        self.assertIn("not converged", task.function_result)
+        self.assertEqual(len(taken), 2)
+
+    def test_the_freeze_threshold_is_a_safe_fraction_of_the_spdk_limit(self):
+        self.assertEqual(constants.REPL_CUTOVER_FINAL_STEP_LIMIT_SEC, 12)
+        self.assertLess(constants.REPL_CUTOVER_FREEZE_MAX_ROUND_SEC,
+                        constants.REPL_CUTOVER_FINAL_STEP_LIMIT_SEC)
+        self.assertGreater(constants.REPL_CUTOVER_FREEZE_MAX_ROUND_SEC,
+                           constants.REPL_CUTOVER_CONVERGE_TARGET_SEC)
+
+    def test_a_backing_off_endgame_defers_without_touching_anything(self):
+        """The handler parks a backed-off task before any claim or snapshot."""
+        task = _task(lvol_id="LV1", src_node_id="N1", tgt_node_id="N2",
+                     endgame_retry_after=10 ** 12)
+        node = MagicMock()
+        node.status = "online"
+        fake_db = MagicMock()
+        fake_db.get_storage_node_by_id.return_value = node
+        with patch.object(runner, "db", fake_db), \
+             patch.object(runner, "_acquire_lvs_claim") as claim, \
+             patch.object(runner, "_take_shrink_snapshot") as take:
+            with self.assertRaises(TaskDefer) as caught:
+                runner.task_runner(task.frozen_view(), [])
+        self.assertIn("backing off", str(caught.exception))
+        claim.assert_not_called()
+        take.assert_not_called()
 
     def test_it_yields_the_pass_when_the_budget_runs_out(self):
         """A very slow transfer must not hog the runner forever."""
