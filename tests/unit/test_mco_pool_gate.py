@@ -13,6 +13,7 @@ from simplyblock_web.api.internal.storage_node.kubernetes import (
     _converged_on_pool,
     _kubelet_configs_owned_by,
     _mco_pool_name,
+    _pool_kubelet_config_name,
 )
 
 MASTER_LABEL = "node-role.kubernetes.io/master"
@@ -113,3 +114,14 @@ def test_the_generated_configs_of_a_kubelet_config_are_found_by_owner():
     ]
     assert _kubelet_configs_owned_by(items, KC) == {
         "99-master-generated-kubelet", "99-storage-ac85c3-generated-kubelet"}
+
+
+def test_the_storage_pool_takes_the_cluster_kubelet_config():
+    assert _pool_kubelet_config_name("storage-ac85c3", "ac85c3") == KC
+
+
+def test_the_master_pool_takes_a_kubelet_config_of_its_own():
+    """MCO evaluates a KubeletConfig when it is created, never when a pool's
+    labels change, so the masters get one that selects the master pool from
+    the start: the topology job's storage-kubelet-<id>-master."""
+    assert _pool_kubelet_config_name("master", "ac85c3") == KC + "-master"
