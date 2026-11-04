@@ -61,7 +61,6 @@ def status():
 
 
 MODES = [
-    "storage_node",
     "storage_node_k8s",
 ]
 
@@ -72,12 +71,7 @@ parser.add_argument("mode", choices=MODES)
 if __name__ == '__main__':
     args = parser.parse_args()
 
-    mode = args.mode
-    if mode == "storage_node":
-        app.register_api(internal_api.storage_node.docker.api)
-
-    if mode == "storage_node_k8s":
-        app.register_api(internal_api.storage_node.kubernetes.api)
+    app.register_api(internal_api.storage_node.kubernetes.api)
 
     settings = Settings()
     server = _HandshakeDeferredWSGIServer(

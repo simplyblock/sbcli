@@ -8,7 +8,7 @@ actually on that cloud.
 
 None of it changes for the life of the process, so it is gathered lazily on
 first use and memoized with ``lru_cache`` rather than at import time.
-``node_api_basic.py``, ``storage_node/docker.py`` and
+``node_api_basic.py`` and
 ``storage_node/kubernetes.py`` are imported transitively by almost anything
 that touches ``simplyblock_web`` (test collection, the CLI, OpenAPI-schema
 generation, ...), so computing this at module scope paid the network-probe cost

@@ -181,7 +181,7 @@ def _start_snode_api():
         [sys.executable, "-c",
          f"""
 from flask_openapi3 import OpenAPI
-from simplyblock_web.api.internal.storage_node.docker import api
+from simplyblock_web.api.internal.storage_node.kubernetes import api
 app = OpenAPI(__name__)
 app.url_map.strict_slashes = False
 app.register_api(api)

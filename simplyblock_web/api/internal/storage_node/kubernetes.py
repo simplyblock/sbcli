@@ -3,6 +3,7 @@ import logging
 import os
 import time
 import traceback
+from pathlib import Path
 from typing import Annotated
 
 import yaml
@@ -15,13 +16,14 @@ from simplyblock_core import constants
 from simplyblock_core import utils as core_utils
 from simplyblock_core.settings import Settings
 from simplyblock_core.storage_network import NetworkAttachment
+from simplyblock_core.utils import host_network
+from simplyblock_core.utils import pci as pci_utils
 from simplyblock_core.utils import shell as shell_utils
 from simplyblock_web import node_utils, node_utils_k8s, utils
 from simplyblock_web.api.internal.storage_node import network_attachments, pod_service
 from simplyblock_web.node_utils_k8s import namespace_id_file
 
 from .._node_info import get_static_node_info
-from . import docker as snode_ops
 
 logger = logging.getLogger(__name__)
 logger.setLevel(constants.LOG_LEVEL)
@@ -238,24 +240,6 @@ def device_smart(query: _DeviceSmartQuery):
         return utils.get_response(None, str(e))
 
 
-@api.post('/join_swarm', responses={
-    200: {'content': {'application/json': {'schema': utils.response_schema({
-        'type': 'boolean'
-    })}}},
-})
-def join_swarm():
-    return utils.get_response(True)
-
-
-@api.get('/leave_swarm', responses={
-    200: {'content': {'application/json': {'schema': utils.response_schema({
-        'type': 'boolean'
-    })}}},
-})
-def leave_swarm():
-    return utils.get_response(True)
-
-
 class _GPTPartitionsParams(BaseModel):
     nbd_device: str = Field('/dev/nbd0')
     jm_percent: int = Field(3, ge=0, le=100)
@@ -295,7 +279,14 @@ def make_gpt_partitions_for_nbd(body: _GPTPartitionsParams):
     return utils.get_response(True)
 
 
-api.post('/delete_dev_gpt_partitions')(snode_ops.delete_gpt_partitions_for_dev)
+@api.post('/delete_dev_gpt_partitions')
+def delete_gpt_partitions_for_dev(body: utils.DeviceParams):
+    bind_device_to_nvme(body)
+    device_name = pci_utils.nvme_device_name(body.device_pci)
+    cmd = f"parted -fs /dev/{device_name} mklabel gpt"
+    out, err, ret_code = shell_utils.run_command(cmd)
+    logger.info(f"out: {out}, err: {err}, ret_code: {ret_code}")
+    return utils.get_response(ret_code == 0, error=err)
 
 
 # How long a stale Job of a previous spdk_process_start attempt may take to
@@ -798,11 +789,9 @@ def spdk_process_kill(query: utils.RPCPortParams):
     })}}},
 })
 def spdk_process_cleanup(query: utils.RPCPortParams):
-    """Authoritative SPDK teardown for failure-cleanup paths. Pod deletion in
-    this deployment mode is already synchronous and verified (see
-    spdk_process_kill's poll-until-gone), so this is an alias kept for parity
-    with the docker agent, where kill (fast, detached remove) and cleanup
-    (slow, verified remove) are distinct."""
+    """Authoritative SPDK teardown for failure-cleanup paths. Pod deletion is
+    already synchronous and verified (see spdk_process_kill's
+    poll-until-gone), so this is an alias of spdk_process_kill."""
     return spdk_process_kill(query)
 
 
@@ -862,7 +851,7 @@ def spdk_process_is_up(query: utils.RPCPortParams):
         return utils.get_response(False, "SPDK container is not running")
 
 
-DHCHAP_KEY_DIR = "/etc/simplyblock/dhchap_keys"
+DHCHAP_KEY_DIR = os.environ.get("DHCHAP_KEY_DIR", "/etc/simplyblock/dhchap_keys")
 
 
 class WriteKeyFileBody(BaseModel):
@@ -890,13 +879,121 @@ def write_key_file(body: WriteKeyFileBody):
     return utils.get_response(key_path)
 
 
+def _node_config_device_ids(node_config: dict) -> set[str]:
+    """Identity of a node-config entry's device set, whichever device mode the
+    host is in: PCI addresses (nvme) or block-device serials (lblk). A valid
+    entry carries exactly one non-empty list, so the union identifies the
+    entry without this endpoint having to know the cluster's mode.
+    """
+    return (set(node_config.get("ssd_pcis") or [])
+            | core_utils.lblk_device_serials(node_config.get("lblk_devices")))
+
+
+class PersistNodeConfigParams(BaseModel):
+    max_lvol: Annotated[int | None, Field(ge=0, le=constants.MAX_SUBSYSTEMS_PER_NODE)] = None
+    huge_page_memory: Annotated[int | None, Field(ge=0)] = None
+    # small/large_pool_count are written alongside huge_page_memory whenever
+    # add_node recalculates it against the cluster's real max_lvol/core count
+    # -- they are what that memory figure was derived from (calculate_pool_count
+    # -> calculate_minimum_hp_memory), so they must never drift from it.
+    small_pool_count: Annotated[int | None, Field(ge=0)] = None
+    large_pool_count: Annotated[int | None, Field(ge=0)] = None
+    # Which node slot to write. A host can carry several (one per socket, and
+    # more than one per socket when nodes_per_socket > 1), so the socket alone
+    # does not identify one -- the slot's device set is what tells them apart.
+    # Whichever device list this host's mode uses is the one that arrives:
+    # PCI addresses in nvme mode, lblk device serials in lblk mode. Both empty
+    # means "don't filter on devices", NOT "match nothing".
+    numa_node: Annotated[int | None, Field(ge=0)] = None
+    ssd_list: list[str] | None = None
+    lblk_serials: list[str] | None = None
+    # CPU layout, resized to the cluster's spdk_vcpu_count at add time (see
+    # storage_node_ops.apply_cluster_vcpu_count). Written together, once, by
+    # the same caller -- never partially, so the file never holds a mask from
+    # one layout next to a distribution from another.
+    cpu_mask: str | None = None
+    isolated: list[int] | None = None
+    l_cores: str | None = None
+    distribution: dict | None = None
+    core_to_index: dict | None = None
+    number_of_distribs: Annotated[int | None, Field(ge=0)] = None
+
+
 @api.post('/persist_node_config', responses={
     200: {'content': {'application/json': {'schema': utils.response_schema({
         'type': 'boolean'
     })}}},
 })
-def persist_node_config(body: snode_ops.PersistNodeConfigParams):
-    return snode_ops.persist_node_config(body)
+def persist_node_config(body: PersistNodeConfigParams):
+    node_info = core_utils.load_config(constants.NODES_CONFIG_FILE)
+    if not node_info.get("nodes"):
+        return utils.get_response(False, "Config not found")
+
+    # An EMPTY device list means the caller is not filtering on devices, the
+    # same as sending none at all -- never "match nothing". lblk-mode configs
+    # always carry ssd_pcis == [] (generate_configs seeds it, validate_config
+    # requires exactly one of the two lists to be non-empty), so treating []
+    # as a filter made every lblk node unmatchable and failed every add-node
+    # that reached here.
+    requested_devices = set(body.ssd_list or []) | set(body.lblk_serials or [])
+    matched = False
+    for node_config in node_info["nodes"]:
+        if body.numa_node is not None and node_config["socket"] != body.numa_node:
+            continue
+        if requested_devices and not requested_devices.intersection(
+                _node_config_device_ids(node_config)):
+            continue
+        if body.max_lvol is not None:
+            node_config["max_lvol"] = body.max_lvol
+        if body.huge_page_memory is not None:
+            node_config["huge_page_memory"] = body.huge_page_memory
+        if body.small_pool_count is not None:
+            node_config["small_pool_count"] = body.small_pool_count
+        if body.large_pool_count is not None:
+            node_config["large_pool_count"] = body.large_pool_count
+        if body.cpu_mask is not None:
+            node_config["cpu_mask"] = body.cpu_mask
+        if body.isolated is not None:
+            node_config["isolated"] = body.isolated
+        if body.l_cores is not None:
+            node_config["l-cores"] = body.l_cores
+        if body.distribution is not None:
+            node_config["distribution"] = body.distribution
+        if body.core_to_index is not None:
+            node_config["core_to_index"] = body.core_to_index
+        if body.number_of_distribs is not None:
+            node_config["number_of_distribs"] = body.number_of_distribs
+        matched = True
+        break
+
+    if not matched:
+        return utils.get_response(
+            False,
+            f"No node config entry matches numa_node={body.numa_node} and "
+            f"devices={sorted(requested_devices)}")
+
+    # isolated_cores/host_cpu_mask are the union of every node's "isolated"
+    # list, computed once at configure time (generate_configs/regenerate_
+    # config) -- nothing reads them back today (the one consumer,
+    # validate_config, always recomputes the union fresh from the nodes
+    # themselves), but leaving them silently stale after a per-node isolated
+    # list changes here is exactly the kind of drift that bites whoever
+    # trusts them next. Recompute unconditionally; cheap, and correct
+    # regardless of which field this call actually changed.
+    all_isolated_cores: set[int] = set()
+    for n in node_info["nodes"]:
+        all_isolated_cores.update(n.get("isolated") or [])
+    node_info["isolated_cores"] = sorted(all_isolated_cores)
+    node_info["host_cpu_mask"] = core_utils.generate_mask(all_isolated_cores)
+
+    # get_nodes_config() refuses (both here and on k8s) whenever the live file
+    # differs from its "_read_only" sibling -- that is the drift check meant
+    # to catch a hand-edited config. This write is sanctioned, not drift, so
+    # it must refresh the read-only baseline too, or the very next /info call
+    # (this same add_node's own idempotent retry included) sees a mismatch
+    # and refuses with "run sbcli sn configure-upgrade".
+    core_utils.store_config_file(node_info, constants.NODES_CONFIG_FILE, create_read_only_file=True)
+    return utils.get_response(True)
 
 
 @api.post('/set_hugepages', responses={
@@ -956,18 +1053,149 @@ def is_alive():
 def spdk_proxy_restart(query: utils.RPCPortParams):
     return utils.get_response(True)
 
-api.post('/bind_device_to_nvme')(snode_ops.bind_device_to_nvme)
 
-api.post('/bind_device_to_spdk')(snode_ops.bind_device_to_spdk)
+@api.post('/bind_device_to_nvme')
+def bind_device_to_nvme(body: utils.DeviceParams):
+    pci_utils.ensure_driver(body.device_pci, 'nvme')
+    return utils.get_response(True)
 
-api.get('/ifc_is_tcp')(snode_ops.ifc_is_tcp)
 
-api.get('/ifc_is_roce')(snode_ops.ifc_is_roce)
+@api.post('/format_device_with_4k')
+def format_device_with_4k(body: utils.DeviceParams):
+    pci_utils.ensure_driver(body.device_pci, 'nvme')
+    core_utils.format_device_with_4k(body.device_pci)
+    return utils.get_response(True)
 
-api.post('/format_device_with_4k')(snode_ops.format_device_with_4k)
 
-api.get('/ping_ip')(snode_ops.ping_ip)
+@api.post('/bind_device_to_spdk')
+def bind_device_to_spdk(body: utils.DeviceParams):
+    device_path = pci_utils.device(body.device_pci)
+    iommu_group = device_path / 'iommu_group'
+    vfio_module = Path('/sys/module/vfio')
+    noiommu_parameter = vfio_module / 'parameters' / 'enable_unsafe_noiommu_mode'
+    driver_name = None
 
-api.get('/read_allowed_list')(snode_ops.read_allowed_list)
+    if pci_utils.driver_loaded('vfio-pci') and iommu_group.exists():
+        driver_name = 'vfio-pci'
+    elif pci_utils.driver_loaded('uio_pci_generic'):
+        driver_name = 'uio_pci_generic'
+    elif pci_utils.driver_loaded('vfio-pci') and noiommu_parameter.exists():
+        if noiommu_parameter.read_text().strip() == 'N':
+            noiommu_parameter.write_text('1')
+        driver_name = 'vfio-pci'
+    else:
+        return utils.get_response_error(
+            'SPDK PCI drivers are not fully loaded and device lacks IOMMU group', 500
+        )
 
-api.post('/recalculate_cores_distribution')(snode_ops.recalculate_cores_distribution)
+    pci_utils.ensure_driver(body.device_pci, driver_name, override=True)
+    return utils.get_response(True)
+
+
+class NicQuery(BaseModel):
+    nic: str
+
+
+@api.get('/ifc_is_roce', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'boolean',
+    })}}},
+})
+def ifc_is_roce(query: NicQuery):
+    """
+    Check if the given interface (including VLANs, bonds, bridges)
+    ultimately uses a RoCE-capable NIC.
+    """
+    try:
+        nic = query.nic if hasattr(query, "nic") else str(query)
+        underlying = host_network.underlying_interfaces(nic)
+        logger.debug(f"Resolved {nic} → underlying ifaces: {underlying}")
+        roce_ifaces = host_network.rdma_netdevs()
+        return utils.get_response(any(iface in roce_ifaces for iface in underlying))
+    except Exception as e:
+        logger.error(f"ifc_is_roce failed: {e}")
+
+    return utils.get_response(False)
+
+
+@api.get('/ifc_is_tcp', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'boolean',
+    })}}},
+})
+def ifc_is_tcp(query: NicQuery):
+    try:
+        nic = query.nic if hasattr(query, "nic") else str(query)
+        if core_utils.get_iface_ip(nic):
+            return utils.get_response(True)
+    except Exception as e:
+        logger.error(e)
+    return utils.get_response(False)
+
+
+class PingQuery(BaseModel):
+    ip: str = Field(pattern=utils.IP_PATTERN)
+    ifname: str = Field(pattern=utils.IFNAME_PATTERN)
+
+
+@api.get('/ping_ip', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'boolean',
+    })}}},
+})
+def ping_ip(query: PingQuery):
+    try:
+        _, err, rc = shell_utils.run_command(host_network.host_command(f"ping -c 3 -W 1 {query.ip}"))
+        if rc != 0:
+            # run_command returns a process's stderr as bytes, and a failure to
+            # start the process as a str.
+            if isinstance(err, bytes):
+                err = err.decode("utf-8", errors="replace")
+            return utils.get_response(False, err or f"{query.ip} does not answer")
+        return utils.get_response(host_network.has_carrier(query.ifname))
+    except Exception as e:
+        logger.error(e)
+        return utils.get_response(False, str(e))
+
+
+@api.get('/read_allowed_list', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'object',
+        'additionalProperties': True,
+    })}}},
+})
+def read_allowed_list():
+    try:
+        with open("/etc/simplyblock/allowed_list") as f:
+            cores = [int(line.strip()) for line in f.read().split(' ')]
+    except Exception:
+        cores = []
+    resp = utils.get_response(cores)
+    return resp
+
+
+class CoresParams(BaseModel):
+    cores: list[int] | None = Field(default=None)
+    number_of_alceml_devices: int | None = Field(None, ge=0)
+
+
+@api.post('/recalculate_cores_distribution', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'boolean'
+    })}}},
+})
+def recalculate_cores_distribution(body: CoresParams):
+    cores = body.cores
+    number_of_alceml_devices = body.number_of_alceml_devices
+    distribution = core_utils.recalculate_cores_distribution(cores, number_of_alceml_devices)
+
+    resp = utils.get_response({
+        "app_thread_core": distribution["app_thread_core"],
+        "jm_cpu_core": distribution["jm_cpu_core"],
+        "poller_cpu_cores": distribution["poller_cpu_cores"],
+        "alceml_cpu_cores": distribution["alceml_cpu_cores"],
+        "alceml_worker_cpu_cores": distribution["alceml_worker_cpu_cores"],
+        "distrib_cpu_cores": distribution["distrib_cpu_cores"],
+        "jc_singleton_core": distribution["jc_singleton_core"],
+        "lvol_poller_core": distribution["lvol_poller_core"]})
+    return resp

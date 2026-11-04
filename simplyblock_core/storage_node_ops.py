@@ -16,7 +16,6 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, NamedTuple
 
 import psutil
-from docker.types import LogConfig
 from kubernetes.client import ApiException
 from pydantic import SecretStr
 from tenacity import (
@@ -29,7 +28,6 @@ from tenacity import (
     wait_fixed,
 )
 
-import docker
 from simplyblock_core import (
     cluster_ops,
     constants,
@@ -94,7 +92,6 @@ from simplyblock_core.utils import (
     dial_backoff,
     hublvol_reconnect,
     nvmf_listener,
-    pull_docker_image_with_retry,
     rpc_budget,
 )
 from simplyblock_web import node_utils
@@ -4451,11 +4448,6 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         if not spdk_image:
             spdk_image = constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE
 
-        if cluster.mode == "docker":
-            log_config_type = utils.get_storage_node_api_log_type(mgmt_ip, '/SNodeAPI')
-            if log_config_type and log_config_type != LogConfig.types.GELF:
-                logger.info("SNodeAPI container found but not configured with gelf logger")
-                start_storage_node_api_container(mgmt_ip, cluster_ip)
         node_socket = node_config.get("socket")
 
         # Idempotent re-entry. A prior add attempt for this (node, socket) may
@@ -8683,7 +8675,6 @@ def _finalize_node_removal(removed_node: StorageNode):
             logger.info("Stopping SPDK container")
             snode_api = removed_node.client(timeout=20)
             snode_api.spdk_process_kill(removed_node.rpc_port, removed_node.cluster_id)
-            snode_api.leave_swarm()
             pci_address = []
             for dev in removed_node.nvme_devices:
                 if dev.bdev_type == "aio":
@@ -11318,57 +11309,6 @@ def generate_automated_deployment_config(max_lvol, max_prov, sockets_to_use, nod
         # for numa, huge_page_memory in huge_page_memory_dict.items():
         #    num_pages = huge_page_memory // (2048 * 1024)
         #    utils.set_hugepages_if_needed(numa, num_pages)
-    return True
-
-
-def start_storage_node_api_container(node_ip, cluster_ip=None):
-    node_docker = docker.DockerClient(base_url=f"tcp://{node_ip}:2375", version="auto", timeout=60 * 5)
-    # node_docker = docker.DockerClient(base_url='unix://var/run/docker.sock', version="auto", timeout=60 * 5)
-    logger.info(f"Pulling image {constants.SIMPLY_BLOCK_DOCKER_IMAGE}")
-    pull_docker_image_with_retry(node_docker, constants.SIMPLY_BLOCK_DOCKER_IMAGE)
-
-    logger.info("Recreating SNodeAPI container")
-
-    # create the api container
-    utils.remove_container(node_docker, '/SNodeAPI')
-
-    if cluster_ip is not None:
-        log_config = LogConfig(type=LogConfig.types.GELF, config={"gelf-address": f"tcp://{cluster_ip}:12202"})
-    else:
-        log_config = LogConfig(type=LogConfig.types.JOURNALD)
-
-    node_docker.containers.run(
-        constants.SIMPLY_BLOCK_DOCKER_IMAGE,
-        "sudo -E python3 simplyblock_web/node_webapp.py storage_node",
-        detach=True,
-        privileged=True,
-        name="SNodeAPI",
-        network_mode="host",
-        log_config=log_config,
-        volumes=[
-            '/etc/simplyblock:/etc/simplyblock',
-            '/etc/foundationdb:/etc/foundationdb',
-            '/var/tmp:/var/tmp',
-            '/var/run:/var/run',
-            '/dev:/dev',
-            '/lib/modules/:/lib/modules/',
-            '/sys:/sys',
-            # Bind-mount the SPDK ramdisk so the spdk_process_is_up endpoint
-            # can probe SPDK's JSON-RPC Unix socket directly at
-            # /mnt/ramdisk/spdk_<port>/spdk.sock. Without this, the endpoint
-            # has to fall through to dockerd, which can stall for 60-80s
-            # during post-outage Swarm reconciliation (incident 2026-04-24).
-            '/mnt/ramdisk:/mnt/ramdisk',
-            '/var/run/simplyblock:/var/run/simplyblock'],
-        restart_policy={"Name": "always"},
-        environment=[
-            f"DOCKER_IP={node_ip}",
-            "WITHOUT_CLOUD_INFO=True",
-            "SIMPLYBLOCK_LOG_LEVEL=DEBUG",
-        ]
-    )
-    logger.info(f"Pulling image {constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE}")
-    pull_docker_image_with_retry(node_docker, constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
     return True
 
 

@@ -2576,20 +2576,6 @@ def _abort_hung_spdk(snode, hung_for):
         "Node %s RPC unreachable for %.0fs while SNodeAPI answers and SPDK is "
         "running -- aborting SPDK so auto-restart can rebuild it",
         node_id, hung_for)
-    # Capture WHY before destroying the evidence. A wedged RPC channel on a
-    # live process leaves nothing in the logs -- the pollers keep printing
-    # normally -- so without this the kill recovers the node and the cause is
-    # lost, which is exactly what happened on 2026-09-01. utime frozen across
-    # the samples means the thread is blocked; utime advancing means it is
-    # running but never returns to the RPC poller. Best-effort: a failed
-    # capture must never delay the abort.
-    try:
-        state = snode.client(timeout=20, retry=1).spdk_thread_state(snode.rpc_port)
-        logger.error("Hung SPDK thread state for %s: %s", node_id, state)
-    except Exception as e:
-        logger.warning("Could not capture thread state for %s before abort: %s",
-                       node_id, e)
-
     try:
         snode_api = snode.client(timeout=20, retry=1)
         snode_api.spdk_process_kill(snode.rpc_port, snode.cluster_id)

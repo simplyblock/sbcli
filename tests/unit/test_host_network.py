@@ -92,8 +92,8 @@ def test_carrier_is_read_from_the_hosts_link_flags():
         assert host_network.has_carrier("ens16np0")
 
 
-def test_ping_and_nvme_connections_leave_from_the_host():
-    from simplyblock_web.api.internal.storage_node import docker
+def test_ping_leaves_from_the_host():
+    from simplyblock_web.api.internal.storage_node import kubernetes
     seen = []
 
     def run(cmd):
@@ -105,14 +105,9 @@ def test_ping_and_nvme_connections_leave_from_the_host():
     with Flask(__name__).app_context(), \
             patch("os.readlink", _namespaces(POD_NS)), \
             patch.object(host_network, "run_command", run), \
-            patch.object(docker.shell_utils, "run_command", run):
-        docker.ping_ip(docker.PingQuery(ip="10.10.10.246", ifname="ens16np0"))
-        docker.connect_to_nvme(docker.utils.NVMEConnectParams(
-            ip="10.10.10.246", port=4420, nqn="nqn.2023-02.io.simplyblock:x"))
-        docker.disconnect_nqn(docker.utils.DisconnectParams(nqn="nqn.2023-02.io.simplyblock:x", device_path=None, all=None))
+            patch.object(kubernetes.shell_utils, "run_command", run):
+        kubernetes.ping_ip(kubernetes.PingQuery(ip="10.10.10.246", ifname="ens16np0"))
     assert "nsenter --net=/proc/1/ns/net ping -c 3 -W 1 10.10.10.246" in seen
-    assert any(c.startswith("nsenter --net=/proc/1/ns/net nvme connect ") for c in seen)
-    assert "nsenter --net=/proc/1/ns/net nvme disconnect --nqn=nqn.2023-02.io.simplyblock:x" in seen
 
 
 def test_the_reported_hostname_is_the_kubernetes_node():
@@ -218,13 +213,13 @@ def test_the_node_read_is_bounded_and_a_timeout_reports_nothing():
 
 
 def test_a_failed_ping_reports_its_diagnostic():
-    from simplyblock_web.api.internal.storage_node import docker
+    from simplyblock_web.api.internal.storage_node import kubernetes
 
     def run(cmd):
         return "", b"connect: Network is unreachable", 2
 
     with Flask(__name__).app_context(), \
             patch("os.readlink", _namespaces(POD_NS)), \
-            patch.object(docker.shell_utils, "run_command", run):
-        response = docker.ping_ip(docker.PingQuery(ip="10.10.10.246", ifname="ens16np0"))
+            patch.object(kubernetes.shell_utils, "run_command", run):
+        response = kubernetes.ping_ip(kubernetes.PingQuery(ip="10.10.10.246", ifname="ens16np0"))
     assert "Network is unreachable" in json.dumps(response.get_json())

@@ -36,7 +36,7 @@ from unittest.mock import MagicMock, patch
 from flask import Flask
 
 from simplyblock_core import storage_node_ops, utils
-from simplyblock_web.api.internal.storage_node import docker as mod
+from simplyblock_web.api.internal.storage_node import kubernetes as mod
 
 
 def _lblk_entry(name, serial, size=512 * 1024 ** 3, journal=False):
