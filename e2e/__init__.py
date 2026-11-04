@@ -474,6 +474,11 @@ from stress_test.mgmt_node_network_outage import (
     MgmtNodeNetworkOutageTest,
     MgmtNodeRebootTest,
 )
+from stress_test.pnfs_stress import (
+    PnfsRwxFailoverK8s,
+    PnfsRwxRapidNoGapK8s,
+    PnfsRwxResilientK8s,
+)
 from stress_test.product_limits_stress import (
     ProductLimits_70TiB_Docker,
     ProductLimits_70TiB_K8s,
@@ -627,6 +632,9 @@ ALL_TESTS = [
     LblkOutageMatrixDocker,
     LblkOutageMatrixK8s,
     LblkStressDocker,
+    PnfsRwxFailoverK8s,
+    PnfsRwxRapidNoGapK8s,
+    PnfsRwxResilientK8s,
     LblkStressK8s,
     LblkMultiOutageStressDocker,
     LblkQuickOutageStressDocker,
@@ -1541,6 +1549,23 @@ def get_pnfs_tests():
         # Last, and alone: it takes the metadata server away from the
         # whole cluster for the length of the case.
         PnfsNoMetadataServerK8s,     # B-16  negative
+    ]
+
+
+def get_pnfs_stress_tests():
+    """pNFS RWX, Track A -- the existing outage loops on a shared claim.
+
+    Separate from get_pnfs_tests() because these are soaks: they run until
+    something breaks, where Track B's cases finish. Ordered cheapest first,
+    so a bring-up problem surfaces in the single-outage loop rather than
+    three hours into the resilient one.
+
+    K8s only, for the same reason Track B is: pNFS has no Docker variant.
+    """
+    return [
+        PnfsRwxFailoverK8s,          # A-01  baseline outage loop
+        PnfsRwxRapidNoGapK8s,        # A-02  outages during a migration
+        PnfsRwxResilientK8s,         # A-03  long soak, snapshot/clone churn
     ]
 
 
