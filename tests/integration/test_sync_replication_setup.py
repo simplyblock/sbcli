@@ -307,7 +307,6 @@ class _AddNodeWorld:
             patch.object(storage_node_ops, "apply_cluster_hugepages", return_value=4 * 1024 ** 3),
             patch.object(storage_node_ops.utils, "calculate_spdk_memory", return_value=(True, None)),
             patch.object(storage_node_ops.utils, "get_max_parallel_node_adds_from_cr", return_value=None),
-            patch.object(storage_node_ops.utils, "get_storage_node_api_log_type", return_value=None),
             patch.object(storage_node_ops.time, "sleep"),
             patch("simplyblock_core.models.storage_node.RPCClient"),
             patch.object(storage_node_ops.utils, "addNvmeDevices", return_value=[]),

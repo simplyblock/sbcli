@@ -16,7 +16,6 @@ from collections.abc import Iterable
 from datetime import UTC, datetime
 from typing import Annotated, Any
 
-from docker.errors import APIError, DockerException, ImageNotFound, NotFound
 from kubernetes import client, config
 from kubernetes.client import (
     ApiException,
@@ -37,13 +36,10 @@ from kubernetes.stream import stream
 from prettytable import PrettyTable
 from pydantic import Field, SecretStr
 
-import docker
-from docker import DockerClient
 from simplyblock_core import constants
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_web import node_utils
 
-from ..models.mgmt_node import MgmtNode
 from . import host_network
 from . import pci as pci_utils
 from . import shell as shell_utils
@@ -204,29 +200,6 @@ def humanbytes(size: int, mode: str = 'iec') -> str:  # show size using 1024 bas
 def generate_string(length):
     return ''.join(random.SystemRandom().choice(
         string.ascii_letters + string.digits) for _ in range(length))
-
-
-def get_docker_client(cluster_id=None):
-    from simplyblock_core.db_controller import DBController
-    db_controller = DBController()
-    nodes = db_controller.get_mgmt_nodes(cluster_id)
-    if not nodes and cluster_id:
-        # Management nodes belong to the deployment, not to one cluster: only
-        # the first cluster's bootstrap records one, so a cluster attached
-        # later with `cluster add` has none of its own. Any of them reaches
-        # the same swarm.
-        nodes = db_controller.get_mgmt_nodes()
-    if not nodes:
-        raise RuntimeError("No mgmt nodes was found in the cluster!")
-
-    for node in nodes:
-        if node.status == MgmtNode.STATUS_ONLINE:
-            try:
-                return docker.DockerClient(base_url=f"tcp://{node.docker_ip_port}", version="auto")
-            except Exception as e:
-                logger.error(e)
-                continue
-    raise RuntimeError("No docker client found for this cluster")
 
 
 def get_k8s_node_ip():
@@ -1604,37 +1577,6 @@ def get_random_snapshot_vuid(all_lvols=None, all_snapshots=None):
     # Args kept for call-site compatibility but no longer used.
     from simplyblock_core.db_controller import DBController
     return DBController().next_vuid()
-
-
-def pull_docker_image_with_retry(client: docker.DockerClient, image_name, retries=3, delay=5):
-    """
-    Pulls a Docker image with retries in case of failure.
-
-    Args:
-        client (docker.DockerClient): The Docker client instance.
-        image_name (str): The name of the Docker image to pull.
-        retries (int): Number of retry attempts. Defaults to 3.
-        delay (int): Delay between retries in seconds. Defaults to 5.
-
-    Returns:
-        docker.models.images.Image: The pulled Docker image.
-
-    Raises:
-        DockerException: If all retry attempts fail.
-    """
-    for attempt in range(1, retries + 1):
-        try:
-            print(f"Attempt {attempt}: Pulling image '{image_name}'...")
-            image = client.images.pull(image_name)
-            print(f"Image '{image_name}' pulled successfully.")
-            return image
-        except (APIError, DockerException, ImageNotFound) as e:
-            print(f"Error pulling image (attempt {attempt}): {e}")
-            if attempt < retries:
-                time.sleep(delay)
-            else:
-                print("All retries failed.")
-                raise
 
 
 def next_free_hublvol_port(cluster_id):
@@ -3332,34 +3274,6 @@ def get_k8s_custom_objects_client():
     return client.CustomObjectsApi()
 
 
-def get_storage_node_api_log_type(mgmt_ip, name):
-    try:
-        node_docker = docker.DockerClient(base_url=f"tcp://{mgmt_ip}:2375", version="auto", timeout=60 * 5)
-        container = node_docker.containers.get(name)
-        log_config = container.attrs["HostConfig"]["LogConfig"]
-        if log_config and log_config["Type"]:
-            return log_config["Type"]
-    except (docker.errors.NotFound, docker.errors.DockerException, Exception):
-        pass
-
-
-def remove_container(client: docker.DockerClient, name, graceful_timeout=3):
-    try:
-        container = client.containers.get(name)
-        if graceful_timeout:
-            container.stop(timeout=graceful_timeout)
-        container.remove(force=(not graceful_timeout))
-    except NotFound:
-        pass
-    except APIError as e:
-        if e.status_code != 409:
-            raise
-
-
-def _top_dir() -> str:
-    return os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
-
-
 # hostPath mount of the host's /etc/modules-load.d inside the k8s storage-node
 # agent (see storage-node.yaml in the CSI chart). Writing to the container's
 # own /etc/modules-load.d is a silent no-op there: the file lands in the
@@ -3990,22 +3904,6 @@ def patch_prometheus_configmap(username: str, password: str):
         return False
 
 
-def create_docker_service(cluster_docker: DockerClient, service_name: str, command: list[str], service_image: str):
-    logger.info(f"Creating service: {service_name}")
-    cluster_docker.services.create(
-        image=service_image,
-        command=list(command),
-        name=service_name,
-        mounts=["/etc/foundationdb:/etc/foundationdb"],
-        env=["SIMPLYBLOCK_LOG_LEVEL=DEBUG"],
-        networks=["host"],
-        constraints=["node.role == manager"],
-        labels={
-            "com.docker.stack.image": service_image,
-            "com.docker.stack.namespace": "app"}
-    )
-
-
 def create_k8s_service(namespace: str, deployment_name: str,
                        container_name: str, command: list[str], container_image: str):
     logger.info(f"Creating deployment: {deployment_name} in namespace {namespace}")
@@ -4422,66 +4320,6 @@ def create_rpc_socket_mount():
         subprocess.run(["df", "-h", mount_point])
     except Exception as e:
         logger.error(e)
-
-
-def get_kms_cont(dev_ip):
-    node_docker = docker.DockerClient(base_url=f"tcp://{dev_ip}", version="auto")
-    for container in node_docker.containers.list():
-        if container.name.startswith("kms_kms_server"): # type: ignore[union-attr]
-            return container
-
-
-def configure_kms_on_docker(cluster, dev_ip):
-    container = get_kms_cont(f"{dev_ip}:2375")
-    if container:
-        environment = [
-            "VAULT_ADDR=http://127.0.0.1:8200",
-            "VAULT_SKIP_VERIFY=true"]
-        res = container.exec_run(
-            cmd="vault operator init -key-shares=1 -key-threshold=1 -format=json",
-            environment=environment
-        )
-        out = res.output.decode("utf-8")
-        logger.debug(out)
-        try:
-            config_data = json.loads(out)
-            with open('/etc/simplyblock/kms/data/init.json', 'w') as outfile:
-                outfile.write(json.dumps(config_data, indent=2))
-        except Exception as e:
-            logger.error(e)
-            return
-
-        with open("/etc/simplyblock/kms/data/init.json", "r") as f:
-            init_file = json.loads(f.read())
-            logger.debug("vault operator unseal")
-            res = container.exec_run(
-                cmd=f"vault operator unseal {init_file['unseal_keys_b64'][0]}",
-                environment=environment)
-            out = res.output.decode("utf-8")
-            logger.debug(res.exit_code)
-            logger.debug(out)
-            if res.exit_code == 0:
-                cluster.kms_unseal_key = init_file['unseal_keys_b64'][0]
-            logger.debug("vault login")
-            res = container.exec_run(
-                cmd=f"vault login {init_file['root_token']}",
-                environment=environment)
-            out = res.output.decode("utf-8")
-            logger.debug(out)
-            if res.exit_code == 0:
-                cluster.kms_root_token = init_file['root_token']
-            logger.debug("vault enable v1 kv")
-            res = container.exec_run(
-                cmd=f"vault secrets enable -path={cluster.uuid} -version=1 kv",
-                environment=environment)
-            out = res.output.decode("utf-8")
-            logger.debug(out)
-            logger.debug("vault enable v1 transit")
-            res = container.exec_run(
-                cmd="vault secrets enable transit",
-                environment=environment)
-            out = res.output.decode("utf-8")
-            logger.debug(out)
 
 
 def run_cmd_on_kms_pod(pod_name, namespace, command):
