@@ -46,6 +46,17 @@ def _mco_pool_name(node_labels, cluster_short_id):
     return f"storage-{cluster_short_id}"
 
 
+def _pool_kubelet_config_name(pool_name, cluster_short_id):
+    """The KubeletConfig the CPU-topology job gives this pool its settings with.
+
+    The masters get one of their own that selects the master pool from the
+    start: MCO evaluates a KubeletConfig when it is created or its spec
+    changes, never when a pool's labels change.
+    """
+    name = f"storage-kubelet-{cluster_short_id}"
+    return f"{name}-master" if pool_name == "master" else name
+
+
 def _cfg_hash(name):
     return name.rsplit("-", 1)[-1] if name else None
 
@@ -746,7 +757,8 @@ def spdk_process_start(body: SPDKParams):
                 if mcp_name == "master":
                     kubelet_configs = _kubelet_configs_owned_by(co.list_cluster_custom_object(
                         group="machineconfiguration.openshift.io", version="v1",
-                        plural="machineconfigs")["items"], f"storage-kubelet-{first_six_cluster_id}")
+                        plural="machineconfigs")["items"],
+                        _pool_kubelet_config_name(mcp_name, first_six_cluster_id))
                 node_obj = k8s_core_v1.read_node(node_name)
                 ann = node_obj.metadata.annotations or {}
                 cur = ann.get("machineconfiguration.openshift.io/currentConfig")

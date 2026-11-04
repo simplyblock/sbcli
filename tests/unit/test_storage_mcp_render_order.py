@@ -159,17 +159,19 @@ if verb == "get":
         if "metadata.labels" in jsonpath:
             print(pool.get("labels", {}).get("custom-kubelet", ""))
         elif "configuration.source" in jsonpath and name == "master":
-            # The master pool renders this cluster's KubeletConfig only once it
-            # carries the KubeletConfig's selector label. A generated config of
-            # another KubeletConfig may be there already, under the name this
-            # one's will take: MCO names it after the pool and a suffix only.
-            if pool.get("labels", {}).get("custom-kubelet") == s["kc_label"] \
-                    and s["kcs"] and not s["reject_kubeletconfig"]:
+            # MCO's KubeletConfig controller evaluates a KubeletConfig when it is
+            # created or its spec changes, never when a pool's labels change, so
+            # the master pool renders only a KubeletConfig whose selector matched
+            # it at creation. Its generated config may take the very name of
+            # another KubeletConfig's: MCO names it after the pool and a suffix.
+            for kc in s["master_kcs"]:
+                if s["reject_kubeletconfig"] or any(g[1] == kc for g in pool.get("generated", [])):
+                    continue
                 if s["render_after"] > 0:
                     s["render_after"] -= 1
                 else:
                     pool["generated"] = [g for g in pool.get("generated", []) if g[0] != s["master_ours_name"]]
-                    pool["generated"].append([s["master_ours_name"], s["kc_name"]])
+                    pool["generated"].append([s["master_ours_name"], kc])
             print("\n".join(["00-master"] + [g[0] for g in pool.get("generated", [])]))
         elif "configuration.source" in jsonpath:
             # The render controller: the MachineConfigs selected by the pool
@@ -199,6 +201,9 @@ if verb == "get":
     elif kind == "machineconfig":
         if name not in s["mcs"]:
             fail('Error from server (NotFound): machineconfigs.machineconfiguration.openshift.io "%s" not found' % name)
+    elif kind == "kubeletconfig" and name == "-o":
+        for kc in s["kcs"]:
+            print("kubeletconfig.machineconfiguration.openshift.io/" + kc)
     elif kind == "kubeletconfig":
         if name not in s["kcs"]:
             fail('Error from server (NotFound): kubeletconfigs.machineconfiguration.openshift.io "%s" not found' % name)
@@ -227,8 +232,26 @@ elif verb in ("create", "apply"):
         if name not in s["mcs"]:
             s["mcs"].append(name)
     elif kind == "KubeletConfig":
+        if name in s["kcs"] and verb == "create":
+            fail('Error from server (AlreadyExists): kubeletconfigs.machineconfiguration.openshift.io "%s" already exists' % name)
+        new = name not in s["kcs"]
         s["kcs"][name] = manifest["spec"]["kubeletConfig"]
+        selector = manifest["spec"]["machineConfigPoolSelector"]["matchLabels"]
+        master = s["pools"].get("master")
+        if new and master is not None and all(
+                master.get("labels", {}).get(k) == v for k, v in selector.items()):
+            s["master_kcs"].append(name)
     print("%s/%s %sd" % (kind.lower(), name, verb))
+elif verb == "delete":
+    assert kind == "kubeletconfig", args
+    for name in args[2:]:
+        s["kcs"].pop(name, None)
+        if name in s["master_kcs"]:
+            s["master_kcs"].remove(name)
+        master = s["pools"].get("master")
+        if master is not None:
+            master["generated"] = [g for g in master.get("generated", []) if g[1] != name]
+        print('kubeletconfig.machineconfiguration.openshift.io "%s" deleted' % name)
 elif verb == "label":
     key, value = args[3].split("=", 1)
     labels = s["pools"][args[2]].setdefault("labels", {})
@@ -259,7 +282,7 @@ save()
 def _state(**overrides):
     state = {"pools": {}, "mcs": [], "kcs": {}, "render_after": 2, "generated_suffix": "", "masters": [],
              "kc_label": "storage-cpumanager-ac85c3", "kc_name": "storage-kubelet-ac85c3",
-             "master_ours_name": "99-master-generated-kubelet",
+             "master_ours_name": "99-master-generated-kubelet", "master_kcs": [],
              "reject_kubeletconfig": False, "fail_get_pool": 0, "fail_get_hosts": 0}
     state.update(overrides)
     return state
@@ -393,29 +416,43 @@ def test_a_configured_node_only_confirms_numa_readiness(tmp_path):
 # ---- Master nodes -----------------------------------------------------------
 # MCO keeps a node carrying the master pool's label in the master pool even
 # when a custom pool selects it, and ignores the custom pool. On a compact
-# cluster every storage node is a master, so it gets the settings through the
-# master pool and joins no storage pool.
+# cluster every storage node is a master, so it gets the settings through a
+# KubeletConfig of its own for the master pool and joins no storage pool.
 
-KC_LABEL = "storage-cpumanager-ac85c3"
+MASTER_KC = KC + "-master"
+MASTER_POOL_LABEL = "pools.operator.machineconfiguration.openshift.io/master"
 
 
 def _master_pool(**fields):
-    pool = {"values": ["master-placeholder"], "labels": {}}
+    pool = {"values": ["master-placeholder"], "labels": {MASTER_POOL_LABEL: ""}}
     pool.update(fields)
     return pool
 
 
 @needs_dash
-def test_a_master_gets_the_kubelet_config_through_the_master_pool(tmp_path):
+def test_a_master_gets_a_kubelet_config_of_its_own_for_the_master_pool(tmp_path):
+    """MCO evaluates a KubeletConfig when it is created, never when a pool's
+    labels change: labeling the master pool for the storage KubeletConfig
+    after it exists renders nothing there. The master KubeletConfig selects
+    the master pool by its own label from the start."""
     proc, state, calls = _run(tmp_path, _state(masters=["master-3"], pools={"master": _master_pool()}),
                               hostname="master-3")
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert state["pools"]["master"]["labels"]["custom-kubelet"] == KC_LABEL
+    assert MASTER_KC in state["kcs"]
     assert "MCP master has rendered 99-master-generated-kubelet" in proc.stdout
+    assert state["pools"]["master"]["generated"] == [["99-master-generated-kubelet", MASTER_KC]]
+    assert state["pools"]["master"]["labels"] == {MASTER_POOL_LABEL: ""}, "the master pool is not relabeled"
     assert state["pools"][POOL]["values"] == [PENDING], "a master joins no storage pool"
-    assert not any(c.startswith("patch machineconfigpool master") for c in calls), \
-        "the master pool's selector and maxUnavailable are left alone"
+    assert not any(c.startswith(("patch machineconfigpool master", "label")) for c in calls), calls
     assert (tmp_path / "cpu_topology_applied").exists()
+
+
+@needs_dash
+def test_the_master_kubelet_config_carries_the_storage_settings(tmp_path):
+    proc, state, calls = _run(tmp_path, _state(masters=["master-3"], pools={"master": _master_pool()}),
+                              hostname="master-3")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert state["kcs"][MASTER_KC] == state["kcs"][KC]
 
 
 @needs_dash
@@ -446,42 +483,43 @@ def test_a_master_leaves_every_storage_pool_including_the_cluster_one(tmp_path):
 
 
 @needs_dash
-def test_a_rerun_takes_over_a_previous_clusters_label(tmp_path):
-    """A torn-down cluster leaves its label on the master pool and its
-    generated config in the render, under the name the new one's takes. The
-    label is replaced, and the wait is for the config the new KubeletConfig
-    owns, not the old one of the same name."""
-    proc, state, calls = _run(tmp_path, _state(masters=["master-3"], pools={"master": _master_pool(
-        labels={"custom-kubelet": "storage-cpumanager-old111"},
-        generated=[["99-master-generated-kubelet", "storage-kubelet-old111"]])}), hostname="master-3")
+def test_a_rerun_replaces_a_previous_clusters_master_kubelet_config(tmp_path):
+    """A torn-down cluster leaves its master KubeletConfig behind, and its
+    generated config under the name the new one's takes. Only one cluster's
+    settings can apply to the masters: the previous one is deleted, and the
+    wait is for the config the new KubeletConfig owns."""
+    old = "storage-kubelet-old111-master"
+    proc, state, calls = _run(tmp_path, _state(masters=["master-3"], kcs={old: {}}, master_kcs=[old], pools={
+        "master": _master_pool(generated=[["99-master-generated-kubelet", old]])}), hostname="master-3")
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert state["pools"]["master"]["labels"]["custom-kubelet"] == KC_LABEL
+    assert old not in state["kcs"]
     assert "previous simplyblock cluster" in proc.stdout
-    assert "[WARN]" not in proc.stdout
+    assert state["pools"]["master"]["generated"] == [["99-master-generated-kubelet", MASTER_KC]]
     assert proc.stdout.count("Waiting for MCP master") == 2, proc.stdout
-    assert "MCP master has rendered 99-master-generated-kubelet" in proc.stdout
 
 
 @needs_dash
-def test_another_kubelet_label_on_the_master_pool_is_replaced_with_a_warning(tmp_path):
-    """The master pool takes one custom-kubelet label. Replacing another
-    one drops the KubeletConfig that selects the masters by it, which the
-    job says."""
-    proc, state, calls = _run(tmp_path, _state(masters=["master-3"], pools={
-        "master": _master_pool(labels={"custom-kubelet": "site-tuning"})}), hostname="master-3")
-    assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert state["pools"]["master"]["labels"]["custom-kubelet"] == KC_LABEL
-    assert "[WARN]" in proc.stdout and "custom-kubelet=site-tuning" in proc.stdout
-
-
-@needs_dash
-def test_a_rerun_on_a_master_finds_the_label_and_the_render(tmp_path):
+def test_a_foreign_kubelet_config_on_the_masters_is_left_alone(tmp_path):
     proc, state, calls = _run(tmp_path, _state(
-        masters=["master-3"], pools={"master": _master_pool(
-            labels={"custom-kubelet": KC_LABEL}, generated=[["99-master-generated-kubelet", KC]])},
-        mcs=[MC], kcs={KC: {}}, render_after=0), hostname="master-3")
+        masters=["master-3"], kcs={"site-tuning": {}}, master_kcs=["site-tuning"],
+        master_ours_name="99-master-generated-kubelet-1",
+        pools={"master": _master_pool(labels={MASTER_POOL_LABEL: "", "custom-kubelet": "site-tuning"},
+                                      generated=[["99-master-generated-kubelet", "site-tuning"]])}),
+        hostname="master-3")
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert not any(c.startswith("label") for c in calls), calls
+    assert "site-tuning" in state["kcs"]
+    assert state["pools"]["master"]["labels"]["custom-kubelet"] == "site-tuning"
+    assert ["99-master-generated-kubelet", "site-tuning"] in state["pools"]["master"]["generated"]
+
+
+@needs_dash
+def test_a_rerun_on_a_master_finds_its_kubelet_config_and_the_render(tmp_path):
+    proc, state, calls = _run(tmp_path, _state(
+        masters=["master-3"], kcs={KC: {}, MASTER_KC: {}}, master_kcs=[MASTER_KC], mcs=[MC], render_after=0,
+        pools={"master": _master_pool(generated=[["99-master-generated-kubelet", MASTER_KC]])}),
+        hostname="master-3")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert not any(c.startswith(("create KubeletConfig", "delete")) for c in calls), calls
     assert "MCP master has rendered 99-master-generated-kubelet" in proc.stdout
 
 
@@ -489,5 +527,6 @@ def test_a_rerun_on_a_master_finds_the_label_and_the_render(tmp_path):
 def test_a_worker_leaves_the_master_pool_alone(tmp_path):
     proc, state, calls = _run(tmp_path, _state(masters=["master-3"], pools={"master": _master_pool()}))
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert state["pools"]["master"]["labels"] == {}
+    assert MASTER_KC not in state["kcs"]
+    assert state["pools"]["master"]["labels"] == {MASTER_POOL_LABEL: ""}
     assert state["pools"][POOL]["values"] == ["worker-1"]

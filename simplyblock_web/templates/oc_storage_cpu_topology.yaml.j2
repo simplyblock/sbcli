@@ -154,37 +154,55 @@ spec:
               # even when a custom pool selects it, and ignores the custom pool
               # ("defaulting to master", MCCPoolAlert). On a compact cluster every
               # storage node is a master. Such a node gets the settings through the
-              # master pool instead: the master pool takes the KubeletConfig's
-              # selector label, and the node joins no storage pool. Every master then
-              # gets the settings and reboots into them, one at a time. The master
-              # pool's maxUnavailable is never touched, because it keeps etcd quorum.
-              # A failed lookup stops the job rather than treat a master as a worker.
+              # master pool instead, and joins no storage pool. Every master then gets
+              # the settings and reboots into them, one at a time. The master pool's
+              # maxUnavailable is never touched, because it keeps etcd quorum. A failed
+              # lookup stops the job rather than treat a master as a worker.
               #
-              # The master pool carries one custom-kubelet label, and this cluster's
-              # replaces whatever is there. A torn-down cluster leaves its own label
-              # behind, so a rerun finds a previous one; any other value belongs to
-              # a KubeletConfig that stops applying to the masters, which is said.
+              # The settings come from a KubeletConfig of their own that selects the
+              # master pool by the label it always carries. MCO's KubeletConfig
+              # controller evaluates a KubeletConfig when it is created or its spec
+              # changes, never when a pool's labels change, so giving the master pool
+              # the storage KubeletConfig's selector label afterwards renders nothing
+              # there. Only one cluster's settings can apply to the masters: a previous
+              # simplyblock cluster's master KubeletConfig, which a teardown leaves
+              # behind, is deleted, and MCO removes its generated config with it.
               IS_MASTER=$(kubectl get nodes -l node-role.kubernetes.io/master \
                 --field-selector "metadata.name=$HOSTNAME" -o name)
               RENDER_POOL="$MCP_NAME"
               RENDER_MC="$MC_NAME"
+              RENDER_KC="$KC_NAME"
               KEEP_POOL="$MCP_NAME"
               if [ -n "$IS_MASTER" ]; then
                 RENDER_POOL="master"
                 # The storage MachineConfig selects the storage pool only.
                 RENDER_MC=""
+                RENDER_KC="$KC_NAME-master"
                 KEEP_POOL=""
-                MASTER_KC_LABEL=$(kubectl get machineconfigpool master -o jsonpath='{.metadata.labels.custom-kubelet}')
-                if [ "$MASTER_KC_LABEL" != "$KC_LABEL" ]; then
-                  case "$MASTER_KC_LABEL" in
-                    "") ;;
-                    storage-cpumanager-*)
-                      echo "[INFO] MCP master carries custom-kubelet=$MASTER_KC_LABEL from a previous simplyblock cluster; replacing it" ;;
-                    *)
-                      echo "[WARN] MCP master carries custom-kubelet=$MASTER_KC_LABEL; replacing it, so the KubeletConfig that selects the masters by that label no longer applies to them" ;;
-                  esac
-                  kubectl label machineconfigpool master "custom-kubelet=$KC_LABEL" --overwrite
-                  echo "[INFO] $HOSTNAME is a master: MCP master now carries custom-kubelet=$KC_LABEL, and every master reboots into the kubelet settings, one at a time"
+                for OLD in $(kubectl get kubeletconfig -o name | sed 's#.*/##' \
+                    | grep '^storage-kubelet-.*-master$' | grep -vx "$RENDER_KC" || true); do
+                  echo "[INFO] KubeletConfig $OLD is from a previous simplyblock cluster; deleting it"
+                  kubectl delete kubeletconfig "$OLD"
+                done
+                if kubectl get kubeletconfig "$RENDER_KC" > /dev/null 2>&1; then
+                  echo "[INFO] KubeletConfig $RENDER_KC already exists — skipping"
+                else
+                  cat <<KCEOF | kubectl create -f -
+              apiVersion: machineconfiguration.openshift.io/v1
+              kind: KubeletConfig
+              metadata:
+                name: $RENDER_KC
+              spec:
+                machineConfigPoolSelector:
+                  matchLabels:
+                    pools.operator.machineconfiguration.openshift.io/master: ""
+                kubeletConfig:
+                  cpuManagerPolicy: static
+                  cpuManagerReconcilePeriod: 5s
+                  topologyManagerPolicy: single-numa-node
+                  reservedSystemCPUs: {{ RESERVED_SYSTEM_CPUS }}
+              KCEOF
+                  echo "[INFO] $HOSTNAME is a master: KubeletConfig $RENDER_KC gives MCP master the kubelet settings, and every master reboots into them, one at a time"
                 fi
               fi
 
@@ -192,7 +210,7 @@ spec:
               # The render controller names the generated kubelet config
               # 99-<pool>-generated-kubelet, with a numeric suffix when another
               # KubeletConfig already selects the pool, so the prefix is matched, and
-              # the config must be owned by this KubeletConfig: the name carries no
+              # the config must be owned by the pool's KubeletConfig: the name carries no
               # owner, and after a rerun a previous cluster's config can hold the
               # very name this one's takes.
               # The pool's target render is complete once its sources carry it and
@@ -208,8 +226,8 @@ spec:
                 SOURCES=$(kubectl get machineconfigpool "$RENDER_POOL" \
                   -o jsonpath='{range .spec.configuration.source[*]}{.name}{"\n"}{end}' 2>/dev/null || true)
                 OWNED=$(kubectl get machineconfig --no-headers \
-                  -o custom-columns=NAME:.metadata.name,OWNER:.metadata.ownerReferences[0].name 2>/dev/null \
-                  | awk -v kc="$KC_NAME" '$2 == kc {print $1}' || true)
+                  -o 'custom-columns=NAME:.metadata.name,OWNER:.metadata.ownerReferences[0].name' 2>/dev/null \
+                  | awk -v kc="$RENDER_KC" '$2 == kc {print $1}' || true)
                 GENERATED=$(echo "$SOURCES" | grep "^${KC_GENERATED}" | grep -xF "$OWNED" | head -n 1 || true)
                 if [ -n "$GENERATED" ] && { [ -z "$RENDER_MC" ] || echo "$SOURCES" | grep -qx "$RENDER_MC"; }; then
                   echo "[INFO] MCP $RENDER_POOL has rendered $GENERATED${RENDER_MC:+ and $RENDER_MC}"
