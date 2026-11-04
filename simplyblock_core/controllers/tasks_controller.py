@@ -1690,6 +1690,50 @@ def get_active_replication_final_task(cluster_id, lvol_id):
     return False
 
 
+def cutover_is_freezing(task, now=None):
+    """True while a replication cutover task may be inside its IO freeze, or
+    has already moved the volume -- either way it must not be canceled.
+
+    The runner stamps ``freeze_started_at`` right before it fences the source
+    and drops it when a final step fails. A freeze is bounded by SPDK's final
+    step limit, so a stamp older than REPL_CUTOVER_FREEZE_GUARD_SEC is a pass
+    that died mid-freeze, not one still freezing.
+    """
+    params = task.function_params or {}
+    if params.get("end_time"):
+        return True
+    started = params.get("freeze_started_at")
+    if not started:
+        return False
+    now = time.time() if now is None else now
+    return now - float(started) < constants.REPL_CUTOVER_FREEZE_GUARD_SEC
+
+
+def replication_final_task_freezing(tasks, lvol_id):
+    """True when an active cutover task of *lvol_id* among *tasks* is freezing."""
+    return any(
+        t.function_name == JobSchedule.FN_REPLICATION_FINAL
+        and not t.canceled and t.status != JobSchedule.STATUS_DONE
+        and (t.function_params or {}).get("lvol_id") == lvol_id
+        and cutover_is_freezing(t)
+        for t in tasks)
+
+
+def cancel_cutover_unless_freezing(task):
+    """Cancel a replication cutover task unless it is freezing; atomically, so
+    a freeze that starts between the caller's read and this write wins.
+
+    Returns True if this call canceled it. The runner then ends the task and
+    its on_finish reverts the relationship and deletes the clone.
+    """
+    def _guard(fresh):
+        if fresh.status == JobSchedule.STATUS_DONE or cutover_is_freezing(fresh):
+            return False
+        return _flag_canceled(fresh)
+
+    return _cancel_atomically(task, _guard) is not None
+
+
 def get_replication_final_task(cluster_id, lvol_id):
     """Return the UUID of the replication cutover task a new commit of *lvol_id*
     would repeat, or False: one queued or running, or one that finished the

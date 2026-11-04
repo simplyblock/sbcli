@@ -569,6 +569,11 @@ REPL_CUTOVER_FREEZE_MAX_ROUND_SEC = (REPL_CUTOVER_FINAL_STEP_LIMIT_SEC
 # released, the volume replicates on its ordinary cadence, and the endgame is
 # retried after this long (the abandon burns one attempt of the task's budget).
 REPL_CUTOVER_ENDGAME_BACKOFF_SEC = 300
+# How long after its freeze_started_at stamp a cutover counts as freezing (and
+# so is spared by a plan cancel or a policy detach). A freeze is bounded by the
+# final-step limit plus fence/restore RPCs; a stamp older than this is a pass
+# that died mid-freeze.
+REPL_CUTOVER_FREEZE_GUARD_SEC = 120
 # When to stop converging in the open and take the lvstore for the endgame.
 # A round completing within this multiple of the target means the delta is
 # nearly converged, so the exclusive window that follows will be short. Claiming
