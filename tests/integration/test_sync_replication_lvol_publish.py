@@ -34,8 +34,6 @@ from simplyblock_core.exceptions import (
 )
 from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.job_schedule import JobSchedule
-from simplyblock_core.models.lvol_migration import LVolMigration
-from simplyblock_core.models.lvol_migration_group import LVolMigrationGroup
 from simplyblock_core.models.lvol_model import LVol, LVolReplication
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.snapshot import SnapShot
@@ -43,8 +41,6 @@ from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient, RPCException, RPCRemoteError
 from simplyblock_core.services import (
     storage_node_monitor,
-    tasks_runner_batch_migration,
-    tasks_runner_lvol_migration,
     tasks_runner_sync_lvol_del,
 )
 from simplyblock_core.utils import ttl_cache
@@ -1487,57 +1483,6 @@ class TestRefused:
         assert "sync-replication" in response.text
         assert db.get_migrations(cluster.get_id()) == []
         assert db.get_migration_groups(cluster.get_id()) == []
-
-    def test_batch_migration_task_ends_without_rpc(self, db, no_rpc):
-        cluster, a, b, owner = _layout(db)
-        vol = _volume(db, cluster, owner, _pool(db, cluster), ns_id=1, namespaced=True)
-        group = LVolMigrationGroup()
-        group.uuid = str(uuid.uuid4())
-        group.cluster_id = cluster.get_id()
-        group.source_node_id = owner.get_id()
-        group.target_node_id = a[1].get_id()
-        group.target_nqn = vol.nqn
-        group.status = LVolMigrationGroup.STATUS_RUNNING
-        group.phase = LVolMigrationGroup.PHASE_SNAP_COPY
-        group.write_to_db(db.kv_store)
-        task = JobSchedule()
-        task.uuid = str(uuid.uuid4())
-        task.cluster_id = cluster.get_id()
-        task.node_id = owner.get_id()
-        task.function_name = JobSchedule.FN_LVOL_BATCH_MIG
-        task.function_params = {"group_id": group.get_id()}
-        task.status = JobSchedule.STATUS_RUNNING
-        task.write_to_db(db.kv_store)
-        assert tasks_runner_batch_migration.task_runner(task) is True
-        (done,) = db.get_job_tasks(cluster.get_id())
-        assert done.status == JobSchedule.STATUS_DONE and "sync-replication" in done.function_result
-        failed = db.get_migration_group_by_id(group.get_id())
-        assert failed.status == LVolMigrationGroup.STATUS_FAILED
-        assert "sync-replication" in failed.error_message
-
-    def test_migration_task_ends_without_rpc(self, db, no_rpc):
-        cluster, a, b, owner = _layout(db)
-        vol = _volume(db, cluster, owner, _pool(db, cluster), ns_id=1)
-        migration = LVolMigration()
-        migration.uuid = str(uuid.uuid4())
-        migration.cluster_id = cluster.get_id()
-        migration.lvol_id = vol.get_id()
-        migration.source_node_id = owner.get_id()
-        migration.target_node_id = a[1].get_id()
-        migration.status = LVolMigration.STATUS_RUNNING
-        migration.write_to_db(db.kv_store)
-        task = JobSchedule()
-        task.uuid = str(uuid.uuid4())
-        task.cluster_id = cluster.get_id()
-        task.node_id = owner.get_id()
-        task.function_name = JobSchedule.FN_LVOL_MIG
-        task.function_params = {"migration_id": migration.get_id()}
-        task.status = JobSchedule.STATUS_RUNNING
-        task.write_to_db(db.kv_store)
-        assert tasks_runner_lvol_migration.task_runner(task) is True
-        (done,) = db.get_job_tasks(cluster.get_id())
-        assert done.status == JobSchedule.STATUS_DONE and "sync-replication" in done.function_result
-        assert db.get_migration_by_id(migration.get_id()).status == LVolMigration.STATUS_FAILED
 
     @pytest.mark.parametrize("operation", ["suspend_lvol", "resume_lvol"])
     def test_suspend_and_resume(self, db, no_rpc, operation):

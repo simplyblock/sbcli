@@ -12,12 +12,6 @@ from simplyblock_core.rpc_client import RPCException
 logger = logging.getLogger()
 
 
-class DistribHomeSiteError(LookupError):
-    """A sync-replication cluster map was asked for without the home site of
-    its distrib. Such a map cannot be built: without the replica flags every
-    node would land in the primary zone of the distrib."""
-
-
 def lvs_owners_on_node(node: StorageNode, nodes) -> list[StorageNode]:
     """The owner (primary) nodes whose LVS has an instance on ``node``.
 
@@ -374,9 +368,6 @@ def get_distr_cluster_map(snodes, target_node, distr_name="", home_site=None):
     On a sync-replication cluster the map belongs to ONE distrib, whose LVS
     has its home on ``home_site``: nodes of the other site form its replica
     zone ("replica": true on the node and on its map_prob bucket).
-
-    Raises:
-        DistribHomeSiteError: sync-replication cluster and no ``home_site``.
     """
     map_cluster = {}
     map_prob = {}
@@ -384,10 +375,6 @@ def get_distr_cluster_map(snodes, target_node, distr_name="", home_site=None):
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(target_node.cluster_id)
     sync = cluster.sync_replication
-    if sync and home_site is None:
-        raise DistribHomeSiteError(
-            f"cluster map of distrib {distr_name!r} on node {target_node.get_id()}: "
-            f"a sync-replication map needs the home site of its LVS")
     # Sync only: the target's position among the EMITTED map_cluster entries,
     # the index ppln1 / replica_ppln1 refer to (None: the target is not in it).
     sync_target_index = None
@@ -664,13 +651,10 @@ def send_cluster_map_to_node(node: StorageNode):
 def send_cluster_map_to_distr(node: StorageNode, distr_name: str, home_site=None):
     """Push the full cluster map to one distrib on ``node``.
 
-    ``home_site``: sync replication only, the site of the distrib's LVS owner;
-    looked up from the node's hosted LVS when not given.
+    ``home_site``: sync replication only, the site of the distrib's LVS owner.
     """
     db_controller = DBController()
     snodes = db_controller.get_storage_nodes_by_cluster_id(node.cluster_id)
-    if home_site is None and _sync_replication(node):
-        home_site = dict(distribs_on_node(node, snodes)).get(distr_name)
     cluster_map_data = get_distr_cluster_map(snodes, node, distr_name, home_site=home_site)
     try:
         ret = node.rpc_client(timeout=10).distr_send_cluster_map(cluster_map_data)

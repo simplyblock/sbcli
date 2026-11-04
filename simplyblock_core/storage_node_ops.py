@@ -64,12 +64,7 @@ from simplyblock_core.controllers import (
 from simplyblock_core.controllers.cluster_expansion import planner as role_planner
 from simplyblock_core.controllers.host_auth import _reapply_allowed_hosts
 from simplyblock_core.db_controller import DBController
-from simplyblock_core.distr_controller import DistribHomeSiteError
-from simplyblock_core.exceptions import (
-    PreconditionError,
-    SyncReplicationUnsupportedError,
-    reject_on_sync_replication,
-)
+from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.job_schedule import JobSchedule
@@ -5388,11 +5383,9 @@ def check_removal_admission(snode, db_controller, force_remove=False, check_snap
             if sn.deleted is False and _snapshot_lives_on_node(sn, node_id, db_controller)
         ]
     if sync and (lvols or node_snaps):
-        try:
-            reject_on_sync_replication(cluster, "Volume migration")
-        except SyncReplicationUnsupportedError as e:
-            return False, (f"{len(lvols)} volume(s) and {len(node_snaps)} snapshot(s) present; "
-                           f"delete them first: {e}")
+        return False, (f"{len(lvols)} volume(s) and {len(node_snaps)} snapshot(s) present; "
+                       f"delete them first: Volume migration is not supported on a "
+                       f"sync-replication cluster")
     if lvols:
         logger.info(
             f"Node {node_id} holds {len(lvols)} LVol(s); the removal will "
@@ -6613,7 +6606,7 @@ def _reselect_remote_roles_held_by(removed_node: StorageNode) -> bool:
                 logger.info(f"[REMOVAL] {removed_id}: remote-triplet member {member_id} of "
                             f"{owner.lvstore} is {member.status}; left for its restart")
                 continue
-            if cluster.sync_replication is True and cluster.lost_site and member.site == cluster.lost_site:
+            if cluster.lost_site and member.site == cluster.lost_site:
                 logger.info(f"[REMOVAL] {removed_id}: remote-triplet member {member_id} of "
                             f"{owner.lvstore} is on the recorded site {member.site}; left for the "
                             f"site activation")
@@ -19476,8 +19469,6 @@ def _create_bdev_stack(snode: StorageNode, lvstore_stack=None, primary_node=None
         except RetryError as e:
             logger.error("Failed to create bdev distrib %s after 2 attempts: %s",
                          name, e.last_attempt.exception())
-        except DistribHomeSiteError as e:
-            logger.error("Failed to create bdev distrib %s: %s", name, e)
         finally:
             # Recorded on every exit, an unexpected exception included: a
             # distrib without a result would not count as failed below.

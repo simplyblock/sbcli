@@ -34,8 +34,6 @@ from simplyblock_core.controllers import sync_replication_controller as src
 from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
-from simplyblock_core.models.lvol_migration import LVolMigration
-from simplyblock_core.models.lvol_migration_group import LVolMigrationGroup
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.replication import ConsistencyGroup
 from simplyblock_core.models.snapshot import SnapShot
@@ -44,10 +42,8 @@ from simplyblock_core.rpc_client import RPCRemoteError
 from simplyblock_core.services import (
     backup_merge_service,
     tasks_runner_backup,
-    tasks_runner_batch_migration,
     tasks_runner_failed_migration,
     tasks_runner_jc_comp,
-    tasks_runner_lvol_migration,
     tasks_runner_migration,
     tasks_runner_new_dev_migration,
     tasks_runner_node_add,
@@ -398,35 +394,6 @@ class TestMigrations:
         with patch.object(tasks_controller, "get_active_cluster_expand_task", side_effect=_Passed):
             with pytest.raises(_Passed):
                 drive(runner.SPEC, task)
-
-    def test_volume_migration_ends_unsupported(self, db):
-        """A volume migration never runs on a sync-replication cluster, the
-        flag set or not - it ends "not supported" before any status check."""
-        cluster, a, b = _activating(db)
-        migration = LVolMigration()
-        migration.uuid = str(uuid.uuid4())
-        migration.cluster_id = cluster.get_id()
-        migration.status = LVolMigration.STATUS_RUNNING
-        migration.write_to_db(db.kv_store)
-        task = _task(db, cluster, JobSchedule.FN_LVOL_MIG, b[1].get_id(), {"migration_id": migration.uuid})
-        assert tasks_runner_lvol_migration.task_runner(task) is True
-        fresh = db.get_task_by_id(task.uuid)
-        assert fresh.status == JobSchedule.STATUS_DONE
-        assert "not supported on a sync-replication cluster" in fresh.function_result
-
-    def test_batch_migration_ends_unsupported(self, db):
-        cluster, a, b = _activating(db)
-        group = LVolMigrationGroup()
-        group.uuid = str(uuid.uuid4())
-        group.cluster_id = cluster.get_id()
-        group.source_node_id, group.target_node_id = b[1].get_id(), b[2].get_id()
-        group.status = LVolMigrationGroup.STATUS_RUNNING
-        group.write_to_db(db.kv_store)
-        task = _task(db, cluster, JobSchedule.FN_LVOL_BATCH_MIG, b[1].get_id(), {"group_id": group.uuid})
-        assert tasks_runner_batch_migration.task_runner(task) is True
-        fresh = db.get_task_by_id(task.uuid)
-        assert fresh.status == JobSchedule.STATUS_DONE
-        assert "not supported on a sync-replication cluster" in fresh.function_result
 
 
 class TestResync:

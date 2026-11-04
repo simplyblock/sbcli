@@ -1239,13 +1239,9 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False, site="") ->
     (ValueError otherwise), stamps ``site_activation_heartbeat`` under that
     token whatever the cluster status - which stays the stored one, never
     IN_ACTIVATION - and clears its own token at the end, whatever the outcome.
-    It never creates an lvstore: ``force_lvstore_create`` is refused with it.
     """
     from simplyblock_core.controllers import sync_replication_controller as src
     site_activation = None
-    if site and force_lvstore_create:
-        raise ValueError(f"Failed to activate site {site}: a site activation rebuilds the existing "
-                         f"lvstores, force_lvstore_create does not apply")
     if site:
         token = src.begin_site_activation(cl_id, site)
         if not token:

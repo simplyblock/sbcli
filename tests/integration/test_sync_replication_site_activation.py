@@ -597,14 +597,6 @@ class TestMovingLvs:
 
 class TestBeginRefused:
 
-    def test_force_lvstore_create_is_refused_first(self, db, rpcs, hub, adopt):
-        s = _shapes(db)
-        bnd = _activate(db, s, expect=ValueError, force_lvstore_create=True)
-        assert bnd.log == []
-        bnd.wait.assert_not_called()
-        cluster = _cluster(db, s)
-        assert (cluster.site_activation_site, cluster.site_activation_since) == ("", "")
-
     @pytest.mark.parametrize("case", ["flag set", "draining"])
     def test_refused_begin_runs_nothing(self, db, rpcs, hub, adopt, case):
         s = _shapes(db, DRAINING if case == "draining" else DOWN)

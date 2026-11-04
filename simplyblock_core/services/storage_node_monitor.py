@@ -1884,15 +1884,12 @@ def _data_plane_votes(node, fresh):
     return votes
 
 
-def is_node_data_plane_disconnected(node, *, fresh=False):
+def is_node_data_plane_disconnected(node):
     """Return True if all other online nodes report *node*'s remote JM as disconnected.
 
     Returns False if no peers are available to check (conservative).
-    ``fresh`` bypasses the vote cache (and refreshes it): a decision that
-    fences a site on the answer must not reuse a vote up to
-    _DP_QUORUM_PROBE_TTL_SEC old.
     """
-    disconnected, total = _data_plane_votes(node, fresh)
+    disconnected, total = _count_data_plane_votes(node)
     return total > 0 and disconnected == total
 
 
@@ -1900,9 +1897,9 @@ def is_node_data_plane_disconnected_quorum(node, lvs_peer_ids=None, *, fresh=Fal
     """Return True if a majority of online nodes report *node*'s remote JM as disconnected.
 
     Returns False if no peers are available to check (conservative).
-    ``fresh`` bypasses the vote cache (and refreshes it), as in
-    is_node_data_plane_disconnected: a leadership granted on the answer
-    must not reuse a vote taken before the grant waited for its locks.
+    ``fresh`` bypasses the vote cache and refreshes it: a leadership granted
+    on the answer must not reuse a vote up to _DP_QUORUM_PROBE_TTL_SEC old,
+    taken before the grant waited for its locks.
     """
     disconnected, total = _data_plane_votes(node, fresh)
     return total > 0 and disconnected > total // 2
@@ -1912,9 +1909,10 @@ def data_plane_seen_votes(node, *, fresh=False) -> tuple[int, int]:
     """``(enabled, total)``: of the ``total`` peers that answered about
     *node*'s remote JM, how many still report it ``enabled``.
 
-    The veto reading of the same vote (``fresh`` as in
-    is_node_data_plane_disconnected): a caller that has its own evidence of
-    the node being gone is stopped by ``enabled > 0`` only. ``(0, 0)`` - no
+    The veto reading of the same vote: a caller that has its own evidence of
+    the node being gone is stopped by ``enabled > 0`` only. ``fresh``
+    bypasses the vote cache and refreshes it: a site-loss decision taken on
+    the answer must not reuse a vote up to _DP_QUORUM_PROBE_TTL_SEC old. ``(0, 0)`` - no
     peer to ask, none that holds the link, none that answered - vetoes
     nothing, where the two predicates above read it as "not disconnected".
     """

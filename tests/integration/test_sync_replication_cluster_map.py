@@ -123,12 +123,6 @@ class TestReplicaFlags:
         _assert_buckets_agree(map_a)
         _assert_buckets_agree(map_b)
 
-    def test_sync_map_without_home_site_is_refused(self, db):
-        cluster = _seed_cluster(db)
-        nodes = _layout(db, cluster)
-        with pytest.raises(distr_controller.DistribHomeSiteError):
-            distr_controller.get_distr_cluster_map(list(nodes), nodes[1], "d_a")
-
     def test_non_sync_map_has_no_zone(self, db):
         cluster = _seed_cluster(db, sync=False)
         nodes = [_seed_node(db, cluster, f"n{i}", "") for i in range(3)]
@@ -198,12 +192,12 @@ class TestSendersPerDistrib:
         host = _layout(db, cluster)[1]
         rpc = rpcs.setdefault(host.get_id(), MagicMock())
         rpc.distr_send_cluster_map.return_value = None
-        assert distr_controller.send_cluster_map_to_distr(host, "d_a") is False
+        assert distr_controller.send_cluster_map_to_distr(host, "d_a", home_site="site-a") is False
 
-    def test_one_distrib_map_resolves_its_home_site(self, db, rpcs):
+    def test_one_distrib_map_is_sent_with_the_given_home_site(self, db, rpcs):
         cluster = _seed_cluster(db)
         a1, host, a3, b1, b2, b3 = _layout(db, cluster)
-        assert distr_controller.send_cluster_map_to_distr(host, "d_b") is True
+        assert distr_controller.send_cluster_map_to_distr(host, "d_b", home_site="site-b") is True
         cl_map = rpcs[host.get_id()].distr_send_cluster_map.call_args.args[0]
         assert cl_map["name"] == "d_b"
         assert _replica_nodes(cl_map) == {a1.get_id(), host.get_id(), a3.get_id()}
