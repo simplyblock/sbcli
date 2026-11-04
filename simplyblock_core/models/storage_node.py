@@ -1183,14 +1183,37 @@ class StorageNode(BaseNodeObject):
         from simplyblock_core.db_controller import DBController
         db_controller = DBController()
         from simplyblock_core.controllers.lvol_controller import role_secondary_ids
-        task_found = False
-        # Every other instance of the node's LVS: a sync delete is owed by each
-        # of them, on a sync-replication cluster the remote triplet's too.
-        sec_ids = role_secondary_ids(self)
-        tasks = db_controller.get_job_tasks(self.cluster_id)
-        for task in tasks:
-            if task.function_name == JobSchedule.FN_LVOL_SYNC_DEL and task.node_id in sec_ids:
-                if task.status != JobSchedule.STATUS_DONE and task.canceled is False:
+        from simplyblock_core.storage_node_ops import _sync_site
+        own_peer_ids = role_secondary_ids(self)
+        pending = [
+            task for task in db_controller.get_job_tasks(self.cluster_id)
+            if task.function_name == JobSchedule.FN_LVOL_SYNC_DEL
+            and task.status != JobSchedule.STATUS_DONE and task.canceled is False]
+        if not _sync_site(self):
+            task_found = any(task.node_id in own_peer_ids for task in pending)
+        else:
+            # The lock sits on the node that led the delete, which on a
+            # sync-replication cluster may be any instance of the LVS - not
+            # necessarily one of the instances of the LVS it owns. A pending
+            # sync delete keeps it when the task's target and this node are
+            # both instances of the task's LVS (from its bdev name). A task
+            # whose LVS has no owner left is matched against this node's own
+            # instances.
+            instances_by_lvs = {}
+            if pending:
+                for node in db_controller.get_storage_nodes_by_cluster_id(self.cluster_id):
+                    if node.lvstore:
+                        instances_by_lvs[node.lvstore] = {node.get_id(), *role_secondary_ids(node)}
+            task_found = False
+            for task in pending:
+                lvs_name = task.function_params.get("lvol_bdev_name", "").split("/")[0]
+                instances = instances_by_lvs.get(lvs_name) if lvs_name else None
+                if instances is None:
+                    if task.node_id in own_peer_ids:
+                        task_found = True
+                        break
+                elif (self.get_id() in instances and task.node_id in instances
+                      and task.node_id != self.get_id()):
                     task_found = True
                     break
 

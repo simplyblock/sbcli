@@ -527,16 +527,34 @@ def lock_no_sleep():
         yield
 
 
-def _sync_del_task(db, cluster, node, owner):
+def _sync_del_task(db, cluster, node, owner, *, lvs="LVS_1", canceled=False):
     task = JobSchedule()
     task.uuid = str(uuid.uuid4())
     task.cluster_id = cluster.get_id()
     task.node_id = node.get_id()
     task.function_name = JobSchedule.FN_LVOL_SYNC_DEL
-    task.function_params = {"lvol_bdev_name": "LVS_1/LVOL_1", "primary_node": owner.get_id()}
+    task.function_params = {"lvol_bdev_name": f"{lvs}/LVOL_1", "primary_node": owner.get_id()}
     task.status = JobSchedule.STATUS_NEW
+    task.canceled = canceled
     task.write_to_db(db.kv_store)
     return task
+
+
+def _four_per_site(db):
+    """Four nodes per site, three LVS whose instance sets differ:
+    LVS_1 owned by a0 (home a0 a1 a2, remote b1 b2 b3) and led from site B,
+    LVS_2 owned by b1 (home b1 b2 b0, remote a1 a2 a3),
+    LVS_3 owned by a3 (home a3 a0 a1, remote b0 b2 b3).
+    b1, the remote primary of LVS_1, leads it and holds the del-sync lock;
+    a0 is an instance of LVS_1 but not of b1's own LVS_2, and b1 is not an
+    instance of LVS_3."""
+    cluster = stack._seed_cluster(db)
+    a, b = stack._sites(db, cluster, per_site=4)
+    owner = stack._make_owner(db, a[0], a[:3], b[1:], lvs_id=1)
+    _update(db, owner, lvs_active_site=SITE_B)
+    stack._make_owner(db, b[1], [b[1], b[2], b[0]], a[1:], lvs_id=2)
+    stack._make_owner(db, a[3], [a[3], a[0], a[1]], [b[0], b[2], b[3]], lvs_id=3)
+    return cluster, a, b
 
 
 class TestDelSyncLockReset:
@@ -566,3 +584,41 @@ class TestDelSyncLockReset:
         cluster, nodes, _ = _plain(db)
         _sync_del_task(db, cluster, nodes[1], nodes[0])
         assert self._reset_keeps_lock(db, nodes[0]) is True
+
+    def test_non_sync_pending_sync_delete_elsewhere_drops_lock(self, db, lock_no_sleep):
+        cluster, nodes, _ = _plain(db)
+        other = stack._seed_node(db, cluster, "n3", "")
+        _sync_del_task(db, cluster, other, nodes[0])
+        assert self._reset_keeps_lock(db, nodes[0]) is False
+
+    def test_remote_leader_keeps_lock_for_led_lvs_outside_its_own(self, db, lock_no_sleep):
+        """The task's target a0 is an instance of the led LVS_1 only, and its
+        primary_node is the owner a0, not the lock holder b1."""
+        cluster, a, b = _four_per_site(db)
+        task = _sync_del_task(db, cluster, a[0], a[0], lvs="LVS_1")
+
+        assert self._reset_keeps_lock(db, b[1]) is True
+
+        db.atomic_update(task, lambda t: setattr(t, "status", JobSchedule.STATUS_DONE))
+        assert self._reset_keeps_lock(db, b[1]) is False
+
+    def test_canceled_sync_delete_drops_lock(self, db, lock_no_sleep):
+        cluster, a, b = _four_per_site(db)
+        _sync_del_task(db, cluster, a[0], a[0], lvs="LVS_1", canceled=True)
+        assert self._reset_keeps_lock(db, b[1]) is False
+
+    def test_sync_delete_of_lvs_the_holder_is_no_instance_of_drops_lock(self, db, lock_no_sleep):
+        """b2 is one of b1's own peers, but the task belongs to LVS_3, which
+        b1 holds no instance of."""
+        cluster, a, b = _four_per_site(db)
+        _sync_del_task(db, cluster, b[2], a[3], lvs="LVS_3")
+        assert self._reset_keeps_lock(db, b[1]) is False
+
+    @pytest.mark.parametrize("site, slot, keeps", [
+        pytest.param("b", 2, True, id="own-peer"),
+        pytest.param("a", 0, False, id="not-own-peer"),
+    ])
+    def test_sync_delete_of_unknown_lvs_matches_own_peers(self, db, lock_no_sleep, site, slot, keeps):
+        cluster, a, b = _four_per_site(db)
+        _sync_del_task(db, cluster, {"a": a, "b": b}[site][slot], b[1], lvs="LVS_9")
+        assert self._reset_keeps_lock(db, b[1]) is keeps
