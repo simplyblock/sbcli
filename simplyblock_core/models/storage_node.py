@@ -1182,10 +1182,11 @@ class StorageNode(BaseNodeObject):
     def lvol_del_sync_lock_reset(self) -> bool:
         from simplyblock_core.db_controller import DBController
         db_controller = DBController()
+        from simplyblock_core.controllers.lvol_controller import role_secondary_ids
         task_found = False
-        sec_ids = [self.secondary_node_id]
-        if self.tertiary_node_id:
-            sec_ids.append(self.tertiary_node_id)
+        # Every other instance of the node's LVS: a sync delete is owed by each
+        # of them, on a sync-replication cluster the remote triplet's too.
+        sec_ids = role_secondary_ids(self)
         tasks = db_controller.get_job_tasks(self.cluster_id)
         for task in tasks:
             if task.function_name == JobSchedule.FN_LVOL_SYNC_DEL and task.node_id in sec_ids:

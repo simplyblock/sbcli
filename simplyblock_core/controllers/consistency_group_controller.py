@@ -1165,14 +1165,12 @@ def create_group_snapshot_for_group(group, snap_type=SnapShot.TYPE_INTERNAL, loc
     if site_activation:
         return None, f"Cannot create group snapshot on LVS {group.lvs_name}: {site_activation}"
 
-    # Leader + HA member set, same as the single-snapshot path.
-    secondary_ids = [host_node.secondary_node_id]
-    if host_node.tertiary_node_id:
-        secondary_ids.append(host_node.tertiary_node_id)
+    # Leader + HA member set, same as the single-snapshot path: every other
+    # instance of the LVS (on a sync-replication cluster both triplets).
+    from simplyblock_core.controllers import lvol_controller
+    secondary_ids = lvol_controller.role_secondary_ids(host_node)
     all_nodes = [host_node]
     for sid in secondary_ids:
-        if not sid:
-            continue
         try:
             all_nodes.append(db.get_storage_node_by_id(sid))
         except KeyError:

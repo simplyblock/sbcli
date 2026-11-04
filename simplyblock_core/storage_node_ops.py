@@ -20118,6 +20118,15 @@ def safe_delete_bdev(name, node_id):
 
     db_controller = DBController()
     primary_node = db_controller.get_storage_node_by_id(node_id)
+    bdev_name = f"{primary_node.lvstore}/{name}"
+    if _sync_site(primary_node):
+        legs = _sync_safe_delete_legs(primary_node, db_controller)
+        if legs is None:
+            logger.error(f"{bdev_name} not deleted: no member of the active triplet of "
+                         f"{primary_node.lvstore} leads it")
+            return False
+        return _safe_delete_bdev_legs(bdev_name, *legs)
+
     # Every replica peer, in the role order lvol_controller uses. A blank id
     # means the role is not wired up (ha_type single has no secondary), and a
     # blank id is a KeyError by contract -- see tests/unit/test_blank_id_
@@ -20141,7 +20150,33 @@ def safe_delete_bdev(name, node_id):
         except KeyError:
             logger.warning(f"Replica peer {role_id} of {primary_node.get_id()} "
                            f"has no record; skipping its delete leg")
-    bdev_name = f"{primary_node.lvstore}/{name}"
+    return _safe_delete_bdev_legs(bdev_name, primary_node, peer_nodes)
+
+
+def _sync_safe_delete_legs(owner, db_controller):
+    """``(leader, peers)`` of a delete of a bdev of ``owner``'s LVS on a
+    sync-replication cluster: the member of the active triplet that reports the
+    leadership (probed only - nothing is recovered or granted) and every other
+    instance of the LVS, both triplets, in role order. None when no member of
+    the active triplet leads."""
+    instances = [owner]
+    for member_id in lvol_controller.role_secondary_ids(owner):
+        try:
+            instances.append(db_controller.get_storage_node_by_id(member_id))
+        except KeyError:
+            logger.warning(f"Instance {member_id} of {owner.lvstore} has no record; "
+                           f"skipping its delete leg")
+    leader = next((node for node in _lvs_leader_candidates(instances, owner.lvstore).nodes
+                   if lvol_controller.is_node_leader(node, owner.lvstore)), None)
+    if leader is None:
+        return None
+    return leader, [node for node in instances if node.get_id() != leader.get_id()]
+
+
+def _safe_delete_bdev_legs(bdev_name, primary_node, peer_nodes):
+    """The delete legs of safe_delete_bdev: the async delete, its completion
+    poll and the sync delete on ``primary_node`` (the one leading the LVS),
+    then a sync delete on every node of ``peer_nodes``."""
     logger.info(f"deleting from primary: {bdev_name}")
     try:
         primary_node.rpc_client().delete_lvol(bdev_name)

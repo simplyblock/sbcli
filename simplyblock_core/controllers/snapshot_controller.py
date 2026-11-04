@@ -1456,6 +1456,12 @@ def _delete_locked(snap, snapshot_uuid, force_delete=False, lock=True):
                 all_nodes.append(db_controller.get_storage_node_by_id(snode.tertiary_node_id))
             except KeyError:
                 pass
+        # The members that may lead the LVS: the home triplet, or on a
+        # sync-replication cluster the active triplet - as the snapshot
+        # monitor probes them. Only probed here: no leader is recovered or
+        # granted, an LVS nobody leads parks the snapshot below.
+        from simplyblock_core.storage_node_ops import _lvs_leader_candidates
+        all_nodes = list(_lvs_leader_candidates(all_nodes, snap.lvol.lvs_name).nodes)
 
         # Probe order, not membership: a node the removal has already shut down
         # cannot answer, so asking it first costs the SnodeAPI retry budget
