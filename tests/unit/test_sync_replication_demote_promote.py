@@ -176,35 +176,35 @@ def _unconnected(uuid="v1", **fields):
     return _lvol(uuid, sync_never_connected=True, **fields)
 
 
-class TestBirthState:
+class TestNeverConnected:
     """The first-placement relaxation: a planned promote whose only blocker is a
     never-connected volume still open on its LVS's lead site may demote that
-    site first and move. is_birth_state is the record test (never connected,
+    site first and move. is_never_connected is the record test (never connected,
     active where the LVS is led, whatever its demote record);
-    birth_state_demote_plan is what the planned promote demotes before it moves.
+    never_connected_demote_plan is what the planned promote demotes before it moves.
     """
 
-    def test_is_birth_state(self):
+    def test_is_never_connected(self):
         owner = _owner()  # home site-a, LVS at home (lvs_active_site == "")
         # Active where its LVS is led; an unset active site defaults to the
         # LVS's lead, the home here, and a demote record does not matter.
-        assert src.is_birth_state(_unconnected(), owner)
-        assert src.is_birth_state(_unconnected(sync_active_site=SITE_A), owner)
-        assert src.is_birth_state(_unconnected(sync_demoted_sites=[SITE_B]), owner)
+        assert src.is_never_connected(_unconnected(), owner)
+        assert src.is_never_connected(_unconnected(sync_active_site=SITE_A), owner)
+        assert src.is_never_connected(_unconnected(sync_demoted_sites=[SITE_B]), owner)
         # Anchored to the LVS's current lead site, not its home.
-        assert src.is_birth_state(_unconnected(sync_active_site=SITE_B), _owner(lvs_active_site=SITE_B))
+        assert src.is_never_connected(_unconnected(sync_active_site=SITE_B), _owner(lvs_active_site=SITE_B))
         # Not active on the LVS's lead site, or the LVS is mid-move.
-        assert not src.is_birth_state(_unconnected(sync_active_site=SITE_B), owner)
-        assert not src.is_birth_state(_unconnected(), _owner(lvs_active_site=SITE_B))
-        assert not src.is_birth_state(_unconnected(), _owner(lvs_active_site="moving:site-b"))
+        assert not src.is_never_connected(_unconnected(sync_active_site=SITE_B), owner)
+        assert not src.is_never_connected(_unconnected(), _owner(lvs_active_site=SITE_B))
+        assert not src.is_never_connected(_unconnected(), _owner(lvs_active_site="moving:site-b"))
 
-    def test_connected_volume_is_never_birth_state(self):
+    def test_connected_volume_does_not_count_as_never_connected(self):
         """A connect has handed out its paths (or the record predates the
         flag): a consumer may hold them, wherever the volume is active."""
         owner = _owner()
-        assert not src.is_birth_state(_lvol(), owner)
-        assert not src.is_birth_state(_lvol(sync_active_site=SITE_A), owner)
-        assert not src.is_birth_state(_lvol(sync_active_site=SITE_B), _owner(lvs_active_site=SITE_B))
+        assert not src.is_never_connected(_lvol(), owner)
+        assert not src.is_never_connected(_lvol(sync_active_site=SITE_A), owner)
+        assert not src.is_never_connected(_lvol(sync_active_site=SITE_B), _owner(lvs_active_site=SITE_B))
 
     def _plan(self, requested, lvs=None, owner=None, site=SITE_B, online=BOTH, nodes=ALL_NODES):
         owner = owner or _owner()
@@ -212,7 +212,7 @@ class TestBirthState:
         decisions = [(lv, src.promote_decision(lv, owner, lvs, site, online_sites=set(online),
                                                online_nodes=set(nodes), force=False))
                      for lv in requested]
-        return src.birth_state_demote_plan(decisions, {owner.get_id(): owner}, {owner.get_id(): lvs})
+        return src.never_connected_demote_plan(decisions, {owner.get_id(): owner}, {owner.get_id(): lvs})
 
     @pytest.mark.parametrize("fields", [
         pytest.param({}, id="fresh-volume"),

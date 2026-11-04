@@ -258,7 +258,7 @@ class TestPromoteApi:
         # The LVS is led from site-b and a fresh volume on it carries site-b,
         # never connected. A pod landing on site-a follows the workload: the
         # promote fences site-b (demotes it) and queues the move instead of
-        # refusing it as "not demoted". is_birth_state is anchored to the LVS's
+        # refusing it as "not demoted". is_never_connected is anchored to the LVS's
         # current lead site, not its home.
         cluster, a, b, owner, pool, vol = _registered(db, spdk)
         _update(db, owner, lvs_active_site=SITE_B)
@@ -271,9 +271,9 @@ class TestPromoteApi:
         assert db.get_lvol_by_id(vol.get_id()).sync_demoted_sites == [SITE_B]
         assert db.get_sync_promote_task(cluster.get_id(), "LVS_1") is not None
 
-    def test_birth_state_volume_fenced_at_home_and_moved(self, db, spdk, gate, moves):
-        """First placement: a brand-new volume (never connected, born on its
-        home) whose pod lands on the site its LVS is not homed on. The promote
+    def test_never_connected_volume_fenced_at_home_and_moved(self, db, spdk, gate, moves):
+        """First placement: a brand-new volume (never connected, created on
+        its home) whose pod lands on the site its LVS is not homed on. The promote
         fences the home itself - what an unstage would have done - and queues
         the move, instead of refusing it as not demoted. The move then
         completes on the far site; no connect handed out the home's paths, so
@@ -298,8 +298,8 @@ class TestPromoteApi:
         assert not done.in_progress
         assert [e.ip for e in done.connection_strings[vol.get_id()]] == [_ip(n) for n in b]
 
-    def test_birth_state_volume_promoted_home_is_no_op(self, db, spdk, gate):
-        # A birth-state volume promoted to the site it is already led from gets
+    def test_never_connected_volume_promoted_home_is_no_op(self, db, spdk, gate):
+        # A never-connected volume promoted to the site it is already led from gets
         # the ordinary served answer, and nothing is fenced. Its paths are
         # handed out, so it is connected from then on.
         cluster, a, b, owner = _layout(db)
@@ -316,7 +316,7 @@ class TestPromoteApi:
         assert after.sync_never_connected is False
         gate.assert_not_called()
 
-    def test_birth_siblings_are_demoted_and_moved_together(self, db, spdk, gate):
+    def test_never_connected_siblings_are_demoted_and_moved_together(self, db, spdk, gate):
         """The LVS moves as one: a never-connected sibling still at its home is
         demoted together with the move, so the LVS's other fresh volumes do not
         block a first-placement move. A connected sibling does

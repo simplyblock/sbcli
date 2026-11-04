@@ -1364,19 +1364,19 @@ def volumes_open_on(volumes: Iterable[LVol], owner: StorageNode, site: str) -> l
             if v.status != LVol.STATUS_DELETED and volume_open_on(v, owner, site)]
 
 
-def is_birth_state(lvol: LVol, owner: StorageNode) -> bool:
+def is_never_connected(lvol: LVol, owner: StorageNode) -> bool:
     """Whether ``lvol`` has never been connected (``sync_never_connected``: no
     connect handed out its paths, so no consumer can hold them) and is active on
     the site its LVS is currently led from (``volume_site ==
     lvs_active_site_of(owner)``). A planned promote to another site may demote
-    such a volume on that site first and move (birth_state_demote_plan): fencing
-    it cuts off nothing.
+    such a volume on that site first and move (never_connected_demote_plan):
+    fencing it cuts off nothing.
 
     Anchored to the LVS's current lead site, not its home (``owner.site``): a
     volume created on an LVS led from a non-home site carries that lead site as
     its ``sync_active_site``. A volume that was ever connected, or whose record
-    does not carry ``sync_never_connected`` (False by default), is never in
-    birth state - its source is demoted only by its own unstage."""
+    does not carry ``sync_never_connected`` (False by default), does not count
+    as never connected - its source is demoted only by its own unstage."""
     return (lvol.sync_never_connected
             and volume_site(lvol, owner) == storage_node_ops.lvs_active_site_of(owner))
 
@@ -1508,10 +1508,10 @@ def _volumes_context(db: DBController, volumes: list[LVol], site: str, *, group=
 
 
 def _demote(db: DBController, volumes: list[LVol], site: str, *, group=None,
-            birth_only: bool = False) -> list[str]:
-    """Fence ``volumes`` on ``site`` (sync_demote_lvol). ``birth_only``: the
-    first-placement demote - inside the site-rule lock every volume still open
-    on ``site`` must still be in birth state, or nothing is fenced (a connect
+            never_connected_only: bool = False) -> list[str]:
+    """Fence ``volumes`` on ``site`` (sync_demote_lvol). ``never_connected_only``:
+    the first-placement demote - inside the site-rule lock every volume still
+    open on ``site`` must still be never connected, or nothing is fenced (a connect
     that cleared ``sync_never_connected`` meanwhile, under the same lock, has
     handed out the site's paths)."""
     cluster, owners = _volumes_context(db, volumes, site, group=group)
@@ -1530,11 +1530,11 @@ def _demote(db: DBController, volumes: list[LVol], site: str, *, group=None,
     check_gate(cluster.get_id())
     demoted = []
     with storage_node_ops.sync_site_rule_locks(cluster.get_id(), {lv.lvs_name for lv in todo}):
-        if birth_only:
+        if never_connected_only:
             for lvol in todo:
                 lvol = db.get_lvol_by_id(lvol.get_id())
                 owner = db.get_storage_node_by_id(lvol.node_id)
-                if volume_open_on(lvol, owner, site) and not is_birth_state(lvol, owner):
+                if volume_open_on(lvol, owner, site) and not is_never_connected(lvol, owner):
                     logger.info("Volume %s was connected meanwhile: site %s is not demoted for a "
                                 "first placement", lvol.get_id(), site)
                     return []
@@ -1648,7 +1648,7 @@ def promote_decision(lvol: LVol, owner: StorageNode, lvs_volumes: Iterable[LVol]
     return PromoteDecision(PROMOTE_MOVE, source)
 
 
-def birth_state_demote_plan(
+def never_connected_demote_plan(
     decisions: Iterable[tuple[LVol, PromoteDecision]],
     owners: dict[str, StorageNode],
     lvs_volumes: dict[str, list[LVol]],
@@ -1660,8 +1660,8 @@ def birth_state_demote_plan(
     and no unstage demoted it - no pod was ever staged there.
 
     For every LVS a decision wants to move off (a NOT_DEMOTED or LVS_BUSY
-    blocker), when EVERY volume of that LVS still open on the source is in birth
-    state (is_birth_state: never connected), all of them are returned to be
+    blocker), when EVERY volume of that LVS still open on the source is never
+    connected (is_never_connected), all of them are returned to be
     demoted there - what an unstage would have done. An LVS with a source-open
     volume that was ever connected is left out, and its promote is refused as
     not demoted / LVS busy. An empty result means nothing is to be
@@ -1678,7 +1678,7 @@ def birth_state_demote_plan(
         owner, source = owners[owner_id], decision.source_site
         open_here = [v for v in lvs_volumes[owner_id]
                      if v.status != LVol.STATUS_DELETED and volume_open_on(v, owner, source)]
-        if open_here and all(is_birth_state(v, owner) for v in open_here):
+        if open_here and all(is_never_connected(v, owner) for v in open_here):
             plan.setdefault(source, []).extend(open_here)
     return plan
 
@@ -1904,14 +1904,15 @@ def reconcile_abandoned_moves(cluster_id: str) -> None:
                          owner.lvstore, e)
 
 
-def _auto_demote_birth_state(db: DBController, volumes: list[LVol], site: str, *,
-                             group=None) -> list[LVol]:
+def _auto_demote_never_connected(db: DBController, volumes: list[LVol], site: str, *,
+                                 group=None) -> list[LVol]:
     """Before a planned promote to ``site``: demote the source of every volume
-    that is open there only because it was never connected (birth state), so a
-    first-placement move can proceed (birth_state_demote_plan). This is what an
-    unstage would have done. The demote runs the live planned gate (``_demote``
-    -> ``check_gate``), so it fences the source only while replication is
-    healthy, and re-checks the birth state under the LVS's site-rule lock.
+    that is open there only because it was never connected, so a
+    first-placement move can proceed (never_connected_demote_plan). This is
+    what an unstage would have done. The demote runs the live planned gate
+    (``_demote`` -> ``check_gate``), so it fences the source only while
+    replication is healthy, and re-checks under the LVS's site-rule lock that
+    each volume is still never connected.
 
     An LVS a running site activation holds (activation_gate.site_activation_blocks)
     is never demoted here - that activation is opening its paths: a promote
@@ -1920,7 +1921,7 @@ def _auto_demote_birth_state(db: DBController, volumes: list[LVol], site: str, *
 
     Returns the request's volumes, re-read when any were demoted so the caller
     judges the promote table against the demoted records. A no-op (the same
-    volumes) when nothing is in birth state."""
+    volumes) when no volume is to be demoted."""
     cluster, owners = _volumes_context(db, volumes, site, group=group)
     nodes = db.get_storage_nodes_by_cluster_id(cluster.get_id())
     sites = online_sites(nodes, cluster)
@@ -1929,7 +1930,7 @@ def _auto_demote_birth_state(db: DBController, volumes: list[LVol], site: str, *
     decisions = [(lv, promote_decision(lv, owners[lv.node_id], lvs_volumes[lv.node_id], site,
                                        online_sites=sites, online_nodes=online_ids, force=False))
                  for lv in volumes]
-    plan = birth_state_demote_plan(decisions, owners, lvs_volumes)
+    plan = never_connected_demote_plan(decisions, owners, lvs_volumes)
     if not plan:
         return volumes
     held = [lv for vols in plan.values() for lv in vols
@@ -1938,12 +1939,12 @@ def _auto_demote_birth_state(db: DBController, volumes: list[LVol], site: str, *
         raise SyncPromoteRefusedError(
             activation_gate.site_activation_blocks(cluster, owners[held[0].node_id]),
             sorted(lv.get_id() for lv in held))
-    for source_site, birth_volumes in plan.items():
+    for source_site, never_connected_volumes in plan.items():
         by_lvs: dict[str, list[LVol]] = {}
-        for lv in birth_volumes:
+        for lv in never_connected_volumes:
             by_lvs.setdefault(lv.node_id, []).append(lv)
-        for lvs_birth_volumes in by_lvs.values():
-            _demote(db, lvs_birth_volumes, source_site, birth_only=True)
+        for lvs_never_connected_volumes in by_lvs.values():
+            _demote(db, lvs_never_connected_volumes, source_site, never_connected_only=True)
     return [db.get_lvol_by_id(lv.get_id()) for lv in volumes]
 
 
@@ -1954,7 +1955,7 @@ def _promote(db: DBController, volumes: list[LVol], site: str, force: bool, *,
         # still open there, so its planned move is not refused as "not
         # demoted". A forced promote never takes this path (it acts only on a
         # lost site).
-        volumes = _auto_demote_birth_state(db, volumes, site, group=group)
+        volumes = _auto_demote_never_connected(db, volumes, site, group=group)
     for attempt in range(2):
         # Everything judged fresh on each attempt: a promote may have started
         # while an abandoned move was being reconciled.
