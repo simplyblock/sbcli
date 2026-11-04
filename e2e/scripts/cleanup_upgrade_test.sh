@@ -384,10 +384,22 @@ for VSC in $(kubectl $KUBECTL_TIMEOUT get volumesnapshotclass --no-headers -o cu
 done
 
 # Webhook configurations
-for WH in $(kubectl $KUBECTL_TIMEOUT get mutatingwebhookconfiguration --no-headers -o custom-columns=:metadata.name 2>/dev/null | grep -i simplyblock 2>/dev/null); do
+#
+# cert-manager's two are swept here as well as simplyblock's, because they
+# are cluster-scoped and so outlive both the helm uninstall in Phase 1 and
+# the namespace deletion in Phase 8. When they do, the next run's
+# "Install cert-manager" step dies on
+#
+#   MutatingWebhookConfiguration "cert-manager-webhook" exists and cannot
+#   be imported into the current release: invalid ownership metadata
+#
+# because helm will not adopt an object it did not create. That is a
+# bring-up failure two minutes in, with nothing wrong with the cluster --
+# run 41797446871 lost its slot to a pair of 18h-old orphans.
+for WH in $(kubectl $KUBECTL_TIMEOUT get mutatingwebhookconfiguration --no-headers -o custom-columns=:metadata.name 2>/dev/null | grep -iE 'simplyblock|cert-manager' 2>/dev/null); do
   kubectl $KUBECTL_TIMEOUT delete mutatingwebhookconfiguration "$WH" --ignore-not-found 2>/dev/null || true
 done
-for WH in $(kubectl $KUBECTL_TIMEOUT get validatingwebhookconfiguration --no-headers -o custom-columns=:metadata.name 2>/dev/null | grep -i simplyblock 2>/dev/null); do
+for WH in $(kubectl $KUBECTL_TIMEOUT get validatingwebhookconfiguration --no-headers -o custom-columns=:metadata.name 2>/dev/null | grep -iE 'simplyblock|cert-manager' 2>/dev/null); do
   kubectl $KUBECTL_TIMEOUT delete validatingwebhookconfiguration "$WH" --ignore-not-found 2>/dev/null || true
 done
 
