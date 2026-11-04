@@ -20095,7 +20095,8 @@ def safe_delete_bdev(name, node_id):
             logger.error(f"{bdev_name} not deleted: no member of the active triplet of "
                          f"{primary_node.lvstore} leads it")
             return False
-        return _safe_delete_bdev_legs(bdev_name, *legs)
+        leader, peers = legs
+        return _safe_delete_bdev_legs(bdev_name, leader, peers, peer_errors=(RPCException,))
 
     # Every replica peer, in the role order lvol_controller uses. A blank id
     # means the role is not wired up (ha_type single has no secondary), and a
@@ -20126,9 +20127,13 @@ def safe_delete_bdev(name, node_id):
 def _sync_safe_delete_legs(owner, db_controller):
     """``(leader, peers)`` of a delete of a bdev of ``owner``'s LVS on a
     sync-replication cluster: the member of the active triplet that reports the
-    leadership (probed only - nothing is recovered or granted) and every other
-    instance of the LVS, both triplets, in role order. None when no member of
-    the active triplet leads."""
+    leadership and every other instance of the LVS, both triplets, in role
+    order. None when no member of the active triplet leads.
+
+    No leader is recovered and nothing is granted. The candidate lookup first
+    attempts to settle an abandoned move (reconcile_lvs_move, which may repeat
+    its fenced, grant-less hand-off); the active triplet's members are then
+    only probed."""
     instances = [owner]
     for member_id in lvol_controller.role_secondary_ids(owner):
         try:
@@ -20143,10 +20148,17 @@ def _sync_safe_delete_legs(owner, db_controller):
     return leader, [node for node in instances if node.get_id() != leader.get_id()]
 
 
-def _safe_delete_bdev_legs(bdev_name, primary_node, peer_nodes):
+def _safe_delete_bdev_legs(bdev_name, primary_node, peer_nodes, *, peer_errors=(RPCRemoteError,)):
     """The delete legs of safe_delete_bdev: the async delete, its completion
     poll and the sync delete on ``primary_node`` (the one leading the LVS),
-    then a sync delete on every node of ``peer_nodes``."""
+    then a sync delete on every node of ``peer_nodes``.
+
+    ``peer_errors`` are the exceptions of one peer's leg that are logged and
+    counted as a failed leg (the result is False) while the remaining peers
+    are still attempted; any other exception propagates and ends the delete.
+    A sync-replication LVS passes ``RPCException``, so an unreachable instance
+    does not cost the instances after it their delete; without sync
+    replication only ``RPCRemoteError`` is."""
     logger.info(f"deleting from primary: {bdev_name}")
     try:
         primary_node.rpc_client().delete_lvol(bdev_name)
@@ -20180,18 +20192,18 @@ def _safe_delete_bdev_legs(bdev_name, primary_node, peer_nodes):
                             f"deletion completed: {bdev_name}")
                 return True
 
-            # Every peer is attempted even when an earlier one fails. Same
-            # reasoning as the sync-delete loop in lvol_controller ("Never
-            # abort the loop -- the remaining non-leaders must still be
-            # processed"): the primary's blob is already gone by this point, so
-            # a peer skipped here is a replica stranded with nothing scheduled
-            # to clean it.
+            # Every peer is attempted even when an earlier one fails with one
+            # of ``peer_errors``. Same reasoning as the sync-delete loop in
+            # lvol_controller ("Never abort the loop -- the remaining
+            # non-leaders must still be processed"): the primary's blob is
+            # already gone by this point, so a peer skipped here is a replica
+            # stranded with nothing scheduled to clean it.
             all_deleted = True
             for peer in peer_nodes:
                 logger.info(f"deleting from peer {peer.get_id()}: {bdev_name}")
                 try:
                     peer.rpc_client().delete_lvol(bdev_name, sync=True)
-                except RPCRemoteError as e:
+                except peer_errors as e:
                     logger.error(f"Failed to delete bdev: {bdev_name} from node: {peer.get_id()}: {e}")
                     all_deleted = False
                 else:

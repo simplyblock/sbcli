@@ -1458,8 +1458,11 @@ def _delete_locked(snap, snapshot_uuid, force_delete=False, lock=True):
                 pass
         # The members that may lead the LVS: the home triplet, or on a
         # sync-replication cluster the active triplet - as the snapshot
-        # monitor probes them. Only probed here: no leader is recovered or
-        # granted, an LVS nobody leads parks the snapshot below.
+        # monitor probes them. No leader is recovered and nothing is granted:
+        # the candidate lookup first attempts to settle an abandoned move
+        # (reconcile_lvs_move, which may repeat its fenced, grant-less
+        # hand-off), then the members are only probed; an LVS nobody leads
+        # parks the snapshot below.
         from simplyblock_core.storage_node_ops import _lvs_leader_candidates
         all_nodes = list(_lvs_leader_candidates(all_nodes, snap.lvol.lvs_name).nodes)
 

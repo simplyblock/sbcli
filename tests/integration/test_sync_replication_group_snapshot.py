@@ -8,8 +8,10 @@ triplet and its remote triplet on the other site, one of them leading
 (``lvs_active_site``). These paths register, delete or wait on every instance
 and look for the leader in the active triplet only. The group snapshot keeps
 its leader lookup (_find_lvs_leader). The snapshot delete and safe_delete_bdev
-only probe: they never recover or grant a leader, and leave an LVS nobody
-leads alone. On a cluster without sync replication the home triplet is every
+never recover or grant a leader: their candidate lookup first attempts to
+settle an abandoned move (reconcile_lvs_move, which may repeat its fenced,
+grant-less hand-off), then the active triplet is only probed, and an LVS
+nobody leads is not deleted from. On a cluster without sync replication the home triplet is every
 instance and the paths behave as they always did.
 
 Storage nodes (RPC) and the port-block / hublvol side effects are mocked; the
@@ -30,6 +32,12 @@ from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.rpc_client import (
+    RPCConnectionError,
+    RPCHTTPError,
+    RPCProtocolError,
+    RPCRemoteError,
+)
 from simplyblock_core.utils import ttl_cache
 from tests.integration import test_sync_replication_active_triplet as triplet
 from tests.integration import test_sync_replication_cadence_snapshots as cadence
@@ -154,6 +162,18 @@ class _Deletes(list):
 
         rpc.delete_lvol.side_effect = _delete
         rpc.bdev_lvol_get_lvol_delete_status.side_effect = _status
+
+    def fail_sync(self, rpcs, node, error):
+        """``node``'s sync delete is recorded, then raises ``error``."""
+        node_id = node.get_id()
+
+        def _delete(name, sync=False, special_delete=False):
+            self.append((node_id, sync))
+            if sync:
+                raise error
+            return True
+
+        rpcs[node_id].delete_lvol.side_effect = _delete
 
 
 def _lvs_probes(rpcs, nodes, lvs_name="LVS_1"):
@@ -403,6 +423,34 @@ class TestSafeDeleteBdev:
                 assert c.args[0] == "LVS_1/SNAP_14"    # the owner's lvstore, never the leader's own
         _never_recovered(no_recovery, rpcs, [*a, *b])
 
+    @pytest.mark.parametrize("error", [
+        RPCConnectionError("unreachable"),
+        RPCHTTPError("bad gateway", 502),
+        RPCProtocolError("not JSON-RPC"),
+        RPCRemoteError("busy", -16),
+    ], ids=["connection", "http", "protocol", "remote"])
+    @pytest.mark.parametrize("failing", ["a1", "a2", "b1"])
+    def test_failing_instance_does_not_skip_later_instances(
+            self, db, rpcs, env, no_sleep, no_recovery, caplog, error, failing):
+        _, a, b, owner, _ = cadence._layout(db, active_site=SITE_B)
+        rpcs.lead(b[0])
+        deletes = _Deletes(rpcs, [*a, *b])
+        failed = {"a1": a[1], "a2": a[2], "b1": b[1]}[failing]
+        deletes.fail_sync(rpcs, failed, error)
+        caplog.set_level(logging.INFO)
+
+        assert ops.safe_delete_bdev("SNAP_14", owner.get_id()) is False
+
+        leader = b[0].get_id()
+        assert deletes[:3] == [(leader, False), (leader, "status"), (leader, True)]
+        peers = [n.get_id() for n in (*a, *b) if n.get_id() != leader]
+        assert deletes[3:] == [(peer, True) for peer in peers]   # the failed one, then every later one
+        errors = [r.getMessage() for r in caplog.records
+                  if r.name == ops.logger.name and r.levelno == logging.ERROR
+                  and r.getMessage().startswith("Failed to delete bdev")]
+        assert errors == [f"Failed to delete bdev: LVS_1/SNAP_14 from node: {failed.get_id()}: {error}"]
+        _never_recovered(no_recovery, rpcs, [*a, *b])
+
     @pytest.mark.parametrize("passive_leads", [False, True])
     def test_nobody_leading_in_active_triplet_deletes_nothing(
             self, db, rpcs, env, no_sleep, no_recovery, caplog, passive_leads):
@@ -449,6 +497,24 @@ class TestSafeDeleteBdev:
                            (nodes[1].get_id(), True), (nodes[2].get_id(), True)]
         assert _lvs_probes(rpcs, nodes) == set()
         _never_recovered(no_recovery, rpcs, nodes)
+
+    def test_non_sync_peer_leg_handles_remote_errors_only(self, db, rpcs, no_sleep):
+        """Without sync replication a peer leg's RPCRemoteError is a failed
+        leg and the next peer is still attempted; any other RPC failure ends
+        the delete."""
+        _, nodes, _ = _plain(db)
+        owner, secondary, tertiary = (n.get_id() for n in nodes)
+        deletes = _Deletes(rpcs, nodes)
+        deletes.fail_sync(rpcs, nodes[1], RPCRemoteError("busy", -16))
+
+        assert ops.safe_delete_bdev("SNAP_14", owner) is False
+        assert deletes[3:] == [(secondary, True), (tertiary, True)]
+
+        deletes.clear()
+        deletes.fail_sync(rpcs, nodes[1], RPCConnectionError("unreachable"))
+        with pytest.raises(RPCConnectionError):
+            ops.safe_delete_bdev("SNAP_14", owner)
+        assert deletes == [(owner, False), (owner, "status"), (owner, True), (secondary, True)]
 
 
 # ---------------------------------------------------------------------------
