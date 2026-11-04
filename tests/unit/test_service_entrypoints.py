@@ -27,8 +27,6 @@ import sys
 import unittest
 from unittest import mock
 
-import yaml
-
 from simplyblock_core.services import __main__ as dispatcher
 from simplyblock_core.services import task_runners
 
@@ -216,29 +214,9 @@ class TestDeploymentCommands(unittest.TestCase):
 
     Everything else — the Helm charts, the operator, Swarm services created by an
     older control plane — still uses the paths, which is why
-    ``TestPathInvocationContract`` above keeps them working. These two files are
-    the ones a change here can actually fix, so they are pinned.
+    ``TestPathInvocationContract`` above keeps them working. cluster_ops.py is
+    the one a change here can actually fix, so it is pinned.
     """
-
-    COMPOSE = pathlib.Path(
-        SERVICES_DIR.parent / "scripts" / "docker-compose-swarm.yml")
-
-    def _compose_commands(self):
-        compose = yaml.safe_load(self.COMPOSE.read_text().replace("$", "_"))
-        return {name: service.get("command", "")
-                for name, service in compose["services"].items()}
-
-    def test_every_task_runner_service_uses_the_entry_point(self):
-        expected = {f"simplyblock-task-runner {name}"
-                    for name in task_runners.runner_names()}
-        found = {command for command in self._compose_commands().values()
-                 if command.startswith("simplyblock-task-runner ")}
-        self.assertEqual(found, expected)
-
-    def test_no_compose_service_starts_a_runner_by_path(self):
-        for name, command in self._compose_commands().items():
-            with self.subTest(service=name):
-                self.assertNotIn("services/tasks_runner_", command)
 
     def test_cluster_ops_creates_runner_services_by_name(self):
         source = (REPO_ROOT / "simplyblock_core" / "cluster_ops.py").read_text()

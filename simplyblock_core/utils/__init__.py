@@ -10,7 +10,6 @@ import socket
 import string
 import subprocess
 import sys
-import tempfile
 import time
 import uuid
 from collections.abc import Iterable
@@ -18,7 +17,6 @@ from datetime import UTC, datetime
 from typing import Annotated, Any
 
 from docker.errors import APIError, DockerException, ImageNotFound, NotFound
-from jinja2 import Environment, FileSystemLoader, StrictUndefined
 from kubernetes import client, config
 from kubernetes.client import (
     ApiException,
@@ -70,14 +68,6 @@ NQN_PATTERN = re.compile(
     r'[a-zA-Z]{2,}'
     r'(?::[a-zA-Z0-9.\-:_]+)?'  # optional unique name
 )
-
-ALERT_RESOURCES_FILE = "alert_resources.yaml"
-ALERTS_TEMPLATE_FOLDER = "simplyblock_core/scripts/alerting/"
-SCRIPTS_FOLDER = "simplyblock_core/scripts/"
-
-# Provisioning files for the cluster event log alerts (`cluster event-alerts`).
-EVENT_ALERT_RULES_FILE = "event_alert_rules.yaml"
-EVENT_ALERT_DATASOURCE_FILE = "datasource-events.yml"
 
 
 #: An NVMe Qualified Name, as a type. Declaring a field with this rather than
@@ -3371,130 +3361,8 @@ def remove_container(client: docker.DockerClient, name, graceful_timeout=3):
             raise
 
 
-def _alerts_template_folder() -> str:
-    return os.path.join(_top_dir(), ALERTS_TEMPLATE_FOLDER)
-
-
-def _scripts_folder() -> str:
-    return os.path.join(_top_dir(), SCRIPTS_FOLDER)
-
-
 def _top_dir() -> str:
     return os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
-
-
-def render_legacy_alerting(contact_point: str | None, grafana_endpoint: str) -> str:
-    """Render the single-contact-point alerting config kept for --contact-point.
-
-    `contact_point` is optional at every layer above (the CLI flag defaults to
-    None, and clusters created without it carry None/"" in the DB), so an absent
-    value has to fall through to the placeholder branch rather than reach the
-    regex matchers.
-    """
-    env = Environment(loader=FileSystemLoader(_alerts_template_folder()), trim_blocks=True, lstrip_blocks=True)
-    template = env.get_template(f'{ALERT_RESOURCES_FILE}.legacy.j2')
-
-    slack_pattern = re.compile(r"https://hooks\.slack\.com/services/\S+")
-    email_pattern = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
-
-    if contact_point and slack_pattern.match(contact_point):
-        alert_type = "slack"
-    elif contact_point and email_pattern.match(contact_point):
-        alert_type = "email"
-    else:
-        alert_type = "slack"
-        contact_point = 'https://hooks.slack.com/services/'
-
-    return template.render({
-        'CONTACT_POINT': contact_point,
-        'GRAFANA_ENDPOINT': grafana_endpoint,
-        'ALERT_TYPE': alert_type,
-    })
-
-
-def render_configfile_alerting(alert_config: dict[str, Any]) -> str:
-    """Render the multi-receiver alerting config from an alerting config file."""
-    env = Environment(loader=FileSystemLoader(_alerts_template_folder()), trim_blocks=True, lstrip_blocks=True)
-    template = env.get_template(f'{ALERT_RESOURCES_FILE}.j2')
-
-    return template.render(alert_config)
-
-
-def render_event_alert_configs(settings: dict[str, Any],
-                               clusters: Iterable[tuple[str, str]]) -> dict[str, str]:
-    """Render the Grafana provisioning files for the cluster event log alerts.
-
-    Returns {filename: content} for both files, always, so that disabling the
-    alerts overwrites what enabling them wrote. A cluster missing either its id
-    or its secret is skipped: the API checks that the two agree, so a
-    half-configured data source fails every evaluation with a 401. Both uids
-    are derived from the cluster id so the two files agree on them and a re-run
-    updates the same objects instead of adding a second set.
-
-    StrictUndefined because a missing value would reach Grafana as empty YAML,
-    which it answers by refusing to start.
-    """
-    entries = []
-    if settings.get('enabled'):
-        for cluster_id, secret in clusters:
-            if not cluster_id or not secret:
-                continue
-            digest = hashlib.sha256(cluster_id.encode('utf-8')).hexdigest()
-            entries.append({'id': cluster_id, 'secret': secret,
-                            'ds_uid': f'sbev-{digest[:12]}', 'uid_prefix': digest[:8]})
-
-    values = {
-        'EVENT_ALERTS': settings,
-        'EVENT_ALERT_CLUSTERS': entries,
-        'CONTROL_PLANE_ADDR': constants.MONITORING_CONTROL_PLANE_ADDR,
-    }
-
-    rendered = {}
-    for folder, filename in ((_alerts_template_folder(), EVENT_ALERT_RULES_FILE),
-                             (_scripts_folder(), EVENT_ALERT_DATASOURCE_FILE)):
-        env = Environment(loader=FileSystemLoader(folder), trim_blocks=True, lstrip_blocks=True,
-                          undefined=StrictUndefined)
-        rendered[filename] = env.get_template(f'{filename}.j2').render(values)
-
-    return rendered
-
-
-def render_and_deploy_alerting_configs(alert_config: dict[str, Any] | None, contact_point: str | None,
-                                       grafana_endpoint, cluster_uuid, cluster_secret):
-    top_dir = _top_dir()
-    alerts_template_folder = _alerts_template_folder()
-
-    if alert_config:
-        rendered = render_configfile_alerting(alert_config)
-    else:
-        rendered = render_legacy_alerting(contact_point, grafana_endpoint)
-
-    destination_file_path = os.path.join(alerts_template_folder, ALERT_RESOURCES_FILE)
-    with tempfile.TemporaryDirectory() as temp_dir:
-        temp_file_path = os.path.join(temp_dir, ALERT_RESOURCES_FILE)
-        with open(temp_file_path, 'w') as file:
-            file.write(rendered)
-
-        subprocess.check_call(['sudo', '-v'])  # sudo -v checks if the current user has sudo permissions
-        subprocess.check_call(['sudo', 'mv', temp_file_path, destination_file_path])
-    print(f"File moved to {destination_file_path} successfully.")
-
-    scripts_folder = os.path.join(top_dir, "simplyblock_core/scripts/")
-    prometheus_file = "prometheus.yml"
-    env = Environment(loader=FileSystemLoader(scripts_folder), trim_blocks=True, lstrip_blocks=True)
-    template = env.get_template(f'{prometheus_file}.j2')
-    values = {
-        'CLUSTER_ID': cluster_uuid,
-        'CLUSTER_SECRET': cluster_secret}
-
-    with tempfile.TemporaryDirectory() as temp_dir:
-        file_path = os.path.join(temp_dir, prometheus_file)
-        with open(file_path, 'w') as file:
-            file.write(template.render(values))
-
-        prometheus_file_path = os.path.join(scripts_folder, prometheus_file)
-        subprocess.check_call(['sudo', 'mv', file_path, prometheus_file_path])
-        print(f"File moved to {prometheus_file_path} successfully.")
 
 
 # hostPath mount of the host's /etc/modules-load.d inside the k8s storage-node

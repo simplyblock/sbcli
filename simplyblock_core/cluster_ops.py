@@ -1,11 +1,7 @@
-import base64
 import builtins
 import contextlib
-import copy
 import json
 import os
-import re
-import shlex
 import subprocess
 import threading
 import time
@@ -17,7 +13,6 @@ from datetime import UTC, datetime
 
 import fdb
 import requests
-import yaml
 from kubernetes import client as k8s_client
 from pydantic import SecretStr
 
@@ -28,7 +23,6 @@ from simplyblock_core import (
     jm_raid,
     mgmt_node_ops,
     release_upgrades,
-    scripts,
     storage_node_ops,
     utils,
 )
@@ -3206,175 +3200,6 @@ def get_logs(cluster_id, limit=50, **kwargs) -> builtins.list[dict]:
     return out
 
 
-# Grafana's provisioning paths inside the monitoring container, as mounted by
-# docker-compose-swarm-monitoring.yml.
-GRAFANA_DATASOURCE_TARGET = "/etc/grafana/provisioning/datasources/datasource.yaml"
-GRAFANA_ALERTING_TARGET = "/etc/grafana/provisioning/alerting"
-GRAFANA_EVENT_DATASOURCE_TARGET = "/etc/grafana/provisioning/datasources/datasource-events.yaml"
-
-_GRAFANA_DURATION = re.compile(r'^(?:\d+(?:ms|[smhdwy]))+$')
-
-
-def _event_alert_settings(enabled, log_limit, interval, pending_period,
-                          plugin_url, plugin_preinstalled) -> dict[str, t.Any]:
-    """Validate the tuning knobs and shape them for the templates.
-
-    Validated here because Grafana answers a malformed duration or limit by
-    refusing to start, long after the command that caused it.
-    """
-    settings = {
-        'enabled': enabled,
-        'logLimit': 1000 if log_limit is None else log_limit,
-        'interval': interval or '1m',
-        'for': pending_period or '1m',
-        'plugin': {
-            'url': constants.GRAFANA_EVENT_ALERTS_PLUGIN_URL if plugin_url is None else plugin_url,
-            'preinstalled': plugin_preinstalled,
-        },
-    }
-
-    if not enabled:
-        return settings
-
-    if settings['logLimit'] < 1:
-        raise ValueError(f"--log-limit must be at least 1, got {settings['logLimit']}")
-
-    for flag, key in (('--interval', 'interval'), ('--pending-period', 'for')):
-        if not _GRAFANA_DURATION.match(settings[key]):
-            raise ValueError(
-                f"{flag} must be a Grafana duration such as 30s, 1m or 1h, got {settings[key]!r}")
-
-    if not settings['plugin']['preinstalled'] and not settings['plugin']['url']:
-        raise ValueError(
-            "--plugin-url is empty and --plugin-preinstalled was not given, so the data source "
-            "plugin the rules query would never be installed")
-
-    return settings
-
-
-def _grafana_provisioning_dirs(cluster_docker) -> tuple[str, str]:
-    """The host directories the running Grafana reads its provisioning from.
-
-    Read off the service rather than computed from this package's location, so
-    the files land where the cluster's own mounts point.
-    """
-    try:
-        service = cluster_docker.services.get(constants.MONITORING_GRAFANA_SERVICE)
-    except docker.errors.NotFound as e:
-        raise ValueError(
-            f"Service {constants.MONITORING_GRAFANA_SERVICE} not found: this cluster has no "
-            f"monitoring stack") from e
-
-    mounts = service.attrs['Spec']['TaskTemplate']['ContainerSpec'].get('Mounts') or []
-    sources = {mount.get('Target'): mount.get('Source') for mount in mounts}
-    for target in (GRAFANA_DATASOURCE_TARGET, GRAFANA_ALERTING_TARGET):
-        if not sources.get(target):
-            raise ValueError(
-                f"Service {constants.MONITORING_GRAFANA_SERVICE} has no bind mount at {target}; "
-                f"redeploy the monitoring stack before provisioning event log alerts")
-
-    return os.path.dirname(sources[GRAFANA_DATASOURCE_TARGET]), sources[GRAFANA_ALERTING_TARGET]
-
-
-def _install_provisioning_on_all_managers(files: dict[str, str]) -> None:
-    """Write Grafana's provisioning files onto every management node.
-
-    Grafana is constrained to node.role == manager and may be rescheduled to
-    any of them, and these are host paths, so a manager that lacks them
-    provisions no rules the first time Grafana lands there. They cannot ship
-    with the package the way alert_rules.yaml does, carrying this cluster's id
-    and secret. Written through each node's docker API, the same way SNodeAPI
-    is started on a remote node; base64 keeps the YAML out of shell quoting,
-    and user=root because the image runs as USER simplyblock, which cannot
-    write into the package directory.
-    """
-    script = "; ".join(
-        f"umask 022 && echo {base64.b64encode(content.encode('utf-8')).decode('ascii')} "
-        f"| base64 -d > {shlex.quote(path)}"
-        for path, content in files.items()
-    )
-    volumes = sorted({os.path.dirname(path) for path in files})
-
-    failed = {}
-    for node in db_controller.get_mgmt_nodes():
-        try:
-            node_docker = docker.DockerClient(
-                base_url=f"tcp://{node.docker_ip_port}", version="auto", timeout=60)
-            node_docker.containers.run(
-                constants.SIMPLY_BLOCK_DOCKER_IMAGE, ["sh", "-c", script], user="root",
-                volumes=[f"{directory}:{directory}" for directory in volumes],
-                remove=True, detach=False)
-            logger.info("Provisioning files written on %s", node.mgmt_ip)
-        except Exception as e:
-            failed[node.mgmt_ip] = str(e)
-
-    if failed:
-        raise RuntimeError(
-            "Could not write the provisioning files on: "
-            + "; ".join(f"{ip} ({reason})" for ip, reason in failed.items())
-            + ". Fix those nodes and re-run; Grafana provisions nothing on a node it cannot "
-              "read them from")
-
-
-def set_event_alerts(cluster_id, enabled=True, log_limit=None, interval=None, pending_period=None,
-                     plugin_url=None, plugin_preinstalled=False) -> None:
-    """Provision (or remove) the Grafana alert rules read from the cluster event log.
-
-    Unlike the Thanos-backed rules in alerting/alert_rules.yaml, which ship
-    with the package and are provisioned unconditionally, these are opt-in:
-    they query the control plane's REST API, which needs a Grafana plugin the
-    deployed image does not carry and downloads once.
-
-    Runs against the live stack -- files onto every management node, then the
-    Grafana task recreated so it re-reads them -- so it configures a cluster
-    that already exists.
-    """
-    cluster = db_controller.get_cluster_by_id(cluster_id)
-
-    if cluster.mode != "docker":
-        raise ValueError(
-            "Event log alerts are provisioned by the simplyblock-operator Helm chart on "
-            "kubernetes; this command configures the docker monitoring stack only")
-
-    if cluster.disable_monitoring:
-        raise ValueError("This cluster was created with --disable-monitoring, so it has no Grafana")
-
-    settings = _event_alert_settings(enabled, log_limit, interval, pending_period,
-                                     plugin_url, plugin_preinstalled)
-
-    cluster_docker = utils.get_docker_client(cluster_id)
-    scripts_dir, alerting_dir = _grafana_provisioning_dirs(cluster_docker)
-
-    # The secret is the bearer token the data source sends, and reaches
-    # plaintext only here, on its way into a file Grafana reads -- the same
-    # treatment prometheus.yml gets.
-    rendered = utils.render_event_alert_configs(
-        settings, [(cluster.get_id(), cluster.secret.get_secret_value())])
-    datasource_path = os.path.join(scripts_dir, utils.EVENT_ALERT_DATASOURCE_FILE)
-    _install_provisioning_on_all_managers({
-        os.path.join(alerting_dir, utils.EVENT_ALERT_RULES_FILE):
-            rendered[utils.EVENT_ALERT_RULES_FILE],
-        datasource_path: rendered[utils.EVENT_ALERT_DATASOURCE_FILE],
-    })
-
-    # --force recreates the task, which is what makes Grafana re-read
-    # provisioning; a single-file bind mount also tracks the inode it started
-    # with, so the rewritten data source is only picked up here. Mounts are
-    # keyed by target and env by name, so re-running updates both in place.
-    # Disabling leaves them: both files are empty now, and keeping the plugin
-    # makes re-enabling a restart instead of another download.
-    update = ["sudo", "docker", "service", "update", "--force"]
-    if enabled:
-        if not settings['plugin']['preinstalled']:
-            update += ["--env-add", (f"GF_INSTALL_PLUGINS={settings['plugin']['url']};"
-                                    f"{constants.GRAFANA_EVENT_ALERTS_PLUGIN_ID}")]
-        update += ["--mount-add", (f"type=bind,src={datasource_path},"
-                                  f"dst={GRAFANA_EVENT_DATASOURCE_TARGET},readonly")]
-
-    logger.info("Restarting Grafana...")
-    subprocess.check_call(update + [constants.MONITORING_GRAFANA_SERVICE])
-
-
 def get_cluster(cl_id) -> dict:
     cluster = db_controller.get_cluster_by_id(cl_id)
     data = cluster.get_clean_dict()
@@ -3398,53 +3223,6 @@ def get_cluster(cl_id) -> dict:
 #: Releases whose `cluster update` must restart Grafana to load a changed
 #: alert_rules.yaml. Add a version here when a release changes that file.
 GRAFANA_RESTART_RELEASE = "26.3.0.4"
-
-
-#: Swarm service -> compose service, for the monitoring args reconciled on every
-#: Docker ``cluster update``. Those args are fixed at ``docker stack deploy``
-#: time, so a compose change otherwise never reaches a deployed cluster.
-#:
-#: An allowlist on purpose. Grafana must not be added: set_event_alerts() mutates
-#: its spec at runtime, and the compose file would overwrite that.
-_RECONCILED_MONITORING_ARGS = {"monitoring_node-exporter": "node-exporter"}
-
-
-def _compose_monitoring_command_args(compose: dict[str, t.Any], service_key: str) -> builtins.list[str]:
-    command = compose["services"][service_key]["command"]
-    if isinstance(command, str):
-        command = shlex.split(command)
-
-    # Compose escapes a literal '$' as '$$'; Swarm stores it interpolated.
-    return [arg.replace("$$", "$") for arg in command]
-
-
-def _reconcile_monitoring_args(cluster_docker) -> None:
-    compose_path = os.path.join(
-        os.path.dirname(scripts.__file__), "docker-compose-swarm-monitoring.yml")
-    with open(compose_path, encoding="utf-8") as f:
-        compose = yaml.safe_load(f)
-
-    for service_name, compose_key in _RECONCILED_MONITORING_ARGS.items():
-        desired = _compose_monitoring_command_args(compose, compose_key)
-        try:
-            service = cluster_docker.services.get(service_name)
-        except docker.errors.NotFound:
-            logger.info("%s is not deployed; nothing to reconcile", service_name)
-            continue
-
-        spec = service.attrs["Spec"]
-        current = spec["TaskTemplate"]["ContainerSpec"].get("Args", [])
-        if current == desired:
-            logger.info("%s args already current", service_name)
-            continue
-
-        logger.info("Reconciling %s args from %s to %s",
-                    service_name, current, desired)
-        task_template = copy.deepcopy(spec["TaskTemplate"])
-        task_template["ContainerSpec"]["Args"] = desired
-        cluster_docker.api.update_service(
-            service.id, service.attrs["Version"]["Index"],
-            task_template=task_template, fetch_current_spec=True)
 
 
 def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, mgmt_image=None,
@@ -3577,12 +3355,6 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
                 service_name="app_BackupService",
                 command=["simplyblock-task-runner", "tasks-runner-fdb-backup"],
                 service_image=service_image)
-
-        if not cluster.disable_monitoring:
-            try:
-                _reconcile_monitoring_args(cluster_docker)
-            except Exception as e:
-                logger.error(f"Failed to reconcile monitoring service args: {e}")
 
         # Grafana reads provisioning at startup, and its upstream image is not
         # matched by the loop above, so the alert rules `pip` refreshed in the
