@@ -65,8 +65,38 @@ elif verb == "get" and kind == "machineconfig":
         print(mc["metadata"].get("annotations", {}).get("simplyblock.io/cluster-id", ""))
     else:
         print(json.dumps(mc["spec"]["kernelArguments"]))
+elif verb == "patch":
+    key = "MachineConfig/" + args[2]
+    mc = s["applied"][key]
+    for op in json.loads(opt("-p")):
+        parts = [x.replace("~1", "/") for x in op["path"].strip("/").split("/")]
+        parent = mc
+        for part in parts[:-1]:
+            parent = parent.setdefault(part, {})
+        if op["op"] == "test" and parent.get(parts[-1]) != op["value"]:
+            sys.stderr.write("Error from server: testing value %s failed\n" % op["path"])
+            sys.exit(1)
+        if op["op"] == "replace":
+            parent[parts[-1]] = op["value"]
+    print("machineconfig.machineconfiguration.openshift.io/%s patched" % args[2])
+elif verb == "create":
+    # A concurrent writer: another master's job creates the MachineConfig
+    # between this job's lookup and its create.
+    src = opt("-f")
+    manifest = yaml.safe_load(sys.stdin.read() if src in ("", "-") else open(src).read())
+    key = "%s/%s" % (manifest["kind"], manifest["metadata"]["name"])
+    if s.get("race") and key == "MachineConfig/" + s["race"]["metadata"]["name"]:
+        s["applied"][key] = s.pop("race")
+    if key in s["applied"]:
+        with open(path, "w") as f:
+            json.dump(s, f)
+        sys.stderr.write('Error from server (AlreadyExists): machineconfigs "%s" already exists\n' % key)
+        sys.exit(1)
+    s["applied"][key] = manifest
+    print("%s created" % key.lower())
 elif verb == "apply":
-    manifest = yaml.safe_load(sys.stdin.read())
+    src = opt("-f")
+    manifest = yaml.safe_load(sys.stdin.read() if src in ("", "-") else open(src).read())
     s["applied"]["%s/%s" % (manifest["kind"], manifest["metadata"]["name"])] = manifest
     print("%s/%s configured" % (manifest["kind"].lower(), manifest["metadata"]["name"]))
 with open(path, "w") as f:
@@ -74,18 +104,24 @@ with open(path, "w") as f:
 '''
 
 
-def _script(hostname):
+def _job(hostname):
     env = Environment(loader=PackageLoader("simplyblock_web", "templates"), trim_blocks=True, lstrip_blocks=True)
-    job = yaml.safe_load(env.get_template("oc_storage_core_isolation.yaml.j2").render(
+    return yaml.safe_load(env.get_template("oc_storage_core_isolation.yaml.j2").render(
         CORE_JOBNAME="snode-core-" + hostname, NAMESPACE="simplyblock", HOSTNAME=hostname, CLUSTER_ID="ac85c3",
         OPENSHIFT_MCP="worker"))
-    return job["spec"]["template"]["spec"]["containers"][0]["args"][0]
 
 
-def _run(tmp_path, hostname, cores, masters=(), applied=None):
+def _script(hostname):
+    return _job(hostname)["spec"]["template"]["spec"]["containers"][0]["args"][0]
+
+
+def _run(tmp_path, hostname, cores, masters=(), applied=None, marker=False, race=None):
     state_dir = tmp_path / "state"
     state_dir.mkdir()
-    (state_dir / "state.json").write_text(json.dumps({"masters": list(masters), "applied": applied or {}}))
+    (state_dir / "state.json").write_text(json.dumps(
+        {"masters": list(masters), "applied": applied or {}, "race": race}))
+    if marker:
+        (tmp_path / "marker").touch()
     fake = tmp_path / "fake_kubectl.py"
     fake.write_text(FAKE_KUBECTL)
     bin_dir = tmp_path / "bin"
@@ -98,6 +134,7 @@ def _run(tmp_path, hostname, cores, masters=(), applied=None):
     config = tmp_path / "sn_config_file"
     config.write_text(json.dumps({"isolated_cores": cores}))
     script = (_script(hostname)
+              .replace("/tmp/master-isolated.yaml", str(tmp_path / "master-isolated.yaml"))
               .replace("/var/simplyblock/.cpu_isolation_applied", str(tmp_path / "marker"))
               .replace("/var/simplyblock/sn_config_file", str(config)))
     env = dict(os.environ, PATH=str(bin_dir) + os.pathsep + os.environ["PATH"], FAKE_STATE=str(state_dir))
@@ -168,3 +205,52 @@ def test_a_rerun_replaces_a_previous_clusters_isolation(tmp_path):
     mc = applied["MachineConfig/" + MASTER_MC]
     assert "isolcpus=4,5" in mc["spec"]["kernelArguments"]
     assert mc["metadata"]["annotations"] == {"simplyblock.io/cluster-id": "ac85c3"}
+
+
+def _mc(cores, cluster_id="ac85c3"):
+    return _master_isolation(cores, cluster_id)["MachineConfig/" + MASTER_MC] | {
+        "kind": "MachineConfig"} | {"metadata": {"name": MASTER_MC, "annotations": {
+            "simplyblock.io/cluster-id": cluster_id}}}
+
+
+@needs_tools
+def test_a_concurrent_master_with_other_cores_stops_the_job(tmp_path):
+    """Two masters' jobs can both find no isolation and both write one. The
+    create lets one win; the other re-reads it and refuses, rather than
+    replace it and reboot every master into its own cores."""
+    proc, applied = _run(tmp_path, "master-2", [4, 5], masters=["master-1", "master-2"], race=_mc("2,3"))
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "isolcpus=2,3" in applied["MachineConfig/" + MASTER_MC]["spec"]["kernelArguments"]
+    assert "4,5" in proc.stdout
+
+
+@needs_tools
+def test_a_concurrent_master_with_the_same_cores_reuses_the_isolation(tmp_path):
+    proc, applied = _run(tmp_path, "master-2", [2, 3], masters=["master-1", "master-2"], race=_mc("2,3"))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "already isolates 2,3" in proc.stdout
+
+
+@needs_tools
+def test_a_master_marked_by_an_earlier_version_still_gets_the_master_isolation(tmp_path):
+    """An earlier version isolated a master through a pool of its own, which
+    MCO ignores, and marked the node configured. The marker must not keep the
+    master off the master pool's isolation."""
+    proc, applied = _run(tmp_path, "master-1", [2, 3], masters=["master-1"], marker=True)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "isolcpus=2,3" in applied["MachineConfig/" + MASTER_MC]["spec"]["kernelArguments"]
+
+
+@needs_tools
+def test_a_marked_master_with_its_isolation_in_place_skips_the_reboot_wait(tmp_path):
+    proc, applied = _run(tmp_path, "master-1", [2, 3], masters=["master-1"], marker=True,
+                         applied=_master_isolation("2,3"))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "Skipping sleep" in proc.stdout
+    assert "Node is rebooting" not in proc.stdout
+
+
+def test_a_refusal_fails_the_job_at_once():
+    """A refusal is final: retried in place it only crash-loops until the
+    agent's wait times out, with the reason in a dead pod's log."""
+    assert _job("master-1")["spec"]["backoffLimit"] == 0
