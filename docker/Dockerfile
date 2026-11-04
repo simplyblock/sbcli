@@ -111,9 +111,8 @@ RUN dnf upgrade -y && dnf clean all
 # The unprivileged runtime user, plus the one line that makes the venv usable
 # under sudo.
 #
-# Several entry points start as `sudo -E python3 ...`: the storage-node API
-# (storage_node_ops.py), the SPDK proxy (storage_node/docker.py and
-# templates/storage_deploy_spdk.yaml.j2) and node_configure.py (invoked by the
+# Several entry points start as `sudo -E python3 ...`: the SPDK proxy
+# (templates/storage_deploy_spdk.yaml.j2) and node_configure.py (invoked by the
 # operator's init script, kubernetes/operator/internal/utils/storage_nodeset_ds.go).
 # UBI's /etc/sudoers sets `Defaults secure_path = /sbin:/bin:/usr/sbin:/usr/bin`,
 # which replaces PATH *even with -E*, so without the override below every one of

@@ -23,9 +23,6 @@ Usage
 Options
 -------
   --output-dir DIR    Write the tarball here (default: current directory).
-  --mode MODE         Deployment mode: "docker" (default) or "kubernetes".
-                      Selects the set of control-plane service names and
-                      adjusts which log sources are queried.
   --use-opensearch    Query OpenSearch scroll API directly instead of the
                       Graylog search REST API.  Useful when Graylog is
                       unavailable or when the result set is very large.
@@ -37,7 +34,6 @@ Examples
   collect_logs.py "2024-01-15T10:00:00" 60
   collect_logs.py "2024-01-15 10:00:00" 30 --output-dir /tmp/logs
   collect_logs.py "2024-01-15T10:00:00" 120 --use-opensearch
-  collect_logs.py "2024-01-15T10:00:00" 60 --mode kubernetes
 """
 
 import argparse
@@ -85,48 +81,6 @@ OS_SCROLL_RETRIES = 3
 # (see simplyblock_core/cluster_ops.py :: _set_max_result_window).
 # Requests that would exceed this threshold are split into time-based chunks.
 MAX_RESULT_WINDOW = 100_000
-
-# Docker Swarm service names that run on the management / control-plane node.
-CONTROL_PLANE_SERVICES_DOCKER = [
-    "WebAppAPI",
-    "WebAppAPI2",
-    "WebAppAPI3",
-    "WebAppAPI4",
-    "WebAppAPI5",
-    "fdb-server",
-    "fdb-backup-agent",
-    "StorageNodeMonitor",
-    "MgmtNodeMonitor",
-    "LVolStatsCollector",
-    "MainDistrEventCollector",
-    "CapacityAndStatsCollector",
-    "CapacityMonitor",
-    "HealthCheck",
-    "DeviceMonitor",
-    "LVolMonitor",
-    "SnapshotMonitor",
-    "TasksRunnerRestart",
-    "TasksRunnerMigration",
-    "TasksRunnerLVolMigration",
-    "TasksRunnerFailedMigration",
-    "TasksRunnerClusterStatus",
-    "TasksRunnerNewDeviceMigration",
-    "TasksNodeAddRunner",
-    "TasksRunnerClusterExpand",
-    "TasksRunnerPortAllow",
-    "TasksRunnerJCCompResume",
-    "TasksRunnerLVolSyncDelete",
-    "TasksRunnerBackup",
-    "BackupMergeService",
-    # Async cross-cluster replication: these run on the CP but were missing from
-    # this list, so a replication incident collected no replication logs at all.
-    "SnapshotReplication",
-    "TasksRunnerReplicationFinal",
-    "TasksRunnerBatchMigration",
-    "TasksNodeRemovalRunner",
-    "HAProxy",
-    "BackupService",
-]
 
 CONTROL_PLANE_SERVICES_KUBERNETES = [
     "simplyblock-control",
@@ -179,44 +133,6 @@ def _sbctl_bin():
 
 
 SBCTL_BIN = _sbctl_bin()
-
-
-def _collect_docker_service_logs(cp_dir, tail=40000):
-    """Fallback: pull control-plane logs straight from Docker Swarm.
-
-    Used when Graylog/OpenSearch returns nothing. `docker service logs`
-    aggregates ALL tasks of a service, including ones that were replaced during
-    the window — `docker logs <container>` only has the currently running task,
-    so a service recreated mid-incident loses its earlier output entirely.
-
-    Best-effort: this only works on a docker-mode management node, and any
-    failure is reported rather than raised so the rest of the bundle survives.
-    """
-    print("  -> falling back to `docker service logs` on this node")
-    r = _run(["docker", "service", "ls", "--format", "{{.Name}}"], timeout=60)
-    if r is None or r.returncode != 0:
-        print("  !! cannot list docker services; no control-plane logs in this bundle")
-        return
-    services = [s.strip() for s in r.stdout.splitlines() if s.strip()]
-    if not services:
-        print("  !! no docker services found")
-        return
-
-    out_dir = cp_dir / "docker_service_logs"
-    out_dir.mkdir(exist_ok=True)
-    total = 0
-    for svc in services:
-        r = _run(["docker", "service", "logs", "--timestamps", "--no-task-ids",
-                  "--tail", str(tail), svc], timeout=600)
-        if r is None:
-            print(f"    {svc:<42} {'timed out':>8}")
-            continue
-        body = (r.stdout or "") + (r.stderr or "")
-        (out_dir / f"{svc}.log").write_text(body, encoding="utf-8", errors="replace")
-        lines = body.count("\n")
-        total += lines
-        print(f"    {svc:<42} {lines:>8,} lines")
-    print(f"  {'Docker service logs total':<42} {total:>8,} lines")
 
 
 def _run(cmd, timeout=30):
@@ -1017,7 +933,6 @@ def main():
             '  collect_logs.py "2024-01-15T10:00:00" 60\n'
             '  collect_logs.py "2024-01-15 10:00:00" 30 --output-dir /tmp/logs\n'
             '  collect_logs.py "2024-01-15T10:00:00" 120 --use-opensearch\n'
-            '  collect_logs.py "2024-01-15T10:00:00" 60 --mode kubernetes\n'
         ),
     )
     parser.add_argument(
@@ -1040,13 +955,9 @@ def main():
     )
     parser.add_argument(
         "--mode",
-        choices=["docker", "kubernetes"],
-        default="docker",
-        help=(
-            "Deployment mode: 'docker' (default) uses Docker Swarm service names "
-            "for control-plane log collection; 'kubernetes' uses Kubernetes container "
-            "names and skips Graylog-based SPDK log collection (kubectl is used instead)."
-        ),
+        choices=["kubernetes"],
+        default="kubernetes",
+        help="Deployment mode. Only 'kubernetes' remains; accepted so existing invocations keep working.",
     )
     parser.add_argument(
         "--use-opensearch",
@@ -1146,7 +1057,7 @@ def main():
     if args.mgmt_ip:
         mgmt_ip = args.mgmt_ip
         print(f"    Using provided IP : {mgmt_ip}")
-    elif args.mode == "kubernetes" and in_cluster:
+    elif in_cluster:
         # Run from a pod of the control plane (the documented way on
         # Kubernetes): the management-node record carries no reachable
         # address there (0.0.0.0), and Graylog and OpenSearch are Services
@@ -1165,16 +1076,13 @@ def main():
         mgmt_ip = cp_nodes[0]["IP"]
         print(f"    Management IP : {mgmt_ip}  ({len(cp_nodes)} node(s) total)")
 
-    if args.mode == "kubernetes" and in_cluster and not args.mgmt_ip:
+    if in_cluster and not args.mgmt_ip:
         ns = args.namespace or "simplyblock"
         graylog_base = f"http://simplyblock-graylog.{ns}.svc:9000/api"
         opensearch_base = f"http://opensearch-cluster-master.{ns}.svc:9200"
-    elif args.mode == "kubernetes":
+    else:
         graylog_base = f"http://{mgmt_ip}:9000/api"
         opensearch_base = f"http://{mgmt_ip}:9200"
-    else:
-        graylog_base = f"http://{mgmt_ip}/graylog/api"
-        opensearch_base = f"http://{mgmt_ip}/opensearch"
 
     # ── 4. Storage nodes ─────────────────────────────────────────────────────
 
@@ -1253,16 +1161,12 @@ def main():
 
         # ── 7. Control-plane logs ────────────────────────────────────────────
 
-        cp_services = (
-            CONTROL_PLANE_SERVICES_KUBERNETES
-            if args.mode == "kubernetes"
-            else CONTROL_PLANE_SERVICES_DOCKER
-        )
-        print(f"\n[5] Collecting control-plane logs ({len(cp_services)} services, mode={args.mode}) …")
+        cp_services = CONTROL_PLANE_SERVICES_KUBERNETES
+        print(f"\n[5] Collecting control-plane logs ({len(cp_services)} services) …")
         cp_dir = log_root / "control_plane"
         cp_dir.mkdir()
 
-        gl_cname_field = "kubernetes_container_name" if args.mode == "kubernetes" else "container_name"
+        gl_cname_field = "kubernetes_container_name"
 
         total_cp_lines = 0
         for svc in cp_services:
@@ -1289,115 +1193,53 @@ def main():
         if total_cp_lines == 0:
             print("\n  !! WARNING: 0 control-plane log lines retrieved.")
             print("  !! Graylog/OpenSearch is not returning data for this window.")
-            if args.mode == "docker":
-                _collect_docker_service_logs(cp_dir)
-            else:
-                print("  !! Check the log pipeline before trusting this bundle.")
+            print("  !! Check the log pipeline before trusting this bundle.")
 
         # ── 8. Storage-node logs ─────────────────────────────────────────────
-        # Docker mode: collect SPDK/SNodeAPI logs from Graylog/OpenSearch.
-        # Kubernetes mode: SPDK logs are captured via kubectl in step 9.
 
-        if args.mode == "docker":
-            print("\n[6] Collecting storage-node logs (docker) …")
-            sn_root = log_root / "storage_nodes"
-            sn_root.mkdir()
+        print("\n[6] Collecting storage-node logs (kubernetes) …")
+        sn_root = log_root / "storage_nodes"
+        sn_root.mkdir()
 
-            # SNodeAPI runs on every storage node under the same container name.
-            # Its GELF 'source' field is the Docker host hostname whose exact
-            # format varies by deployment and cannot be reliably derived from
-            # the management IP alone.  Collect ALL SNodeAPI logs once (no
-            # source filter) into a shared file; each line contains src=<host>
-            # so per-node filtering can be done with grep afterwards.
-            print("\n  SNodeAPI (all nodes combined) …")
-            snode_api_log = sn_root / "SNodeAPI_all_nodes.log"
-            snode_api_count = fetch(
-                gl_query='container_name:"SNodeAPI"',
-                os_container="SNodeAPI",
-                os_source=None,
-                out_path=snode_api_log,
-                **fetch_kw,
-            )
-            print(f"  {'SNodeAPI (all nodes)':<42} {snode_api_count:>8,} lines")
-            print("  (filter by src=<ip> to isolate per-node logs)")
+        for node in sn_list:
+            hostname = node.get("Hostname", "unknown")
+            node_ip = node.get("Management IP", "")
+            rpc_port = node.get("SPDK P", 8080)
 
-            for node in sn_list:
-                hostname = node.get("Hostname", "unknown")
-                node_ip = node.get("Management IP", "")
-                rpc_port = node.get("SPDK P", 8080)
+            node_label = f"{hostname}_{node_ip}".strip("_") if node_ip else hostname
+            node_dir = sn_root / node_label
+            node_dir.mkdir()
 
-                node_label = f"{hostname}_{node_ip}".strip("_") if node_ip else hostname
-                node_dir = sn_root / node_label
-                node_dir.mkdir()
+            print(f"\n  Node: {hostname}  ip={node_ip}  rpc_port={rpc_port}")
 
-                print(f"\n  Node: {hostname}  ip={node_ip}  rpc_port={rpc_port}")
+            # Pod name pattern: snode-spdk-pod-<rpc_port>-<cluster_uuid>
+            # Container names inside that pod: spdk-container, spdk-proxy-container
+            pod_name = f"snode-spdk-pod-{rpc_port}-*"
+            spdk_containers = [
+                ("spdk-container",       f"spdk-container_{rpc_port}.log"),
+                ("spdk-proxy-container", f"spdk-proxy-container_{rpc_port}.log"),
+            ]
 
-                # spdk_N and spdk_proxy_N are globally unique by RPC port number;
-                # no source filter needed.
-                spdk_containers = [
-                    (f"spdk_{rpc_port}",       f"spdk_{rpc_port}.log"),
-                    (f"spdk_proxy_{rpc_port}", f"spdk_proxy_{rpc_port}.log"),
-                ]
-
-                for cname, fname in spdk_containers:
-                    out_f = node_dir / fname
-                    n = fetch(
-                        gl_query=f'container_name:"{cname}"',
-                        os_container=cname,
-                        os_source=None,
-                        out_path=out_f,
-                        **fetch_kw,
-                    )
-                    print(f"    {cname:<42} {n:>8,} lines")
-        else:
-            print("\n[6] Collecting storage-node logs (kubernetes) …")
-            sn_root = log_root / "storage_nodes"
-            sn_root.mkdir()
-
-            for node in sn_list:
-                hostname = node.get("Hostname", "unknown")
-                node_ip = node.get("Management IP", "")
-                rpc_port = node.get("SPDK P", 8080)
-
-                node_label = f"{hostname}_{node_ip}".strip("_") if node_ip else hostname
-                node_dir = sn_root / node_label
-                node_dir.mkdir()
-
-                print(f"\n  Node: {hostname}  ip={node_ip}  rpc_port={rpc_port}")
-
-                # Pod name pattern: snode-spdk-pod-<rpc_port>-<cluster_uuid>
-                # Container names inside that pod: spdk-container, spdk-proxy-container
-                pod_name = f"snode-spdk-pod-{rpc_port}-*"
-                spdk_containers = [
-                    ("spdk-container",       f"spdk-container_{rpc_port}.log"),
-                    ("spdk-proxy-container", f"spdk-proxy-container_{rpc_port}.log"),
-                ]
-
-                for cname, fname in spdk_containers:
-                    out_f = node_dir / fname
-                    gl_q = (
-                        f'kubernetes_pod_name:{_gl_escape(pod_name)} '
-                        f'AND kubernetes_container_name:/.*{_gl_escape(cname)}.*/'
-                    )
-                    n = fetch(
-                        gl_query=gl_q,
-                        os_container=cname,
-                        os_source=None,
-                        os_pod_name=pod_name,
-                        out_path=out_f,
-                        **fetch_kw,
-                    )
-                    print(f"    {cname:<42} {n:>8,} lines")
+            for cname, fname in spdk_containers:
+                out_f = node_dir / fname
+                gl_q = (
+                    f'kubernetes_pod_name:{_gl_escape(pod_name)} '
+                    f'AND kubernetes_container_name:/.*{_gl_escape(cname)}.*/'
+                )
+                n = fetch(
+                    gl_query=gl_q,
+                    os_container=cname,
+                    os_source=None,
+                    os_pod_name=pod_name,
+                    out_path=out_f,
+                    **fetch_kw,
+                )
+                print(f"    {cname:<42} {n:>8,} lines")
 
         # ── 9. Kubernetes pod logs (CSI node + storage-node DS) ──────────────
 
-        # Kubernetes pod logs only exist in a kubernetes deployment. A docker
-        # deployment has no pods, so this step is skipped there rather than
-        # shelling out to kubectl against a cluster that is not there.
         k8s_ns = args.namespace
-        if args.mode != "kubernetes":
-            print(f"\n[7] Skipping Kubernetes pod logs (deploy mode is {args.mode}).")
-        elif not k8s_ns:
+        if not k8s_ns:
             print("\n[7] Skipping Kubernetes pod logs (namespace collection disabled).")
         else:
             print(f"\n[7] Collecting Kubernetes pod logs (namespace: {k8s_ns}) …")
