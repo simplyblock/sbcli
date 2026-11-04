@@ -31,6 +31,71 @@ cluster_id_file = "/etc/foundationdb/sbcli_cluster_id"
 
 TOP_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 
+# The label the OpenShift master pool selects on. MCO keeps a node carrying it
+# in the master pool even when a custom pool selects it too ("defaulting to
+# master"), so the storage pool's settings reach such a node only through the
+# master pool. The CPU-topology job reads the same label.
+MASTER_POOL_LABEL = "node-role.kubernetes.io/master"
+
+
+def _mco_pool_name(node_labels, cluster_short_id):
+    """The MachineConfigPool whose render this node runs once its CPU-topology
+    settings have landed."""
+    if MASTER_POOL_LABEL in (node_labels or {}):
+        return "master"
+    return f"storage-{cluster_short_id}"
+
+
+def _cfg_hash(name):
+    return name.rsplit("-", 1)[-1] if name else None
+
+
+def _kubelet_configs_owned_by(machine_configs, kubelet_config_name):
+    """Names of the MachineConfigs MCO generated from this KubeletConfig.
+
+    MCO names a generated kubelet config after its pool and a suffix only, so a
+    rerun's KubeletConfig can take the very name a previous cluster's carried;
+    the owner reference is what tells them apart.
+    """
+    return {
+        mc["metadata"]["name"]
+        for mc in machine_configs
+        if any(ref.get("kind") == "KubeletConfig" and ref.get("name") == kubelet_config_name
+               for ref in mc["metadata"].get("ownerReferences") or [])
+    }
+
+
+def _converged_on_pool(pool_name, mcp, node_annotations, unschedulable, kubelet_configs=None):
+    """Whether the node runs its pool's render with the CPU-topology settings,
+    and MCO is done with it.
+
+    The storage pool's status render is its target: the job joins a host only
+    once that render is complete. Its hash, not its full name, is compared, so
+    a node under a previous cluster's pool with byte-identical config passes
+    without a pool migration or reboot.
+
+    The master pool is shared with the control plane and rolls one master at a
+    time. Its status names the old render until every master has rebooted, and
+    a master that has not rebooted yet matches it, so the target is the spec's
+    render, and that render must carry one of `kubelet_configs`, the generated
+    configs of the job's KubeletConfig.
+    """
+    if unschedulable:
+        return False
+    annotations = node_annotations or {}
+    if annotations.get("machineconfiguration.openshift.io/state") != "Done":
+        return False
+    if pool_name == "master":
+        configuration = (mcp.get("spec", {}) or {}).get("configuration", {}) or {}
+        sources = {s.get("name", "") for s in configuration.get("source", []) or []}
+        if not sources & set(kubelet_configs or ()):
+            return False
+    else:
+        configuration = (mcp.get("status", {}) or {}).get("configuration", {}) or {}
+    target = configuration.get("name")
+    current = annotations.get("machineconfiguration.openshift.io/currentConfig")
+    return bool(target and _cfg_hash(current) and _cfg_hash(current) == _cfg_hash(target))
+
 def set_namespace(namespace):
     if not os.path.exists(namespace_id_file):
         try:
@@ -653,15 +718,10 @@ def spdk_process_start(body: SPDKParams):
             # brings it up before cpuManagerPolicy=static is in effect (unpinned),
             # only to be killed by the reboot moments later.
             #
-            # Converge check compares the rendered-config CONTENT HASH
-            # (rendered-<pool>-<hash>), not the full name: a node still under an
-            # older pool (e.g. a previous cluster id) with byte-identical config
-            # has a different name but the same hash and must pass immediately —
-            # no false wait, no needless pool migration/reboot.
-            mcp_name = f"storage-{first_six_cluster_id}"
-
-            def _cfg_hash(name):
-                return name.rsplit("-", 1)[-1] if name else None
+            # The pool gated on is the one MCO keeps the node in: a master stays
+            # in the master pool, which the job gives the storage KubeletConfig.
+            mcp_name = _mco_pool_name(
+                k8s_core_v1.read_node(node_name).metadata.labels, first_six_cluster_id)
 
             co = core_utils.get_k8s_custom_objects_client()
             for attempt in range(240):  # ~40 min: reboots queue under MCP maxUnavailable
@@ -682,18 +742,23 @@ def spdk_process_start(body: SPDKParams):
                         time.sleep(10)
                         continue
                     raise
-                target = (mcp.get("status", {}).get("configuration", {}) or {}).get("name")
+                kubelet_configs = None
+                if mcp_name == "master":
+                    kubelet_configs = _kubelet_configs_owned_by(co.list_cluster_custom_object(
+                        group="machineconfiguration.openshift.io", version="v1",
+                        plural="machineconfigs")["items"], f"storage-kubelet-{first_six_cluster_id}")
                 node_obj = k8s_core_v1.read_node(node_name)
                 ann = node_obj.metadata.annotations or {}
                 cur = ann.get("machineconfiguration.openshift.io/currentConfig")
-                state = ann.get("machineconfiguration.openshift.io/state")
-                if (target and state == "Done" and not node_obj.spec.unschedulable
-                        and _cfg_hash(cur) and _cfg_hash(cur) == _cfg_hash(target)):
+                if _converged_on_pool(mcp_name, mcp, ann, node_obj.spec.unschedulable, kubelet_configs):
                     logger.info(f"Node '{node_name}' carries MCP '{mcp_name}' config "
                                 f"(hash {_cfg_hash(cur)}), reboot done — starting SPDK")
                     break
+                target = {side: ((mcp.get(side, {}) or {}).get("configuration", {}) or {}).get("name")
+                          for side in ("spec", "status")}
                 logger.info(f"Waiting for '{node_name}' to converge on MCP '{mcp_name}' "
-                            f"(cur={cur} target={target} state={state} "
+                            f"(cur={cur} target={target} "
+                            f"state={ann.get('machineconfiguration.openshift.io/state')} "
                             f"cordoned={node_obj.spec.unschedulable})... {attempt + 1}/240")
                 time.sleep(10)
             else:

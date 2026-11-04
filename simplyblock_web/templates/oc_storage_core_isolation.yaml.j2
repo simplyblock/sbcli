@@ -62,7 +62,69 @@ spec:
 
               echo "[INFO] Isolated cores to apply: $ISOLATED_CORES"
 
-              cat <<EOF | kubectl apply -f -
+              # MCO keeps a node carrying the master pool's label in the master pool
+              # even when a custom pool selects it, so a pool of its own never reaches
+              # a master, and on a compact cluster every storage node is one. A master
+              # is isolated through the master pool: one MachineConfig and one
+              # KubeletConfig for every master, which reboot into them one at a time.
+              # One set of kernel arguments applies to every master, so a master whose
+              # cores differ stops here rather than reboot the others into its cores.
+              # The MachineConfig records the cluster that wrote it: a torn-down
+              # cluster leaves its own behind, and a rerun replaces that one.
+              IS_MASTER=$(kubectl get nodes -l node-role.kubernetes.io/master \
+                --field-selector "metadata.name={{ HOSTNAME }}" -o name)
+              if [ -n "$IS_MASTER" ]; then
+                MASTER_MC="simplyblock-master-isolated"
+                APPLIED=$(kubectl get machineconfig "$MASTER_MC" -o jsonpath='{.spec.kernelArguments}' 2>/dev/null || true)
+                if [ -n "$APPLIED" ]; then
+                  APPLIED_BY=$(kubectl get machineconfig "$MASTER_MC" \
+                    -o jsonpath='{.metadata.annotations.simplyblock\.io/cluster-id}' 2>/dev/null || true)
+                  if [ "$APPLIED_BY" != "{{ CLUSTER_ID }}" ]; then
+                    echo "[INFO] MachineConfig $MASTER_MC is from a previous simplyblock cluster (${APPLIED_BY:-unrecorded}); replacing it"
+                    APPLIED=""
+                  fi
+                fi
+                if [ -n "$APPLIED" ]; then
+                  if ! echo "$APPLIED" | grep -q "\"isolcpus=${ISOLATED_CORES}\""; then
+                    echo "[ERROR] {{ HOSTNAME }} is a master and needs cores $ISOLATED_CORES isolated, but MachineConfig $MASTER_MC applies $APPLIED to every master"
+                    exit 1
+                  fi
+                  echo "[INFO] MachineConfig $MASTER_MC already isolates $ISOLATED_CORES"
+                else
+                  cat <<EOF | kubectl apply -f -
+              apiVersion: machineconfiguration.openshift.io/v1
+              kind: MachineConfig
+              metadata:
+                name: $MASTER_MC
+                labels:
+                  machineconfiguration.openshift.io/role: master
+                annotations:
+                  simplyblock.io/cluster-id: "{{ CLUSTER_ID }}"
+              spec:
+                kernelArguments:
+                  - "nohz_full=${ISOLATED_CORES}"
+                  - "rcu_nocbs=${ISOLATED_CORES}"
+                  - "isolcpus=${ISOLATED_CORES}"
+                  - "intel_iommu=on"
+                  - "iommu=pt"
+              EOF
+                fi
+
+                cat <<EOF | kubectl apply -f -
+              apiVersion: machineconfiguration.openshift.io/v1
+              kind: KubeletConfig
+              metadata:
+                name: simplyblock-master-static-cpu-manager
+              spec:
+                machineConfigPoolSelector:
+                  matchLabels:
+                    pools.operator.machineconfiguration.openshift.io/master: ""
+                kubeletConfig:
+                  cpuManagerPolicy: static
+                  cpuManagerReconcilePeriod: 5s
+              EOF
+              else
+                cat <<EOF | kubectl apply -f -
               apiVersion: machineconfiguration.openshift.io/v1
               kind: MachineConfigPool
               metadata:
@@ -83,8 +145,8 @@ spec:
                     kubernetes.io/hostname: {{ HOSTNAME }}
               EOF
 
-              # Create the MachineConfig for CPU isolation and IOMMU settings
-              cat <<EOF | kubectl apply -f -
+                # Create the MachineConfig for CPU isolation and IOMMU settings
+                cat <<EOF | kubectl apply -f -
               apiVersion: machineconfiguration.openshift.io/v1
               kind: MachineConfig
               metadata:
@@ -100,8 +162,8 @@ spec:
                   - "iommu=pt"
               EOF
 
-              # Create the KubeletConfig to enable static CPU manager
-              cat <<EOF | kubectl apply -f -
+                # Create the KubeletConfig to enable static CPU manager
+                cat <<EOF | kubectl apply -f -
               apiVersion: machineconfiguration.openshift.io/v1
               kind: KubeletConfig
               metadata:
@@ -114,6 +176,7 @@ spec:
                   cpuManagerPolicy: static
                   cpuManagerReconcilePeriod: 5s
               EOF
+              fi
 
               echo "[INFO] Init setup and CPU isolation complete."
 
