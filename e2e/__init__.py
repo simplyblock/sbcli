@@ -1537,7 +1537,7 @@ def get_pnfs_tests():
         PnfsScaleThirtyPodsK8s,      # B-12  30 pods on one claim
         PnfsMixedRwxRwoK8s,          # B-13  RWX beside RWO
         PnfsTwoNamespacesK8s,        # B-14  same name, two tenants
-        PnfsClaimCeilingK8s,         # B-15  30 claims, then one more
+        PnfsClaimCeilingK8s,         # B-15  31 claims on one MDS, all serving
         # Last, and alone: it takes the metadata server away from the
         # whole cluster for the length of the case.
         PnfsNoMetadataServerK8s,     # B-16  negative

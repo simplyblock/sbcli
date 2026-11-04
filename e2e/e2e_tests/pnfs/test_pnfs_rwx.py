@@ -1455,12 +1455,25 @@ class PnfsTwoNamespacesK8s(_PnfsBase):
 # ── B-15 ─────────────────────────────────────────────────────────────────
 
 class PnfsClaimCeilingK8s(_PnfsBase):
-    """B-15: thirty claims on one metadata server, then one more.
+    """B-15: thirty-one claims on one metadata server, all serving.
 
-    A boundary case, and the answer is allowed to be either. What is not
-    allowed is the thirty-first binding and then not working, so the
-    assertion is that whatever happens is *consistent*: it binds and
-    serves, or it stays Pending and says why.
+    Named a ceiling case once, on the reading that max_subsys=30 put the
+    boundary at the thirty-first claim. It does not. A volume takes a
+    *namespace*, not a subsystem, and this cluster carries
+    max_namespace_per_subsys=30 alongside max_subsys=30 -- room for about
+    900 volumes, so claim 31 is nowhere near any limit and binding is the
+    only correct answer. Run 41844080711 bound and served it, which is the
+    product being right rather than a ceiling being missed.
+
+    So what this case is actually worth: thirty-one RWX claims against one
+    metadata server, every one of them bound, and the last one proved to
+    serve IO. That is a real scale check on the MDS and the only one in the
+    suite. A true subsystem-exhaustion case needs ~900 volumes and belongs
+    in Track C, not here.
+
+    The Pending branch stays, because a ceiling arriving early is exactly
+    the surprise worth catching, and a silent one is worse than a stated
+    one.
     """
 
     CLAIMS = 30
@@ -1495,23 +1508,27 @@ with open("{self.MOUNT}/b15.dat", "wb") as f:
 print("ok")
 ''')
             self.logger.info(
-                "[B-15] PASS: claim %d bound and serves; no ceiling at %d",
-                self.CLAIMS + 1, self.CLAIMS + 1)
+                "[B-15] PASS: %d claims bound on one metadata server and "
+                "claim %d serves IO", self.CLAIMS + 1, self.CLAIMS + 1)
             return
 
-        export = nfsexport_status(self.k8s_utils, pvc_name=extra)
-        reason = ""
-        if export:
-            status = export.get("status") or {}
-            reason = str(status.get("phase") or status.get("reason") or "")
-        if not reason:
+        # Same correction as B-16: the operator reports a refusal as an Event
+        # on the NFSExport, not in status, and a Pending claim has no PV for
+        # nfsexport_status to join spec.volumeRef through -- so the old read
+        # returned None and then "" every time. This branch has never run, so
+        # the bug was latent: the first real early ceiling would have been
+        # reported as "neither bound nor said why" however clearly the
+        # operator had in fact said it.
+        events = export_event_reasons(self.k8s_utils)
+        if not events:
             raise PnfsEvidenceError(
                 f"claim {self.CLAIMS + 1} neither bound nor said why "
                 f"(B-15). A ceiling is acceptable; a silent one is not: the "
-                f"claim is Pending and its NFSExport reports {export!r}")
+                f"claim is Pending and no NFSExport Event explains it.")
+        reason, message = events[-1]
         self.logger.info(
-            "[B-15] PASS: ceiling at %d claims, reported as %r rather than "
-            "silently", self.CLAIMS, reason)
+            "[B-15] PASS: ceiling at %d claims, stated as %r: %s",
+            self.CLAIMS, reason, message)
 
 
 # ── B-16 ─────────────────────────────────────────────────────────────────
