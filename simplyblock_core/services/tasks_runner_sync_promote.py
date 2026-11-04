@@ -8,7 +8,7 @@ promote table again. An error the pass does not expect (a DB or RPC error
 outside the promote's own failure paths) is a retry of the driver instead: the
 task is SUSPENDED, still owning its markers, and the next attempt (3 s on at
 the earliest) goes on from the DB state; at ``max_retry`` the driver gives up and the task
-ends failed, its markers settled.
+ends failed (the endings are below).
 
 Per LVS the task may move (``owners``), led from the other site T:
 
@@ -36,11 +36,15 @@ DONE FIRST (it then no longer owns the move) in the spec's terminal commit
 (finish_task): the outcome recorded on each of its volumes in the same
 transaction (``LVol.sync_promote_failures``, a failure reported once to the
 next promote of that volume to that site), unless the task was canceled or
-replaced meanwhile. Then (on_finish) every marker it set is settled: the
-previous site written back for an LVS whose hand-off never started,
-storage_node_ops.reconcile_lvs_move for one whose hand-off did (the leader
-decides). A pass that restarts after a crash finds its markers by ``moves``
-and goes on from the DB state.
+replaced meanwhile. Then (on_finish) the previous site is written back for
+every LVS it marked whose hand-off never started. An LVS whose hand-off
+started keeps its ``moving:`` marker - the leader decides where it settles -
+until the next promote call (sync_replication_controller._settle_abandoned_moves),
+a leader lookup or the storage-node monitor
+(sync_replication_controller.reconcile_abandoned_moves) settles it by
+storage_node_ops.reconcile_lvs_move; meanwhile both sites stay closed and a
+volume create or clone on it is refused. A pass that restarts after a crash
+finds its markers by ``moves`` and goes on from the DB state.
 
 A promote with ``lost_site`` T in the params (a site T recorded as lost, or
 the forced promote of T) judges every gate by the disaster gate of T
@@ -114,11 +118,11 @@ def _is_site_fence(task) -> bool:
 
 
 def _settle_markers(task) -> None:
-    """Settle every ``moving:`` marker the (DONE) task still holds, each
-    owner on its own. A reconcile that fails operationally (a member's RPC, a
-    changed precondition, a record gone) leaves that marker to the
-    storage-node monitor (reconcile_abandoned_moves). A site fence sets no
-    marker."""
+    """Write back the previous site of every LVS the (DONE) task still holds
+    at ``moving:`` and never started to hand off. An LVS whose hand-off
+    started keeps its marker for the next promote call, a leader lookup and
+    the storage-node monitor (storage_node_ops.reconcile_lvs_move): the
+    leader decides where it settles. A site fence sets no marker."""
     if _is_site_fence(task):
         return
     params = task.function_params
@@ -133,13 +137,8 @@ def _settle_markers(task) -> None:
         if owner.lvs_active_site != moving:
             continue
         if lvs_name in transferring:
-            try:
-                settled = storage_node_ops.reconcile_lvs_move(owner_id)
-            except (RPCException, PreconditionError, KeyError) as e:
-                logger.error("LVS %s: reconciling the move of an ended promote failed, "
-                             "left to the monitor: %s", lvs_name, e)
-                continue
-            logger.warning("LVS %s: move of an ended promote reconciled to %r", lvs_name, settled)
+            logger.info("LVS %s: move of an ended promote left at %r for the next promote call "
+                        "and the storage-node monitor", lvs_name, moving)
         elif storage_node_ops.set_lvs_active_site(owner_id, previous, expect=moving):
             logger.warning("LVS %s: move of an ended promote undone, lvs_active_site=%r",
                            lvs_name, previous)

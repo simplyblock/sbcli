@@ -16509,9 +16509,12 @@ def reconcile_lvs_move(owner_id):
       nothing. "Nobody leads" is also what a completed hand-off looks like
       before the first IO: the hand-off is then simply repeated.
 
-    A promote runner that fails records its task DONE / canceled BEFORE
-    calling this; while its task owns the move this is a no-op. Returns the
-    settled site, or None when nothing was settled."""
+    Called by the next promote call
+    (sync_replication_controller._settle_abandoned_moves), by every leader
+    lookup (_lvs_leader_candidates) and by the storage-node monitor
+    (sync_replication_controller.reconcile_abandoned_moves); while a promote
+    task owns the move this is a no-op. Returns the settled site, or None
+    when nothing was settled."""
     db = DBController()
     try:
         owner = db.get_storage_node_by_id(owner_id)

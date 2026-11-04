@@ -2,8 +2,8 @@
 driver, against the real FoundationDB: a failing read of the cluster list ends
 the loop with that error instead of being logged and retried - the process
 exits and the orchestrator restarts it with a fresh FDB client. And the
-promote's settle of its ``moving:`` markers when the driver ends a task it
-never ran.
+``moving:`` markers of LVSs whose hand-off had started, left in place when the
+driver ends a promote task it never ran.
 
 The failing read is a Cluster record whose value does not decode: the real
 ``get_clusters`` range read raises on it.
@@ -18,7 +18,6 @@ from simplyblock_core import storage_node_ops
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
-from simplyblock_core.rpc_client import RPCRemoteError
 from simplyblock_core.services import (
     tasks_runner_sync_promote,
     tasks_runner_sync_resync,
@@ -50,7 +49,7 @@ def test_cluster_read_error_ends_loop(corrupt_cluster, spec):
 
 
 # ---------------------------------------------------------------------------
-# the promote's marker settle at the end of a task
+# the promote's markers at the end of a task
 # ---------------------------------------------------------------------------
 
 MOVING_B = "moving:" + stack.SITE_B
@@ -78,34 +77,22 @@ def _transferring_promote(db, **task_fields):
     return db.get_task_by_id(task.uuid), owners
 
 
-def _first_reconcile_raises(owners):
-    """reconcile_lvs_move: the first owner's member RPC fails, the second
-    owner's move settles on site B."""
-    def _reconcile(owner_id):
-        if owner_id == owners[0].get_id():
-            raise RPCRemoteError(message="busy", code=-16)
-        assert storage_node_ops.set_lvs_active_site(owner_id, stack.SITE_B, expect=MOVING_B)
-        return stack.SITE_B
-    return patch.object(storage_node_ops, "reconcile_lvs_move", side_effect=_reconcile)
-
-
 @pytest.mark.parametrize("task_fields, result", [
     pytest.param({"canceled": True}, "canceled", id="canceled"),
     # At the retry limit the driver ends the task without running its handler.
     pytest.param({"retry": 5, "function_result": "unhandled error: lost answer"},
                  "max retry reached (5) after: unhandled error: lost answer", id="retry-ceiling"),
 ])
-def test_ended_task_reconcile_error_settles_others(task_fields, result):
-    """The driver ends the task without running its handler. A reconcile error
-    after that commit does not escape, and the other owners are still settled."""
+def test_ended_task_leaves_started_moves(task_fields, result):
+    """The driver ends the task without running its handler. Both hand-offs
+    had started: the runner reconciles neither, both markers stay for the next
+    promote call and the storage-node monitor."""
     db = DBController()
     task, owners = _transferring_promote(db, **task_fields)
     handler = MagicMock()
-    with _first_reconcile_raises(owners) as reconcile:
+    with patch.object(storage_node_ops, "reconcile_lvs_move") as reconcile:
         done = task_driver.drive(tasks_runner_sync_promote.SPEC, task, handler=handler)
     handler.assert_not_called()
     assert (done.status, done.function_result) == (JobSchedule.STATUS_DONE, result)
-    assert [c.args[0] for c in reconcile.call_args_list] == [o.get_id() for o in owners]
-    # the failed one is left to the storage-node monitor's reconcile
-    assert stack._fresh(db, owners[0]).lvs_active_site == MOVING_B
-    assert stack._fresh(db, owners[1]).lvs_active_site == stack.SITE_B
+    reconcile.assert_not_called()
+    assert [stack._fresh(db, o).lvs_active_site for o in owners] == [MOVING_B, MOVING_B]

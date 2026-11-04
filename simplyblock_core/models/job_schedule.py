@@ -90,9 +90,11 @@ class JobSchedule(BaseModel):
     # for those LVS, and an LVS it left at ``moving:<site>`` is reconciled
     # only afterwards (storage_node_ops.reconcile_lvs_move). Its runner hands
     # the leadership off (without a grant: the taker leads from its first IO)
-    # only through storage_node_ops.move_lvs_leadership, and on failure /
-    # cancel records the task DONE BEFORE settling its markers (the previous
-    # site written back before any hand-off, reconcile_lvs_move after one).
+    # only through storage_node_ops.move_lvs_leadership, and on any ending
+    # records the task DONE BEFORE writing back the previous site of an LVS
+    # whose hand-off never started; an LVS whose hand-off started keeps its
+    # marker for the next promote call, a leader lookup and the storage-node
+    # monitor (reconcile_lvs_move).
     # One pass, no retry: the caller's next promote call judges again.
     FN_SYNC_PROMOTE = "sync_promote"
     # Sync replication: catch up the lagging zone of one LVS after a zone

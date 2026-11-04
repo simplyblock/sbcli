@@ -2,8 +2,10 @@
 FoundationDB: the strict fence of a site's triplet and its record, the promote
 decision table as the API answers it, the FN_SYNC_PROMOTE runner (gates, the
 marker transaction, the hand-off, the opening on the promoted site, the
-settling of its markers on every failure and cancel, resuming after a crash),
-the volume create / clone claim against a ``moving:`` marker (interleaved
+write-back of the markers of moves it never started on every failure and
+cancel, resuming after a crash), the moves it started and left unsettled,
+settled by the next promote call and the storage-node monitor, the volume
+create / clone claim against a ``moving:`` marker (interleaved
 transactions), and the site-rule lock that serializes all of it with the ANA
 writers of the other flows (lvol monitor repair, restart, failover).
 
@@ -436,7 +438,7 @@ class TestPromoteApi:
         assert tasks_controller.cancel_task(first.task_id)
         second = src.sync_promote_lvol(vol.get_id(), SITE_B)
         assert second.in_progress and second.task_id != first.task_id
-        # the runner still sees the canceled one, to settle it
+        # the runner still sees the canceled one, to end it
         assert {t.uuid for t in db.get_active_sync_promote_tasks(cluster.get_id())} == {
             first.task_id, second.task_id}
 
@@ -820,7 +822,7 @@ class TestResume:
 
 
 # ---------------------------------------------------------------------------
-# two LVS: every marker the task owns is settled
+# two LVS: a move never started is written back, a started one is left
 # ---------------------------------------------------------------------------
 
 def _two_lvs(db, spdk, gate):
@@ -867,20 +869,15 @@ class TestTwoLvs:
         assert _fresh(db, owners[1]).lvs_active_site == ""         # restored, never handed off
         assert [db.get_lvol_by_id(v.get_id()).sync_active_site for v in vols] == [SITE_A, SITE_A]
 
-    def test_failed_second_hand_off_reconciled_after_done(self, db, spdk, gate, moves):
+    def test_failed_second_hand_off_leaves_marker(self, db, spdk, gate, moves):
         cluster, a, b, owners, vols, task_id = _two_lvs(db, spdk, gate)
         moves.leader.update(LVS_1=owners[0], LVS_2=owners[1])
         moves.fail["LVS_2"] = ops.LeadershipTransferError("grant refused")
-        reconciled = []
-
-        def _reconcile(owner_id):
-            assert _task(db, task_id).status == JobSchedule.STATUS_DONE   # DONE first
-            reconciled.append(owner_id)
-
-        with patch.object(ops, "reconcile_lvs_move", side_effect=_reconcile), \
+        with patch.object(ops, "reconcile_lvs_move") as reconcile, \
                 patch.object(ops, "set_lvs_active_site", wraps=ops.set_lvs_active_site) as cas:
             _run(db, task_id)
-        assert reconciled == [owners[1].get_id()]
+        assert _task(db, task_id).status == JobSchedule.STATUS_DONE
+        reconcile.assert_not_called()
         assert all(c.args[1] != "" for c in cas.call_args_list)        # no blind CAS back
         assert _fresh(db, owners[0]).lvs_active_site == SITE_B
         assert _fresh(db, owners[1]).lvs_active_site == MOVING_B        # left to the reconciler
@@ -926,7 +923,7 @@ class TestCancel:
         assert _fresh(db, owner).lvs_active_site == ""
         assert moves.calls == []
 
-    def test_cancel_racing_transfer_record_reconciles(self, db, spdk, gate, moves):
+    def test_cancel_racing_transfer_record_leaves_marker(self, db, spdk, gate, moves):
         cluster, a, b, owner, pool, vol, task_id = _queued(db, spdk, gate)
         TestResume()._marked(db, gate, cluster, owner, task_id)
         stale = _task(db, task_id)
@@ -936,7 +933,11 @@ class TestCancel:
         assert _task(db, task_id).function_params["transferring"] == ["LVS_1"]
         with patch.object(ops, "reconcile_lvs_move") as reconcile:
             _run(db, task_id)
-        reconcile.assert_called_once_with(owner.get_id())
+        task = _task(db, task_id)
+        assert (task.status, task.function_result) == (JobSchedule.STATUS_DONE, "canceled")
+        reconcile.assert_not_called()
+        assert _fresh(db, owner).lvs_active_site == MOVING_B        # its hand-off may have started
+        assert moves.calls == []
 
     def test_cancel_seen_after_marker_undoes_it(self, db, spdk, gate, moves):
         cluster, a, b, owner, pool, vol, task_id = _queued(db, spdk, gate)
@@ -1030,18 +1031,14 @@ class TestUnexpectedError:
         db.atomic_update(_task(db, task_id), _at_the_ceiling)
         reason = f"max retry reached ({_task(db, task_id).max_retry}) after: unhandled error: fdb timeout"
 
-        def _reconcile(owner_id):
-            assert ops.set_lvs_active_site(owner_id, SITE_B, expect=MOVING_B)
-            return SITE_B
-
         handler = MagicMock()
-        with patch.object(ops, "reconcile_lvs_move", side_effect=_reconcile) as reconcile:
+        with patch.object(ops, "reconcile_lvs_move") as reconcile:
             task = task_driver.drive(runner.SPEC, _task(db, task_id), handler=handler)
         handler.assert_not_called()
         assert (task.status, task.function_result) == (JobSchedule.STATUS_DONE, reason)
         assert [_failures(db, v) for v in vols] == [{SITE_B: {"task_id": task_id, "reason": reason}}] * 2
-        reconcile.assert_called_once_with(owners[0].get_id())     # its hand-off had started
-        assert _fresh(db, owners[0]).lvs_active_site == SITE_B
+        reconcile.assert_not_called()
+        assert _fresh(db, owners[0]).lvs_active_site == MOVING_B   # its hand-off had started
         assert _fresh(db, owners[1]).lvs_active_site == ""         # written back
         assert moves.calls == []
 
@@ -1526,6 +1523,45 @@ class TestMonitorReconcile:
         src._reconcile_attempts.invalidate()
         yield
         src._reconcile_attempts.invalidate()
+
+    def test_ended_promote_leaves_started_move_to_monitor(self, db, spdk, gate, moves):
+        """LVS_1's hand-off starts and fails, LVS_2's never starts. The ended
+        task writes LVS_2's previous site back and leaves LVS_1 ``moving:``:
+        no volume is created on it and both sites stay closed until the
+        monitor's reconcile - the real one, its ownership check included -
+        settles it on the site of the member that leads."""
+        cluster, a, b, owners, vols, task_id = _two_lvs(db, spdk, gate)
+        moves.leader.update(LVS_1=owners[0], LVS_2=owners[1])
+        moves.fail["LVS_1"] = ops.LeadershipTransferError("grant refused")
+        assert _run(db, task_id)
+        task = _task(db, task_id)
+        assert task.status == JobSchedule.STATUS_DONE
+        assert "leadership transfer" in task.function_result
+        assert task.function_params["transferring"] == ["LVS_1"]
+        assert _fresh(db, owners[1]).lvs_active_site == ""          # written back
+        assert _fresh(db, owners[0]).lvs_active_site == MOVING_B
+
+        pool = db.get_pool_by_id(vols[0].pool_uuid)
+        new = _new_volume(cluster, owners[0], pool)
+        nqn = f"{cluster.nqn}:lvol:{new.uuid}"
+        with pytest.raises(SyncLeadershipMovingError):
+            db.claim_lvol_ns_slot(new, owners[0], False, standalone_nqn=nqn)
+        vol = db.get_lvol_by_id(vols[0].get_id())
+        ctx = ops.sync_ana_context(vol)
+        assert [ops.lvol_site_open(vol, site, ctx) for site in (SITE_A, SITE_B)] == [False, False]
+
+        verdict = ops._LeadershipVerdict([owners[0].get_id()], [], set())
+        with patch.object(ops, "_lvs_leadership_verdict", return_value=verdict) as probe:
+            src.reconcile_abandoned_moves(cluster.get_id())
+        probe.assert_called_once()
+        assert _fresh(db, owners[0]).lvs_active_site == SITE_A
+
+        new = _new_volume(cluster, owners[0], pool)
+        db.claim_lvol_ns_slot(new, owners[0], False, standalone_nqn=f"{cluster.nqn}:lvol:{new.uuid}")
+        new = db.get_lvol_by_id(new.get_id())
+        assert new.sync_active_site == SITE_A
+        ctx = ops.sync_ana_context(new)
+        assert [ops.lvol_site_open(new, site, ctx) for site in (SITE_A, SITE_B)] == [True, False]
 
     def test_one_failed_reconcile_does_not_stop_others(
             self, db, spdk, gate):

@@ -938,7 +938,7 @@ class DBController(metaclass=Singleton):
     def sync_promote_task_blocks(task: JobSchedule | None) -> bool:
         """Whether ``task`` (the promote task recorded for an LVS) is still in
         progress for the API and for a new promote: neither done nor
-        canceled. The runner also sees canceled ones until it has settled them
+        canceled. The runner also sees canceled ones until it has ended them
         (get_active_sync_promote_tasks)."""
         return task is not None and task.status != JobSchedule.STATUS_DONE and not task.canceled
 
@@ -1137,8 +1137,7 @@ class DBController(metaclass=Singleton):
 
     def get_active_sync_promote_tasks(self, cluster_id: str) -> list[JobSchedule]:
         """Every FN_SYNC_PROMOTE task of the cluster that is not done, oldest
-        first - canceled ones included: the runner still has to settle the
-        leadership moves they own."""
+        first - canceled ones included: the runner still has to end them."""
         return self._active_tasks(cluster_id, JobSchedule.FN_SYNC_PROMOTE)
 
     def _lvols_of_node_tx(self, tr, node_id) -> list[LVol]:

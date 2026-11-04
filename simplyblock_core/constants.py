@@ -1055,7 +1055,7 @@ SYNC_RESYNC_HELD_ALERT_SEC = 1800
 # Sync-replication promote (tasks_runner_sync_promote): a failed or canceled
 # pass ends its task; a pass interrupted by an unexpected error is a retry of the
 # shared task driver, which enforces this as the task's max_retry - at the
-# ceiling the task ends failed (its leadership moves settled).
+# ceiling the task ends failed, the moves it never started written back.
 SYNC_PROMOTE_MAX_UNEXPECTED_ERRORS = 5
 
 # Sync-replication status (sync_replication_controller): the status endpoints
