@@ -916,6 +916,175 @@ class K8sUtils:
         self.logger.info("[K8sUtils] network restored on %s", node_ip)
         return True
 
+    # ── F-9: the targeted NFS partition ──────────────────────────────────
+    #
+    # Everything above cuts a node off its peers, or off everything. Track C
+    # needs neither: C-07 cuts ONE client off the pNFS metadata server, on
+    # port 2049 only, and leaves that client's NVMe/TCP data path untouched.
+    # That separation is the whole case -- a layout the client already holds
+    # should keep serving IO while its metadata session is gone, and the
+    # fencing that protects committed data only engages once the lease
+    # expires. Cutting the whole interface instead tests nothing about pNFS:
+    # it fails the client for reasons that are ours, and we have already
+    # written that up as a product defect once.
+
+    #: The MDS serves NFS here and nowhere else.
+    MDS_NFS_PORT = 2049
+
+    def mds_nfs_targets(self, namespace=None):
+        """(service_name, cluster_ip, [pod_ip, ...]) for the pNFS MDS.
+
+        Both the ClusterIP and the backing pod IPs are returned because a
+        rule on the ClusterIP alone is not reliably enough: whether the
+        service is translated before or after the packet meets netfilter
+        depends on the OVN gateway mode, and this cluster runs
+        routingViaHost=false. Dropping both covers either path and costs one
+        extra rule.
+        """
+        ns = namespace or self.namespace
+        out, _err = self._exec_kubectl(
+            f"kubectl get svc -n {ns} -o json 2>/dev/null || true",
+            supress_logs=True)
+        try:
+            items = json.loads(out or "{}").get("items", [])
+        except ValueError:
+            items = []
+        svc = None
+        for it in items:
+            name = (it.get("metadata") or {}).get("name") or ""
+            ports = [p.get("port") for p in
+                     ((it.get("spec") or {}).get("ports") or [])]
+            if "pnfs-mds" in name and self.MDS_NFS_PORT in ports:
+                svc = it
+                break
+        if svc is None:
+            raise RuntimeError(
+                f"[K8sUtils] no pNFS metadata-server Service on port "
+                f"{self.MDS_NFS_PORT} in namespace {ns}. Without it there is "
+                f"nothing to partition, and a cut that silently hits nothing "
+                f"would read as a pass.")
+        name = svc["metadata"]["name"]
+        cluster_ip = ((svc.get("spec") or {}).get("clusterIP") or "").strip()
+
+        pod_ips = []
+        pods, _err = self._exec_kubectl(
+            f"kubectl get pods -n {ns} -o json 2>/dev/null || true",
+            supress_logs=True)
+        try:
+            for p in json.loads(pods or "{}").get("items", []):
+                pname = (p.get("metadata") or {}).get("name") or ""
+                pip = ((p.get("status") or {}).get("podIP") or "").strip()
+                if "pnfs-mds" in pname and pip:
+                    pod_ips.append(pip)
+        except ValueError:
+            pass
+
+        if not cluster_ip or cluster_ip == "None":
+            raise RuntimeError(
+                f"[K8sUtils] Service {name} has no ClusterIP to block")
+        return name, cluster_ip, pod_ips
+
+    @staticmethod
+    def _mds_drop_add(ips, port):
+        return "; ".join(
+            f"iptables -I OUTPUT -d {ip} -p tcp --dport {port} -j DROP"
+            for ip in ips)
+
+    @staticmethod
+    def _mds_drop_undo(ips, port):
+        """Delete exactly what was added, three times. Never flush.
+
+        Three passes for the same reason the peer undo takes three: a
+        retried cycle can insert the same rule more than once, and -D
+        removes one match per call.
+        """
+        return "; ".join(
+            f"for i in 1 2 3; do iptables -D OUTPUT -d {ip} -p tcp "
+            f"--dport {port} -j DROP 2>/dev/null; done"
+            for ip in ips) + "; true"
+
+    def cut_mds_access(self, node_ip, duration, namespace=None):
+        """Cut *node_ip* off the pNFS metadata server for *duration* seconds.
+
+        Port 2049 only, to the MDS ClusterIP and its pod IPs. The node's
+        NVMe/TCP paths, its kubelet, and its traffic to every other service
+        are left alone.
+
+        The rules go on the HOST, not in a pod: csi-node mounts the export in
+        the host mount namespace, so the NFS client is the host kernel and
+        its traffic leaves from the host's own network namespace. Verified on
+        this cluster before this was written -- a TCP probe to the ClusterIP
+        and to the MDS pod IP from the host both went from OPEN to BLOCKED
+        with these rules and back to OPEN without them, under
+        routingViaHost=false.
+
+        Verifies the rules landed and raises if they did not, after undoing
+        whatever did: a partition that silently applies nothing is
+        indistinguishable from a system that tolerated it.
+
+        Returns (duration, ips) so the caller can hand *ips* to
+        :meth:`restore_mds_access`.
+        """
+        name, cluster_ip, pod_ips = self.mds_nfs_targets(namespace)
+        ips = [cluster_ip, *pod_ips]
+        port = self.MDS_NFS_PORT
+
+        self.run_on_node(node_ip, self._mds_drop_add(ips, port),
+                         timeout=180, check=False)
+        out, _err = self.run_on_node(
+            node_ip, f"iptables -S OUTPUT | grep -- '--dport {port}' || true",
+            timeout=180, check=False)
+        applied = sum(1 for ip in ips
+                      if f"-d {ip}/32" in (out or "") or f"-d {ip} " in (out or ""))
+        if applied < len(ips):
+            self.restore_mds_access(node_ip, ips)
+            raise RuntimeError(
+                f"[K8sUtils] the MDS partition did not take on {node_ip}: "
+                f"wanted {len(ips)} rule(s) for {ips}, saw {applied}. Rules "
+                f"undone. iptables -S OUTPUT said: {(out or '<nothing>')[:300]}")
+
+        armed = self.arm_host_undo_script(
+            node_ip, self._mds_drop_undo(ips, port), duration + 30,
+            tag="mdsundo")
+        if not armed:
+            self.logger.warning(
+                "[K8sUtils] no host-armed undo for the MDS cut on %s. The "
+                "caller must restore it; nothing else will.", node_ip)
+        self.logger.info(
+            "[K8sUtils] %s cut off from MDS %s (%s) on port %d for %ds; undo "
+            "armed %s. NVMe paths untouched.",
+            node_ip, name, ",".join(ips), port, duration,
+            "on the host" if armed else "NOT armed")
+        return duration, ips
+
+    def restore_mds_access(self, node_ip, ips):
+        """Remove the MDS DROP rules. Safe to call twice. Never raises."""
+        if not ips:
+            return True
+        port = self.MDS_NFS_PORT
+        try:
+            self.run_on_node(node_ip, self._mds_drop_undo(ips, port),
+                             timeout=180, check=False)
+            out, _err = self.run_on_node(
+                node_ip,
+                f"iptables -S OUTPUT | grep -- '--dport {port}' || true",
+                timeout=180, check=False)
+        except Exception as exc:                      # noqa: BLE001
+            self.logger.error(
+                "[K8sUtils] could not reach %s to restore MDS access, so the "
+                "DROP rules are probably still in place: %s",
+                node_ip, str(exc)[:160])
+            return False
+        left = [ln for ln in (out or "").splitlines()
+                if "-j DROP" in ln and any(ip in ln for ip in ips)]
+        if left:
+            self.logger.warning(
+                "[K8sUtils] MDS DROP rules still on %s after restore: %s",
+                node_ip, left[:4])
+            return False
+        self.logger.info("[K8sUtils] MDS access restored on %s", node_ip)
+        return True
+
     def relocate_monitor_off(self, node_ip, timeout=180):
         """Move simplyblock-monitoring off *node_ip* before isolating it.
 
