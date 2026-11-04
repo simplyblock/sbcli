@@ -439,7 +439,8 @@ def test_shrink_takes_next_snapshot_immediately(monkeypatch):
 
 
 def test_shrink_hands_over_when_it_cannot_converge(monkeypatch):
-    """Written faster than it replicates: freeze anyway, but say so."""
+    """Written faster than it replicates: freeze anyway, but say so -- as
+    long as the round fits the final step's safe window."""
     import time as _time
 
     from simplyblock_core import constants
@@ -448,22 +449,55 @@ def test_shrink_hands_over_when_it_cannot_converge(monkeypatch):
                        {"shrink_round": 3, "shrink_snap_id": "S1",
                         "shrink_deadline": 2**60,
                         "cutover_lvs": "LVS_1",
-                        "shrink_started_at": _time.time() - 60})
+                        "shrink_started_at": _time.time() - 4})
     # Returning (rather than raising) is what hands over to the freeze.
     _shrink(runner, task)
     assert "not converged" in task.function_result
 
 
-def test_shrink_deadline_proceeds_to_cutover(monkeypatch):
-    """An expired deadline stops adding rounds and hands straight over to the
-    freeze: the residual delta is slightly larger than a converged one, but
-    proceeding always beats failing the task and waiting out another
-    900-second shrink window."""
+def test_shrink_cap_keeps_converging_when_the_final_step_would_time_out(monkeypatch):
+    """bf12 2026-11-03: a 22s round at the cap froze "anyway" and the final
+    step failed at SPDK's 12s limit. Past the cap a round that long takes
+    another round instead of freezing."""
+    import time as _time
+
+    from simplyblock_core import constants
+    monkeypatch.setattr(constants, "REPL_CUTOVER_MAX_SHRINK_ROUNDS", 3)
+    monkeypatch.setattr(constants, "REPL_CUTOVER_MIN_INLINE_SEC", 0)
+    monkeypatch.setattr(constants, "REPL_CUTOVER_CONVERGE_BUDGET_SEC", 0)
+    runner, task = _mk(monkeypatch, {"S1": _ShrinkSnap(replicated=True)},
+                       {"shrink_round": 3, "shrink_snap_id": "S1",
+                        "shrink_deadline": 2**60,
+                        "cutover_lvs": "LVS_1",
+                        "shrink_started_at": _time.time() - 22})
+    taken = []
+
+    def _add(lid, name, snap_type="user"):
+        taken.append(lid)
+        runner.db._snaps["S2"] = _ShrinkSnap(replicated=False)
+        return "S2", None
+    import simplyblock_core.controllers.snapshot_controller as sc
+    monkeypatch.setattr(sc, "add", _add)
+
+    with pytest.raises(TaskDefer):
+        _shrink(runner, task)
+    assert taken == ["LV1"], "a round too long to freeze is followed by another"
+    assert task.function_params["shrink_round"] == 4
+    assert "not converged" not in str(task.function_result)
+
+
+def test_shrink_deadline_without_a_freezable_round_backs_off(monkeypatch):
+    """An expired deadline with no round short enough for the final step
+    abandons the endgame (one attempt burned, lvstore released) instead of
+    freezing into SPDK's terminate timeout."""
     runner, task = _mk(monkeypatch, {"S1": _ShrinkSnap(replicated=False)},
                        {"shrink_round": 1, "shrink_snap_id": "S1",
-                        "shrink_deadline": 1})
-    # Returning (rather than raising) is what hands over to the freeze.
-    _shrink(runner, task)
+                        "shrink_deadline": 1, "cutover_lvs": "LVS_1"})
+    with pytest.raises(TaskRetry, match="shrink deadline expired"):
+        _shrink(runner, task)
+    assert "cutover_lvs" not in task.function_params
+    assert "shrink_snap_id" not in task.function_params
+    assert task.function_params["endgame_retry_after"] > 1
 
 
 def _install_raising(monkeypatch, nodes, rep, exc):

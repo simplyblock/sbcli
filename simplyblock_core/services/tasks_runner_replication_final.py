@@ -527,6 +527,11 @@ def task_runner(task: JobSchedule, tasks):
     # recover and the control plane time to reflect a down state in DB.
     if int(time.time()) < params.get("cutover_retry_after", 0):
         raise TaskDefer("waiting after connectivity failure")
+    # An endgame abandoned because its delta would not fit the final step
+    # (_abandon_endgame) waits out its back-off on the ordinary cadence.
+    if int(time.time()) < params.get("endgame_retry_after", 0):
+        raise TaskDefer("endgame backing off: the delta did not converge enough "
+                        "to freeze; retrying later")
 
     if src_node is None:
         raise TaskRetry("source node not found for cutover")
@@ -834,15 +839,22 @@ def _shrink_step(task, lvol):
 
     while True:
         if int(time.time()) > deadline:
-            # Deadline expired: stop adding rounds and fall through to cutover
-            # rather than failing and burning a retry.  The freeze that follows
-            # is slightly larger than if we had converged, but proceeding is
-            # always better than another 900-second wait.
-            logger.warning(
-                "cutover convergence: lvol=%s shrink deadline expired after %d "
-                "rounds; proceeding to cutover", lvol.get_id(),
-                params.get("shrink_round", 0))
-            return
+            # Deadline expired: stop adding rounds. Freeze only if the final
+            # step can finish inside SPDK's limit; a freeze that cannot only
+            # darkens the volume for 12s and then fails (bf12 2026-11-03).
+            estimate = _final_delta_estimate(params)
+            if estimate <= constants.REPL_CUTOVER_FREEZE_MAX_ROUND_SEC:
+                logger.warning(
+                    "cutover convergence: lvol=%s shrink deadline expired after "
+                    "%d rounds (last round %.2fs); proceeding to cutover",
+                    lvol.get_id(), params.get("shrink_round", 0), estimate)
+                return
+            _abandon_endgame(task, lvol, (
+                f"shrink deadline expired after {params.get('shrink_round', 0)} "
+                f"rounds; last round {estimate:.2f}s exceeds the "
+                f"{constants.REPL_CUTOVER_FREEZE_MAX_ROUND_SEC:.1f}s a "
+                f"{constants.REPL_CUTOVER_FINAL_STEP_LIMIT_SEC}s final step can "
+                f"safely copy"))
 
         snap_id = params["shrink_snap_id"]
         done = _shrink_round_done(snap_id)
@@ -896,15 +908,29 @@ def _shrink_step(task, lvol):
 
         if params["shrink_round"] >= constants.REPL_CUTOVER_MAX_SHRINK_ROUNDS:
             # Written faster than it replicates. Freezing now is still the best
-            # move -- the freeze at least stops the writes -- but say so.
+            # move IF the final step can copy the residual inside SPDK's
+            # limit -- the freeze at least stops the writes -- but say so.
+            if elapsed <= constants.REPL_CUTOVER_FREEZE_MAX_ROUND_SEC:
+                logger.warning(
+                    "cutover convergence: lvol=%s did not converge in %d rounds "
+                    "(last round %.2fs > %.2fs target); freezing, the round fits "
+                    "the %.1fs safe final-step window",
+                    lvol.get_id(), params["shrink_round"], elapsed,
+                    constants.REPL_CUTOVER_CONVERGE_TARGET_SEC,
+                    constants.REPL_CUTOVER_FREEZE_MAX_ROUND_SEC)
+                set_result(task, f"not converged after {params['shrink_round']} "
+                                 f"rounds (last {elapsed:.2f}s)")
+                return
+            # A residual that takes longer than this to copy fails the final
+            # step at SPDK's terminate timeout, after the source was fenced.
+            # Keep converging; shrink_deadline bounds it.
             logger.warning(
                 "cutover convergence: lvol=%s did not converge in %d rounds "
-                "(last round %.2fs > %.2fs target); freezing anyway",
-                lvol.get_id(), params["shrink_round"], elapsed,
-                constants.REPL_CUTOVER_CONVERGE_TARGET_SEC)
-            set_result(task, f"not converged after {params['shrink_round']} "
-                             f"rounds (last {elapsed:.2f}s)")
-            return
+                "(last round %.2fs > %.1fs safe for the %ds final step); not "
+                "freezing, taking another round", lvol.get_id(),
+                params["shrink_round"], elapsed,
+                constants.REPL_CUTOVER_FREEZE_MAX_ROUND_SEC,
+                constants.REPL_CUTOVER_FINAL_STEP_LIMIT_SEC)
 
         # IMMEDIATELY take the next snapshot. This is the whole mechanism: the
         # next round carries only what was written while this one transferred,
@@ -925,6 +951,55 @@ def _shrink_step(task, lvol):
         if time.time() >= budget_end:
             raise TaskDefer(f"shrink round {params['shrink_round'] - 1} done "
                             f"({elapsed:.2f}s); continuing next pass")
+
+
+def _final_delta_estimate(params):
+    """How long the frozen final step would take to copy, as best known now.
+
+    The last completed round's duration -- or the age of the round still in
+    flight, when that is already longer. A task with no measurement at all is
+    NOT assumed fast (inf), for the same reason an unstamped round is not.
+    """
+    times = params.get("shrink_round_times") or []
+    estimate = float(times[-1]) if times else float("inf")
+    started = params.get("shrink_started_at")
+    done_at = params.get("shrink_round_done_at")
+    if started is not None and (done_at is None or done_at < started):
+        in_flight = time.time() - float(started)
+        estimate = in_flight if not times else max(estimate, in_flight)
+    return estimate
+
+
+# What one endgame accumulates. Dropping them returns the task to "replicating":
+# the next endgame takes a fresh first round (task_runner) under a new claim.
+_ENDGAME_ROUND_PARAMS = ("shrink_snap_id", "shrink_round", "shrink_round_times",
+                         "shrink_started_at", "shrink_round_done_at")
+
+
+def _abandon_endgame(task, lvol, reason) -> NoReturn:
+    """Give the endgame up without freezing, and retry it later.
+
+    Reached when the shrink deadline expires and no round was short enough
+    for the final step to finish inside SPDK's limit. Freezing then fails
+    with certainty, after fencing the source; waiting does not. So: release
+    the lvstore (other volumes replicate again), let this volume fall back to
+    its ordinary cadence, and come back after REPL_CUTOVER_ENDGAME_BACKOFF_SEC
+    -- write load is often bursty, and the next endgame is gated on catching
+    up again. It burns one attempt, so a volume that never converges ends in
+    the task's terminal failure rather than looping forever.
+    """
+    now = int(time.time())
+    retry_at = now + constants.REPL_CUTOVER_ENDGAME_BACKOFF_SEC
+    task = _record(task, last_error=reason, endgame_retry_after=retry_at,
+                   shrink_deadline=retry_at + constants.REPL_CUTOVER_SHRINK_TIMEOUT_SEC)
+    logger.warning("cutover attempt %d/%d for lvol %s abandoned before the freeze: "
+                   "%s; endgame retried in %ds", task.retry + 1, task.max_retry,
+                   lvol.get_id(), reason, constants.REPL_CUTOVER_ENDGAME_BACKOFF_SEC)
+    xfer_timing.stamp("endgame_abandoned", lvol=lvol.get_id(),
+                      round=task.function_params.get("shrink_round"))
+    drop_params(task, *_ENDGAME_ROUND_PARAMS)
+    _release_lvs_claim(task)
+    raise TaskRetry(reason)
 
 
 def _prepare_cutover(task, lvol, src_node, tgt_node):
