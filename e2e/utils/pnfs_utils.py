@@ -392,6 +392,44 @@ def export_fsid(export):
     return vr.rsplit(":", 1)[-1] if ":" in vr else ""
 
 
+def export_event_reasons(k8s, namespace=None, kind="NFSExport"):
+    """The Event reasons the operator has published against *kind*.
+
+    Why Events and not status: the operator reports a refusal as a Kubernetes
+    Event on the NFSExport, e.g.
+
+        reason: NoMetadataServer
+        note:   no SimplyblockDriver configures a pNFS metadata server;
+                set spec.pnfs.mds
+
+    and does not copy it into ``status``. B-16 read ``status`` and so saw an
+    empty string on run 41853868960 while the operator had in fact said
+    exactly the right thing in exactly the right place.
+
+    Joining through the claim does not work here either: a refused claim stays
+    Pending, Pending means no PV, and ``pvc_volume_ref`` needs a PV to resolve
+    ``spec.volumeRef``. So the lookup is by Event, scoped to the namespace,
+    not by claim.
+
+    Returns a list of ``(reason, message)``, oldest first.
+    """
+    ns = namespace or k8s.namespace
+    out, _err = k8s._exec_kubectl(
+        f"kubectl get events -n {ns} --sort-by=.lastTimestamp "
+        f"-o json 2>/dev/null || true", supress_logs=True)
+    try:
+        items = json.loads(out or "{}").get("items", [])
+    except ValueError:
+        return []
+    found = []
+    for it in items:
+        if ((it.get("involvedObject") or {}).get("kind") or "") != kind:
+            continue
+        found.append((it.get("reason") or "",
+                      it.get("message") or it.get("note") or ""))
+    return found
+
+
 def nvme_resv_report(k8s, node_ip, device):
     """Persistent-reservation report for *device*, as the node sees it.
 

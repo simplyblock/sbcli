@@ -29,6 +29,7 @@ from utils.pnfs_utils import (
     PnfsProbeError,
     assert_devices_moved,
     assert_layouts_taken,
+    export_event_reasons,
     export_fsid,
     nfsexport_status,
     nvme_ns_counters,
@@ -1571,17 +1572,45 @@ class PnfsNoMetadataServerK8s(_PnfsBase):
                     "promise the cluster cannot keep.")
             sleep_n_sec(10)
 
-        export = nfsexport_status(self.k8s_utils, pvc_name=self.CLAIM)
-        said = ""
-        if export:
-            status = export.get("status") or {}
-            said = " ".join(str(status.get(k) or "")
-                            for k in ("phase", "reason", "message"))
-        if "NoMetadataServer" not in said:
+        # The refusal is an Event on the NFSExport, not a status field, and a
+        # Pending claim has no PV to join an export by. This used to read
+        # nfsexport_status(pvc_name=...).status and so could only ever see
+        # "", which is how run 41853868960 failed a case the product had in
+        # fact passed: the operator did refuse, and did say why.
+        events = export_event_reasons(self.k8s_utils)
+        hit = [(r, m) for r, m in events if "NoMetadataServer" in r]
+        if not hit:
+            seen = sorted({r for r, _ in events}) or ["(no NFSExport events)"]
             raise PnfsEvidenceError(
                 f"the claim correctly stayed Pending, but nothing said why "
-                f"(B-16). Expected NoMetadataServer; the export reports "
-                f"{said!r}. A operator who cannot see the cause has to guess.")
+                f"(B-16). Expected a NoMetadataServer Event on an NFSExport; "
+                f"the reasons present are {seen}. An operator who cannot see "
+                f"the cause has to guess.")
         self.logger.info(
-            "[B-16] PASS: claim stayed Pending and the export reported %r",
-            said.strip())
+            "[B-16] PASS: claim stayed Pending and the operator said %r: %s",
+            hit[-1][0], hit[-1][1])
+
+        # Drop the claim here, while the metadata server is still absent.
+        #
+        # Teardown restores spec.pnfs.mds first and unconditionally, so if
+        # this claim were still outstanding the operator would provision it
+        # the moment the MDS came back -- and teardown would then delete the
+        # PVC underneath an in-flight provision. That is what happened on run
+        # 41853868960: a 20 GiB lvol dc18b03b and a Ready NFSExport at
+        # /var/lib/simplyblock/exports/simplyblock-pnfs-b16-dc18b03b, both
+        # created at 15:06:02 and both still there afterwards with no PV and
+        # no claim. The case is about a refusal; it has no business leaving a
+        # volume behind.
+        self.k8s_utils.delete_pvc(self.CLAIM)
+        if self.CLAIM in self.extra_claims:
+            self.extra_claims.remove(self.CLAIM)
+        deadline = time.time() + 120
+        while time.time() < deadline:
+            if not (self.k8s_utils.get_pvc_status(self.CLAIM) or {}).get(
+                    "phase"):
+                break
+            sleep_n_sec(5)
+        else:
+            self.logger.warning(
+                "[B-16] claim %s still present after 120s; teardown will "
+                "restore the MDS with it outstanding", self.CLAIM)
