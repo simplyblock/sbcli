@@ -20125,15 +20125,17 @@ def safe_delete_bdev(name, node_id):
 
 
 def _sync_safe_delete_legs(owner, db_controller):
-    """``(leader, peers)`` of a delete of a bdev of ``owner``'s LVS on a
-    sync-replication cluster: the member of the active triplet that reports the
-    leadership and every other instance of the LVS, both triplets, in role
-    order. None when no member of the active triplet leads.
+    """Where to delete a bdev of ``owner``'s LVS on a sync-replication cluster.
 
-    No leader is recovered and nothing is granted. The candidate lookup first
-    attempts to settle an abandoned move (reconcile_lvs_move, which may repeat
-    its fenced, grant-less hand-off); the active triplet's members are then
-    only probed."""
+    Returns ``(leader, peers)``: ``leader`` is the member of the active triplet
+    that reports the leadership, ``peers`` are all other instances of the LVS,
+    from both triplets, in role order. Returns None when no member of the
+    active triplet leads.
+
+    The candidate lookup may first settle an abandoned move with
+    reconcile_lvs_move, which can repeat its fenced hand-off but grants
+    nothing. After that the members of the active triplet are only asked
+    whether they lead: no leader is recovered or granted."""
     instances = [owner]
     for member_id in lvol_controller.role_secondary_ids(owner):
         try:
@@ -20149,16 +20151,18 @@ def _sync_safe_delete_legs(owner, db_controller):
 
 
 def _safe_delete_bdev_legs(bdev_name, primary_node, peer_nodes, *, peer_errors=(RPCRemoteError,)):
-    """The delete legs of safe_delete_bdev: the async delete, its completion
-    poll and the sync delete on ``primary_node`` (the one leading the LVS),
-    then a sync delete on every node of ``peer_nodes``.
+    """The deletes of safe_delete_bdev, in order: on ``primary_node`` an async
+    delete, a poll until it completes and a sync delete; then a sync delete on
+    every node of ``peer_nodes``. On a sync-replication cluster
+    ``primary_node`` is the member that leads the LVS; otherwise it is the
+    LVS's owner.
 
-    ``peer_errors`` are the exceptions of one peer's leg that are logged and
-    counted as a failed leg (the result is False) while the remaining peers
-    are still attempted; any other exception propagates and ends the delete.
-    A sync-replication LVS passes ``RPCException``, so an unreachable instance
-    does not cost the instances after it their delete; without sync
-    replication only ``RPCRemoteError`` is."""
+    If a peer's delete raises one of ``peer_errors``, the error is logged, the
+    result becomes False and the remaining peers are still deleted. Any other
+    exception propagates and stops the delete. A sync-replication LVS passes
+    ``RPCException``, so one unreachable instance does not stop the deletes on
+    the instances after it; without sync replication only ``RPCRemoteError``
+    is caught."""
     logger.info(f"deleting from primary: {bdev_name}")
     try:
         primary_node.rpc_client().delete_lvol(bdev_name)

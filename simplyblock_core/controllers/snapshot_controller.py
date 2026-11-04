@@ -1456,13 +1456,14 @@ def _delete_locked(snap, snapshot_uuid, force_delete=False, lock=True):
                 all_nodes.append(db_controller.get_storage_node_by_id(snode.tertiary_node_id))
             except KeyError:
                 pass
-        # The members that may lead the LVS: the home triplet, or on a
-        # sync-replication cluster the active triplet - as the snapshot
-        # monitor probes them. No leader is recovered and nothing is granted:
-        # the candidate lookup first attempts to settle an abandoned move
-        # (reconcile_lvs_move, which may repeat its fenced, grant-less
-        # hand-off), then the members are only probed; an LVS nobody leads
-        # parks the snapshot below.
+        # Probe the members that may lead the LVS: the home triplet, or the
+        # active triplet on a sync-replication cluster (the snapshot monitor
+        # probes the same set). The candidate lookup may first settle an
+        # abandoned move with reconcile_lvs_move, which can repeat its fenced
+        # hand-off but grants nothing. After that the members are only asked
+        # whether they lead: no leader is recovered or granted. If nobody
+        # leads, the snapshot stays IN_DELETION below and the snapshot monitor
+        # retries the delete.
         from simplyblock_core.storage_node_ops import _lvs_leader_candidates
         all_nodes = list(_lvs_leader_candidates(all_nodes, snap.lvol.lvs_name).nodes)
 

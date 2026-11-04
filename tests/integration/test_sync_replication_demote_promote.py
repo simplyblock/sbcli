@@ -1,13 +1,18 @@
 """Demote and planned promote on a sync-replication cluster, against the real
-FoundationDB: the strict fence of a site's triplet and its record, the promote
-decision table as the API answers it, the FN_SYNC_PROMOTE runner (gates, the
-marker transaction, the hand-off, the opening on the promoted site, the
-write-back of the markers of moves it never started on every failure and
-cancel, resuming after a crash), the moves it started and left unsettled,
-settled by the next promote call and the storage-node monitor, the volume
-create / clone claim against a ``moving:`` marker (interleaved
-transactions), and the site-rule lock that serializes all of it with the ANA
-writers of the other flows (lvol monitor repair, restart, failover).
+FoundationDB. Covered:
+
+- the strict fence of a site's triplet and its record;
+- the promote decision table as the API answers it;
+- the FN_SYNC_PROMOTE runner: gates, the marker transaction, the hand-off,
+  the opening on the promoted site, resuming after a crash, and, on every
+  failure and cancel, the previous site given back to each LVS whose hand-off
+  never started;
+- a started hand-off left unsettled by the runner and settled later by the
+  next promote call or the storage-node monitor;
+- volume create / clone against a ``moving:`` marker (interleaved
+  transactions);
+- the site-rule lock that serializes all of it with the ANA writers of the
+  other flows (lvol monitor repair, restart, failover).
 
 Storage nodes are the stateful nvmf fake of
 test_sync_replication_lvol_publish.py; the live gate
@@ -822,7 +827,8 @@ class TestResume:
 
 
 # ---------------------------------------------------------------------------
-# two LVS: a move never started is written back, a started one is left
+# two LVS: the one whose hand-off never started gets its previous site back,
+# the one whose hand-off started keeps its ``moving:`` marker
 # ---------------------------------------------------------------------------
 
 def _two_lvs(db, spdk, gate):
@@ -1525,11 +1531,12 @@ class TestMonitorReconcile:
         src._reconcile_attempts.invalidate()
 
     def test_ended_promote_leaves_started_move_to_monitor(self, db, spdk, gate, moves):
-        """LVS_1's hand-off starts and fails, LVS_2's never starts. The ended
-        task writes LVS_2's previous site back and leaves LVS_1 ``moving:``:
-        no volume is created on it and both sites stay closed until the
-        monitor's reconcile - the real one, its ownership check included -
-        settles it on the site of the member that leads."""
+        """LVS_1's hand-off starts and fails; LVS_2's never starts. When the
+        task ends, LVS_2 gets its previous site back and LVS_1 keeps its
+        ``moving:`` marker. Until the monitor settles LVS_1, no volume can be
+        created on it and both sites stay closed. The monitor's real reconcile
+        runs here, including its check that no promote task owns the move, and
+        settles the LVS on the site of the member that leads."""
         cluster, a, b, owners, vols, task_id = _two_lvs(db, spdk, gate)
         moves.leader.update(LVS_1=owners[0], LVS_2=owners[1])
         moves.fail["LVS_1"] = ops.LeadershipTransferError("grant refused")

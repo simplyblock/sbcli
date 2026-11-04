@@ -1897,9 +1897,9 @@ def is_node_data_plane_disconnected_quorum(node, lvs_peer_ids=None, *, fresh=Fal
     """Return True if a majority of online nodes report *node*'s remote JM as disconnected.
 
     Returns False if no peers are available to check (conservative).
-    ``fresh`` bypasses the vote cache and refreshes it: a leadership granted
-    on the answer must not reuse a vote up to _DP_QUORUM_PROBE_TTL_SEC old,
-    taken before the grant waited for its locks.
+    ``fresh`` skips the vote cache and refreshes it. A caller that grants the
+    leadership based on the answer passes it: a cached vote can be up to
+    _DP_QUORUM_PROBE_TTL_SEC old, taken before the caller acquired its locks.
     """
     disconnected, total = _data_plane_votes(node, fresh)
     return total > 0 and disconnected > total // 2

@@ -1509,11 +1509,13 @@ def _volumes_context(db: DBController, volumes: list[LVol], site: str, *, group=
 
 def _demote(db: DBController, volumes: list[LVol], site: str, *, group=None,
             never_connected_only: bool = False) -> list[str]:
-    """Fence ``volumes`` on ``site`` (sync_demote_lvol). ``never_connected_only``:
-    the first-placement demote - inside the site-rule lock every volume still
-    open on ``site`` must still be never connected, or nothing is fenced (a connect
-    that cleared ``sync_never_connected`` meanwhile, under the same lock, has
-    handed out the site's paths)."""
+    """Fence ``volumes`` on ``site`` (sync_demote_lvol).
+
+    ``never_connected_only`` is the first-placement demote. Under the site-rule
+    lock, every volume still open on ``site`` must still be never connected;
+    otherwise nothing is fenced. A connect clears ``sync_never_connected``
+    under the same lock before it hands out the site's paths, so a volume
+    connected in the meantime is never fenced by this demote."""
     cluster, owners = _volumes_context(db, volumes, site, group=group)
     # A site the monitor has authoritatively recorded lost cannot be cleanly
     # demoted -- the planned gate would refuse it forever on an unplanned failover.
@@ -1813,12 +1815,14 @@ def demote_site_volumes(db: DBController, cluster_id: str, lost_site: str,
 
 @dataclass(frozen=True)
 class SyncPromoteResult:
-    """The answer to a promote call: in progress - a promote task of one of the
-    requested LVS that is neither done nor canceled (``task_id``), a task
-    suspended between retries included - or done, with the connection entries
-    of every volume on the promoted site (``{volume id: connect_lvol
-    entries}``). A leadership move no promote task owns is never in progress:
-    the call settles it or refuses (SyncPromoteRefusedError)."""
+    """The answer to a promote call: in progress or done.
+
+    In progress: a promote task of one of the requested LVS is neither done nor
+    canceled (a task waiting between retries counts); ``task_id`` names it.
+    Done: ``connection_strings`` holds the connection entries of every volume on
+    the promoted site (``{volume id: connect_lvol entries}``). A leadership
+    move that no promote task owns is never reported as in progress: the call
+    settles it or raises SyncPromoteRefusedError."""
     in_progress: bool
     task_id: str = ""
     connection_strings: dict | None = None

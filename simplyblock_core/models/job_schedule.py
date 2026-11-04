@@ -90,15 +90,15 @@ class JobSchedule(BaseModel):
     # for those LVS, and an LVS it left at ``moving:<site>`` is reconciled
     # only afterwards (storage_node_ops.reconcile_lvs_move). Its runner hands
     # the leadership off (without a grant: the taker leads from its first IO)
-    # only through storage_node_ops.move_lvs_leadership, and on any ending
-    # records the task DONE BEFORE writing back the previous site of an LVS
-    # whose hand-off never started; an LVS whose hand-off started keeps its
-    # marker for the next promote call, a leader lookup and the storage-node
-    # monitor (reconcile_lvs_move).
-    # One pass per run: a failed or refused promote ends the task and the
-    # caller's next promote call judges again; a run an unexpected error
-    # interrupts is retried by the shared task driver, which gives up after
-    # SYNC_PROMOTE_MAX_UNEXPECTED_ERRORS such errors (the task's max_retry,
+    # only through storage_node_ops.move_lvs_leadership. However the task
+    # ends, it is recorded DONE first; then every LVS whose hand-off never
+    # started gets its previous site back. An LVS whose hand-off started keeps
+    # its marker until the next promote call, a leader lookup or the
+    # storage-node monitor settles it (reconcile_lvs_move).
+    # One pass per run: a failed or refused promote ends the task, and the
+    # caller's next promote call decides again. A run stopped by an unexpected
+    # error is retried by the shared task driver, at most
+    # SYNC_PROMOTE_MAX_UNEXPECTED_ERRORS times (the task's max_retry,
     # tasks_controller.add_sync_promote_task).
     FN_SYNC_PROMOTE = "sync_promote"
     # Sync replication: catch up the lagging zone of one LVS after a zone

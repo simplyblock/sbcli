@@ -1192,13 +1192,14 @@ class StorageNode(BaseNodeObject):
         if not _sync_site(self):
             task_found = any(task.node_id in own_peer_ids for task in pending)
         else:
-            # The lock sits on the node that led the delete, which on a
-            # sync-replication cluster may be any instance of the LVS - not
-            # necessarily one of the instances of the LVS it owns. A pending
-            # sync delete keeps it when the task's target and this node are
-            # both instances of the task's LVS (from its bdev name). A task
-            # whose LVS has no owner left is matched against this node's own
-            # instances.
+            # The lock is held by the node that led the delete. On a
+            # sync-replication cluster that node can lead the LVS of another
+            # owner, so its own LVS's members are not the right set to check.
+            # A pending sync delete keeps the lock when this node and the
+            # task's target node both hold an instance of the task's LVS (the
+            # LVS is taken from the task's bdev name). If no node owns that
+            # LVS any more, the task's target is checked against the members
+            # of this node's own LVS instead.
             instances_by_lvs = {}
             if pending:
                 for node in db_controller.get_storage_nodes_by_cluster_id(self.cluster_id):

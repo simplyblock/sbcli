@@ -106,12 +106,13 @@ class LVol(BaseModel):
     # sync delete — a repeat walks the replica blob tree again and errors on
     # every entry the first pass cleaned.
     sync_deleted_nodes: list[str] = default_factory(list)
-    # Sync replication: the site recorded as this volume's active site -
-    # initialized from its LVS's lead site at a sync creation and updated when
-    # a promote opens the volume on a site - and the sites it is fenced on (a
-    # demote, or the fence of a lost site); a promote takes the site it opens
-    # off that list. An empty active site falls back to the LVS's home site
-    # (sync_replication_controller.volume_site).
+    # Sync replication:
+    # - sync_active_site: the site this volume is assigned to. A sync creation
+    #   sets it to the site its LVS is led from; a promote sets it to the site
+    #   it opens the volume on. An empty value falls back to the LVS's home
+    #   site (sync_replication_controller.volume_site).
+    # - sync_demoted_sites: the sites the volume is fenced on, by a demote or
+    #   by the fence of a lost site. A promote removes the site it opens.
     sync_active_site: str = ""
     sync_demoted_sites: list[str] = default_factory(list)
     # Sync replication: True after a sync creation until the first authorized

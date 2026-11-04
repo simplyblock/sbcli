@@ -177,11 +177,13 @@ def _unconnected(uuid="v1", **fields):
 
 
 class TestNeverConnected:
-    """The first-placement relaxation: a planned promote whose only blocker is a
-    never-connected volume still open on its LVS's lead site may demote that
-    site first and move. is_never_connected is the record test (never connected,
-    active where the LVS is led, whatever its demote record);
-    never_connected_demote_plan is what the planned promote demotes before it moves.
+    """The first-placement relaxation: when a planned promote is blocked only by
+    a never-connected volume still open on the site its LVS is led from, the
+    promote may demote that site first and then move the LVS.
+    is_never_connected checks one volume's record: never connected and assigned
+    to the site the LVS is led from, whatever its demote record.
+    never_connected_demote_plan lists what the planned promote demotes before
+    it moves.
     """
 
     def test_is_never_connected(self):

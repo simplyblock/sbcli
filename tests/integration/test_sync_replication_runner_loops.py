@@ -1,9 +1,10 @@
 """The poll loops of the two sync-replication task runners, both on the shared
 driver, against the real FoundationDB: a failing read of the cluster list ends
 the loop with that error instead of being logged and retried - the process
-exits and the orchestrator restarts it with a fresh FDB client. And the
-``moving:`` markers of LVSs whose hand-off had started, left in place when the
-driver ends a promote task it never ran.
+exits and the orchestrator restarts it with a fresh FDB client. Also: when an
+earlier attempt of a promote task started an LVS hand-off and the driver then
+ends the task without running its handler again, that LVS keeps its
+``moving:`` marker.
 
 The failing read is a Cluster record whose value does not decode: the real
 ``get_clusters`` range read raises on it.

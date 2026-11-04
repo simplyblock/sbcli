@@ -36,15 +36,15 @@ DONE FIRST (it then no longer owns the move) in the spec's terminal commit
 (finish_task): the outcome recorded on each of its volumes in the same
 transaction (``LVol.sync_promote_failures``, a failure reported once to the
 next promote of that volume to that site), unless the task was canceled or
-replaced meanwhile. Then (on_finish) the previous site is written back for
-every LVS it marked whose hand-off never started. An LVS whose hand-off
-started keeps its ``moving:`` marker - the leader decides where it settles -
-until the next promote call (sync_replication_controller._settle_abandoned_moves),
-a leader lookup or the storage-node monitor
-(sync_replication_controller.reconcile_abandoned_moves) settles it by
-storage_node_ops.reconcile_lvs_move; meanwhile both sites stay closed and a
-volume create or clone on it is refused. A pass that restarts after a crash
-finds its markers by ``moves`` and goes on from the DB state.
+replaced meanwhile. Then on_finish gives every LVS the task marked, whose
+hand-off never started, its previous site back. An LVS whose hand-off started
+keeps its ``moving:`` marker. The next promote call
+(sync_replication_controller._settle_abandoned_moves), a leader lookup or the
+storage-node monitor (sync_replication_controller.reconcile_abandoned_moves)
+settles it with storage_node_ops.reconcile_lvs_move, on the site of the member
+that leads. Until then both sites stay closed and a volume create or clone on
+that LVS is refused. A pass that restarts after a crash finds its markers in
+``moves`` and continues from the DB state.
 
 A promote with ``lost_site`` T in the params (a site T recorded as lost, or
 the forced promote of T) judges every gate by the disaster gate of T
@@ -118,11 +118,12 @@ def _is_site_fence(task) -> bool:
 
 
 def _settle_markers(task) -> None:
-    """Write back the previous site of every LVS the (DONE) task still holds
-    at ``moving:`` and never started to hand off. An LVS whose hand-off
-    started keeps its marker for the next promote call, a leader lookup and
-    the storage-node monitor (storage_node_ops.reconcile_lvs_move): the
-    leader decides where it settles. A site fence sets no marker."""
+    """For a task that is DONE: give every LVS that still carries this task's
+    ``moving:`` marker, and whose hand-off never started, its previous site
+    back. An LVS whose hand-off started keeps its marker; the next promote
+    call, a leader lookup or the storage-node monitor settles it with
+    storage_node_ops.reconcile_lvs_move, on the site of the member that leads.
+    A site fence sets no marker, so there is nothing to do for it."""
     if _is_site_fence(task):
         return
     params = task.function_params

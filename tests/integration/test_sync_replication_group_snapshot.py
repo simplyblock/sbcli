@@ -4,15 +4,20 @@ delete (also of a group generation), auto_repair's safe_delete_bdev and the
 del-sync lock reset.
 
 An LVS of a sync-replication cluster has six instances: the owner's home
-triplet and its remote triplet on the other site, one of them leading
-(``lvs_active_site``). These paths register, delete or wait on every instance
-and look for the leader in the active triplet only. The group snapshot keeps
-its leader lookup (_find_lvs_leader). The snapshot delete and safe_delete_bdev
-never recover or grant a leader: their candidate lookup first attempts to
-settle an abandoned move (reconcile_lvs_move, which may repeat its fenced,
-grant-less hand-off), then the active triplet is only probed, and an LVS
-nobody leads is not deleted from. On a cluster without sync replication the home triplet is every
-instance and the paths behave as they always did.
+triplet and its remote triplet on the other site. The triplet of the site in
+``lvs_active_site`` is the active one and holds the leader. These paths
+register, delete or wait on every instance, and look for the leader in the
+active triplet only:
+
+- the group snapshot finds its leader with _find_lvs_leader;
+- the snapshot delete and safe_delete_bdev never recover or grant a leader.
+  Their candidate lookup may first settle an abandoned move with
+  reconcile_lvs_move, which can repeat its fenced hand-off but grants
+  nothing; after that the active triplet is only asked who leads. If nobody
+  leads, nothing is deleted.
+
+On a cluster without sync replication the home triplet holds every instance,
+so the member sets are the home triplet.
 
 Storage nodes (RPC) and the port-block / hublvol side effects are mocked; the
 database, its locks and the task queue never are.
@@ -205,7 +210,7 @@ class TestGroupSnapshotMembers:
         # the generation is taken on the leader, in one RPC
         assert cadence._takers(rpcs, [*a, *b]) == [leader.get_id()]
         rpc.bdev_lvol_snapshot_group.assert_called_once_with("LVS_1", ANY)
-        # and registered on the five other instances, each member snapshot
+        # and each member snapshot is registered on the five other instances
         others = [n for n in (*a, *b) if n.get_id() != leader.get_id()]
         assert _registered(rpcs, [*a, *b]) == _ids(others)
         for node in others:
@@ -271,7 +276,8 @@ class TestGroupSnapshotMembers:
 # ---------------------------------------------------------------------------
 
 def _parked(db, snap):
-    """The snapshot waits for the monitor: IN_DELETION with no phase-1 node."""
+    """The snapshot waits for the snapshot monitor: it is IN_DELETION and no
+    node is recorded as having started its async delete (deletion_status)."""
     snap = db.get_snapshot_by_id(snap.get_id())
     assert (snap.status, snap.deletion_status) == (SnapShot.STATUS_IN_DELETION, "")
 
@@ -352,10 +358,10 @@ class TestSnapshotDelete:
 
     def test_abandoned_move_is_settled_and_nobody_leading_parks(
             self, db, rpcs, hub, env, adopt, no_sleep, short_lock_wait, no_recovery):
-        """An LVS left at moving:B by a promote that ended, nobody leading: the
-        lookup's reconciliation hands it off to b0 without a grant and settles
-        the marker on B; b0 takes the leadership only on its first IO, so the
-        delete still parks."""
+        """A promote ended and left the LVS at moving:B, and nobody leads it.
+        The lookup's reconcile hands the LVS off to b0 without a grant and sets
+        the marker to B. b0 takes the leadership only on its first IO, so the
+        delete still finds no leader and the snapshot waits for the monitor."""
         cluster, a, b, owner, pool = cadence._layout(db, active_site="moving:" + SITE_B)
         triplet._promote_task(db, cluster, owner, status=JobSchedule.STATUS_DONE)
         for node in (*a, *b):
@@ -409,7 +415,8 @@ class TestSafeDeleteBdev:
             self, db, rpcs, env, no_sleep, no_recovery, slot):
         _, a, b, owner, _ = cadence._layout(db, active_site=SITE_B)
         rpcs.lead(b[slot])
-        rpcs.lead(a[0])                                  # stale, passive: only a peer leg
+        # a stale leadership report on a passive member: it gets only a peer sync delete
+        rpcs.lead(a[0])
         deletes = _Deletes(rpcs, [*a, *b])
 
         assert ops.safe_delete_bdev("SNAP_14", owner.get_id()) is True
@@ -487,7 +494,7 @@ class TestSafeDeleteBdev:
 
     def test_non_sync_deletes_owner_first_without_probe(self, db, rpcs, no_sleep, no_recovery):
         _, nodes, _ = _plain(db)
-        rpcs.lead(nodes[1])                              # never asked: main's path
+        rpcs.lead(nodes[1])                              # never asked: without sync the delete starts on the owner
         deletes = _Deletes(rpcs, nodes)
 
         assert ops.safe_delete_bdev("SNAP_14", nodes[0].get_id()) is True
@@ -499,9 +506,9 @@ class TestSafeDeleteBdev:
         _never_recovered(no_recovery, rpcs, nodes)
 
     def test_non_sync_peer_leg_handles_remote_errors_only(self, db, rpcs, no_sleep):
-        """Without sync replication a peer leg's RPCRemoteError is a failed
-        leg and the next peer is still attempted; any other RPC failure ends
-        the delete."""
+        """Without sync replication, an RPCRemoteError from a peer's delete
+        marks that delete as failed and the next peer is still deleted; any
+        other RPC error stops the delete."""
         _, nodes, _ = _plain(db)
         owner, secondary, tertiary = (n.get_id() for n in nodes)
         deletes = _Deletes(rpcs, nodes)
@@ -592,8 +599,9 @@ class TestDelSyncLockReset:
         assert self._reset_keeps_lock(db, nodes[0]) is False
 
     def test_remote_leader_keeps_lock_for_led_lvs_outside_its_own(self, db, lock_no_sleep):
-        """The task's target a0 is an instance of the led LVS_1 only, and its
-        primary_node is the owner a0, not the lock holder b1."""
+        """The task targets a0, which holds an instance of LVS_1 (the LVS b1
+        leads) but not of b1's own LVS_2. The task's primary_node is the owner
+        a0, not the lock holder b1."""
         cluster, a, b = _four_per_site(db)
         task = _sync_del_task(db, cluster, a[0], a[0], lvs="LVS_1")
 
@@ -608,8 +616,9 @@ class TestDelSyncLockReset:
         assert self._reset_keeps_lock(db, b[1]) is False
 
     def test_sync_delete_of_lvs_the_holder_is_no_instance_of_drops_lock(self, db, lock_no_sleep):
-        """b2 is one of b1's own peers, but the task belongs to LVS_3, which
-        b1 holds no instance of."""
+        """The task's target b2 is a member of b1's own LVS, but the task
+        deletes from LVS_3, and b1 holds no instance of LVS_3. So the task does
+        not keep b1's lock."""
         cluster, a, b = _four_per_site(db)
         _sync_del_task(db, cluster, b[2], a[3], lvs="LVS_3")
         assert self._reset_keeps_lock(db, b[1]) is False
