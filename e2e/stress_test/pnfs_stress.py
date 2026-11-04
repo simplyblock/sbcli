@@ -156,12 +156,32 @@ class _PnfsRwxMixin:
                 "[pnfs-stress] %s: %d NFSExport(s) not Ready: %s",
                 when, len(bad), bad[:4])
 
-    def _perform_outage(self, *args, **kwargs):
+    #: The method on the k8s bases that actually injects an outage.
+    #
+    # Named explicitly and checked at first use. The first version of this
+    # mixin wrapped _perform_outage(), copying lblk_stress -- but that method
+    # only exists on the docker bases. On the three k8s bases the override
+    # would have been dead code, the layout check would never have run, and
+    # the soak would have reported green for a data path that had silently
+    # stopped being pNFS. That is precisely the failure this file exists to
+    # catch, so the name is asserted rather than trusted.
+    OUTAGE_HOOK = "perform_n_plus_k_outages"
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        if not hasattr(super(), self.OUTAGE_HOOK):
+            raise RuntimeError(
+                f"[pnfs-stress] {type(self).__name__} has no "
+                f"{self.OUTAGE_HOOK}() to wrap, so the layout check would "
+                f"never run and this soak would prove nothing about pNFS. "
+                f"The base changed; update OUTAGE_HOOK.")
+
+    def perform_n_plus_k_outages(self, *args, **kwargs):
         if not self._pnfs_checked:
             self.assert_pnfs_cluster()
             self._pnfs_checked = True
         self._assert_still_pnfs("before outage")
-        out = super()._perform_outage(*args, **kwargs)
+        out = super().perform_n_plus_k_outages(*args, **kwargs)
         self._assert_still_pnfs("after outage")
         return out
 
