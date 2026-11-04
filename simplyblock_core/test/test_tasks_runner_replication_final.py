@@ -574,6 +574,31 @@ def test_a_failed_final_step_returns_the_volume_to_replicating(monkeypatch):
     assert "Failed" in p["last_error"]
 
 
+def test_a_reverted_relationship_no_longer_names_the_discarded_clone(monkeypatch):
+    """The relationship record was created for this cutover's clone; once the
+    cutover is abandoned and the clone discarded, get_relationship must not
+    keep reporting the deleted volume as the target (bf12 2026-11-04)."""
+    rep = _pending_rep(monkeypatch)
+    clone = LVol()
+    clone.uuid = "CLONE1"
+    rep.target_lvol = clone
+    rep.target_nqn = "nqn.clone"
+    rep.target_ns_id = 7
+    nodes = {"S1": _node("S1"), "T1": _node("T1")}
+    _install(monkeypatch, nodes, rep, (False, "transfer_state='Failed'"))
+
+    task = _task(tgt_lvol_id="CLONE1", cutover_proceed_timeout=1,
+                 shrink_round=4, shrink_round_times=[22.0])
+    with pytest.raises(TaskRetry):
+        runner.task_runner(task.frozen_view(), [])
+
+    assert rep.state == LVolReplication.STATE_REPLICATING
+    assert rep.target_lvol is None
+    assert rep.target_nqn == ""
+    assert rep.target_ns_id == 0
+    assert task.function_params["discard_tgt_lvol_id"] == "CLONE1",         "the clone itself is still deleted via the discard marker"
+
+
 def test_the_retry_after_a_failed_final_step_does_not_freeze_again(monkeypatch):
     """The next pass must not go straight back into run_cutover with the old
     clone (a second freeze from a stale base): it discards the clone first,

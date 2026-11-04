@@ -1253,6 +1253,12 @@ def _revert_cutover_relationship(replication_id):
     try:
         rep.state = LVolReplication.STATE_REPLICATING
         rep.cutover_proceed = False
+        # The record was created for THIS cutover's clone, which is being
+        # discarded: leaving it named would make get_relationship report a
+        # deleted volume as the target (and the operator connect to it).
+        rep.target_lvol = None
+        rep.target_nqn = ""
+        rep.target_ns_id = 0
         rep.write_to_db(db.kv_store)
         logger.info("cutover relationship %s back to replicating: the cutover "
                     "did not happen", replication_id)
