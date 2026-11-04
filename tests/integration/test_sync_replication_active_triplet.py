@@ -92,7 +92,8 @@ def _grants(rpcs, nodes):
     return [n.get_id() for n in nodes if _took_leadership(rpcs[n.get_id()])]
 
 
-#: What an RPC grant sends to the taker: the reload, the grant and its confirmation poll.
+#: What the leaderless recovery or an RPC grant sends to the taker: the recovery's
+#: reload, the grant and its confirmation poll.
 _GRANT_RPCS = {"bdev_lvol_update_lvstore", "bdev_lvol_set_leader", "get_lvstore"}
 
 
@@ -123,7 +124,7 @@ def _demote_takes(rpcs, node):
 
 def _nothing_granted(rpcs, nodes):
     """No node of ``nodes`` got a grant: neither a set_leader(True) nor the
-    metadata reload that precedes one."""
+    leaderless recovery's metadata reload that precedes one."""
     assert _grants(rpcs, nodes) == []
     for node in nodes:
         rpcs[node.get_id()].bdev_lvol_update_lvstore.assert_not_called()
@@ -694,31 +695,24 @@ class TestRestart:
 
 class TestTransfer:
 
-    def _run(self, db, rpcs, a, b, owner, *, reload=True):
+    def _run(self, db, rpcs, a, b, owner):
         leader, taker = _fresh(db, a[0]), _fresh(db, b[0])
         _transfer_ready(rpcs, leader)
         _grant_takes(rpcs, taker)
         peers = [_fresh(db, n) for n in (*a, b[1], b[2])]
-        ops.transfer_lvs_leadership(leader, taker, peers, lvs_node=_fresh(db, owner),
-                                    reload_metadata=reload)
+        ops.transfer_lvs_leadership(leader, taker, peers, lvs_node=_fresh(db, owner))
         return leader, taker
 
-    @pytest.mark.parametrize("grant", [
-        pytest.param(True, id="grant"),
+    def test_to_remote_triplet(self, db, rpcs, hub, env, adopt):
         # Without a grant the taker gets its role and its triplet's hublvol,
         # but not the leadership. It takes the leadership itself on the first
         # client IO.
-        pytest.param(False, id="no-grant"),
-    ])
-    def test_to_remote_triplet(self, db, rpcs, hub, env, adopt, grant):
         _, a, b, owner = _layout(db)
         _update(db, owner, lvstore_status="ready")
         leader, taker = _fresh(db, a[0]), _fresh(db, b[0])
         _transfer_ready(rpcs, leader)
-        if grant:
-            _grant_takes(rpcs, taker)
         ops.transfer_lvs_leadership(leader, taker, [_fresh(db, n) for n in (*a, b[1], b[2])],
-                                    lvs_node=_fresh(db, owner), grant=grant)
+                                    lvs_node=_fresh(db, owner), grant=False)
 
         # every connected peer fenced, the leader last, all released again
         blocked = env.blocked()
@@ -736,18 +730,11 @@ class TestTransfer:
         assert stack._roles(rpcs[leader.get_id()]) == ["secondary"]
         assert stack._roles(rpcs[a[1].get_id()]) == ["secondary"]
         assert stack._roles(rpcs[a[2].get_id()]) == ["tertiary"]
-        # The taker gets the primary role. With a grant, its metadata is
-        # reloaded first and then it is made the leader. Without a grant there
-        # is no reload, no set_leader and no poll.
+        # The taker gets the primary role, and no reload, no set_leader and no poll.
         new = _rpc_names(rpcs, taker)
         assert stack._roles(rpcs[taker.get_id()]) == ["primary"]
-        if grant:
-            assert new.index("bdev_lvol_update_lvstore") < new.index("bdev_lvol_set_lvs_opts") \
-                < new.index("bdev_lvol_set_leader")
-            assert _grants(rpcs, [*a, *b]) == [taker.get_id()]
-        else:
-            assert "bdev_lvol_set_lvs_opts" in new and not set(new) & _GRANT_RPCS
-            assert _grants(rpcs, [*a, *b]) == []
+        assert "bdev_lvol_set_lvs_opts" in new and not set(new) & _GRANT_RPCS
+        assert _grants(rpcs, [*a, *b]) == []
         # hublvol only within the taker's site
         assert adopt.call_args.args[0].get_id() == taker.get_id()
         assert adopt.call_args.args[1].get_id() == owner.get_id()
@@ -760,24 +747,6 @@ class TestTransfer:
         assert failover.args[0].get_id() == b[2].get_id()
         assert failover.kwargs["lvs_node"].get_id() == owner.get_id()
         # nothing killed, the old leader's status restored
-        env.set_node_status.assert_not_called()
-        assert _fresh(db, owner).lvstore_status == "ready"
-
-    @pytest.mark.parametrize("reload_result", [False, RPCException("reload failed")])
-    def test_failed_metadata_reload_grants_nothing(
-            self, db, rpcs, hub, env, adopt, reload_result):
-        _, a, b, owner = _layout(db)
-        _update(db, owner, lvstore_status="ready")
-        reload = rpcs[b[0].get_id()].bdev_lvol_update_lvstore
-        if isinstance(reload_result, Exception):
-            reload.side_effect = reload_result
-        else:
-            reload.return_value = reload_result
-        with pytest.raises(ops.LeadershipTransferError) as err:
-            self._run(db, rpcs, a, b, owner)
-        assert err.value.granted is False
-        assert not _took_leadership(rpcs[b[0].get_id()])
-        assert sorted(env.unblocked()) == sorted(env.blocked())
         env.set_node_status.assert_not_called()
         assert _fresh(db, owner).lvstore_status == "ready"
 
@@ -813,9 +782,8 @@ class TestTransfer:
     def test_failed_old_leader_restamp_aborts_grant(self, db, rpcs, hub, env, adopt):
         _, a, b, owner = _layout(db)
         rpcs[a[0].get_id()].bdev_lvol_set_lvs_opts.return_value = False
-        with pytest.raises(ops.LeadershipTransferError) as err:
+        with pytest.raises(ops.LeadershipTransferError):
             self._run(db, rpcs, a, b, owner)
-        assert err.value.granted is False
         assert _grants(rpcs, [*a, *b]) == []
         rpcs[b[0].get_id()].bdev_lvol_set_lvs_opts.assert_not_called()
         assert sorted(env.unblocked()) == sorted(env.blocked())
@@ -857,6 +825,8 @@ class TestTransfer:
         for node in a:
             rpcs[node.get_id()].bdev_lvol_set_leader.assert_not_called()
         assert _grants(rpcs, [*a, *b]) == [taker.get_id()]
+        # a grant goes without a metadata reload
+        rpcs[taker.get_id()].bdev_lvol_update_lvstore.assert_not_called()
 
     # grant=False: the taker gets its role and its triplet's hublvol, never the
     # leadership - it takes that itself on the first client IO
@@ -922,10 +892,9 @@ class TestTransfer:
             stamp.side_effect = stamp_result
         else:
             stamp.return_value = stamp_result
-        with pytest.raises(ops.LeadershipTransferError) as err:
+        with pytest.raises(ops.LeadershipTransferError):
             ops.transfer_lvs_leadership(leader, taker, [_fresh(db, n) for n in (*a, b[1], b[2])],
                                         lvs_node=_fresh(db, owner), grant=False)
-        assert err.value.granted is False
         # the abort is at the taker's stamp: tried once, nothing wired, nothing granted
         stamp.assert_called_once()
         adopt.assert_not_called()
@@ -935,17 +904,17 @@ class TestTransfer:
         env.set_node_status.assert_not_called()
         assert _fresh(db, owner).lvstore_status == "ready"
 
-    def test_without_grant_failed_adopt_reports_no_grant(
+    def test_without_grant_failed_adopt_grants_nothing(
             self, db, rpcs, hub, env, adopt):
         _, a, b, owner = _layout(db)
         leader, taker = _fresh(db, a[0]), _fresh(db, b[0])
         _transfer_ready(rpcs, leader)
         adopt.side_effect = RPCException("adopt failed")
-        with pytest.raises(ops.LeadershipTransferError, match="adopt_hublvol") as err:
+        with pytest.raises(ops.LeadershipTransferError, match="adopt_hublvol"):
             ops.transfer_lvs_leadership(leader, taker, [_fresh(db, n) for n in (*a, b[1], b[2])],
                                         lvs_node=_fresh(db, owner), grant=False)
-        assert err.value.granted is False
         assert stack._roles(rpcs[taker.get_id()]) == ["primary"]
+        assert _grants(rpcs, [*a, *b]) == []
         assert sorted(env.unblocked()) == sorted(env.blocked())
 
 

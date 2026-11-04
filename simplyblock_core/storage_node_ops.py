@@ -553,8 +553,6 @@ def _failover_primary_ana(primary_node: StorageNode) -> bool:
     the skip, and the primary's volumes stayed unserved until the promotion
     was triggered by hand).
     """
-    if _sync_site(primary_node):
-        return _sync_flip_active_peer(primary_node, [primary_node], "optimized", promoted=True)
     db_ctrl = DBController()
     first_sec = None
     if primary_node.secondary_node_id:
@@ -15071,13 +15069,8 @@ def _leader_for_non_leader_rebuild(owner: StorageNode, snode: StorageNode, db_co
 
 class LeadershipTransferError(Exception):
     """A fenced leadership hand-off was aborted: every fenced port has been
-    released. ``granted`` tells whether the taker had already been granted the
-    leadership when it happened (False: the LVS may be leaderless if the old
-    leader was demoted)."""
-
-    def __init__(self, message, *, granted=False):
-        super().__init__(message)
-        self.granted = granted
+    released. The LVS may be left leaderless when the old leader was already
+    demoted."""
 
 
 class _LvsFence:
@@ -15296,7 +15289,7 @@ class _LvsFence:
             self.on_abort()
         self.release_block_gate()
         self.flush_port_events()
-        raise LeadershipTransferError(f"{self.abort_prefix}: {reason}", granted=self.granted)
+        raise LeadershipTransferError(f"{self.abort_prefix}: {reason}")
 
     def fence_elapsed(self):
         """Seconds since the first peer port was fenced (0.0 if none is)."""
@@ -15810,22 +15803,20 @@ def _fence_and_demote_leader(fence, current_leader, sec_nodes, disconnected_peer
         _fenced("jc_explicit_synchronization", lvs_jm_vuid)
 
 
-def _grant_lvs_leadership(fence, *, force=False, reload_metadata=False, grant=True):
+def _grant_lvs_leadership(fence, *, force=False, grant=True):
     """Step 7 of a leadership hand-off, all through the fence, in one of two
-    modes. ``grant=True``: stamp the taker's (``fence.rpc_node``) kernel role,
-    grant it the leadership by RPC and confirm the grant. ``grant=False``:
-    check the taker is a member and stamp its role, nothing else - no
-    bdev_lvol_update_lvstore, no bdev_lvol_set_leader, no poll,
+    modes. Both check that the taker (``fence.rpc_node``) is a member and
+    stamp its kernel role. ``grant=True``: then bdev_lvol_set_leader and a
+    get_lvstore poll that confirms the grant; ``fence.granted`` is set.
+    ``grant=False``: nothing else - no bdev_lvol_set_leader, no poll,
     ``fence.granted`` stays False; the taker takes the leadership itself on
     its first IO (the lvstore is reloaded and promoted then; each lvol
     reloads its blob on its own first IO). A role stamp that does not land
     aborts there (the taker would never promote itself).
 
-    The rule that picks the mode: only an instance examined since anyone last
-    led is granted by RPC. ``reload_metadata`` (with a grant only) runs
-    bdev_lvol_update_lvstore first; that rebuilds the blobstore-wide bitmaps
-    and does not reload open blobs, so it never makes a long-lived non-leader
-    safe to grant."""
+    The callers pick the mode: a restart (recreate_lvstore) grants the
+    instance it has just examined; a move (move_lvs_leadership) hands off
+    without a grant."""
     snode = fence.rpc_node
     lvs_node = fence.lvs_node
     lvs_name = fence.lvs_name
@@ -15848,16 +15839,6 @@ def _grant_lvs_leadership(fence, *, force=False, reload_metadata=False, grant=Tr
             f"snode {snode.get_id()} is not a registered peer of "
             f"lvstore {lvs_name} (lvs_node={lvs_node.get_id()})")
     snode_lvs_role = lvs_instance_role(lvs_node, snode.get_id(), leading=True)
-    if grant and reload_metadata:
-        # bdev_lvol_update_lvstore rebuilds the blobstore-wide bitmaps from
-        # disk; it does NOT reload the blobs this instance holds open (only
-        # the IO path of a non-leader does), so it cannot make a long-lived
-        # non-leader safe to grant.
-        if not _fenced("bdev_lvol_update_lvstore", lvs_name,
-                       budget=constants.FENCE_WAIT_EXAMINE_TIMEOUT_SEC):
-            _abort_restart_and_unblock(
-                f"bdev_lvol_update_lvstore returned False on {snode.get_id()} "
-                f"for {lvs_name}: no grant on top of un-reloaded metadata")
     ret = _fenced(
         "bdev_lvol_set_lvs_opts",
         lvs_name,
@@ -16153,7 +16134,7 @@ def _lvs_disconnected_peers(lvs_node, peers) -> set:
 
 def transfer_lvs_leadership(current_leader, taker, peers, *, lvs_node, fence=None,
                             disconnected_peers=None, before_grant=None,
-                            reload_metadata=True, force=False, grant: bool = True):
+                            force=False, grant: bool = True):
     """Fenced hand-off of the leadership of ``lvs_node``'s LVS from
     ``current_leader`` (None: nobody leads) to ``taker``, the node the fenced
     RPCs run on; ``peers`` are the LVS's other instances (``current_leader``
@@ -16169,15 +16150,10 @@ def transfer_lvs_leadership(current_leader, taker, peers, *, lvs_node, fence=Non
     (_wire_taker_hublvol).
 
     ``grant=True``: the taker's role is stamped and the leadership granted to
-    it by RPC, after bdev_lvol_update_lvstore when ``reload_metadata``.
+    it by RPC (a restart, on the instance it has just examined).
     ``grant=False``: the taker's role is stamped and nothing is granted - it
     takes the leadership itself on its first IO (the lvstore is reloaded and
-    promoted then; each lvol reloads its blob on its own first IO);
-    ``reload_metadata`` is not consulted. Only an instance examined since
-    anyone last led is granted by RPC:
-    bdev_lvol_update_lvstore rebuilds the blobstore-wide bitmaps and does not
-    reload open blobs, so a long-lived non-leader must take the leadership by
-    IO.
+    promoted then; each lvol reloads its blob on its own first IO).
 
     With ``fence`` the caller owns the fence (recreate_lvstore: the restarting
     node, killed on abort) and the steps after the window; the deferred
@@ -16188,8 +16164,7 @@ def transfer_lvs_leadership(current_leader, taker, peers, *, lvs_node, fence=Non
 
     Raises:
         LeadershipTransferError: the hand-off was aborted (every fenced port
-            released); ``granted`` says whether an RPC grant had been issued
-            (never with ``grant=False``).
+            released).
     """
     if current_leader is not None:
         # The hand-off tells the leader apart from its peers by identity.
@@ -16202,7 +16177,7 @@ def transfer_lvs_leadership(current_leader, taker, peers, *, lvs_node, fence=Non
         _restamp_other_site_peers(fence, peers, disconnected_peers or set())
         if before_grant is not None:
             before_grant()
-        _grant_lvs_leadership(fence, force=force, reload_metadata=reload_metadata, grant=grant)
+        _grant_lvs_leadership(fence, force=force, grant=grant)
         return _wire_taker_hublvol(fence, current_leader, peers, disconnected_peers or set())
 
     db_controller = DBController()
@@ -16226,7 +16201,7 @@ def transfer_lvs_leadership(current_leader, taker, peers, *, lvs_node, fence=Non
         _restamp_other_site_peers(fence, peers, disconnected_peers)
         if before_grant is not None:
             before_grant()
-        _grant_lvs_leadership(fence, force=force, reload_metadata=reload_metadata, grant=grant)
+        _grant_lvs_leadership(fence, force=force, grant=grant)
         deferred = _wire_taker_hublvol(fence, current_leader, peers, disconnected_peers)
         fence.release_hub_locks()
         fence.close()
@@ -17052,7 +17027,7 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
             deferred_tertiary_paths = transfer_lvs_leadership(
                 current_leader, snode, sec_nodes, lvs_node=lvs_node, fence=fence,
                 disconnected_peers=disconnected_peers, before_grant=_examine_and_validate,
-                reload_metadata=False, force=force)
+                force=force)
 
         _deferred_lvol_verify()
 
