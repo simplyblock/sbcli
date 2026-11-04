@@ -656,6 +656,25 @@ REPL_RETRY_BACKOFF_MAX_SEC = 600
 # the task table per pass, and polling a database at 5Hz to detect an event is
 # the wrong shape. Sub-second reaction lives in the RPC-based inline wait.
 REPL_CUTOVER_ACTIVE_POLL_SEC = 1.0
+# How often the snapshot replication runner looks for a converging cutover's
+# next shrink snapshot (snapshot_replication._EndgameWake). A point read of
+# each converging cutover's own task row -- never the task table -- and only
+# while one converges. Without it the snapshot waited for the runner's next
+# pass: TASK_EXEC_INTERVAL_SEC, ~12 s of every ~21 s round on bed bf12
+# (2026-11-03).
+REPL_ENDGAME_WAKE_POLL_SEC = 0.2
+# Build the cutover clone (and the replication record the operator's preconnect
+# keys on) when the endgame STARTS instead of after the last round, so the
+# operator's preconnect runs in parallel with the convergence rounds and the
+# freeze follows the last round immediately. The clone is then based on an
+# older copy than the last round's; the final step re-chains it onto the
+# newest copy (bdev_lvol_transfer_final_step's snapshot_name ->
+# spdk_lvol_chain on the receiver, bdev_lvol_add_clone on the peers), and the
+# record follows. Off by default until verified on a bed: the re-chain of a
+# clone onto a newer snapshot leaves the open reference spdk_bs_chain_snapshot
+# _clone never drops on the old parent, which the post-cutover prune then
+# deletes (see the special_delete open_ref history).
+REPL_CUTOVER_EARLY_PREPARE = False
 
 SPDK_PROXY_MULTI_THREADING_ENABLED=True
 SPDK_PROXY_TIMEOUT=60*5
