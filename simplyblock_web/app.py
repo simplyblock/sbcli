@@ -78,6 +78,14 @@ class AccessLogMiddleware(BaseHTTPMiddleware):
 app: FastAPI = FastAPI()
 Instrumentator().instrument(app).expose(app, endpoint="/_meta/metrics")
 
+
+@app.get("/_meta/live", include_in_schema=False)
+async def live() -> dict:
+    """Liveness: the event loop is serving requests. Touches no FDB on purpose,
+    so an FDB outage does not get every replica restarted at once; see
+    ``simplyblock_web/healthcheck.py``."""
+    return {"live": True}
+
 @app.exception_handler(PreconditionError)
 async def precondition_handler(request: Request, exc: PreconditionError):
     logger.exception("Preciondition checks failed", exc_info=exc)
