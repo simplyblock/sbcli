@@ -122,6 +122,48 @@ class _PnfsRwxMixin:
     #: Server-side data ops per pod at the previous check, for growth.
     _pnfs_srv = None
 
+    def _cluster_settled(self):
+        """Is the cluster actually healthy right now?
+
+        The growth check below is only meaningful once the block path could
+        have been restored. "Between two outages" is not the same thing, and
+        on this test it is emphatically not: K8sNativeRapidFailoverNoGapTest
+        exists to land the next outage while migration from the previous one
+        is still in flight, so the inter-outage window is deliberately never
+        settled.
+
+        Run 41959008874 failed on exactly that mistaken premise --
+        fio-pvc-xx0axkn4x1io-q1-z6bch grew 240185 -> 281862 server-side ops
+        in a window my check called "after the cluster recovered" and the
+        test had designed to be anything but. Falling back there is the
+        product keeping IO alive mid-migration.
+
+        So ask the cluster, rather than inferring from where we are in the
+        loop. Anything other than a fully active cluster with every node
+        online means skip the comparison this cycle and re-baseline.
+        """
+        try:
+            status = (self.sbcli_utils.get_cluster_status(self.cluster_id)
+                      or "")
+            if isinstance(status, (list, dict)):
+                row = status[0] if isinstance(status, list) and status else status
+                status = (row or {}).get("status", "")
+            if str(status).strip().lower() != "active":
+                return False
+            nodes = self.sbcli_utils.get_storage_nodes() or {}
+            results = nodes.get("results", nodes if isinstance(nodes, list) else [])
+            if not results:
+                return False
+            return all((n or {}).get("status", "") == "online" for n in results)
+        except Exception as exc:                      # noqa: BLE001
+            # Never fail the soak on a health probe. An unreadable cluster
+            # means this cycle cannot judge fallback, not that fallback
+            # happened.
+            self.logger.warning(
+                "[pnfs-stress] could not read cluster health, skipping the "
+                "fallback comparison this cycle: %s", str(exc)[:160])
+            return False
+
     def _assert_still_pnfs(self, when):
         """A layout is held, and no mount is still falling back.
 
@@ -166,7 +208,7 @@ class _PnfsRwxMixin:
                 f"server. {exc}") from exc
 
         now = {p: v.get("server_ops", 0) for p, v in proven.items()}
-        if when.startswith("before") and self._pnfs_srv:
+        if when.startswith("before") and self._pnfs_srv and self._cluster_settled():
             grew = {p: (self._pnfs_srv[p], n) for p, n in now.items()
                     if p in self._pnfs_srv and n > self._pnfs_srv[p]}
             if grew:
