@@ -6,9 +6,10 @@ serves and clients hang instead of failing over. This probe asks the server
 itself and fails when no answer arrives in time, letting Docker Swarm replace
 the task.
 
-It deliberately checks the event loop and nothing behind it: ``/_meta/live``
-does not touch FDB, since an FDB outage would otherwise fail every replica at
-once and restarting them would not bring FDB back.
+It probes the v2 liveness endpoint, ``/api/v2/_meta/health``, and deliberately
+not ``/api/v2/_meta/ready``: an FDB outage would fail every replica at once, and
+restarting them would not bring FDB back. The endpoint is mounted with the v2
+API, so the probe needs v2 enabled (``SB_API_VERSIONS`` includes 2, the default).
 """
 
 import os
@@ -19,7 +20,7 @@ import urllib.request
 
 from simplyblock_core.settings import Settings
 
-LIVE_PATH = "/_meta/live"
+LIVE_PATH = "/api/v2/_meta/health"
 DEFAULT_TIMEOUT_SEC = 5.0
 
 
