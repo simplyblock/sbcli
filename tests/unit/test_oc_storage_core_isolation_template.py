@@ -61,23 +61,32 @@ elif verb == "get" and kind == "machineconfig":
     if mc is None:
         sys.stderr.write("Error from server (NotFound)\n")
         sys.exit(1)
-    if "annotations" in opt("-o"):
+    if "resourceVersion" in opt("-o"):
+        print(mc["metadata"].get("resourceVersion", "1"))
+    elif "annotations" in opt("-o"):
         print(mc["metadata"].get("annotations", {}).get("simplyblock.io/cluster-id", ""))
     else:
         print(json.dumps(mc["spec"]["kernelArguments"]))
 elif verb == "patch":
     key = "MachineConfig/" + args[2]
+    if s.get("race_patch"):
+        # Another master's job replaces it between this job's read and patch.
+        s["applied"][key] = s.pop("race_patch")
     mc = s["applied"][key]
+    mc.setdefault("metadata", {}).setdefault("resourceVersion", "1")
     for op in json.loads(opt("-p")):
         parts = [x.replace("~1", "/") for x in op["path"].strip("/").split("/")]
         parent = mc
         for part in parts[:-1]:
             parent = parent.setdefault(part, {})
         if op["op"] == "test" and parent.get(parts[-1]) != op["value"]:
+            with open(path, "w") as f:
+                json.dump(s, f)
             sys.stderr.write("Error from server: testing value %s failed\n" % op["path"])
             sys.exit(1)
-        if op["op"] == "replace":
+        if op["op"] in ("replace", "add"):
             parent[parts[-1]] = op["value"]
+    mc["metadata"]["resourceVersion"] = str(int(mc["metadata"].get("resourceVersion", "1")) + 1)
     print("machineconfig.machineconfiguration.openshift.io/%s patched" % args[2])
 elif verb == "create":
     # A concurrent writer: another master's job creates the MachineConfig
@@ -115,11 +124,11 @@ def _script(hostname):
     return _job(hostname)["spec"]["template"]["spec"]["containers"][0]["args"][0]
 
 
-def _run(tmp_path, hostname, cores, masters=(), applied=None, marker=False, race=None):
+def _run(tmp_path, hostname, cores, masters=(), applied=None, marker=False, race=None, race_patch=None):
     state_dir = tmp_path / "state"
     state_dir.mkdir()
     (state_dir / "state.json").write_text(json.dumps(
-        {"masters": list(masters), "applied": applied or {}, "race": race}))
+        {"masters": list(masters), "applied": applied or {}, "race": race, "race_patch": race_patch}))
     if marker:
         (tmp_path / "marker").touch()
     fake = tmp_path / "fake_kubectl.py"
@@ -254,3 +263,18 @@ def test_a_refusal_fails_the_job_at_once():
     """A refusal is final: retried in place it only crash-loops until the
     agent's wait times out, with the reason in a dead pod's log."""
     assert _job("master-1")["spec"]["backoffLimit"] == 0
+
+
+@needs_tools
+def test_an_unrecorded_isolation_is_replaced_by_one_writer_only(tmp_path):
+    """An isolation written before the cluster-id annotation existed is
+    replaced like any previous cluster's: the write tests the version it
+    read, so a master that replaced it first wins, and this one compares."""
+    unrecorded = {"MachineConfig/" + MASTER_MC: {"metadata": {"name": MASTER_MC, "resourceVersion": "7"},
+                                                  "spec": {"kernelArguments": ["isolcpus=9"]}}}
+    proc, applied = _run(tmp_path, "master-2", [4, 5], masters=["master-1", "master-2"],
+                         applied=unrecorded, race_patch=_mc("2,3") | {"metadata": {
+                             "name": MASTER_MC, "resourceVersion": "8",
+                             "annotations": {"simplyblock.io/cluster-id": "ac85c3"}}})
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "isolcpus=2,3" in applied["MachineConfig/" + MASTER_MC]["spec"]["kernelArguments"]
