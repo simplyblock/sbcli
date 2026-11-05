@@ -58,6 +58,13 @@ spec:
     - name: host-modules
       hostPath:
         path: /lib/modules
+    # dev-vol bind-mounts the whole host /dev into the container (needed for
+    # block/NVMe device access), which brings along the host's existing
+    # /dev/hugepages hugetlbfs mount. There is no dedicated hugepage volume:
+    # the container shares the host's hugepage pool rather than an isolated,
+    # kubelet-provisioned one. The hugepages-2Mi resource limit still bounds
+    # allocation via the kernel hugetlb cgroup controller, independent of
+    # which mount is used to reach it.
     - name: dev-vol
       hostPath:
         path: /dev
@@ -65,9 +72,6 @@ spec:
       hostPath:
         path: /var/crash
         type: DirectoryOrCreate
-    - name: hugepage
-      emptyDir:
-        medium: HugePages
     - name: script-volume
       emptyDir: {}
     - name: varlog
@@ -154,7 +158,6 @@ spec:
           {{ name }}: {{ count }}
           {% endfor %}
         requests:
-          hugepages-2Mi: {{ MEM_MEGA }}Mi
           {% if CPU_TOPOLOGY_ENABLED %}
           memory: {{ MEM2_MEGA }}Mi
           numa-align/numa-{{ NSOCKET }}: 1
