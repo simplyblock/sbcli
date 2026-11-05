@@ -1568,19 +1568,31 @@ class TestRefused:
         assert "sync-replication" in response.text
 
     @pytest.mark.parametrize("verb", ["suspend", "resume"])
-    @pytest.mark.parametrize("method", ["get", "post"])
-    def test_v2_suspend_resume_work_on_non_sync_cluster(self, db, rpcs, web_client, verb, method):
+    def test_v2_suspend_resume_work_on_non_sync_cluster(self, db, rpcs, web_client, verb):
         cluster, a, b, owner = _layout(db)
         cluster.sync_replication = False
         cluster.write_to_db(db.kv_store)
         pool = _pool(db, cluster)
         vol = _volume(db, cluster, owner, pool, ns_id=1)
-        response = getattr(web_client, method)(
+        response = web_client.post(
             f"/api/v2/clusters/{cluster.get_id()}/storage-pools/{pool.get_id()}"
             f"/volumes/{vol.get_id()}/{verb}")
         assert response.status_code == 200, response.text
         assert response.json() is True
         assert rpcs[owner.get_id()].nvmf_subsystem_listener_set_ana_state.called
+
+    @pytest.mark.parametrize("verb", ["suspend", "resume"])
+    def test_v2_suspend_resume_reject_get(self, db, rpcs, web_client, verb):
+        cluster, a, b, owner = _layout(db)
+        cluster.sync_replication = False
+        cluster.write_to_db(db.kv_store)
+        pool = _pool(db, cluster)
+        vol = _volume(db, cluster, owner, pool, ns_id=1)
+        response = web_client.get(
+            f"/api/v2/clusters/{cluster.get_id()}/storage-pools/{pool.get_id()}"
+            f"/volumes/{vol.get_id()}/{verb}")
+        assert response.status_code == 405, response.text
+        assert not rpcs[owner.get_id()].nvmf_subsystem_listener_set_ana_state.called
 
 
 def _uuid_node(db, cluster):
