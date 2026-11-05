@@ -39,11 +39,14 @@ spec:
               MARKER="/var/simplyblock/.cpu_topology_applied"
 
               # Resource names — one MCP/MC/KC shared across all storage nodes in the cluster.
-              # The MCP nodeSelector grows as new nodes are added (In operator).
-              MCP_NAME="storage-{{ CLUSTER_ID }}"
-              MC_NAME="storage-mc-{{ CLUSTER_ID }}"
-              KC_NAME="storage-kubelet-{{ CLUSTER_ID }}"
-              KC_LABEL="storage-cpumanager-{{ CLUSTER_ID }}"
+              # The MCP nodeSelector grows as new nodes are added (In operator). The agent
+              # hands the names over from storage_mco_names, which its convergence gate
+              # reads them back from too.
+              MCP_NAME="{{ STORAGE_MCO.pool }}"
+              MC_NAME="{{ STORAGE_MCO.machine_config }}"
+              KC_NAME="{{ STORAGE_MCO.kubelet_config }}"
+              KC_LABEL="{{ STORAGE_MCO.kubelet_label }}"
+              MASTER_KC_NAME="{{ STORAGE_MCO.master_kubelet_config }}"
               HOSTNAME="{{ HOSTNAME }}"
 
               # ---- Order --------------------------------------------------
@@ -180,10 +183,10 @@ spec:
                 RENDER_POOL="master"
                 # The storage MachineConfig selects the storage pool only.
                 RENDER_MC=""
-                RENDER_KC="$KC_NAME-master"
+                RENDER_KC="$MASTER_KC_NAME"
                 KEEP_POOL=""
                 for OLD in $(kubectl get kubeletconfig -o name | sed 's#.*/##' \
-                    | grep '^storage-kubelet-.*-master$' | grep -vx "$RENDER_KC" || true); do
+                    | grep '{{ STORAGE_MCO.master_kubelet_config_pattern }}' | grep -vx "$RENDER_KC" || true); do
                   echo "[INFO] KubeletConfig $OLD is from a previous simplyblock cluster; deleting it"
                   kubectl delete kubeletconfig "$OLD"
                 done
@@ -250,8 +253,8 @@ spec:
                 SOURCES=$(kubectl get machineconfigpool "$RENDER_POOL" \
                   -o jsonpath='{range .spec.configuration.source[*]}{.name}{"\n"}{end}' 2>/dev/null || true)
                 OWNED=$(kubectl get machineconfig --no-headers \
-                  -o 'custom-columns=NAME:.metadata.name,OWNER:.metadata.ownerReferences[0].name' 2>/dev/null \
-                  | awk -v kc="$RENDER_KC" '$2 == kc {print $1}' || true)
+                  -o 'custom-columns=NAME:.metadata.name,OWNERS:.metadata.ownerReferences[*].name' 2>/dev/null \
+                  | awk -v kc="$RENDER_KC" '{n = split($2, owner, ","); for (i = 1; i <= n; i++) if (owner[i] == kc) print $1}' || true)
                 GENERATED=$(echo "$SOURCES" | grep "^${KC_GENERATED}" | grep -xF "$OWNED" | head -n 1 || true)
                 if [ -n "$GENERATED" ] && { [ -z "$RENDER_MC" ] || echo "$SOURCES" | grep -qx "$RENDER_MC"; }; then
                   echo "[INFO] MCP $RENDER_POOL has rendered $GENERATED${RENDER_MC:+ and $RENDER_MC}"

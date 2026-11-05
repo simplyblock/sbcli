@@ -106,17 +106,20 @@ spec:
                       *) echo "[ERROR] Creating MachineConfig $MASTER_MC failed: $CREATE_OUT"; exit 1 ;;
                     esac
                   fi
+                  # The version is read before the cluster it records, so a replace
+                  # that lands in between fails the patch's test rather than being
+                  # overwritten. That holds for an isolation written before the
+                  # annotation existed too, which has no cluster to test.
+                  APPLIED_RV=$(kubectl get machineconfig "$MASTER_MC" -o jsonpath='{.metadata.resourceVersion}' 2>/dev/null || true)
                   APPLIED_BY=$(kubectl get machineconfig "$MASTER_MC" \
                     -o jsonpath='{.metadata.annotations.simplyblock\.io/cluster-id}' 2>/dev/null || true)
                   if [ "$APPLIED_BY" != "{{ CLUSTER_ID }}" ]; then
                     echo "[INFO] MachineConfig $MASTER_MC is from a previous simplyblock cluster (${APPLIED_BY:-unrecorded}); replacing it"
-                    if [ -z "$APPLIED_BY" ]; then
-                      kubectl apply -f /tmp/master-isolated.yaml
-                      break
-                    fi
+                    # add on /metadata/annotations sets the whole map, so it works
+                    # whether or not the old MachineConfig has annotations at all.
                     if kubectl patch machineconfig "$MASTER_MC" --type=json -p "[
-                        {\"op\": \"test\", \"path\": \"/metadata/annotations/simplyblock.io~1cluster-id\", \"value\": \"$APPLIED_BY\"},
-                        {\"op\": \"replace\", \"path\": \"/metadata/annotations/simplyblock.io~1cluster-id\", \"value\": \"{{ CLUSTER_ID }}\"},
+                        {\"op\": \"test\", \"path\": \"/metadata/resourceVersion\", \"value\": \"$APPLIED_RV\"},
+                        {\"op\": \"add\", \"path\": \"/metadata/annotations\", \"value\": {\"simplyblock.io/cluster-id\": \"{{ CLUSTER_ID }}\"}},
                         {\"op\": \"replace\", \"path\": \"/spec/kernelArguments\", \"value\": $KERNEL_ARGS}]"; then
                       break
                     fi

@@ -10,6 +10,13 @@ from flask_openapi3 import APIBlueprint
 from jinja2 import Environment, PackageLoader
 from kubernetes.client import ApiException, V1DeleteOptions
 from pydantic import BaseModel, Field
+from tenacity import (
+    RetryError,
+    Retrying,
+    retry_if_result,
+    stop_after_attempt,
+    wait_fixed,
+)
 
 from simplyblock_core import constants
 from simplyblock_core import utils as core_utils
@@ -38,23 +45,23 @@ TOP_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 MASTER_POOL_LABEL = "node-role.kubernetes.io/master"
 
 
-def _mco_pool_name(node_labels, cluster_short_id):
+def _mco_pool_name(node_labels, cluster_id):
     """The MachineConfigPool whose render this node runs once its CPU-topology
     settings have landed."""
     if MASTER_POOL_LABEL in (node_labels or {}):
         return "master"
-    return f"storage-{cluster_short_id}"
+    return core_utils.storage_mco_names(cluster_id).pool
 
 
-def _pool_kubelet_config_name(pool_name, cluster_short_id):
+def _pool_kubelet_config_name(pool_name, cluster_id):
     """The KubeletConfig the CPU-topology job gives this pool its settings with.
 
     The masters get one of their own that selects the master pool from the
     start: MCO evaluates a KubeletConfig when it is created or its spec
     changes, never when a pool's labels change.
     """
-    name = f"storage-kubelet-{cluster_short_id}"
-    return f"{name}-master" if pool_name == "master" else name
+    names = core_utils.storage_mco_names(cluster_id)
+    return names.master_kubelet_config if pool_name == "master" else names.kubelet_config
 
 
 def _cfg_hash(name):
@@ -76,7 +83,32 @@ def _kubelet_configs_owned_by(machine_configs, kubelet_config_name):
     }
 
 
-def _converged_on_pool(pool_name, mcp, node_annotations, unschedulable, kubelet_configs=None):
+def _pool_kubelet_configs(co, pool_name, mcp, kubelet_config_name):
+    """The generated kubelet configs in the pool's target render that this
+    KubeletConfig owns.
+
+    The candidates are named in the render's sources, 99-<pool>-generated-kubelet
+    with an optional suffix, so only those are read: listing every
+    MachineConfig, rendered payloads included, on each poll is far more than
+    the gate needs. One deleted between the two reads is skipped.
+    """
+    configuration = (mcp.get("spec", {}) or {}).get("configuration", {}) or {}
+    prefix = f"99-{pool_name}-generated-kubelet"
+    machine_configs = []
+    for source in configuration.get("source", []) or []:
+        name = source.get("name", "")
+        if not name.startswith(prefix):
+            continue
+        try:
+            machine_configs.append(co.get_cluster_custom_object(
+                group="machineconfiguration.openshift.io", version="v1", plural="machineconfigs", name=name))
+        except ApiException as e:
+            if e.status != 404:
+                raise
+    return _kubelet_configs_owned_by(machine_configs, kubelet_config_name)
+
+
+def _converged_on_pool(pool_name, mcp, node_annotations, unschedulable, kubelet_configs):
     """Whether the node runs its pool's render with the CPU-topology settings,
     and MCO is done with it.
 
@@ -89,8 +121,12 @@ def _converged_on_pool(pool_name, mcp, node_annotations, unschedulable, kubelet_
     time. Its status names the old render until every master has rebooted, and
     a master that has not rebooted yet matches it, so the target is the spec's
     render, and that render must carry one of `kubelet_configs`, the generated
-    configs of the job's KubeletConfig.
+    configs of the job's KubeletConfig. A master gate without them is an
+    error, not a render that has not arrived yet: that would wait out the
+    whole gate.
     """
+    if pool_name == "master" and kubelet_configs is None:
+        raise ValueError("the master pool's gate needs the generated kubelet configs to look for")
     if unschedulable:
         return False
     annotations = node_annotations or {}
@@ -99,13 +135,63 @@ def _converged_on_pool(pool_name, mcp, node_annotations, unschedulable, kubelet_
     if pool_name == "master":
         configuration = (mcp.get("spec", {}) or {}).get("configuration", {}) or {}
         sources = {s.get("name", "") for s in configuration.get("source", []) or []}
-        if not sources & set(kubelet_configs or ()):
+        if not sources & set(kubelet_configs):
             return False
     else:
         configuration = (mcp.get("status", {}) or {}).get("configuration", {}) or {}
     target = configuration.get("name")
     current = annotations.get("machineconfiguration.openshift.io/currentConfig")
     return bool(target and _cfg_hash(current) and _cfg_hash(current) == _cfg_hash(target))
+
+def _wait_converged_on_pool(co, core_v1, node_name, cluster_id, wait=None, attempts=240):
+    """Wait for the node to run its pool's render with the CPU-topology
+    settings; False when it does not within the attempts, ~40 minutes at the
+    default 10 s, since reboots queue under the pool's maxUnavailable.
+
+    A pool that does not exist leaves nothing to gate on, which should not
+    happen once the job ensures membership; the wait then degrades to the node
+    being uncordoned rather than hang.
+    """
+    mcp_name = _mco_pool_name(core_v1.read_node(node_name).metadata.labels, cluster_id)
+    kubelet_config_name = _pool_kubelet_config_name(mcp_name, cluster_id)
+
+    def converged():
+        try:
+            mcp = co.get_cluster_custom_object(
+                group="machineconfiguration.openshift.io", version="v1",
+                plural="machineconfigpools", name=mcp_name)
+        except ApiException as e:
+            if e.status != 404:
+                raise
+            logger.warning(f"MCP '{mcp_name}' not found; cannot gate on "
+                           f"topology rollout — proceeding once uncordoned")
+            return not core_v1.read_node(node_name).spec.unschedulable
+        kubelet_configs = (_pool_kubelet_configs(co, mcp_name, mcp, kubelet_config_name)
+                           if mcp_name == "master" else None)
+        node_obj = core_v1.read_node(node_name)
+        ann = node_obj.metadata.annotations or {}
+        cur = ann.get("machineconfiguration.openshift.io/currentConfig")
+        if _converged_on_pool(mcp_name, mcp, ann, node_obj.spec.unschedulable, kubelet_configs):
+            logger.info(f"Node '{node_name}' carries MCP '{mcp_name}' config "
+                        f"(hash {_cfg_hash(cur)}), reboot done — starting SPDK")
+            return True
+        target = {side: ((mcp.get(side, {}) or {}).get("configuration", {}) or {}).get("name")
+                  for side in ("spec", "status")}
+        logger.info(f"Waiting for '{node_name}' to converge on MCP '{mcp_name}' "
+                    f"(cur={cur} target={target} "
+                    f"state={ann.get('machineconfiguration.openshift.io/state')} "
+                    f"cordoned={node_obj.spec.unschedulable})")
+        return False
+
+    # Only a False result is retried: an API error other than the pool's 404
+    # propagates, as it did from the hand-written loop this replaces.
+    retrying = Retrying(stop=stop_after_attempt(attempts), wait=wait or wait_fixed(10),
+                        retry=retry_if_result(lambda done: not done))
+    try:
+        return retrying(converged)
+    except RetryError:
+        return False
+
 
 def set_namespace(namespace):
     if not os.path.exists(namespace_id_file):
@@ -591,6 +677,8 @@ def spdk_process_start(body: SPDKParams):
             'GRAYLOG_SERVER_IP': body.cluster_ip,
             'MODE': body.cluster_mode,
             'CLUSTER_ID': first_six_cluster_id,
+            # The names of the objects the CPU-topology job writes, spelled once.
+            'STORAGE_MCO': core_utils.storage_mco_names(body.cluster_id)._asdict(),
             'SSD_PCIE': ssd_pcie_params,
             'PCI_ALLOWED': ssd_pcie_list,
             'TOTAL_HP': total_mem_mib,
@@ -731,49 +819,9 @@ def spdk_process_start(body: SPDKParams):
             #
             # The pool gated on is the one MCO keeps the node in: a master stays
             # in the master pool, which the job gives the storage KubeletConfig.
-            mcp_name = _mco_pool_name(
-                k8s_core_v1.read_node(node_name).metadata.labels, first_six_cluster_id)
-
             co = core_utils.get_k8s_custom_objects_client()
-            for attempt in range(240):  # ~40 min: reboots queue under MCP maxUnavailable
-                try:
-                    mcp = co.get_cluster_custom_object(
-                        group="machineconfiguration.openshift.io", version="v1",
-                        plural="machineconfigpools", name=mcp_name)
-                except ApiException as e:
-                    if e.status == 404:
-                        # No MCP to gate on (should not happen once the Job ensures
-                        # membership). Degrade to the old behaviour rather than hang:
-                        # proceed as soon as the node is uncordoned.
-                        logger.warning(f"MCP '{mcp_name}' not found; cannot gate on "
-                                       f"topology rollout — proceeding once uncordoned")
-                        node_obj = k8s_core_v1.read_node(node_name)
-                        if not node_obj.spec.unschedulable:
-                            break
-                        time.sleep(10)
-                        continue
-                    raise
-                kubelet_configs = None
-                if mcp_name == "master":
-                    kubelet_configs = _kubelet_configs_owned_by(co.list_cluster_custom_object(
-                        group="machineconfiguration.openshift.io", version="v1",
-                        plural="machineconfigs")["items"],
-                        _pool_kubelet_config_name(mcp_name, first_six_cluster_id))
-                node_obj = k8s_core_v1.read_node(node_name)
-                ann = node_obj.metadata.annotations or {}
-                cur = ann.get("machineconfiguration.openshift.io/currentConfig")
-                if _converged_on_pool(mcp_name, mcp, ann, node_obj.spec.unschedulable, kubelet_configs):
-                    logger.info(f"Node '{node_name}' carries MCP '{mcp_name}' config "
-                                f"(hash {_cfg_hash(cur)}), reboot done — starting SPDK")
-                    break
-                target = {side: ((mcp.get(side, {}) or {}).get("configuration", {}) or {}).get("name")
-                          for side in ("spec", "status")}
-                logger.info(f"Waiting for '{node_name}' to converge on MCP '{mcp_name}' "
-                            f"(cur={cur} target={target} "
-                            f"state={ann.get('machineconfiguration.openshift.io/state')} "
-                            f"cordoned={node_obj.spec.unschedulable})... {attempt + 1}/240")
-                time.sleep(10)
-            else:
+            if not _wait_converged_on_pool(co, k8s_core_v1, node_name, body.cluster_id):
+                mcp_name = _mco_pool_name(k8s_core_v1.read_node(node_name).metadata.labels, body.cluster_id)
                 return utils.get_response(
                     False, f"Node '{node_name}' did not converge on MCP '{mcp_name}' config in time")
         else:

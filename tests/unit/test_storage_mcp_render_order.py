@@ -27,6 +27,8 @@ import pytest
 import yaml
 from jinja2 import Environment, PackageLoader
 
+from simplyblock_core.utils import storage_mco_names
+
 POOL = "storage-ac85c3"
 MC = "storage-mc-ac85c3"
 KC = "storage-kubelet-ac85c3"
@@ -37,9 +39,11 @@ needs_dash = pytest.mark.skipif(
     os.name != "posix" or not shutil.which("dash"), reason="dash is not installed")
 
 
-def _job(hostname="worker-1"):
+def _job(hostname="worker-1", names=None):
     env = Environment(loader=PackageLoader("simplyblock_web", "templates"), trim_blocks=True, lstrip_blocks=True)
+    names = names or storage_mco_names("ac85c3")
     return yaml.safe_load(env.get_template("oc_storage_cpu_topology.yaml.j2").render(
+        STORAGE_MCO=names._asdict(),
         CORE_JOBNAME="snode-core-" + hostname, NAMESPACE="simplyblock", CLUSTER_ID="ac85c3",
         HOSTNAME=hostname, MCP_MAX_UNAVAILABLE=4, RESERVED_SYSTEM_CPUS="0-1", NSOCKET=0,
         OPENSHIFT_MCP="worker"))
@@ -200,7 +204,7 @@ if verb == "get":
         for pool_name, pool in s["pools"].items():
             if pool_name == "master":
                 for generated, owner in pool.get("generated", []):
-                    print("%s   %s" % (generated, owner))
+                    print("%s   %s" % (generated, ",".join(s["extra_owners"].get(generated, []) + [owner])))
             else:
                 print("99-%s-generated-kubelet%s   %s" % (pool_name, s["generated_suffix"], s["kc_name"]))
     elif kind == "machineconfig":
@@ -301,7 +305,7 @@ save()
 def _state(**overrides):
     state = {"pools": {}, "mcs": [], "kcs": {}, "render_after": 2, "generated_suffix": "", "masters": [],
              "kc_label": "storage-cpumanager-ac85c3", "kc_name": "storage-kubelet-ac85c3",
-             "master_ours_name": "99-master-generated-kubelet", "master_kcs": [], "race_kc": None, "node_current": {}, "pool_target": {},
+             "master_ours_name": "99-master-generated-kubelet", "master_kcs": [], "race_kc": None, "node_current": {}, "pool_target": {}, "extra_owners": {},
              "reject_kubeletconfig": False, "fail_get_pool": 0, "fail_get_hosts": 0}
     state.update(overrides)
     return state
@@ -636,3 +640,28 @@ def test_a_worker_joining_a_new_render_waits_for_its_reboot(tmp_path):
         node_current={"worker-1": "rendered-worker-ccc333"}))
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "900" in _slept(tmp_path)
+
+
+def test_the_job_takes_the_object_names_from_the_agent():
+    """The agent's gate and the job must name the same objects: the names
+    come from one place and are handed to the template."""
+    names = storage_mco_names("ac85c3")._replace(
+        pool="pool-x", machine_config="mc-x", kubelet_config="kc-x", kubelet_label="label-x",
+        master_kubelet_config="kc-x-masters", master_kubelet_config_pattern="^kc-.*-masters$")
+    script = _job(names=names)["spec"]["template"]["spec"]["containers"][0]["args"][0]
+    for value in ('MCP_NAME="pool-x"', 'MC_NAME="mc-x"', 'KC_NAME="kc-x"', 'KC_LABEL="label-x"',
+                  'MASTER_KC_NAME="kc-x-masters"'):
+        assert value in script, value
+    assert "storage-kubelet-" not in script and "storage-cpumanager-" not in script
+
+
+@needs_dash
+def test_the_generated_config_is_found_among_several_owners(tmp_path):
+    proc, state, calls = _run(tmp_path, _state(
+        masters=["master-3"], kcs={KC: {}, MASTER_KC: {"reservedSystemCPUs": "0-1"}}, master_kcs=[MASTER_KC],
+        mcs=[MC], render_after=0, extra_owners={"99-master-generated-kubelet": ["machine-config-operator"]},
+        pools={"master": _master_pool(generated=[["99-master-generated-kubelet", MASTER_KC]])}),
+        hostname="master-3")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "MCP master has rendered 99-master-generated-kubelet" in proc.stdout
+    assert "Waiting for MCP master" not in proc.stdout
