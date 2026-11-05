@@ -280,7 +280,10 @@ class BaseModel:
                 return value.to_dict(unwrap_secrets=unwrap_secrets)
             if isinstance(value, (SecretStr, SecretBytes)):
                 return value.get_secret_value() if unwrap_secrets else value
-            if isinstance(value, dict):
+            # Mapping, not dict: a task handler's frozen_view() wraps
+            # function_params in a read-only MappingProxyType, and that view
+            # gets serialized too (e.g. as an event's object_dict).
+            if isinstance(value, Mapping):
                 return {k: _maybe_to_dict(v) for k, v in value.items()}
             if hasattr(value, "to_dict"):
                 return value.to_dict()
@@ -295,7 +298,7 @@ class BaseModel:
                 result[attr] = value.to_dict(unwrap_secrets=unwrap_secrets)
             elif hasattr(value, "to_dict"):
                 result[attr] = value.to_dict()
-            elif isinstance(value, dict):
+            elif isinstance(value, Mapping):
                 result[attr] = {k: _maybe_to_dict(v) for k, v in value.items()}
             elif isinstance(value, (SecretStr, SecretBytes)):
                 result[attr] = value.get_secret_value() if unwrap_secrets else value
