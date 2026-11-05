@@ -11761,16 +11761,25 @@ def _rebind_own_devices_to_spdk(snode, snode_api, node_info):
     setup.sh, so every restart after a shutdown failed with "No NVMe devices
     was found!" (bf7 2026-10-30: e0ad4fa0 and 5055ad5c, shut down by the
     suspend drain, stayed offline for hours).
+
+    A device is bound unless SPDK already holds it, not only when the kernel
+    nvme driver does: after a host reboot a device can be left on no driver at
+    all, and skipping it failed every restart the same way (dev-ocp
+    2026-11-05: master-2's four drives, unbound after its MachineConfig
+    reboot). A device the node has given up, removed or failed and migrated,
+    is not taken back: an operator may have handed it to the kernel on purpose.
     """
-    kernel_bound = set((node_info or {}).get("nvme_pcie_list") or [])
+    spdk_bound = set((node_info or {}).get("spdk_pcie_list") or [])
     own = list(snode.ssd_pcie or [])
+    given_up = (NVMeDevice.STATUS_REMOVED, NVMeDevice.STATUS_FAILED_AND_MIGRATED)
     for dev in snode.nvme_devices:
-        if dev.bdev_type != "aio" and dev.pcie_address and dev.pcie_address not in own:
+        if (dev.bdev_type != "aio" and dev.pcie_address and dev.pcie_address not in own
+                and getattr(dev, "status", None) not in given_up):
             own.append(dev.pcie_address)
     for pci in own:
-        if pci not in kernel_bound:
+        if pci in spdk_bound:
             continue
-        logger.info("Binding %s back to SPDK on %s (left on the kernel driver by a shutdown)",
+        logger.info("Binding %s back to SPDK on %s (not on the SPDK driver after a shutdown or reboot)",
                     pci, snode.get_id())
         try:
             snode_api.bind_device_to_spdk(pci)

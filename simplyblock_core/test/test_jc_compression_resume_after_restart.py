@@ -22,6 +22,7 @@ from types import SimpleNamespace
 import pytest
 
 from simplyblock_core import cluster_ops, storage_node_ops
+from simplyblock_core.models.nvme_device import NVMeDevice
 
 
 class _RPC:
@@ -141,6 +142,25 @@ def test_devices_known_only_from_the_device_records_are_bound_too():
         _snode([], [("nvme", "0000:00:1d.0"), ("nvme", "0000:00:1f.0")]), api, node_info)
     # One failing bind does not stop the others.
     assert api.bound == ["0000:00:1f.0"]
+
+
+def test_a_device_left_on_no_driver_after_a_reboot_is_bound():
+    # dev-ocp 2026-11-05: after a MachineConfig reboot master-2's drives were
+    # on neither the kernel nvme driver nor SPDK's, and the restart found none.
+    api = _API()
+    node_info = {"nvme_pcie_list": [], "spdk_pcie_list": []}
+    storage_node_ops._rebind_own_devices_to_spdk(
+        _snode(["0000:00:02.0", "0000:00:03.0"], []), api, node_info)
+    assert api.bound == ["0000:00:02.0", "0000:00:03.0"]
+
+
+def test_a_device_the_node_gave_up_is_not_taken_back():
+    api = _API()
+    node = _snode([], [("nvme", "0000:00:02.0"), ("nvme", "0000:00:03.0"), ("nvme", "0000:00:04.0")])
+    node.nvme_devices[1].status = NVMeDevice.STATUS_REMOVED
+    node.nvme_devices[2].status = NVMeDevice.STATUS_FAILED_AND_MIGRATED
+    storage_node_ops._rebind_own_devices_to_spdk(node, api, {"nvme_pcie_list": [], "spdk_pcie_list": []})
+    assert api.bound == ["0000:00:02.0"]
 
 
 def test_restart_rebinds_before_starting_spdk():
