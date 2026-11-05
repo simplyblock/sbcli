@@ -67,10 +67,10 @@ def test_an_error_status_is_not_live():
         server.shutdown()
 
 
-def test_the_app_serves_the_live_route():
+def test_the_app_serves_the_probed_path_without_auth():
+    """The probe holds no credentials, so the path must exist and be open."""
     from simplyblock_web.app import app
 
     response = TestClient(app).get(healthcheck.LIVE_PATH)
 
-    assert response.status_code == 200
-    assert response.json() == {"live": True}
+    assert response.status_code == 204
