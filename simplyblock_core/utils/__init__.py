@@ -15,7 +15,7 @@ import time
 import uuid
 from collections.abc import Iterable
 from datetime import UTC, datetime
-from typing import Annotated, Any
+from typing import Annotated, Any, NamedTuple
 
 from docker.errors import APIError, DockerException, ImageNotFound, NotFound
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
@@ -966,6 +966,36 @@ def first_six_chars(s: str) -> str:
     If the string is shorter than six characters, returns the entire string.
     """
     return s[:6]
+
+
+class StorageMcoNames(NamedTuple):
+    """The OpenShift objects the CPU-topology job writes for one cluster."""
+    pool: str
+    machine_config: str
+    kubelet_config: str
+    kubelet_label: str
+    master_kubelet_config: str
+    # Matches the master KubeletConfig of any cluster, this one's included.
+    master_kubelet_config_pattern: str
+
+
+def storage_mco_names(cluster_id: str) -> StorageMcoNames:
+    """Names of a cluster's storage MachineConfigPool and the objects that give
+    it its settings.
+
+    The CPU-topology job creates them from these names, which the agent hands
+    to its template, and the agent's convergence gate and the pool's
+    maxUnavailable reads them back, so the names are spelled here only.
+    """
+    short_id = first_six_chars(cluster_id)
+    return StorageMcoNames(
+        pool=f"storage-{short_id}",
+        machine_config=f"storage-mc-{short_id}",
+        kubelet_config=f"storage-kubelet-{short_id}",
+        kubelet_label=f"storage-cpumanager-{short_id}",
+        master_kubelet_config=f"storage-kubelet-{short_id}-master",
+        master_kubelet_config_pattern="^storage-kubelet-.*-master$",
+    )
 
 
 def nearest_upper_power_of_2(n):
@@ -3634,7 +3664,7 @@ def set_storage_mcp_max_unavailable(cluster_id: str, max_unavailable: int) -> bo
     # at 1. The MCP name mirrors the CPU-topology job template
     # (storage-<first-6-of-cluster-id>).
     value = max(int(max_unavailable), 1)
-    mcp_name = f"storage-{first_six_chars(cluster_id)}"
+    mcp_name = storage_mco_names(cluster_id).pool
     try:
         load_kube_config_with_fallback()
         api = client.CustomObjectsApi()
