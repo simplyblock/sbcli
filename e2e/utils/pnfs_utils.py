@@ -157,7 +157,7 @@ def mountstats(k8s, pod_name, mountpoint="/spdkvol", namespace=None):
 
 def assert_layouts_taken(k8s, pod_names, mountpoint="/spdkvol",
                          namespace=None, logger=None, context="",
-                         retries=10, delay=15):
+                         retries=10, delay=15, allow_server_io=False):
     """B-03. Every pod holds a pNFS layout and drives no server-side IO.
 
     Three things have to be true at once, and each one alone is satisfiable
@@ -173,6 +173,18 @@ def assert_layouts_taken(k8s, pod_names, mountpoint="/spdkvol",
     Raises :class:`PnfsEvidenceError` naming every pod that failed and why,
     because one pod falling back while five succeed is the interesting case
     and a first-failure abort would hide it.
+
+    ``allow_server_io`` relaxes (3) only, and exists for the soaks. The
+    mountstats counters are cumulative since mount and never reset, so a
+    single fallback during one outage window marks that mount permanently
+    -- the check can never pass again for that pod even after the layout is
+    fully restored and every subsequent byte goes direct. On a healthy
+    cluster, which is what B-03 tests, zero is the right bar. In a soak that
+    deliberately kills nodes it is not: NFS 4.1 falling back is what keeps
+    IO alive while the block path is gone, and the counter records that
+    forever. Callers that pass True get the counts back under
+    ``server_ops`` and decide for themselves, which for the soaks means
+    "did this keep growing after the cluster recovered".
     """
     failures, proven, unreadable = [], {}, []
     for pod in pod_names:
@@ -210,13 +222,14 @@ def assert_layouts_taken(k8s, pod_names, mountpoint="/spdkvol",
         if lg <= 0:
             why.append(f"LAYOUTGET={lg}")
         busy = {op: n for op, n in data.items() if n}
-        if busy:
+        if busy and not allow_server_io:
             why.append("server-side data ops: "
                        + ", ".join(f"{op}={n}" for op, n in busy.items()))
         if why:
             failures.append(f"{pod}: " + "; ".join(why))
         else:
-            proven[pod] = {"layout_type": lt, "LAYOUTGET": lg}
+            proven[pod] = {"layout_type": lt, "LAYOUTGET": lg,
+                           "server_ops": sum(data.values())}
             if logger:
                 logger.info(
                     "[pnfs] %s: layout=%s LAYOUTGET=%d, no server-side "

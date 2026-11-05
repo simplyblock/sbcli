@@ -119,8 +119,28 @@ class _PnfsRwxMixin:
             f"2>/dev/null || true", supress_logs=True)
         return [ln.strip() for ln in (out or "").splitlines() if ln.strip()]
 
+    #: Server-side data ops per pod at the previous check, for growth.
+    _pnfs_srv = None
+
     def _assert_still_pnfs(self, when):
-        """Layouts still held, and every export still Ready.
+        """A layout is held, and no mount is still falling back.
+
+        Two different questions, and the first version of this conflated
+        them. B-03's rule is that server-side READ/WRITE is exactly zero,
+        which is right on a healthy cluster. It is wrong here: mountstats
+        counters are cumulative since mount and never reset, so one fallback
+        during one outage window marks that mount for the rest of the soak
+        even after the layout is fully restored. Run 41923565845 died on
+        exactly that after eight clean outages --
+        fio-pvc-ywcan1kzf6eq-5-vcc2c reported READ=1421 WRITE=107478 while
+        holding a valid layout, and the eight other mounts were clean.
+
+        So the hard failure is "no layout", which assert_layouts_taken still
+        enforces. Fallback is judged by growth across the settled window
+        between one outage's recovery and the next outage: IO going to the
+        server while the cluster is healthy again is the silent-fallback
+        case; IO that went there during the outage is the product keeping
+        the mount alive, which is what it is supposed to do.
 
         Never fails the soak on an empty pod list: between outages there are
         windows with no fio pod Running, and turning that into a failure
@@ -132,19 +152,37 @@ class _PnfsRwxMixin:
             self.logger.warning(
                 "[pnfs-stress] %s: no Running fio pod to read mountstats "
                 "from, so the layout check was skipped this cycle", when)
-        else:
-            try:
-                assert_layouts_taken(self.k8s_utils, pods,
-                                     mountpoint=self.MOUNT)
-                self.logger.info(
-                    "[pnfs-stress] %s: %d mount(s) still hold a layout and "
-                    "the server is serving no data", when, len(pods))
-            except PnfsEvidenceError as exc:
+            return
+
+        try:
+            proven = assert_layouts_taken(self.k8s_utils, pods,
+                                          mountpoint=self.MOUNT,
+                                          allow_server_io=True)
+        except PnfsEvidenceError as exc:
+            raise PnfsEvidenceError(
+                f"[pnfs-stress] {when}: a mount is no longer holding a pNFS "
+                f"layout. This is the silent-fallback case -- IO would keep "
+                f"verifying while every byte went through the metadata "
+                f"server. {exc}") from exc
+
+        now = {p: v.get("server_ops", 0) for p, v in proven.items()}
+        if when.startswith("before") and self._pnfs_srv:
+            grew = {p: (self._pnfs_srv[p], n) for p, n in now.items()
+                    if p in self._pnfs_srv and n > self._pnfs_srv[p]}
+            if grew:
                 raise PnfsEvidenceError(
-                    f"[pnfs-stress] {when}: the data path stopped being pNFS. "
-                    f"This is the silent-fallback case -- IO would keep "
-                    f"verifying while every byte went through the metadata "
-                    f"server. {exc}") from exc
+                    "[pnfs-stress] the data path is still falling back to "
+                    "the metadata server after the cluster recovered. These "
+                    "mounts held a layout and drove server-side IO anyway, "
+                    "between one outage's recovery and the next: "
+                    + ", ".join(f"{p} {a}->{b}" for p, (a, b) in grew.items()))
+        self._pnfs_srv = now
+
+        served = sum(1 for n in now.values() if n)
+        self.logger.info(
+            "[pnfs-stress] %s: %d mount(s) hold a layout%s", when, len(proven),
+            f"; {served} carry historic server-side IO from earlier outages"
+            if served else " and none has ever touched the server")
 
         exports = nfsexport_status(self.k8s_utils) or []
         bad = [((e.get("metadata") or {}).get("name"),
