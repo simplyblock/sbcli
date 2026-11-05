@@ -159,7 +159,9 @@ if verb == "get":
         pool = s["pools"].get(name)
         if pool is None:
             fail('Error from server (NotFound): machineconfigpools.machineconfiguration.openshift.io "%s" not found' % name)
-        if "metadata.labels" in jsonpath:
+        if "spec.configuration.name" in jsonpath:
+            print(s["pool_target"].get(name, ""))
+        elif "metadata.labels" in jsonpath:
             print(pool.get("labels", {}).get("custom-kubelet", ""))
         elif "configuration.source" in jsonpath and name == "master":
             # MCO's KubeletConfig controller evaluates a KubeletConfig when it is
@@ -221,7 +223,12 @@ if verb == "get":
     elif kind == "pod":
         print("true")
     elif kind == "node":
-        print("100")
+        if "currentConfig" in jsonpath:
+            print(s["node_current"].get(name, ""))
+        elif jsonpath.endswith("/state}"):
+            print("Done")
+        else:
+            print("100")
 elif verb in ("create", "apply"):
     src = opt("-f")
     text = sys.stdin.read() if src == "-" else open(src).read()
@@ -294,7 +301,7 @@ save()
 def _state(**overrides):
     state = {"pools": {}, "mcs": [], "kcs": {}, "render_after": 2, "generated_suffix": "", "masters": [],
              "kc_label": "storage-cpumanager-ac85c3", "kc_name": "storage-kubelet-ac85c3",
-             "master_ours_name": "99-master-generated-kubelet", "master_kcs": [], "race_kc": None,
+             "master_ours_name": "99-master-generated-kubelet", "master_kcs": [], "race_kc": None, "node_current": {}, "pool_target": {},
              "reject_kubeletconfig": False, "fail_get_pool": 0, "fail_get_hosts": 0}
     state.update(overrides)
     return state
@@ -313,7 +320,7 @@ def _run(tmp_path, state, hostname="worker-1", marker=False):
     kubectl = bin_dir / "kubectl"
     kubectl.write_text('#!/bin/sh\nexec "%s" -I "%s" "$@"\n' % (sys.executable, fake))
     sleep = bin_dir / "sleep"
-    sleep.write_text("#!/bin/sh\nexit 0\n")
+    sleep.write_text('#!/bin/sh\necho "$1" >> "%s"\n' % (tmp_path / "slept"))
     for tool in (kubectl, sleep):
         tool.chmod(0o755)
     marker_path = tmp_path / "cpu_topology_applied"
@@ -574,3 +581,58 @@ def test_a_refusal_fails_the_job_at_once():
     """A refusal is final: retried in place it only crash-loops until the
     agent's wait times out, with the reason in a dead pod's log."""
     assert _job()["spec"]["backoffLimit"] == 0
+
+
+def _slept(tmp_path):
+    path = tmp_path / "slept"
+    return path.read_text().split() if path.exists() else []
+
+
+def _rendered_master(**fields):
+    return _state(masters=["master-3"], kcs={KC: {}, MASTER_KC: {"reservedSystemCPUs": "0-1"}},
+                  master_kcs=[MASTER_KC], mcs=[MC], render_after=0,
+                  pools={"master": _master_pool(generated=[["99-master-generated-kubelet", MASTER_KC]])},
+                  pool_target={"master": "rendered-master-aaa111"}, **fields)
+
+
+@needs_dash
+def test_a_master_already_on_the_render_skips_the_reboot_wait(tmp_path):
+    """The first master's add rolls every master into the settings. A later
+    master's own job has no marker, but the node already runs the render:
+    no reboot is due, so there is none to wait for."""
+    proc, state, calls = _run(tmp_path, _rendered_master(node_current={"master-3": "rendered-master-aaa111"}),
+                              hostname="master-3")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "900" not in _slept(tmp_path), proc.stdout
+    assert "already runs" in proc.stdout
+    assert "numa-align/numa-0 is available (100)" in proc.stdout
+    assert (tmp_path / "cpu_topology_applied").exists()
+
+
+@needs_dash
+def test_a_master_not_yet_on_the_render_waits_for_its_reboot(tmp_path):
+    proc, state, calls = _run(tmp_path, _rendered_master(node_current={"master-3": "rendered-master-old999"}),
+                              hostname="master-3")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "900" in _slept(tmp_path)
+
+
+@needs_dash
+def test_a_worker_on_an_identical_render_keeps_the_reboot_wait(tmp_path):
+    """Only a master skips the wait: a worker's first add keeps it whatever
+    render the worker already runs."""
+    proc, state, calls = _run(tmp_path, _state(
+        pools={POOL: {"values": ["worker-1"]}}, mcs=[MC], kcs={KC: {}}, render_after=0,
+        pool_target={POOL: "rendered-%s-bbb222" % POOL},
+        node_current={"worker-1": "rendered-storage-old111-bbb222"}))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "900" in _slept(tmp_path)
+
+
+@needs_dash
+def test_a_worker_joining_a_new_render_waits_for_its_reboot(tmp_path):
+    proc, state, calls = _run(tmp_path, _state(
+        pool_target={POOL: "rendered-%s-bbb222" % POOL},
+        node_current={"worker-1": "rendered-worker-ccc333"}))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "900" in _slept(tmp_path)

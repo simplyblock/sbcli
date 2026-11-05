@@ -362,6 +362,23 @@ spec:
               # NUMA-plugin readiness. SPDK start is gated separately by the agent
               # (it waits for the MCO reboot to actually land), so correctness no
               # longer depends on this marker being in sync.
+              #
+              # A master has no reboot due when it already runs the master pool's
+              # target render: the first master's add rolls every master into the
+              # settings, and a later master's own job has no marker. Its current
+              # config carries the target's content hash and MCO is done with it.
+              # A worker keeps the first-time wait.
+              if [ ! -f "$MARKER" ] && [ -n "$IS_MASTER" ]; then
+                TARGET=$(kubectl get machineconfigpool master -o jsonpath='{.spec.configuration.name}' 2>/dev/null || true)
+                CURRENT=$(kubectl get node "$HOSTNAME" \
+                  -o jsonpath='{.metadata.annotations.machineconfiguration\.openshift\.io/currentConfig}' 2>/dev/null || true)
+                STATE=$(kubectl get node "$HOSTNAME" \
+                  -o jsonpath='{.metadata.annotations.machineconfiguration\.openshift\.io/state}' 2>/dev/null || true)
+                if [ -n "$TARGET" ] && [ -n "$CURRENT" ] && [ "${CURRENT##*-}" = "${TARGET##*-}" ] && [ "$STATE" = "Done" ]; then
+                  echo "[INFO] $HOSTNAME already runs $TARGET; no reboot is due"
+                  touch "$MARKER"
+                fi
+              fi
               if [ -f "$MARKER" ]; then
                   echo "[INFO] Node already configured. Waiting for numa-align/numa-{{ NSOCKET }} to be allocatable..."
                   RETRIES=0
