@@ -171,21 +171,21 @@ def storage_node_restart():
     force = bool(req_data.get("force", ""))
 
     try:
-        db.get_storage_node_by_id(uuid)
+        node = db.get_storage_node_by_id(uuid)
     except KeyError:
         return utils.get_response_error(f"node not found: {uuid}", 404)
 
-    threading.Thread(
-        target=storage_node_ops.restart_storage_node,
-        kwargs={
-            "node_id": uuid,
-            "node_address": node_ip,
-            "force": force,
-            "reattach_volume": reattach_volume,
-        }
-    ).start()
+    task_id = tasks_controller.ensure_node_restart_task(node, function_params={
+        "force": force,
+        "node_address": node_ip,
+        "reattach_volume": reattach_volume,
+    })
+    if not task_id:
+        task_id = tasks_controller.get_active_node_restart_task(node.cluster_id, uuid)
+        if not task_id:
+            return utils.get_response_error("Failed to create restart task", 500)
 
-    return utils.get_response(True)
+    return utils.get_response(task_id)
 
 
 @bp.route('/storagenode/add', methods=['POST'])
