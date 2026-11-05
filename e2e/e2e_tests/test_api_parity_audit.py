@@ -1,5 +1,23 @@
 """Three-way parity audit: CLI vs API v1 vs API v2.
 
+**Obsolete as written, and it refuses to run.** ``SbcliUtils`` now speaks v2,
+so the column this test labels "v1" is served by v2 as well. The two columns
+agree by construction, and a green report would say nothing at all -- which
+is worse than a red one, because someone would believe it.
+
+Two things worth salvaging before it is rewritten or deleted:
+
+* its comparison machinery (``_check_interface_data``, the field diffing and
+  the HTML report) is the right shape for a **CLI vs v2** audit, which is the
+  comparison that still exists;
+* the findings it last produced (``parity_report/api_parity_findings.json``,
+  August) are not usable evidence: ``SbcliUtilsV2`` was sending v1's
+  ``Authorization: <cluster_id> <secret>`` header, which v2's HTTPBearer
+  refuses with 403 before any handler runs. Every v2 column came back empty,
+  and the 724 "missing field" findings are that, not a field gap. Both
+  clients send ``Bearer <secret>`` now, so a fresh run would say something
+  different.
+
 For each auditable operation, invokes all three interfaces against the
 live cluster and compares:
 
@@ -44,6 +62,18 @@ class TestAPIParityAudit(TestClusterBase):
     # ── orchestrator ──────────────────────────────────────────────────
 
     def run(self):
+        raise RuntimeError(
+            "TestAPIParityAudit compares API v1 against API v2, and the "
+            "harness no longer has a v1 client: SbcliUtils speaks v2, so the "
+            "'v1' column here is a second reading of v2 and the two agree "
+            "whatever the product does. Rewrite it as a CLI-vs-v2 audit (the "
+            "comparison machinery carries over unchanged) or delete it; do "
+            "not re-enable it as it stands. See the module docstring, and "
+            "note that the August findings file predates the auth fix and is "
+            "not evidence of anything."
+        )
+
+    def _run_obsolete(self):
         self.logger.info("=== API Parity Audit: CLI / v1 / v2 ===")
 
         # Phase 0: ensure a pool exists for the entire audit

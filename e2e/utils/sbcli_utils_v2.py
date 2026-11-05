@@ -37,7 +37,11 @@ class SbcliUtilsV2:
         self.cluster_id = cluster_id
         self.headers = {
             "Content-Type": "application/json",
-            "Authorization": f"{cluster_id} {cluster_secret}",
+            # HTTPBearer, scheme and all (api/v2/_auth.py). The v1 form
+            # "<cluster_id> <secret>" is refused with 403 before any handler
+            # runs, which is what made every v2 column of the August parity
+            # report come back empty.
+            "Authorization": f"Bearer {cluster_secret}",
         }
         self.logger = setup_logger(__name__)
 

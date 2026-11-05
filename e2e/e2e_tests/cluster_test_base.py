@@ -3180,9 +3180,9 @@ class TestClusterBase:
         # differently and only one of them has an HTTP base at all.
         #
         # Docker (SbcliUtils) talks to the API over HTTP, so poll the
-        # endpoint. cluster_api_url is the v1 wrapper's base and may already
-        # carry the /api/v1 suffix -- strip it and build the v2 prefix the
-        # same way SbcliUtilsV2 does, or every poll 404s.
+        # endpoint. SbcliUtils normalises the base and exposes the v2 prefix
+        # as v2_base; the removesuffix below is kept for a stand-in object
+        # that only carries cluster_api_url.
         #
         # K8s-native (K8sSbcliUtils) has neither cluster_api_url nor headers:
         # it runs everything as `kubectl exec` into the admin pod. The API
@@ -3194,12 +3194,14 @@ class TestClusterBase:
         # what it does not cover is the HTTP layer itself.
         api_url = getattr(self.sbcli_utils, "cluster_api_url", None)
         if api_url:
-            raw = api_url.rstrip("/").removesuffix("/api/v1")
-            source = f"{raw}/api/v2/clusters/{self.cluster_id}/alerts/"
+            v2_base = getattr(self.sbcli_utils, "v2_base", None)
+            raw = v2_base or (
+                api_url.rstrip("/").removesuffix("/api/v1") + "/api/v2")
+            source = f"{raw}/clusters/{self.cluster_id}/alerts/"
             # v2 authenticates with HTTPBearer against the cluster secret
-            # alone. sbcli_utils.headers carries the v1 form,
-            # "Authorization: <cluster_id> <secret>", whose scheme is not
-            # Bearer -- v2 rejects that with 403 before any handler runs.
+            # alone. sbcli_utils.headers now carries exactly that, since the
+            # whole suite moved to v2 -- but spelled out here so this poll
+            # does not depend on that having stayed true.
             headers = {"Authorization": f"Bearer {self.cluster_secret}"}
 
             def _fetch():

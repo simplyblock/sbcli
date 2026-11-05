@@ -4,11 +4,31 @@ from http import HTTPStatus
 
 import requests
 from logger_config import setup_logger
+from utils.api_v2 import ExpectedApiError, V2Router, V2TranslationError
 from utils.common_utils import sleep_n_sec
 
 
 class SbcliUtils:
-    """Contains all API calls
+    """Contains all API calls. **Every one of them goes to API v2.**
+
+    v1 is being retired, and the whole suite reaches the product through this
+    one class -- 67 methods, ~1,900 call sites, and outside this file not a
+    single direct ``requests`` call to the product API -- so the migration
+    happens here and nowhere else.
+
+    Method signatures and return shapes are deliberately unchanged. v2 is a
+    different API, not a renamed one: resources nest under
+    ``/clusters/{id}``, a response is the bare object rather than
+    ``{"status", "results"}``, ``uuid`` became ``id``, and failures come back
+    as real status codes. :class:`utils.api_v2.V2Router` absorbs all of that
+    and returns what v1 returned, which is what makes moving off a deprecated
+    API possible without rewriting 135 test files against an API no parity
+    run has validated yet.
+
+    Read ``utils/api_v2.py``'s docstring for what the translation can and
+    cannot do. The one thing it cannot: ``StorageNodeDTO`` reports node
+    *state*, so the configuration a node was added with is no longer
+    readable back off the node.
     """
 
     def __init__(self, cluster_secret, cluster_api_url, cluster_id):
@@ -24,10 +44,32 @@ class SbcliUtils:
         #
         # Normalising here rather than at the five call sites, and rather than in
         # the workflows, so e2e is correct whichever form of the URL it is handed.
-        self.cluster_api_url = (cluster_api_url or "").rstrip("/")
+        #
+        # A caller may also hand over a base that already names a version --
+        # "http://.../api/v1" is what several workflows export -- so the
+        # version suffix comes off before v2's is added. Otherwise the
+        # request goes to /api/v1/api/v2/... and 404s ten times.
+        base = (cluster_api_url or "").rstrip("/")
+        for suffix in ("/api/v1", "/api/v2"):
+            if base.endswith(suffix):
+                base = base[: -len(suffix)]
+                break
+        self.cluster_api_url = base
+        #: Where every call in this class actually goes.
+        self.v2_base = f"{base}/api/v2"
+        # v2 authenticates with HTTPBearer (api/v2/_auth.py): the scheme has
+        # to be "Bearer" and the credential is the cluster secret on its own.
+        # v1 took "Authorization: <cluster_id> <secret>", whose scheme v2
+        # rejects with 403 before any handler runs -- and silently, from a
+        # test's point of view, since every call fails identically.
+        #
+        # This is also why the August parity report showed v2 returning zero
+        # clusters, zero nodes and zero devices: SbcliUtilsV2 was sending the
+        # v1 header, so nothing it asked for was ever authorised. Those 724
+        # "missing field" findings were an auth failure, not a field gap.
         self.headers = {
             "Content-Type": "application/json",
-            "Authorization": f"{cluster_id} {cluster_secret}"
+            "Authorization": f"Bearer {cluster_secret}",
         }
         self.logger = setup_logger(__name__)
         # Extended API recovery: after the quick retries exhaust on a 503,
@@ -47,9 +89,32 @@ class SbcliUtils:
         # instead of half an hour. A lane that wants to wait longer sets its
         # own value, as the stress lanes already do.
         self.api_recovery_timeout = 300
+        #: Translates a v1-style call into v2 requests. Holds the id
+        #: indexes v2's nested paths need (a volume is only addressable
+        #: through its pool), so it is per-instance and not shared.
+        self.router = V2Router(cluster_id, self._v2_call, self.logger)
+
+    # ── transport ────────────────────────────────────────────────────────
+    #
+    # The four verb helpers below are the only seam between the suite and the
+    # API, and they are what moved to v2. Each one still takes a v1-style
+    # path, because that is what 1,900 call sites pass; the router turns it
+    # into however many v2 requests it needs and rebuilds v1's response.
+    #
+    # Retries, the API-recovery wait and expected_error_code all stay here,
+    # in _v2_call, rather than being duplicated in the router: a v1 call that
+    # fans out over several pools must not multiply the retry budget.
+
+    #: Status codes v2 answers success with. v1 only ever used 200, so the
+    #: old helpers compared against HTTPStatus.OK alone and would have read
+    #: every 201/202/204 as a failure.
+    V2_SUCCESS = frozenset({
+        HTTPStatus.OK, HTTPStatus.CREATED, HTTPStatus.ACCEPTED,
+        HTTPStatus.NO_CONTENT,
+    })
 
     def _url(self, api_url):
-        """Join the base and an endpoint with exactly one slash between them.
+        """Join the v2 base and an endpoint with exactly one slash between.
 
         Every endpoint in the suite is written with a leading slash today, so
         rstrip()ing the base in __init__ is on its own enough. But that is a
@@ -57,11 +122,8 @@ class SbcliUtils:
         with "pool" instead of "/pool" would get
         "http://192.168.10.210pool" -- a worse failure than the one this
         replaced, and one that only shows up at runtime.
-
-        Normalising both halves costs nothing and makes the join correct for
-        any combination.
         """
-        return f"{self.cluster_api_url}/{api_url.lstrip('/')}"
+        return f"{self.v2_base}/{api_url.lstrip('/')}"
 
     @staticmethod
     def _is_transient_error(exc):
@@ -75,10 +137,15 @@ class SbcliUtils:
         return False
 
     def _wait_for_api_recovery(self, interval=15):
-        """Ping GET /storagenode every *interval* seconds until the API
-        responds with 200 or *api_recovery_timeout* is exceeded.
+        """Ping the API every *interval* seconds until it answers or
+        *api_recovery_timeout* is exceeded.
 
         Returns True if API recovered, False if timeout expired.
+
+        Pings ``/_meta/health``, which is v2's own liveness route and the one
+        endpoint in the API that needs no token and touches no cluster. The
+        v1 version of this pinged ``/storagenode``, so a cluster whose nodes
+        were mid-restart could answer 500 and be read as "still down".
         """
         timeout = self.api_recovery_timeout
         if timeout <= 0:
@@ -94,11 +161,11 @@ class SbcliUtils:
             time.sleep(interval)
             try:
                 resp = requests.get(
-                    self._url("/storagenode"),
+                    self._url("/_meta/health"),
                     headers=self.headers,
                     timeout=10,
                 )
-                if resp.status_code == 200:
+                if resp.status_code in self.V2_SUCCESS:
                     self.logger.info(
                         f"API recovered after {attempt * interval}s — resuming"
                     )
@@ -115,237 +182,177 @@ class SbcliUtils:
         )
         return False
 
-    def get_request(self, api_url, headers=None, expected_error_code=None):
-        """Performs get request on the given API URL
+    def _v2_call(self, verb, path, body=None, query=None, headers=None,
+                 retry=10, expected_error_code=None,
+                 treat_404_as_success=False, timeout=120):
+        """One request against ``/api/v2``, with the suite's retry policy.
 
-        Args:
-            api_url (str): Endpoint to request
-            headers (dict, optional): Headers needed. Defaults to None.
-
-        Returns:
-            dict: response returned
+        Returns the parsed body, or None for a 204 and for an expected error.
+        *path* is already a v2 path -- the router has done the translation.
         """
-        print(self.cluster_api_url)
-        print(api_url)
-        request_url = self._url(api_url)
-        print(request_url)
+        request_url = self._url(path)
         headers = headers if headers else self.headers
-        print(headers)
-        self.logger.info(f"Calling GET for {api_url} with headers: {headers}")
-        retry = 10
-        data = None
-        while retry > 0:
+        self.logger.info(f"[v2] {verb} {path}"
+                         + (f" ?{query}" if query else "")
+                         + (f" body={body}" if body is not None else ""))
+        attempts_left = max(1, retry)
+        while True:
             try:
-                resp = requests.get(request_url, headers=headers)
-                if resp.status_code == HTTPStatus.OK:
-                    data = resp.json()
-                    return data
-                else:
-                    body_text = resp.text or ""
-                    self.logger.error(f"request failed. status_code: {resp.status_code}, text: {body_text}")
-                    raise requests.exceptions.HTTPError(
-                        f"{resp.status_code} {resp.reason}: {body_text}",
-                        response=resp,
-                    )
+                resp = requests.request(
+                    verb, request_url, headers=headers, json=body,
+                    params=query or None, timeout=timeout,
+                )
+                if resp.status_code in self.V2_SUCCESS:
+                    if resp.status_code == HTTPStatus.NO_CONTENT or not resp.content:
+                        return None
+                    try:
+                        return resp.json()
+                    except ValueError:
+                        return resp.text
+                if (resp.status_code == HTTPStatus.NOT_FOUND
+                        and treat_404_as_success):
+                    self.logger.info(
+                        f"[v2] {verb} {path} returned 404 — resource already "
+                        f"gone, treating as success")
+                    return None
+                body_text = resp.text or ""
+                self.logger.error(
+                    f"request failed. status_code: {resp.status_code}, "
+                    f"text: {body_text}")
+                raise requests.exceptions.HTTPError(
+                    f"{resp.status_code} {resp.reason}: {body_text}",
+                    response=resp,
+                )
             except requests.exceptions.HTTPError as e:
-                self.logger.debug(f"API call {api_url} failed with error:{e}")
-                if expected_error_code:
-                    if e.response.status_code in expected_error_code:
-                        self.logger.info(f"Expected error: {e}")
-                        break
-                else:
-                    retry -= 1
-                    if retry == 0:
-                        if self._is_transient_error(e) and self._wait_for_api_recovery():
-                            retry = 1  # one more attempt after recovery
-                            continue
-                        self.logger.info(f"Retry attempt exhausted. API {api_url} failed with: {e}.")
-                        raise e
-                    self.logger.info(f"Retrying API {api_url}. Attempt: {10 - retry + 1}")
-                    sleep_n_sec(1)
-            except Exception as e:
-                self.logger.debug(f"API call {api_url} failed with error:{e}")
-                retry -= 1
-                if retry == 0:
+                code = getattr(getattr(e, "response", None), "status_code", 0)
+                if expected_error_code and code in expected_error_code:
+                    self.logger.info(f"Expected error: {e}")
+                    # Raised rather than returned: this is several frames
+                    # below the route handler, which would otherwise wrap a
+                    # refusal in its usual success envelope.
+                    raise ExpectedApiError(code, str(e)) from e
+                # A 4xx other than an expected one is the API's answer, not a
+                # transport failure. v1 returned 200 with status:false for
+                # these, so there was nothing to retry; retrying a 409 or a
+                # 422 ten times only delays the failure by ten round trips.
+                if 400 <= code < 500 and code not in (408, 429):
+                    self.logger.info(
+                        f"[v2] {verb} {path} refused with {code}; not retrying")
+                    raise
+                attempts_left -= 1
+                if attempts_left <= 0:
                     if self._is_transient_error(e) and self._wait_for_api_recovery():
-                        retry = 1
+                        attempts_left = 1
                         continue
-                    self.logger.info(f"Retry attempt exhausted. API {api_url} failed with: {e}.")
-                    raise e
-                self.logger.info(f"Retrying API {api_url}. Attempt: {10 - retry + 1}")
+                    self.logger.info(
+                        f"Retry attempt exhausted. API {path} failed with: {e}.")
+                    raise
+                self.logger.info(f"Retrying API {path}.")
+                sleep_n_sec(1)
+            except Exception as e:
+                self.logger.debug(f"API call {path} failed with error:{e}")
+                attempts_left -= 1
+                if attempts_left <= 0:
+                    if self._is_transient_error(e) and self._wait_for_api_recovery():
+                        attempts_left = 1
+                        continue
+                    self.logger.info(
+                        f"Retry attempt exhausted. API {path} failed with: {e}.")
+                    raise
+                self.logger.info(f"Retrying API {path}.")
                 sleep_n_sec(1)
 
-    def post_request(self, api_url, headers=None, body=None, retry=10, expected_error_code=None):
-        """Performs post request on the given API URL
+    def _dispatch(self, verb, api_url, body=None, headers=None, retry=10,
+                  expected_error_code=None, treat_404_as_success=False):
+        """Serve a v1-style call out of v2, in v1's response shape."""
+        try:
+            return self.router.dispatch(
+                verb, api_url, body,
+                headers=headers, retry=retry,
+                expected_error_code=expected_error_code,
+                treat_404_as_success=treat_404_as_success,
+            )
+        except ExpectedApiError as exc:
+            # v1's helpers returned None when the caller had named this code.
+            self.logger.info(f"[api-v2] {exc}")
+            return None
+        except V2TranslationError as exc:
+            # Never swallowed and never retried. An unmapped endpoint is a gap
+            # in the migration, and the one failure mode worth avoiding above
+            # all others is a translation that quietly returns something
+            # plausible: the test would pass while asserting nothing.
+            self.logger.error(f"[api-v2] {exc}")
+            raise
+
+    def get_request(self, api_url, headers=None, expected_error_code=None):
+        """Performs a GET against the v2 equivalent of *api_url*.
 
         Args:
-            api_url (str): Endpoint to request
+            api_url (str): Endpoint to request, in v1 spelling.
             headers (dict, optional): Headers needed. Defaults to None.
-            body (dict, optional): Body to send in request. Defaults to None.
-            retry (int, optional): number of retries if request failed. Default is 10.
 
         Returns:
-            dict: response returned
+            dict: response in v1's ``{"status", "results"}`` shape
         """
-        request_url = self._url(api_url)
-        headers = headers if headers else self.headers
-        self.logger.info(f"Calling POST for {api_url} with headers: {headers}, body: {body}")
-        while retry > 0:
-            try:
-                resp = requests.post(request_url, headers=headers,
-                                     json=body, timeout=100)
-                if resp.status_code == HTTPStatus.OK:
-                    data = resp.json()
-                    return data
-                else:
-                    body_text = resp.text or ""
-                    self.logger.error(f"request failed. status_code: {resp.status_code}, text: {body_text}")
-                    raise requests.exceptions.HTTPError(
-                        f"{resp.status_code} {resp.reason}: {body_text}",
-                        response=resp,
-                    )
-            except requests.exceptions.HTTPError as e:
-                self.logger.debug(f"API call {api_url} failed with error:{e}")
-                if expected_error_code:
-                    if e.response.status_code in expected_error_code:
-                        self.logger.info(f"Expected error: {e}")
-                else:
-                    retry -= 1
-                    if retry == 0:
-                        if self._is_transient_error(e) and self._wait_for_api_recovery():
-                            retry = 1
-                            continue
-                        self.logger.info(f"Retry attempt exhausted. API {api_url} failed with: {e}.")
-                        raise e
-                    self.logger.info(f"Retrying API {api_url}. Attempt: {10 - retry + 1}")
-                    sleep_n_sec(1)
-            except Exception as e:
-                self.logger.debug(f"API call {api_url} failed with error:{e}")
-                retry -= 1
-                if retry == 0:
-                    if self._is_transient_error(e) and self._wait_for_api_recovery():
-                        retry = 1
-                        continue
-                    self.logger.info(f"Retry attempt exhausted. API {api_url} failed with: {e}.")
-                    raise e
-                self.logger.info(f"Retrying API {api_url}. Attempt: {10 - retry + 1}")
-                sleep_n_sec(3)
+        return self._dispatch(
+            "GET", api_url, headers=headers,
+            expected_error_code=expected_error_code)
 
-    def delete_request(self, api_url, headers=None, expected_error_code=None, treat_404_as_success=False):
-        """Performs delete request on the given API URL
+    def post_request(self, api_url, headers=None, body=None, retry=10,
+                     expected_error_code=None):
+        """Performs a POST against the v2 equivalent of *api_url*.
 
         Args:
-            api_url (str): Endpoint to request
+            api_url (str): Endpoint to request, in v1 spelling.
+            headers (dict, optional): Headers needed. Defaults to None.
+            body (dict, optional): Body to send, in v1 spelling. The router
+                renames and drops fields to match v2's request models.
+            retry (int, optional): number of retries if request failed.
+
+        Returns:
+            dict: response in v1's ``{"status", "results"}`` shape
+        """
+        return self._dispatch(
+            "POST", api_url, body=body, headers=headers, retry=retry,
+            expected_error_code=expected_error_code)
+
+    def delete_request(self, api_url, headers=None, expected_error_code=None,
+                       treat_404_as_success=False, body=None):
+        """Performs a DELETE against the v2 equivalent of *api_url*.
+
+        Args:
+            api_url (str): Endpoint to request, in v1 spelling.
             headers (dict, optional): Headers needed. Defaults to None.
             treat_404_as_success (bool): If True, treat HTTP 404 as idempotent
                 success (resource already deleted). Defaults to False.
 
         Returns:
-            dict: response returned
+            dict: response in v1's ``{"status", "results"}`` shape
         """
-        request_url = self._url(api_url)
-        headers = headers if headers else self.headers
-        self.logger.info(f"Calling DELETE for {api_url} with headers: {headers}")
-        retry = 10
-        while retry > 0:
-            try:
-                resp = requests.delete(request_url, headers=headers)
-                if resp.status_code == HTTPStatus.OK:
-                    data = resp.json()
-                    return data
-                elif resp.status_code == HTTPStatus.NOT_FOUND and treat_404_as_success:
-                    self.logger.info(f"DELETE {api_url} returned 404 — resource already deleted, treating as success")
-                    return {"status": True, "results": [], "error": None}
-                else:
-                    body_text = resp.text or ""
-                    self.logger.error(f"request failed. status_code: {resp.status_code}, text: {body_text}")
-                    raise requests.exceptions.HTTPError(
-                        f"{resp.status_code} {resp.reason}: {body_text}",
-                        response=resp,
-                    )
+        return self._dispatch(
+            "DELETE", api_url, body=body, headers=headers,
+            expected_error_code=expected_error_code,
+            treat_404_as_success=treat_404_as_success)
 
-            except requests.exceptions.HTTPError as e:
-                self.logger.debug(f"API call {api_url} failed with error:{e}")
-                if expected_error_code:
-                    if e.response.status_code in expected_error_code:
-                        self.logger.info(f"Expected error: {e}")
-                else:
-                    retry -= 1
-                    if retry == 0:
-                        if self._is_transient_error(e) and self._wait_for_api_recovery():
-                            retry = 1
-                            continue
-                        self.logger.info(f"Retry attempt exhausted. API {api_url} failed with: {e}.")
-                        raise e
-                    self.logger.info(f"Retrying API {api_url}. Attempt: {10 - retry + 1}")
-                    sleep_n_sec(1)
-            except Exception as e:
-                self.logger.debug(f"API call {api_url} failed with error:{e}")
-                retry -= 1
-                if retry == 0:
-                    if self._is_transient_error(e) and self._wait_for_api_recovery():
-                        retry = 1
-                        continue
-                    self.logger.info(f"Retry attempt exhausted. API {api_url} failed with: {e}.")
-                    raise e
-                self.logger.info(f"Retrying API {api_url}. Attempt: {5 - retry + 1}")
-                sleep_n_sec(3)
+    def put_request(self, api_url, headers=None, body=None,
+                    expected_error_code=None):
+        """Performs a PUT against the v2 equivalent of *api_url*.
 
-    def put_request(self, api_url, headers=None, body=None, expected_error_code=None):
-        """Performs put request on the given API URL
+        Several v1 PUTs are POSTs in v2 (cluster activate, node restart); the
+        router maps the verb along with the path, so callers keep using the
+        verb v1 wanted.
 
         Args:
-            api_url (str): Endpoint to request
+            api_url (str): Endpoint to request, in v1 spelling.
             headers (dict, optional): Headers needed. Defaults to None.
-            body (dict, optional): Body to send in request. Defaults to None.
+            body (dict, optional): Body to send, in v1 spelling.
 
         Returns:
-            dict: response returned
+            dict: response in v1's ``{"status", "results"}`` shape
         """
-        request_url = self._url(api_url)
-        headers = headers if headers else self.headers
-        self.logger.info(f"Calling POST for {api_url} with headers: {headers}, body: {body}")
-        retry = 5
-        while retry > 0:
-            try:
-                resp = requests.put(request_url, headers=headers,
-                                     json=body, timeout=100)
-                if resp.status_code == HTTPStatus.OK:
-                    data = resp.json()
-                    return data
-                else:
-                    body_text = resp.text or ""
-                    self.logger.error(f"request failed. status_code: {resp.status_code}, text: {body_text}")
-                    raise requests.exceptions.HTTPError(
-                        f"{resp.status_code} {resp.reason}: {body_text}",
-                        response=resp,
-                    )
-            except requests.exceptions.HTTPError as e:
-                self.logger.debug(f"API call {api_url} failed with error:{e}")
-                if expected_error_code:
-                    if e.response.status_code in expected_error_code:
-                        self.logger.info(f"Expected error: {e}")
-                else:
-                    retry -= 1
-                    if retry == 0:
-                        if self._is_transient_error(e) and self._wait_for_api_recovery():
-                            retry = 1
-                            continue
-                        self.logger.info(f"Retry attempt exhausted. API {api_url} failed with: {e}.")
-                        raise e
-                    self.logger.info(f"Retrying API {api_url}. Attempt: {10 - retry + 1}")
-                    sleep_n_sec(1)
-            except Exception as e:
-                self.logger.debug(f"API call {api_url} failed with error:{e}")
-                retry -= 1
-                if retry == 0:
-                    if self._is_transient_error(e) and self._wait_for_api_recovery():
-                        retry = 1
-                        continue
-                    self.logger.info(f"Retry attempt exhausted. API {api_url} failed with: {e}.")
-                    raise e
-                self.logger.info(f"Retrying API {api_url}. Attempt: {10 - retry + 1}")
-                sleep_n_sec(3)
+        return self._dispatch(
+            "PUT", api_url, body=body, headers=headers, retry=5,
+            expected_error_code=expected_error_code)
 
     def add_storage_node(self, cluster_id, node_ip, ifname, max_lvol, max_prov, max_snap,
                          number_of_distribs, number_of_devices, partitions, jm_percent,
@@ -537,13 +544,11 @@ class SbcliUtils:
             self.logger.info("Pool does not exist. Exiting")
             return
 
-        pool_data = self.get_pool_by_id(pool_id=pool_id)
-
-        header = self.headers.copy()
-        header["secret"] = pool_data["results"][0]["secret"]
-
-        self.delete_request(api_url=f"/pool/{pool_id}",
-                                   headers=header)
+        # v1 wanted the pool's own secret echoed back in a header, so this
+        # first read the pool to find it. v2's delete route takes no secret:
+        # the bearer token already authorises the cluster, and StoragePoolDTO
+        # does not carry one. The extra read is gone with it.
+        self.delete_request(api_url=f"/pool/{pool_id}")
 
     def delete_all_storage_pools(self):
         """Deletes all the storage pools
