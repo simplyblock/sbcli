@@ -161,8 +161,8 @@ class TestClusterFlag(unittest.TestCase):
 
     def test_fresh_clusters_are_v2(self):
         src = inspect.getsource(cluster_ops)
-        self.assertEqual(src.count("cluster.write_protection_v2 = True"), 2,
-                         "both create paths must stamp v2")
+        self.assertEqual(src.count("cluster.write_protection_v2 = True"), 1,
+                         "the create path must stamp v2")
 
     def test_upgrade_stamps_back_to_v1(self):
         src = inspect.getsource(cluster_ops.update_cluster)

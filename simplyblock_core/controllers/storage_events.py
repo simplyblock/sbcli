@@ -2,7 +2,6 @@ import logging
 
 from simplyblock_core import constants, utils
 from simplyblock_core.controllers import events_controller as ec
-from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.events import EventObj
 
 logger = logging.getLogger()
@@ -20,8 +19,6 @@ def snode_add(node):
 
 
 def snode_delete(node):
-    db_controller = DBController()
-    cluster = db_controller.get_cluster_by_id(node.cluster_id)
     ec.log_event_cluster(
         cluster_id=node.cluster_id,
         domain=ec.DOMAIN_CLUSTER,
@@ -30,21 +27,18 @@ def snode_delete(node):
         caused_by=ec.CAUSED_BY_CLI,
         message=f"Storage node deleted {node.get_id()}",
         node_id=node.get_id())
-    if cluster.mode == "kubernetes":
-        utils.patch_cr_node_status(
-            group=constants.CR_GROUP,
-            version=constants.CR_VERSION,
-            plural=node.cr_plural,
-            namespace=node.cr_namespace,
-            name=node.cr_name,
-            node_uuid=node.get_id(),
-            node_mgmt_ip=node.mgmt_ip,
-            remove=True,
-        )
+    utils.patch_cr_node_status(
+        group=constants.CR_GROUP,
+        version=constants.CR_VERSION,
+        plural=node.cr_plural,
+        namespace=node.cr_namespace,
+        name=node.cr_name,
+        node_uuid=node.get_id(),
+        node_mgmt_ip=node.mgmt_ip,
+        remove=True,
+    )
 
 def snode_status_change(node, new_state, old_status, caused_by=ec.CAUSED_BY_CLI):
-    db_controller = DBController()
-    cluster = db_controller.get_cluster_by_id(node.cluster_id)
     ec.log_event_cluster(
         cluster_id=node.cluster_id,
         domain=ec.DOMAIN_CLUSTER,
@@ -53,22 +47,19 @@ def snode_status_change(node, new_state, old_status, caused_by=ec.CAUSED_BY_CLI)
         caused_by=caused_by,
         message=f"Storage node status changed from: {old_status} to: {new_state}",
         node_id=node.get_id())
-    if cluster.mode == "kubernetes":
-        utils.patch_cr_node_status(
-            group=constants.CR_GROUP,
-            version=constants.CR_VERSION,
-            plural=node.cr_plural,
-            namespace=node.cr_namespace,
-            name=node.cr_name,
-            node_uuid=node.get_id(),
-            node_mgmt_ip=node.mgmt_ip,
-            updates={"status": new_state},
-        )
+    utils.patch_cr_node_status(
+        group=constants.CR_GROUP,
+        version=constants.CR_VERSION,
+        plural=node.cr_plural,
+        namespace=node.cr_namespace,
+        name=node.cr_name,
+        node_uuid=node.get_id(),
+        node_mgmt_ip=node.mgmt_ip,
+        updates={"status": new_state},
+    )
 
 
 def snode_health_check_change(node, new_state, old_status, caused_by=ec.CAUSED_BY_CLI):
-    db_controller = DBController()
-    cluster = db_controller.get_cluster_by_id(node.cluster_id)
     ec.log_event_cluster(
         cluster_id=node.cluster_id,
         domain=ec.DOMAIN_CLUSTER,
@@ -77,17 +68,16 @@ def snode_health_check_change(node, new_state, old_status, caused_by=ec.CAUSED_B
         caused_by=caused_by,
         message=f"Storage node health check changed from: {old_status} to: {new_state}",
         node_id=node.get_id())
-    if cluster.mode == "kubernetes":
-        utils.patch_cr_node_status(
-            group=constants.CR_GROUP,
-            version=constants.CR_VERSION,
-            plural=node.cr_plural,
-            namespace=node.cr_namespace,
-            name=node.cr_name,
-            node_uuid=node.get_id(),
-            node_mgmt_ip=node.mgmt_ip,
-            updates={"health": new_state},
-        )
+    utils.patch_cr_node_status(
+        group=constants.CR_GROUP,
+        version=constants.CR_VERSION,
+        plural=node.cr_plural,
+        namespace=node.cr_namespace,
+        name=node.cr_name,
+        node_uuid=node.get_id(),
+        node_mgmt_ip=node.mgmt_ip,
+        updates={"health": new_state},
+    )
 
 
 def snode_restart_failed(node):
@@ -229,8 +219,6 @@ def jm_repl_tasks_found(node, jm_vuid, caused_by=ec.CAUSED_BY_MONITOR):
 
 
 def node_ports_changed(node, caused_by=ec.CAUSED_BY_MONITOR):
-    db_controller = DBController()
-    cluster = db_controller.get_cluster_by_id(node.cluster_id)
     ec.log_event_cluster(
         cluster_id=node.cluster_id,
         domain=ec.DOMAIN_CLUSTER,
@@ -240,14 +228,13 @@ def node_ports_changed(node, caused_by=ec.CAUSED_BY_MONITOR):
         event_level=EventObj.LEVEL_WARN,
         message=f"Storage node ports set, LVol:{node.lvol_subsys_port} RPC:{node.rpc_port} Internal:{node.nvmf_port}",
         node_id=node.get_id())
-    if cluster.mode == "kubernetes":
-        utils.patch_cr_node_status(
-            group=constants.CR_GROUP,
-            version=constants.CR_VERSION,
-            plural=node.cr_plural,
-            namespace=node.cr_namespace,
-            name=node.cr_name,
-            node_uuid=node.get_id(),
-            node_mgmt_ip=node.mgmt_ip,
-            updates={"nvmf_port": node.nvmf_port, "rpc_port": node.rpc_port, "lvol_port": node.lvol_subsys_port},
-        )
+    utils.patch_cr_node_status(
+        group=constants.CR_GROUP,
+        version=constants.CR_VERSION,
+        plural=node.cr_plural,
+        namespace=node.cr_namespace,
+        name=node.cr_name,
+        node_uuid=node.get_id(),
+        node_mgmt_ip=node.mgmt_ip,
+        updates={"nvmf_port": node.nvmf_port, "rpc_port": node.rpc_port, "lvol_port": node.lvol_subsys_port},
+    )

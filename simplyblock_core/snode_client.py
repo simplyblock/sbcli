@@ -129,7 +129,7 @@ class SNodeClient:
     def spdk_process_start(self, l_cores, spdk_mem, spdk_image=None, spdk_debug=None, cluster_ip=None,
                            fdb_connection: SecretStr | None = None, namespace=None, server_ip=None, rpc_port=None,
                            rpc_username=None, rpc_password: SecretStr | None = None, multi_threading_enabled=False, timeout=0, ssd_pcie=None,
-                           total_mem=None, system_mem=None, cluster_mode=None, socket=0, cluster_id=None,
+                           total_mem=None, system_mem=None, socket=0, cluster_id=None,
                            spdk_proxy_image=None, mcp_max_unavailable=None, spdk_proxy_tls_secret=None,
                            networks=None, pod_network=False, published_ports=None):
         params = {
@@ -161,8 +161,8 @@ class SNodeClient:
             params["total_mem"] = total_mem
         if system_mem:
             params["system_mem"] = system_mem
-        if cluster_mode:
-            params["cluster_mode"] = cluster_mode
+        # Agents older than the docker-mode removal require this field.
+        params["cluster_mode"] = "kubernetes"
         params["socket"] = socket
         if cluster_id:
             params["cluster_id"] = cluster_id
@@ -188,19 +188,6 @@ class SNodeClient:
         """Remove the pod-network node's Service; its cluster address is gone for good."""
         return self._request("GET", "spdk_service_delete", {"rpc_port": rpc_port, "cluster_id": cluster_id})
 
-    def join_swarm(self, cluster_ip, join_token, db_connection, cluster_id):
-        return True, None
-        # params = {
-        #     "cluster_ip": cluster_ip,
-        #     "cluster_id": cluster_id,
-        #     "join_token": join_token,
-        #     "db_connection": db_connection}
-        # return self._request("POST", "join_swarm", params)
-
-    def spdk_thread_state(self, rpc_port):
-        """Per-thread state of SPDK, sampled twice ~1s apart (diagnostic)."""
-        return self._request("GET", "spdk_thread_state", {"rpc_port": rpc_port})
-
     def spdk_process_kill(self, rpc_port, cluster_id=None):
         return self._request("GET", "spdk_process_kill", {"rpc_port": rpc_port, "cluster_id": cluster_id})
 
@@ -212,10 +199,6 @@ class SNodeClient:
         restart policy)."""
         return self._request("GET", "spdk_process_cleanup",
                              {"rpc_port": rpc_port, "cluster_id": cluster_id})
-
-    def leave_swarm(self):
-        return True
-        # return self._request("GET", "leave_swarm")
 
     def make_gpt_partitions(self, nbd_device, jm_percent, num_partitions, partition_percent):
         params = {
@@ -325,14 +308,6 @@ class SNodeClient:
     def ifc_is_tcp(self, nic):
         params = {"nic": nic}
         return self._request("GET", "ifc_is_tcp", params)
-    def nvme_connect(self, ip, port, nqn):
-        params = {"ip": ip, "port": port, "nqn": nqn}
-        return self._request("POST", "nvme_connect", params)
-
-    def disconnect_nqn(self, nqn):
-        params = {"nqn": nqn}
-        return self._request("POST", "disconnect_nqn", params)
-
 
     def ping_ip(self, ip_address, ifname):
         params = {

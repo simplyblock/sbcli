@@ -9,15 +9,11 @@ metadata:
     {% if FULL_CLUSTER_ID %}
     simplyblock.io/cluster: {{ FULL_CLUSTER_ID }}
     {% endif %}
-  {% if MODE == "kubernetes" or NETWORKS %}
   annotations:
-    {% if MODE == "kubernetes" %}
     log-collector/enabled: "true"
-    {% endif %}
     {% if NETWORKS %}
     k8s.v1.cni.cncf.io/networks: {{ NETWORKS | tojson }}
     {% endif %}
-  {% endif %}
 spec:
   restartPolicy: Never
   serviceAccountName: simplyblock-storage-node-sa
@@ -221,59 +217,3 @@ spec:
           cpu: 1
           memory: "512Mi"
       {% endif %}
-
-{% if MODE == "docker" %}
----
-apiVersion: v1
-kind: Pod
-metadata:
-  name: simplyblock-fluentd-{{ RPC_PORT }}-{{ CLUSTER_ID }}
-  namespace: {{ NAMESPACE }}
-  labels:
-    app: simplyblock-fluentd-app-{{ RPC_PORT }}
-spec:
-  serviceAccountName: simplyblock-storage-node-sa
-  nodeSelector:
-    kubernetes.io/hostname: {{ HOSTNAME }}
-  tolerations:
-    - effect: NoSchedule
-      operator: Exists
-    - effect: NoExecute
-      operator: Exists
-  volumes:
-    - name: varlog
-      hostPath:
-        path: /var/log
-    - name: dockercontainerlogdirectory
-      hostPath:
-        path: /var/log/pods
-  containers:
-    - name: fluentd
-      image: public.ecr.aws/simply-block/fluentd-kubernetes-daemonset:v1.17.1-debian-graylog-1.2
-      imagePullPolicy: "Always"
-      env:
-        - name: K8S_NODE_NAME
-          valueFrom:
-            fieldRef:
-              fieldPath: spec.nodeName
-        - name: FLUENT_GRAYLOG_HOST
-          value: "{{ GRAYLOG_SERVER_IP }}"
-        - name: FLUENT_GRAYLOG_PORT
-          value: "12202"
-        - name: FLUENT_GRAYLOG_PROTOCOL
-          value: "tcp"
-        - name: FLUENTD_SYSTEMD_CONF
-          value: "disable"
-        - name: FLUENT_CONTAINER_TAIL_PATH
-          value: "/var/log/pods/{{ NAMESPACE }}_snode-spdk-pod-{{ RPC_PORT }}-{{ CLUSTER_ID }}_*/*/*.log"
-        - name: FLUENT_CONTAINER_TAIL_EXCLUDE_PATH
-          value: /var/log/pods/fluent*
-        - name: FLUENT_CONTAINER_TAIL_PARSER_TYPE
-          value: '/^(?<time>[^ ]+) (?<stream>stdout|stderr)(?: (?<logtag>.))? (?<log>.*)$/'
-      volumeMounts:
-        - name: varlog
-          mountPath: /var/log
-        - name: dockercontainerlogdirectory
-          mountPath: /var/log/pods
-          readOnly: true
-  {% endif %}

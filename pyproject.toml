@@ -10,7 +10,6 @@ dependencies = [
     "hvac",
     "requests>=2.33.0",
     "prettytable>=3.10.0",
-    "docker",
     "psutil",
     "py-cpuinfo",
     "flask",
@@ -63,7 +62,6 @@ test = [
 types = [
     "mypy",
     "kubernetes-typed",
-    "types-docker",
     "types-boto3",
     "types-urllib3",
 ]

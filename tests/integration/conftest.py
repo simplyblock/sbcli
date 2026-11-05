@@ -32,6 +32,7 @@ import shutil
 import socket
 import tempfile
 import time
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import patch
 
@@ -249,8 +250,11 @@ def _no_kubernetes():
     fast, and 272s — six timeouts — once it started accepting connections
     without answering. CI has no kubeconfig, so raising here is not a new
     behaviour, it is the environment these tests were written against, pinned
-    so it holds everywhere. Callers already handle an unavailable config; that
-    is the branch they take on any non-k8s deployment.
+    so it holds everywhere.
+
+    The helpers that mirror state into the operator's custom resources (and
+    the Prometheus config map) run on every event and cluster add. They are
+    observability only, so they are no-ops here rather than raising.
     """
     from kubernetes.config.config_exception import ConfigException
 
@@ -260,7 +264,12 @@ def _no_kubernetes():
         raise ConfigException(
             "Kubernetes access is disabled in tests (tests/integration/conftest.py)")
 
-    with patch.object(utils, "load_kube_config_with_fallback", _refuse):
+    mirrors = ("patch_cr_status", "patch_cr_node_status", "patch_cr_lvol_status",
+               "patch_prometheus_configmap")
+    with patch.object(utils, "load_kube_config_with_fallback", _refuse), \
+            ExitStack() as stack:
+        for name in mirrors:
+            stack.enter_context(patch.object(utils, name, return_value=True))
         yield
 
 

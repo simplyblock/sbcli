@@ -27,8 +27,6 @@ import sys
 import unittest
 from unittest import mock
 
-import yaml
-
 from simplyblock_core.services import __main__ as dispatcher
 from simplyblock_core.services import task_runners
 
@@ -108,7 +106,7 @@ class TestPathInvocationContract(unittest.TestCase):
         "snapshot_replication", "spdk_http_proxy_server", "storage_node_monitor",
         "tasks_cluster_status", "tasks_runner_backup", "backup_merge_service",
         "tasks_runner_batch_migration", "tasks_runner_cluster_expand",
-        "tasks_runner_failed_migration", "tasks_runner_fdb_backup",
+        "tasks_runner_failed_migration",
         "tasks_runner_jc_comp", "tasks_runner_lvol_migration",
         "tasks_runner_migration", "tasks_runner_new_dev_migration",
         "tasks_runner_node_add", "tasks_runner_node_removal",
@@ -180,10 +178,10 @@ class TestTaskRunnerDispatcher(unittest.TestCase):
 
     def test_serves_the_named_spec(self):
         with mock.patch.object(task_runners, "serve") as serve, \
-                mock.patch.object(sys, "argv", ["simplyblock-task-runner", "tasks-runner-fdb-backup"]):
+                mock.patch.object(sys, "argv", ["simplyblock-task-runner", "tasks-runner-jc-comp"]):
             task_runners.main()
 
-        import simplyblock_core.services.tasks_runner_fdb_backup as runner
+        import simplyblock_core.services.tasks_runner_jc_comp as runner
         serve.assert_called_once_with(runner.SPEC)
 
     def test_a_runner_not_on_the_driver_is_started_through_its_own_main(self):
@@ -216,29 +214,9 @@ class TestDeploymentCommands(unittest.TestCase):
 
     Everything else — the Helm charts, the operator, Swarm services created by an
     older control plane — still uses the paths, which is why
-    ``TestPathInvocationContract`` above keeps them working. These two files are
-    the ones a change here can actually fix, so they are pinned.
+    ``TestPathInvocationContract`` above keeps them working. cluster_ops.py is
+    the one a change here can actually fix, so it is pinned.
     """
-
-    COMPOSE = pathlib.Path(
-        SERVICES_DIR.parent / "scripts" / "docker-compose-swarm.yml")
-
-    def _compose_commands(self):
-        compose = yaml.safe_load(self.COMPOSE.read_text().replace("$", "_"))
-        return {name: service.get("command", "")
-                for name, service in compose["services"].items()}
-
-    def test_every_task_runner_service_uses_the_entry_point(self):
-        expected = {f"simplyblock-task-runner {name}"
-                    for name in task_runners.runner_names()}
-        found = {command for command in self._compose_commands().values()
-                 if command.startswith("simplyblock-task-runner ")}
-        self.assertEqual(found, expected)
-
-    def test_no_compose_service_starts_a_runner_by_path(self):
-        for name, command in self._compose_commands().items():
-            with self.subTest(service=name):
-                self.assertNotIn("services/tasks_runner_", command)
 
     def test_cluster_ops_creates_runner_services_by_name(self):
         source = (REPO_ROOT / "simplyblock_core" / "cluster_ops.py").read_text()

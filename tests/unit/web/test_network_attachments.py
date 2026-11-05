@@ -24,8 +24,8 @@ def _render(**extra):
     values = dict(
         SPDK_IMAGE="spdk:test", L_CORES="0-1", SPDK_MEM=1024, CORES=2, SERVER_IP="10.0.0.10",
         RPC_PORT=8080, RPC_USERNAME="admin", RPC_PASSWORD="secret", HOSTNAME="node-a",
-        NAMESPACE="simplyblock", SIMPLYBLOCK_DOCKER_IMAGE="proxy:test", GRAYLOG_SERVER_IP="10.0.0.20",
-        MODE="kubernetes", CLUSTER_ID="cluster1", SSD_PCIE="none", PCI_ALLOWED="", TOTAL_HP="",
+        NAMESPACE="simplyblock", SIMPLYBLOCK_DOCKER_IMAGE="proxy:test",
+        CLUSTER_ID="cluster1", SSD_PCIE="none", PCI_ALLOWED="", TOTAL_HP="",
         NSOCKET=0, FW_PORT=50001, CPU_TOPOLOGY_ENABLED=False, MEM_MEGA=1536, MEM2_MEGA=1024,
         TLS_SERVE=False, TLS_CONNECT="disabled", TLS_PROVIDER="cert-manager",
     )
@@ -70,7 +70,7 @@ def _params(**extra):
     from simplyblock_web.api.internal.storage_node.kubernetes import SPDKParams
 
     return SPDKParams(server_ip="10.0.0.10", rpc_port=8080, rpc_username="u", rpc_password="p",
-                      l_cores="0-1", namespace=None, cluster_ip="10.0.0.1", cluster_mode="kubernetes",
+                      l_cores="0-1", namespace=None, cluster_ip="10.0.0.1",
                       cluster_id="c1", **extra)
 
 
@@ -216,7 +216,7 @@ def test_a_pod_without_a_management_network_binds_its_proxy_to_its_own_address()
 def _render_init_job(**extra):
     env = Environment(loader=FileSystemLoader(str(deploy_template.TEMPLATE_DIR)), trim_blocks=True, lstrip_blocks=True)
     values = dict(NAMESPACE="simplyblock", HOSTNAME="w1", JOBNAME="snode-spdk-job-w1", SIMPLYBLOCK_DOCKER_IMAGE="sb:test",
-                  TLS_CONNECT="disabled", TLS_SERVE=False, TLS_PROVIDER="cert-manager", OPENSHIFT_MCP="", MODE="kubernetes")
+                  TLS_CONNECT="disabled", TLS_SERVE=False, TLS_PROVIDER="cert-manager", OPENSHIFT_MCP="")
     values.update(extra)
     docs = [d for d in yaml.safe_load_all(env.get_template("storage_init_job.yaml.j2").render(values)) if d]
     return docs[0]

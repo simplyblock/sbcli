@@ -7,10 +7,8 @@ import json
 import logging
 import math
 import os
-import platform
 import re
 import socket
-import subprocess
 import threading
 import time
 import uuid
@@ -18,7 +16,6 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, NamedTuple
 
 import psutil
-from docker.types import LogConfig
 from kubernetes.client import ApiException
 from pydantic import SecretStr
 from tenacity import (
@@ -31,22 +28,16 @@ from tenacity import (
     wait_fixed,
 )
 
-import docker
 from simplyblock_core import (
     cluster_ops,
     constants,
     distr_controller,
     jm_raid,
-    scripts,
     storage_network,
     utils,
 )
 from simplyblock_core import db_controller as db_module
 from simplyblock_core import rpc_client as rpc_client_module
-from simplyblock_core.constants import (
-    LINUX_DRV_MASS_STORAGE_ID,
-    LINUX_DRV_MASS_STORAGE_NVME_TYPE_ID,
-)
 from simplyblock_core.controllers import (
     activation_gate,
     device_controller,
@@ -101,7 +92,6 @@ from simplyblock_core.utils import (
     dial_backoff,
     hublvol_reconnect,
     nvmf_listener,
-    pull_docker_image_with_retry,
     rpc_budget,
 )
 from simplyblock_web import node_utils
@@ -3815,8 +3805,8 @@ class _SpdkPodStillPresent(Exception):
 
 
 def _delete_spdk_pod_via_k8s(rpc_port, cluster_id):
-    """Delete the SPDK pod (and its fluentd companion) straight from the
-    Kubernetes API, without routing the request through the node agent.
+    """Delete the SPDK pod straight from the Kubernetes API, without routing
+    the request through the node agent.
 
     ``snode_api.spdk_process_kill`` already does exactly this work -- see
     ``spdk_process_kill`` in
@@ -3836,7 +3826,6 @@ def _delete_spdk_pod_via_k8s(rpc_port, cluster_id):
     """
     six = utils.first_six_chars(cluster_id)
     pod_name = f"snode-spdk-pod-{rpc_port}-{six}"
-    fluent_pod_name = f"simplyblock-fluentd-{rpc_port}-{six}"
     namespace = constants.K8S_NAMESPACE
 
     try:
@@ -3853,17 +3842,6 @@ def _delete_spdk_pod_via_k8s(rpc_port, cluster_id):
         logger.info(f"SPDK pod {pod_name} was already gone")
     except Exception as e:
         return False, f"failed to delete pod {pod_name}: {e}"
-
-    # Companion log shipper: best effort, never fails the teardown. It holds
-    # no hugepages, so leaving it behind does not block a later add.
-    try:
-        k8s_core.delete_namespaced_pod(fluent_pod_name, namespace)
-        logger.info(f"Deleted fluentd pod {fluent_pod_name}")
-    except ApiException as e:
-        if e.status != 404:
-            logger.warning(f"Failed to delete fluentd pod {fluent_pod_name}: {e.body}")
-    except Exception as e:
-        logger.warning(f"Failed to delete fluentd pod {fluent_pod_name}: {e}")
 
     # Confirm it is really gone. Same budget as the agent-side implementation.
     try:
@@ -3923,7 +3901,7 @@ def _delete_spdk_service(snode, rpc_port, cluster_id):
         logger.warning("The Service of the node on port %s was not deleted: %s", rpc_port, e)
 
 
-def _abort_started_spdk(snode_api, rpc_port, cluster_id, reason, cluster_mode=None):
+def _abort_started_spdk(snode_api, rpc_port, cluster_id, reason):
     """Tear down the SPDK pod add_node just started, before bailing out.
 
     Between ``spdk_process_start`` and the point the StorageNode record is
@@ -3936,12 +3914,11 @@ def _abort_started_spdk(snode_api, rpc_port, cluster_id, reason, cluster_mode=No
     (observed on fresh 12-node deploys 2026-09-08 and 2026-09-11; recovery
     was a manual delete of the unowned pod).
 
-    In kubernetes mode the teardown goes straight to the API server
+    The teardown goes straight to the API server
     (``_delete_spdk_pod_via_k8s``) rather than through the node agent,
     because the agent runs ON the host we are abandoning and is routinely
     unreachable in exactly this situation. The agent call remains the
-    fallback, and the only path in docker mode, where the control plane has
-    no way to reach the container itself.
+    fallback.
 
     The rpc_port reservation is deliberately NOT released: it has no release
     API and ages out by TTL (see reserve_cluster_nvmf_port), and dropping it
@@ -3950,22 +3927,21 @@ def _abort_started_spdk(snode_api, rpc_port, cluster_id, reason, cluster_mode=No
     """
     logger.error(f"add_node aborting after SPDK start: {reason}")
 
-    if cluster_mode == "kubernetes":
-        # A pod-network add created a Service before the pod, and nothing names
-        # it once the add is abandoned. Best effort: a node on the host network
-        # has none and the delete answers not-found.
-        ok, err = _delete_spdk_service_via_k8s(rpc_port, cluster_id)
-        if not ok:
-            logger.warning(f"The Service of the aborted add on port {rpc_port} was not deleted: {err}")
-        ok, err = _delete_spdk_pod_via_k8s(rpc_port, cluster_id)
-        if ok:
-            logger.info(
-                f"Cleaned up SPDK pod on port {rpc_port} after failed add_node "
-                f"(direct Kubernetes delete)")
-            return
-        logger.warning(
-            f"Direct Kubernetes teardown of the SPDK pod on port {rpc_port} failed "
-            f"({err}); falling back to the node agent")
+    # A pod-network add created a Service before the pod, and nothing names
+    # it once the add is abandoned. Best effort: a node on the host network
+    # has none and the delete answers not-found.
+    ok, err = _delete_spdk_service_via_k8s(rpc_port, cluster_id)
+    if not ok:
+        logger.warning(f"The Service of the aborted add on port {rpc_port} was not deleted: {err}")
+    ok, err = _delete_spdk_pod_via_k8s(rpc_port, cluster_id)
+    if ok:
+        logger.info(
+            f"Cleaned up SPDK pod on port {rpc_port} after failed add_node "
+            f"(direct Kubernetes delete)")
+        return
+    logger.warning(
+        f"Direct Kubernetes teardown of the SPDK pod on port {rpc_port} failed "
+        f"({err}); falling back to the node agent")
 
     try:
         ok, err = snode_api.spdk_process_kill(rpc_port, cluster_id)
@@ -4428,11 +4404,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         if cluster.cluster_vip:
             cluster_ip = cluster.cluster_vip
         else:
-            if cluster.mode == "docker":
-                cluster_docker = utils.get_docker_client(cluster_id)
-                cluster_ip = cluster_docker.info()["Swarm"]["NodeAddr"]
-            else:
-                cluster_ip = utils.get_k8s_node_ip()
+            cluster_ip = utils.get_k8s_node_ip()
 
         rpc_user, rpc_pass = utils.generate_rpc_user_and_pass()
         mgmt_info = utils.get_mgmt_ip(node_info, iface_name, networks, pod_network)
@@ -4458,11 +4430,6 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         if not spdk_image:
             spdk_image = constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE
 
-        if cluster.mode == "docker":
-            log_config_type = utils.get_storage_node_api_log_type(mgmt_ip, '/SNodeAPI')
-            if log_config_type and log_config_type != LogConfig.types.GELF:
-                logger.info("SNodeAPI container found but not configured with gelf logger")
-                start_storage_node_api_container(mgmt_ip, cluster_ip)
         node_socket = node_config.get("socket")
 
         # Idempotent re-entry. A prior add attempt for this (node, socket) may
@@ -4607,7 +4574,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                 # storage device.
                 ssd_pcie=(ssd_pcie if not lblk_mode
                           else [constants.LBLK_PCI_ALLOWED_PLACEHOLDER]),
-                total_mem=total_mem, system_mem=minimum_sys_memory, cluster_mode=cluster.mode,
+                total_mem=total_mem, system_mem=minimum_sys_memory,
                 socket=node_socket, cluster_id=cluster_id, spdk_proxy_image=spdk_proxy_image,
                 mcp_max_unavailable=mcp_max_unavailable,
                 spdk_proxy_tls_secret=cluster.spdk_proxy_tls_secret, networks=networks,
@@ -4616,14 +4583,12 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
 
         except Exception as e:
             # spdk_process_start may have created the pod before raising.
-            _abort_started_spdk(snode_api, rpc_port, cluster_id, str(e),
-                                cluster_mode=cluster.mode)
+            _abort_started_spdk(snode_api, rpc_port, cluster_id, str(e))
             return False
 
         if not results:
             _abort_started_spdk(snode_api, rpc_port, cluster_id,
-                                f"Failed to start spdk: {err}",
-                                cluster_mode=cluster.mode)
+                                f"Failed to start spdk: {err}")
             return False
         number_of_alceml_devices = node_config.get("number_of_alcemls")
         # Increase number of alcemls by one for the JM
@@ -4682,8 +4647,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                 data_nics = storage_network.from_report(results)
             except (ValueError, KeyError, TypeError) as e:
                 _abort_started_spdk(snode_api, rpc_port, cluster_id,
-                                    f"The SPDK pod reported no usable interfaces: {e}",
-                                    cluster_mode=cluster.mode)
+                                    f"The SPDK pod reported no usable interfaces: {e}")
                 return False
             active_tcp = True
             names = []
@@ -4713,8 +4677,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
 
         if not active_tcp and not active_rdma:
             _abort_started_spdk(snode_api, rpc_port, cluster_id,
-                                "No usable storage network interface found.",
-                                cluster_mode=cluster.mode)
+                                "No usable storage network interface found.")
             return False
 
         hostname = node_info['hostname'] + f"_{rpc_port}"
@@ -8654,12 +8617,11 @@ def _fail_and_migrate_node_devices(removed_node: StorageNode):
 
 
 def _finalize_node_removal(removed_node: StorageNode):
-    """Best-effort host cleanup before the node is flipped to REMOVED: leave the
-    docker swarm and wipe GPT partitions. Mirrors the tail of the legacy
+    """Best-effort host cleanup before the node is flipped to REMOVED: stop
+    SPDK and wipe GPT partitions. Mirrors the tail of the legacy
     offline-removal path."""
     db_controller = DBController()
     removed_node = db_controller.get_storage_node_by_id(removed_node.get_id())
-    cluster = db_controller.get_cluster_by_id(removed_node.cluster_id)
 
     # Case A/B (_teardown_replicas_of_primary, _relocate_replicas_hosted_on)
     # already cleared this node's forward/back-reference fields as they
@@ -8675,22 +8637,11 @@ def _finalize_node_removal(removed_node: StorageNode):
         removed_node.lvstore_ports = {}
         removed_node.write_to_db()
 
-    if cluster.mode == "docker":
-        logger.info("Leaving swarm...")
-        try:
-            cluster_docker = utils.get_docker_client(removed_node.cluster_id)
-            for node in cluster_docker.nodes.list():
-                if node.attrs["Status"] and removed_node.mgmt_ip in node.attrs["Status"]["Addr"]:
-                    node.remove(force=True)
-        except Exception:
-            pass
-
     try:
         if health_controller._check_node_api(removed_node):
             logger.info("Stopping SPDK container")
             snode_api = removed_node.client(timeout=20)
             snode_api.spdk_process_kill(removed_node.rpc_port, removed_node.cluster_id)
-            snode_api.leave_swarm()
             pci_address = []
             for dev in removed_node.nvme_devices:
                 if dev.bdev_type == "aio":
@@ -9421,11 +9372,7 @@ def _restart_storage_node_impl(
     if cluster.cluster_vip:
         cluster_ip = cluster.cluster_vip
     else:
-        if cluster.mode == "docker":
-            cluster_docker = utils.get_docker_client(snode.cluster_id)
-            cluster_ip = cluster_docker.info()["Swarm"]["NodeAddr"]
-        else:
-            cluster_ip = utils.get_k8s_node_ip()
+        cluster_ip = utils.get_k8s_node_ip()
 
     total_mem = minimum_hp_memory
     for n in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
@@ -9490,7 +9437,7 @@ def _restart_storage_node_impl(
             # DPDK and SPDK's nvme driver could claim kernel NVMe disks.
             ssd_pcie=(snode.ssd_pcie if not lblk_mode
                       else [constants.LBLK_PCI_ALLOWED_PLACEHOLDER]),
-            total_mem=total_mem, system_mem=minimum_sys_memory, cluster_mode=cluster.mode,
+            total_mem=total_mem, system_mem=minimum_sys_memory,
             socket=snode.socket, cluster_id=snode.cluster_id,
             spdk_proxy_image=snode.spdk_proxy_image,
             spdk_proxy_tls_secret=snode.spdk_proxy_tls_secret, networks=snode.networks,
@@ -11326,105 +11273,6 @@ def generate_automated_deployment_config(max_lvol, max_prov, sockets_to_use, nod
         #    num_pages = huge_page_memory // (2048 * 1024)
         #    utils.set_hugepages_if_needed(numa, num_pages)
     return True
-
-
-def deploy(ifname, isolate_cores=False):
-    if not ifname:
-        ifname = "eth0"
-
-    dev_ip = utils.get_iface_ip(ifname)
-    if not dev_ip:
-        logger.error(f"Error getting interface ip: {ifname}")
-        return False
-    try:
-        nodes_config = utils.load_config(constants.NODES_CONFIG_FILE)
-        logger.info("Config loaded successfully.")
-    except FileNotFoundError:
-        logger.error("Error: Config file not found!")
-        return False
-    except json.JSONDecodeError:
-        logger.error("Error: Config file is not valid JSON!")
-        return False
-    all_isolated_cores = utils.validate_config(nodes_config)
-    if not all_isolated_cores:
-        return False
-    logger.info("Config Validated successfully.")
-
-    logger.info("NVMe SSD devices found on node:")
-    for line in subprocess.check_output(["lspci", "-Dnn"], text=True).splitlines():
-        if f"[{LINUX_DRV_MASS_STORAGE_ID:02x}{LINUX_DRV_MASS_STORAGE_NVME_TYPE_ID:02x}]".lower() in line.lower():
-            logger.info(line.strip())
-
-    logger.info("Installing dependencies...")
-    scripts.install_deps(mode="docker")
-
-    logger.info(f"Node IP: {dev_ip}")
-    scripts.configure_docker(dev_ip)
-
-    start_storage_node_api_container(dev_ip)
-
-    if isolate_cores:
-        utils.generate_realtime_variables_file(all_isolated_cores)
-        utils.run_tuned()
-        arch = platform.machine().lower()
-        if "arm" in arch or "aarch64" in arch:
-            utils.run_grubby(all_isolated_cores)
-    return f"{dev_ip}:5000"
-
-
-def start_storage_node_api_container(node_ip, cluster_ip=None):
-    node_docker = docker.DockerClient(base_url=f"tcp://{node_ip}:2375", version="auto", timeout=60 * 5)
-    # node_docker = docker.DockerClient(base_url='unix://var/run/docker.sock', version="auto", timeout=60 * 5)
-    logger.info(f"Pulling image {constants.SIMPLY_BLOCK_DOCKER_IMAGE}")
-    pull_docker_image_with_retry(node_docker, constants.SIMPLY_BLOCK_DOCKER_IMAGE)
-
-    logger.info("Recreating SNodeAPI container")
-
-    # create the api container
-    utils.remove_container(node_docker, '/SNodeAPI')
-
-    if cluster_ip is not None:
-        log_config = LogConfig(type=LogConfig.types.GELF, config={"gelf-address": f"tcp://{cluster_ip}:12202"})
-    else:
-        log_config = LogConfig(type=LogConfig.types.JOURNALD)
-
-    node_docker.containers.run(
-        constants.SIMPLY_BLOCK_DOCKER_IMAGE,
-        "sudo -E python3 simplyblock_web/node_webapp.py storage_node",
-        detach=True,
-        privileged=True,
-        name="SNodeAPI",
-        network_mode="host",
-        log_config=log_config,
-        volumes=[
-            '/etc/simplyblock:/etc/simplyblock',
-            '/etc/foundationdb:/etc/foundationdb',
-            '/var/tmp:/var/tmp',
-            '/var/run:/var/run',
-            '/dev:/dev',
-            '/lib/modules/:/lib/modules/',
-            '/sys:/sys',
-            # Bind-mount the SPDK ramdisk so the spdk_process_is_up endpoint
-            # can probe SPDK's JSON-RPC Unix socket directly at
-            # /mnt/ramdisk/spdk_<port>/spdk.sock. Without this, the endpoint
-            # has to fall through to dockerd, which can stall for 60-80s
-            # during post-outage Swarm reconciliation (incident 2026-04-24).
-            '/mnt/ramdisk:/mnt/ramdisk',
-            '/var/run/simplyblock:/var/run/simplyblock'],
-        restart_policy={"Name": "always"},
-        environment=[
-            f"DOCKER_IP={node_ip}",
-            "WITHOUT_CLOUD_INFO=True",
-            "SIMPLYBLOCK_LOG_LEVEL=DEBUG",
-        ]
-    )
-    logger.info(f"Pulling image {constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE}")
-    pull_docker_image_with_retry(node_docker, constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
-    return True
-
-
-def deploy_cleaner():
-    scripts.deploy_cleaner()
 
 
 def clean_devices(config_path, format=True, force=False, format_4k=False):

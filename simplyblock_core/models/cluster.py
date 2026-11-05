@@ -1,4 +1,3 @@
-import os.path
 from collections.abc import Mapping
 from typing import Any, ClassVar
 
@@ -150,7 +149,6 @@ class Cluster(BaseModel):
     # a device can be made to "hang" on demand (see device_controller device-hang).
     enable_hang_device: bool = False
     grafana_endpoint: str = ""
-    mode: str = "docker"
     grafana_secret: SecretStr = SecretStr("")
     contact_point: str = ""
     ha_type: str = "single"
@@ -405,12 +403,6 @@ class Cluster(BaseModel):
     # Consumed by release_upgrades plugins with a from_release restriction.
     # Empty on clusters that never completed an upgrade under this framework.
     installed_release: str = ""
-    backup_local_path: str = constants.KVD_DB_BACKUP_PATH
-    backup_frequency_seconds: int = 3*60*60
-    backup_retention_days: int = 7
-    backup_s3_bucket: str = ""
-    backup_s3_region: str = ""
-    backup_s3_cred: str = ""
     # Cluster Virtual IP, this is used for the load balancer,
     # and it is used for gelf address in the storage nodes' containers.
     # If not defined, then gelf address will be the first mgmt node's address
@@ -486,16 +478,6 @@ class Cluster(BaseModel):
         self._resolve_backup_config(config)
         self.backup_config = dict(config)
 
-    def get_backup_path(self, path=""):
-        if self.backup_s3_bucket and self.backup_s3_cred:
-            backup_path = f"blobstore://{self.backup_s3_cred}@s3.{self.backup_s3_region}.amazonaws.com/{path}?bucket={self.backup_s3_bucket}" \
-                          + f"&region={self.backup_s3_region}&sc=0"
-        elif self.backup_local_path:
-            backup_path = os.path.join(self.backup_local_path, path)
-        else:
-            backup_path = os.path.join(constants.KVD_DB_BACKUP_PATH, self.uuid, path)
-        return backup_path
-
 
 class PortReservation(BaseModel):
     """Short-lived reservation of an NVMe-oF port during node add.
@@ -524,7 +506,6 @@ class DeployConfig(BaseModel):
     grafana_endpoint: str = ""
     db_connection: SecretStr = SecretStr("")
     grafana_secret: SecretStr = SecretStr("")
-    mode: str = "docker"
     disable_monitoring: bool = False
 
     def get_id(self):

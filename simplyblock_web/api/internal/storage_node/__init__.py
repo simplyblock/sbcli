@@ -1,3 +1,3 @@
-from . import docker, kubernetes
+from . import kubernetes
 
-__all__ = ['docker', 'kubernetes']
+__all__ = ['kubernetes']

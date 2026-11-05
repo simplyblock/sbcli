@@ -70,13 +70,12 @@ class TestClusterCarriesTheLayout:
         assert c.jm_raid_layout == "", "empty = not pinned yet"
 
     def test_fresh_clusters_are_pinned_raid01(self):
-        """create_cluster / _add_cluster_impl set the new-cluster geometry."""
+        """_add_cluster_impl sets the new-cluster geometry."""
         import inspect as _i
 
         from simplyblock_core import cluster_ops
-        for fn in (cluster_ops.create_cluster, cluster_ops._add_cluster_impl):
-            src = _i.getsource(fn)
-            assert "jm_raid_layout = jm_raid.LAYOUT_RAID01" in src, fn.__name__
+        src = _i.getsource(cluster_ops._add_cluster_impl)
+        assert "jm_raid_layout = jm_raid.LAYOUT_RAID01" in src
 
 
 class TestBuildResolvesGeometry:

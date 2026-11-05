@@ -29,11 +29,9 @@ GiB=1024*1024*1024
 KVD_DB_VERSION = 730
 KVD_DB_FILE_PATH = os.getenv('FDB_CLUSTER_FILE', '/etc/foundationdb/fdb.cluster')
 KVD_DB_TIMEOUT_MS = 10000
-KVD_DB_BACKUP_PATH = "file:///etc/foundationdb/backup"
 SPK_DIR = '/home/ec2-user/spdk'
 LOG_LEVEL = logging.INFO
 LOG_WEB_LEVEL = logging.INFO
-LOG_WEB_DEBUG = True if LOG_WEB_LEVEL == logging.DEBUG else False
 
 INSTALL_DIR = os.path.dirname(os.path.realpath(__file__))
 
@@ -377,16 +375,16 @@ LVSTORE_MUTATION_LOCK_WAIT_SEC = 120
 # then the per-lvstore mutation lock (LVSTORE_MUTATION_LOCK_WAIT_SEC). These locks
 # MUST time out before the front-end API cuts the connection, otherwise a waiting
 # request is severed mid-operation and can leave a half-registered object. The
-# invariant the deployment must hold (HAProxy timeout server/client in
-# scripts/haproxy.cfg is the binding API timeout; uvicorn imposes none; the CLI
-# runs controllers in-process):
+# invariant the deployment must hold (the front-end proxy's read timeout is the
+# binding API timeout; uvicorn imposes none; the CLI runs controllers
+# in-process):
 #
 #   API_OPERATION_TIMEOUT  >  LVOL_SYNC_DELETE_WAIT_SEC
 #                             + LVSTORE_MUTATION_LOCK_WAIT_SEC
 #                             + worst-case create+register RPC work
 #
 # Current budget: 60 + 120 = 180s max lock wait, leaving 120s of the 300s API
-# timeout for RPC work. Keep haproxy.cfg in sync if these change.
+# timeout for RPC work. Keep the front-end proxy timeout in sync if these change.
 LVOL_SYNC_DELETE_WAIT_SEC = 60
 API_OPERATION_TIMEOUT_SEC = 300
 
@@ -942,20 +940,6 @@ LVO_MAX_NAMESPACES_PER_SUBSYS=32
 
 CR_GROUP = "storage.simplyblock.io"
 CR_VERSION  = "v1alpha2"
-
-# Grafana alert rules read from the cluster event log rather than from Thanos,
-# provisioned by `sbctl cluster event-alerts`. The plugin id is both the folder
-# Grafana installs the plugin into and the data source `type` the rules use.
-# 2.12.2 is the last Infinity release compatible with Grafana 10.0.12.
-GRAFANA_EVENT_ALERTS_PLUGIN_ID = "yesoreyeram-infinity-datasource"
-GRAFANA_EVENT_ALERTS_PLUGIN_URL = (
-    "https://grafana.com/api/plugins/yesoreyeram-infinity-datasource/versions/2.12.2/download")
-
-# The control plane as reached from the monitoring stack. HAProxy's default
-# backend is the web API, so /api/v2 needs no route of its own; the same host
-# prometheus.yml.j2 scrapes /cluster/metrics from.
-MONITORING_CONTROL_PLANE_ADDR = "http://HAProxy"
-MONITORING_GRAFANA_SERVICE = "monitoring_grafana"
 
 GRAFANA_K8S_ENDPOINT = "http://simplyblock-grafana:3000"
 GRAYLOG_K8S_ENDPOINT = "http://simplyblock-graylog:9000"

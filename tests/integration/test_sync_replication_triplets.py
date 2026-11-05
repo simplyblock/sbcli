@@ -54,7 +54,6 @@ def _seed_cluster(db, *, sync=True, ftt=1, fd=False, status=Cluster.STATUS_UNREA
     cluster.distr_ndcs = 1
     cluster.distr_npcs = npcs
     cluster.max_fault_tolerance = ftt
-    cluster.mode = "docker"
     cluster.cluster_vip = "10.0.0.1"
     cluster.write_to_db(db.kv_store)
     return cluster

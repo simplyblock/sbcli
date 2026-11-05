@@ -675,13 +675,10 @@ ORPHANED_STATE_FAST_GRACE_SEC = 5 * 60
 
 
 def _spdk_pod_exists(node):
-    """Whether the node's SPDK pod exists (kubernetes mode). Used only to
-    pick the watchdog grace tier — on any doubt return True so the
-    conservative (long) tier applies."""
+    """Whether the node's SPDK pod exists. Used only to pick the watchdog
+    grace tier — on any doubt return True so the conservative (long) tier
+    applies."""
     try:
-        cluster = db.get_cluster_by_id(node.cluster_id)
-        if cluster.mode != "kubernetes":
-            return True
         utils.load_kube_config_with_fallback()
         from kubernetes import client as k8s_client
         namespace = getattr(node, "cr_namespace", "") or constants.K8S_NAMESPACE

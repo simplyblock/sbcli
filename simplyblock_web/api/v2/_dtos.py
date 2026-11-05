@@ -153,7 +153,6 @@ TaskFunctionName = Literal[
     "group_backup_delete",
     "cluster_expand",
     "replication_final",
-    "fdb_backup",
     "sync_promote",
     "sync_resync",
     "sync_site_fence",

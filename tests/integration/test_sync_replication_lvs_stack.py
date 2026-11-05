@@ -168,6 +168,7 @@ def _seed_node(db, cluster, name, site, *, status=StorageNode.STATUS_ONLINE, **f
     node.site = site
     node.mgmt_ip = f"10.{3 if site == SITE_A else 4}.{next(_order) % 250}.{next(_order) % 250 + 1}"
     node.status = status
+    node.cr_namespace = "simplyblock"
     node.enable_ha_jm = True
     node.ha_jm_count = 6
     node.number_of_distribs = 2

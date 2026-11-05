@@ -30,7 +30,7 @@ from tests._mocks import unique_ip
 # Fixtures
 # ---------------------------------------------------------------------------
 
-def _cluster(ha_type="ha", npcs=1, ndcs=2, ft=1, mode="docker",
+def _cluster(ha_type="ha", npcs=1, ndcs=2, ft=1,
              enable_failure_domain=False):
     cl = Cluster()
     cl.uuid = "cluster-1"
@@ -38,7 +38,6 @@ def _cluster(ha_type="ha", npcs=1, ndcs=2, ft=1, mode="docker",
     cl.distr_npcs = npcs
     cl.distr_ndcs = ndcs
     cl.max_fault_tolerance = ft
-    cl.mode = mode
     cl.status = Cluster.STATUS_ACTIVE
     cl.nqn = "nqn.2023-01.io.simplyblock:cluster-1"
     cl.enable_failure_domain = enable_failure_domain
@@ -2977,8 +2976,8 @@ class TestAdvanceRemovalStatus(unittest.TestCase):
 
 class TestFinalizeNodeRemovalClearsLvstorePorts(unittest.TestCase):
 
-    def _run(self, removed, cluster_mode="kubernetes", node_api_up=False):
-        cl = _cluster(mode=cluster_mode)
+    def _run(self, removed, node_api_up=False):
+        cl = _cluster()
         db = FakeDB(cl, [removed])
         with patch.object(storage_node_ops, "DBController", return_value=db), \
              patch.object(storage_node_ops.health_controller, "_check_node_api",

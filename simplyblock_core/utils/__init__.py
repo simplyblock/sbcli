@@ -10,15 +10,12 @@ import socket
 import string
 import subprocess
 import sys
-import tempfile
 import time
 import uuid
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from typing import Annotated, Any
 
-from docker.errors import APIError, DockerException, ImageNotFound, NotFound
-from jinja2 import Environment, FileSystemLoader, StrictUndefined
 from kubernetes import client, config
 from kubernetes.client import (
     ApiException,
@@ -39,13 +36,10 @@ from kubernetes.stream import stream
 from prettytable import PrettyTable
 from pydantic import Field, SecretStr
 
-import docker
-from docker import DockerClient
 from simplyblock_core import constants
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_web import node_utils
 
-from ..models.mgmt_node import MgmtNode
 from . import host_network
 from . import pci as pci_utils
 from . import shell as shell_utils
@@ -70,14 +64,6 @@ NQN_PATTERN = re.compile(
     r'[a-zA-Z]{2,}'
     r'(?::[a-zA-Z0-9.\-:_]+)?'  # optional unique name
 )
-
-ALERT_RESOURCES_FILE = "alert_resources.yaml"
-ALERTS_TEMPLATE_FOLDER = "simplyblock_core/scripts/alerting/"
-SCRIPTS_FOLDER = "simplyblock_core/scripts/"
-
-# Provisioning files for the cluster event log alerts (`cluster event-alerts`).
-EVENT_ALERT_RULES_FILE = "event_alert_rules.yaml"
-EVENT_ALERT_DATASOURCE_FILE = "datasource-events.yml"
 
 
 #: An NVMe Qualified Name, as a type. Declaring a field with this rather than
@@ -110,11 +96,6 @@ def get_baseboard_sn():
 
 def get_system_id():
     out, _, _ = shell_utils.run_command("dmidecode -s system-uuid")
-    return out
-
-
-def get_hostname():
-    out, _, _ = shell_utils.run_command("hostname -s")
     return out
 
 
@@ -219,29 +200,6 @@ def humanbytes(size: int, mode: str = 'iec') -> str:  # show size using 1024 bas
 def generate_string(length):
     return ''.join(random.SystemRandom().choice(
         string.ascii_letters + string.digits) for _ in range(length))
-
-
-def get_docker_client(cluster_id=None):
-    from simplyblock_core.db_controller import DBController
-    db_controller = DBController()
-    nodes = db_controller.get_mgmt_nodes(cluster_id)
-    if not nodes and cluster_id:
-        # Management nodes belong to the deployment, not to one cluster: only
-        # the first cluster's bootstrap records one, so a cluster attached
-        # later with `cluster add` has none of its own. Any of them reaches
-        # the same swarm.
-        nodes = db_controller.get_mgmt_nodes()
-    if not nodes:
-        raise RuntimeError("No mgmt nodes was found in the cluster!")
-
-    for node in nodes:
-        if node.status == MgmtNode.STATUS_ONLINE:
-            try:
-                return docker.DockerClient(base_url=f"tcp://{node.docker_ip_port}", version="auto")
-            except Exception as e:
-                logger.error(e)
-                continue
-    raise RuntimeError("No docker client found for this cluster")
 
 
 def get_k8s_node_ip():
@@ -1109,67 +1067,6 @@ def get_next_dev_port(cluster_id):
     return get_next_nvmf_port(cluster_id)
 
 
-def generate_realtime_variables_file(isolated_cores, realtime_variables_file_path="/etc/tuned/realtime-variables.conf"):
-    """
-    Generate or update the realtime-variables.conf file.
-    Args:
-        isolated_cores (set): set of isolated cores to write.
-        file_path (str): Path to the file.
-    """
-    # Ensure the directory exists
-    core_list = ",".join(map(str, isolated_cores))
-    tuned_dir = "/etc/tuned/realtime"
-    os.makedirs(tuned_dir, exist_ok=True)
-
-    # Create tuned.conf
-    tuned_conf_content = f"""[main]
-include=latency-performance
-[bootloader]
-cmdline_add=isolcpus={core_list} nohz_full={core_list} rcu_nocbs={core_list}
-"""
-
-    tuned_conf_path = f"{tuned_dir}/tuned.conf"
-    with open(tuned_conf_path, "w") as f:
-        f.write(tuned_conf_content)
-    content = f"isolated_cores={core_list}\n"
-    try:
-        subprocess.run(
-            ["sudo", "tee", realtime_variables_file_path],
-            input=content.encode("utf-8"),
-            stdout=subprocess.DEVNULL,  # Suppress standard output
-            stderr=subprocess.PIPE,  # Capture standard error
-            check=True  # Raise an error if command fails
-        )
-        logger.info(f"Successfully wrote to {realtime_variables_file_path}")
-    except subprocess.CalledProcessError as e:
-        logger.error(f"Error writing to file: {e}")
-
-
-def run_tuned():
-    try:
-        subprocess.run(
-            ["sudo", "tuned-adm", "profile", "realtime"],
-            check=True
-        )
-        logger.info("Successfully run the tuned adm profile")
-    except subprocess.CalledProcessError:
-        logger.warning("Error running the tuned adm profile")
-
-
-def run_grubby(core_list):
-    isolated_cores = ",".join(map(str, core_list))
-    core_args = f"isolcpus={isolated_cores} nohz_full={isolated_cores} rcu_nocbs={isolated_cores}"
-
-    try:
-        subprocess.run(
-            ["sudo", "grubby", "--update-kernel=All", f"--args={core_args}"],
-            check=True
-        )
-        logger.info("Successfully run the grubby command")
-    except subprocess.CalledProcessError:
-        logger.warning("Error running the grubby command")
-
-
 def parse_thread_siblings():
     """Parse the thread siblings from the sysfs topology."""
     siblings = {}
@@ -1680,37 +1577,6 @@ def get_random_snapshot_vuid(all_lvols=None, all_snapshots=None):
     # Args kept for call-site compatibility but no longer used.
     from simplyblock_core.db_controller import DBController
     return DBController().next_vuid()
-
-
-def pull_docker_image_with_retry(client: docker.DockerClient, image_name, retries=3, delay=5):
-    """
-    Pulls a Docker image with retries in case of failure.
-
-    Args:
-        client (docker.DockerClient): The Docker client instance.
-        image_name (str): The name of the Docker image to pull.
-        retries (int): Number of retry attempts. Defaults to 3.
-        delay (int): Delay between retries in seconds. Defaults to 5.
-
-    Returns:
-        docker.models.images.Image: The pulled Docker image.
-
-    Raises:
-        DockerException: If all retry attempts fail.
-    """
-    for attempt in range(1, retries + 1):
-        try:
-            print(f"Attempt {attempt}: Pulling image '{image_name}'...")
-            image = client.images.pull(image_name)
-            print(f"Image '{image_name}' pulled successfully.")
-            return image
-        except (APIError, DockerException, ImageNotFound) as e:
-            print(f"Error pulling image (attempt {attempt}): {e}")
-            if attempt < retries:
-                time.sleep(delay)
-            else:
-                print("All retries failed.")
-                raise
 
 
 def next_free_hublvol_port(cluster_id):
@@ -3408,156 +3274,6 @@ def get_k8s_custom_objects_client():
     return client.CustomObjectsApi()
 
 
-def get_storage_node_api_log_type(mgmt_ip, name):
-    try:
-        node_docker = docker.DockerClient(base_url=f"tcp://{mgmt_ip}:2375", version="auto", timeout=60 * 5)
-        container = node_docker.containers.get(name)
-        log_config = container.attrs["HostConfig"]["LogConfig"]
-        if log_config and log_config["Type"]:
-            return log_config["Type"]
-    except (docker.errors.NotFound, docker.errors.DockerException, Exception):
-        pass
-
-
-def remove_container(client: docker.DockerClient, name, graceful_timeout=3):
-    try:
-        container = client.containers.get(name)
-        if graceful_timeout:
-            container.stop(timeout=graceful_timeout)
-        container.remove(force=(not graceful_timeout))
-    except NotFound:
-        pass
-    except APIError as e:
-        if e.status_code != 409:
-            raise
-
-
-def _alerts_template_folder() -> str:
-    return os.path.join(_top_dir(), ALERTS_TEMPLATE_FOLDER)
-
-
-def _scripts_folder() -> str:
-    return os.path.join(_top_dir(), SCRIPTS_FOLDER)
-
-
-def _top_dir() -> str:
-    return os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
-
-
-def render_legacy_alerting(contact_point: str | None, grafana_endpoint: str) -> str:
-    """Render the single-contact-point alerting config kept for --contact-point.
-
-    `contact_point` is optional at every layer above (the CLI flag defaults to
-    None, and clusters created without it carry None/"" in the DB), so an absent
-    value has to fall through to the placeholder branch rather than reach the
-    regex matchers.
-    """
-    env = Environment(loader=FileSystemLoader(_alerts_template_folder()), trim_blocks=True, lstrip_blocks=True)
-    template = env.get_template(f'{ALERT_RESOURCES_FILE}.legacy.j2')
-
-    slack_pattern = re.compile(r"https://hooks\.slack\.com/services/\S+")
-    email_pattern = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
-
-    if contact_point and slack_pattern.match(contact_point):
-        alert_type = "slack"
-    elif contact_point and email_pattern.match(contact_point):
-        alert_type = "email"
-    else:
-        alert_type = "slack"
-        contact_point = 'https://hooks.slack.com/services/'
-
-    return template.render({
-        'CONTACT_POINT': contact_point,
-        'GRAFANA_ENDPOINT': grafana_endpoint,
-        'ALERT_TYPE': alert_type,
-    })
-
-
-def render_configfile_alerting(alert_config: dict[str, Any]) -> str:
-    """Render the multi-receiver alerting config from an alerting config file."""
-    env = Environment(loader=FileSystemLoader(_alerts_template_folder()), trim_blocks=True, lstrip_blocks=True)
-    template = env.get_template(f'{ALERT_RESOURCES_FILE}.j2')
-
-    return template.render(alert_config)
-
-
-def render_event_alert_configs(settings: dict[str, Any],
-                               clusters: Iterable[tuple[str, str]]) -> dict[str, str]:
-    """Render the Grafana provisioning files for the cluster event log alerts.
-
-    Returns {filename: content} for both files, always, so that disabling the
-    alerts overwrites what enabling them wrote. A cluster missing either its id
-    or its secret is skipped: the API checks that the two agree, so a
-    half-configured data source fails every evaluation with a 401. Both uids
-    are derived from the cluster id so the two files agree on them and a re-run
-    updates the same objects instead of adding a second set.
-
-    StrictUndefined because a missing value would reach Grafana as empty YAML,
-    which it answers by refusing to start.
-    """
-    entries = []
-    if settings.get('enabled'):
-        for cluster_id, secret in clusters:
-            if not cluster_id or not secret:
-                continue
-            digest = hashlib.sha256(cluster_id.encode('utf-8')).hexdigest()
-            entries.append({'id': cluster_id, 'secret': secret,
-                            'ds_uid': f'sbev-{digest[:12]}', 'uid_prefix': digest[:8]})
-
-    values = {
-        'EVENT_ALERTS': settings,
-        'EVENT_ALERT_CLUSTERS': entries,
-        'CONTROL_PLANE_ADDR': constants.MONITORING_CONTROL_PLANE_ADDR,
-    }
-
-    rendered = {}
-    for folder, filename in ((_alerts_template_folder(), EVENT_ALERT_RULES_FILE),
-                             (_scripts_folder(), EVENT_ALERT_DATASOURCE_FILE)):
-        env = Environment(loader=FileSystemLoader(folder), trim_blocks=True, lstrip_blocks=True,
-                          undefined=StrictUndefined)
-        rendered[filename] = env.get_template(f'{filename}.j2').render(values)
-
-    return rendered
-
-
-def render_and_deploy_alerting_configs(alert_config: dict[str, Any] | None, contact_point: str | None,
-                                       grafana_endpoint, cluster_uuid, cluster_secret):
-    top_dir = _top_dir()
-    alerts_template_folder = _alerts_template_folder()
-
-    if alert_config:
-        rendered = render_configfile_alerting(alert_config)
-    else:
-        rendered = render_legacy_alerting(contact_point, grafana_endpoint)
-
-    destination_file_path = os.path.join(alerts_template_folder, ALERT_RESOURCES_FILE)
-    with tempfile.TemporaryDirectory() as temp_dir:
-        temp_file_path = os.path.join(temp_dir, ALERT_RESOURCES_FILE)
-        with open(temp_file_path, 'w') as file:
-            file.write(rendered)
-
-        subprocess.check_call(['sudo', '-v'])  # sudo -v checks if the current user has sudo permissions
-        subprocess.check_call(['sudo', 'mv', temp_file_path, destination_file_path])
-    print(f"File moved to {destination_file_path} successfully.")
-
-    scripts_folder = os.path.join(top_dir, "simplyblock_core/scripts/")
-    prometheus_file = "prometheus.yml"
-    env = Environment(loader=FileSystemLoader(scripts_folder), trim_blocks=True, lstrip_blocks=True)
-    template = env.get_template(f'{prometheus_file}.j2')
-    values = {
-        'CLUSTER_ID': cluster_uuid,
-        'CLUSTER_SECRET': cluster_secret}
-
-    with tempfile.TemporaryDirectory() as temp_dir:
-        file_path = os.path.join(temp_dir, prometheus_file)
-        with open(file_path, 'w') as file:
-            file.write(template.render(values))
-
-        prometheus_file_path = os.path.join(scripts_folder, prometheus_file)
-        subprocess.check_call(['sudo', 'mv', file_path, prometheus_file_path])
-        print(f"File moved to {prometheus_file_path} successfully.")
-
-
 # hostPath mount of the host's /etc/modules-load.d inside the k8s storage-node
 # agent (see storage-node.yaml in the CSI chart). Writing to the container's
 # own /etc/modules-load.d is a silent no-op there: the file lands in the
@@ -4188,22 +3904,6 @@ def patch_prometheus_configmap(username: str, password: str):
         return False
 
 
-def create_docker_service(cluster_docker: DockerClient, service_name: str, command: list[str], service_image: str):
-    logger.info(f"Creating service: {service_name}")
-    cluster_docker.services.create(
-        image=service_image,
-        command=list(command),
-        name=service_name,
-        mounts=["/etc/foundationdb:/etc/foundationdb"],
-        env=["SIMPLYBLOCK_LOG_LEVEL=DEBUG"],
-        networks=["host"],
-        constraints=["node.role == manager"],
-        labels={
-            "com.docker.stack.image": service_image,
-            "com.docker.stack.namespace": "app"}
-    )
-
-
 def create_k8s_service(namespace: str, deployment_name: str,
                        container_name: str, command: list[str], container_image: str):
     logger.info(f"Creating deployment: {deployment_name} in namespace {namespace}")
@@ -4622,66 +4322,6 @@ def create_rpc_socket_mount():
         logger.error(e)
 
 
-def get_kms_cont(dev_ip):
-    node_docker = docker.DockerClient(base_url=f"tcp://{dev_ip}", version="auto")
-    for container in node_docker.containers.list():
-        if container.name.startswith("kms_kms_server"): # type: ignore[union-attr]
-            return container
-
-
-def configure_kms_on_docker(cluster, dev_ip):
-    container = get_kms_cont(f"{dev_ip}:2375")
-    if container:
-        environment = [
-            "VAULT_ADDR=http://127.0.0.1:8200",
-            "VAULT_SKIP_VERIFY=true"]
-        res = container.exec_run(
-            cmd="vault operator init -key-shares=1 -key-threshold=1 -format=json",
-            environment=environment
-        )
-        out = res.output.decode("utf-8")
-        logger.debug(out)
-        try:
-            config_data = json.loads(out)
-            with open('/etc/simplyblock/kms/data/init.json', 'w') as outfile:
-                outfile.write(json.dumps(config_data, indent=2))
-        except Exception as e:
-            logger.error(e)
-            return
-
-        with open("/etc/simplyblock/kms/data/init.json", "r") as f:
-            init_file = json.loads(f.read())
-            logger.debug("vault operator unseal")
-            res = container.exec_run(
-                cmd=f"vault operator unseal {init_file['unseal_keys_b64'][0]}",
-                environment=environment)
-            out = res.output.decode("utf-8")
-            logger.debug(res.exit_code)
-            logger.debug(out)
-            if res.exit_code == 0:
-                cluster.kms_unseal_key = init_file['unseal_keys_b64'][0]
-            logger.debug("vault login")
-            res = container.exec_run(
-                cmd=f"vault login {init_file['root_token']}",
-                environment=environment)
-            out = res.output.decode("utf-8")
-            logger.debug(out)
-            if res.exit_code == 0:
-                cluster.kms_root_token = init_file['root_token']
-            logger.debug("vault enable v1 kv")
-            res = container.exec_run(
-                cmd=f"vault secrets enable -path={cluster.uuid} -version=1 kv",
-                environment=environment)
-            out = res.output.decode("utf-8")
-            logger.debug(out)
-            logger.debug("vault enable v1 transit")
-            res = container.exec_run(
-                cmd="vault secrets enable transit",
-                environment=environment)
-            out = res.output.decode("utf-8")
-            logger.debug(out)
-
-
 def run_cmd_on_kms_pod(pod_name, namespace, command):
     load_kube_config_with_fallback()
     v1 = client.CoreV1Api()
@@ -4908,32 +4548,3 @@ def dump_json(data, unwrap_secrets: bool = False, **kwargs):
     return json.dumps(data, cls=_SecretAwareEncoder, unwrap_secrets=unwrap_secrets, **kwargs)
 
 
-def query_yes_no(question, default="yes")-> bool:
-    """Ask a yes/no question via raw_input() and return their answer.
-
-    "question" is a string that is presented to the user.
-    "default" is the presumed answer if the user just hits <Enter>.
-            It must be "yes" (the default), "no" or None (meaning
-            an answer is required of the user).
-
-    The "answer" return value is True for "yes" or False for "no".
-    """
-    valid = {"yes": True, "y": True, "ye": True, "no": False, "n": False}
-    if default is None:
-        prompt = " [y/n] "
-    elif default == "yes":
-        prompt = " [Y/n] "
-    elif default == "no":
-        prompt = " [y/N] "
-    else:
-        raise ValueError("invalid default answer: '%s'" % default)
-
-    while True:
-        sys.stdout.write(question + prompt)
-        choice = str(input()).lower()
-        if default is not None and choice == "":
-            return valid[default]
-        elif choice in valid:
-            return valid[choice]
-        else:
-            sys.stdout.write("Please respond with 'yes' or 'no' " "(or 'y' or 'n').\n")

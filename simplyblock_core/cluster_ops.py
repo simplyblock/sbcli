@@ -1,12 +1,7 @@
-import base64
 import builtins
 import contextlib
-import copy
 import json
 import os
-import re
-import shlex
-import socket
 import subprocess
 import threading
 import time
@@ -18,19 +13,15 @@ from datetime import UTC, datetime
 
 import fdb
 import requests
-import yaml
-from docker.errors import DockerException
 from kubernetes import client as k8s_client
 from pydantic import SecretStr
 
-import docker
 from simplyblock_core import (
     constants,
     index_ops,
     jm_raid,
     mgmt_node_ops,
     release_upgrades,
-    scripts,
     storage_node_ops,
     utils,
 )
@@ -54,7 +45,6 @@ from simplyblock_core.exceptions import (
     reject_on_sync_replication,
 )
 from simplyblock_core.models import indices
-from simplyblock_core.models.backup_config import UnresolvedBackupConfig
 from simplyblock_core.models.cluster import (
     Cluster,
     DeployConfig,
@@ -76,7 +66,6 @@ from simplyblock_core.models.stats import (
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.prom_client import PromClient
 from simplyblock_core.settings import Settings
-from simplyblock_core.utils import pull_docker_image_with_retry
 
 logger = utils.get_logger(__name__)
 
@@ -381,265 +370,6 @@ def _validate_integrity_flags(inline_checksum, atomic_4k):
         raise ValueError("atomic_4k requires inline_checksum")
 
 
-def create_cluster(blk_size, page_size_in_blocks, cli_pass,
-                   cap_warn, cap_crit, prov_cap_warn, prov_cap_crit, ifname, mgmt_ip, log_del_interval, metrics_retention_period,
-                   contact_point, grafana_endpoint, distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, mode,
-                   enable_node_affinity, qpair_count, client_qpair_count, max_queue_size, inflight_io_threshold, disable_monitoring, strict_node_anti_affinity, name,
-                   tls_secret, ingress_host_source, dns_name, fabric, is_single_node, client_data_nic,
-                   nvmeof_tls_config=None, max_fault_tolerance=1, backup_config=None,
-                   nvmf_base_port=4420, rpc_base_port=8080, snode_api_port=50001, container_image_prefix=None,
-                   hashicorp_vault_settings : HashicorpVaultSettings | None = None,
-                   enable_failure_domain=False,
-                   device_mode=constants.DEVICE_MODE_NVME,
-                   enable_hang_device=False,
-                   max_subsys=0, hugepages_mem=0, spdk_vcpu_count=0,
-                   alert_config: dict[str, t.Any] | None = None,
-                   inline_checksum=False,
-                   atomic_4k=False,
-                   cluster_vip=None,
-                   sync_replication=False,
-                   page_copy=False,
-                   md_journal=True,
-) -> str:
-    if (distr_ndcs, distr_npcs) not in SUPPORTED_ERASURE_CODING_SCHEMES:
-        raise ValueError("Unsupported erasure coding scheme")
-    _validate_integrity_flags(inline_checksum, atomic_4k)
-
-    _validate_sync_replication(sync_replication, ha_type, is_single_node)
-
-    if max_fault_tolerance > 1:
-        if ha_type != "ha":
-            raise ValueError("max_fault_tolerance > 1 requires ha_type='ha'")
-        if distr_npcs < 2:
-            raise ValueError("max_fault_tolerance > 1 requires distr_npcs >= 2")
-
-    if (hashicorp_vault_settings is not None) and (Settings().tls_connect != "authenticated"):
-        raise ValueError("External KMS requires mTLS authentication to be used")
-
-    if ingress_host_source == "dns" or ingress_host_source == "loadbalancer":
-        if not dns_name:
-            raise ValueError("--dns-name is required when --ingress-host-source is dns or loadbalancer")
-
-    if backup_config:
-        # Reject a configuration the cluster could not act on before installing
-        # anything, rather than at the set_backup_config below. Everything but
-        # the bucket is checked here: that one is derived from a cluster id that
-        # does not exist yet, so an absent one is not a caller's mistake.
-        UnresolvedBackupConfig.model_validate(backup_config)
-
-    if name and db_controller.kv_store is not None:
-        existing_clusters = db_controller.get_clusters()
-        for existing in existing_clusters:
-            if existing.cluster_name and existing.cluster_name == name:
-                raise ValueError(f"A cluster with the name '{name}' already exists")
-
-    monitoring_secret = SecretStr(os.environ.get("MONITORING_SECRET", ""))
-
-    logger.info("Installing dependencies...")
-    scripts.install_deps(mode)
-    logger.info("Installing dependencies > Done")
-
-    if not ifname:
-        ifname = "eth0"
-
-    dev_ip = utils.get_iface_ip(ifname)
-    if not dev_ip:
-        raise ValueError(f"Error getting interface ip: {ifname}")
-
-    db_connection = SecretStr(f"{utils.generate_string(8)}:{utils.generate_string(32)}@{dev_ip}:4500")
-    scripts.set_db_config(db_connection.get_secret_value())
-    logger.info(f"Node IP: {dev_ip}")
-    scripts.configure_docker(dev_ip)
-    logger.info("Configuring docker swarm...")
-    c = docker.DockerClient(base_url=f"tcp://{dev_ip}:2375", version="auto")
-    if c.swarm.attrs and "ID" in c.swarm.attrs:
-        logger.warning("Warning! Docker swarm found")
-        ret = utils.query_yes_no("Destroy current cluster and create new one?", default="no")
-        if not ret:
-            raise ValueError("Aborting")
-        c.swarm.leave(force=True)
-        try:
-            c.volumes.get("monitoring_grafana_data").remove(force=True)
-        except DockerException as e:
-            logger.debug(
-                "Best-effort cleanup: could not remove volume 'monitoring_grafana_data'; continuing cluster reset. Error: %s",
-                e,
-            )
-        time.sleep(3)
-
-    c.swarm.init(dev_ip)
-    logger.info("Configuring docker swarm > Done")
-
-    hostname = socket.gethostname()
-    current_node = next((node for node in c.nodes.list() if node.attrs["Description"]["Hostname"] == hostname), None)
-    if current_node:
-        current_spec = current_node.attrs["Spec"]
-        current_labels = current_spec.get("Labels", {})
-        current_labels["app"] = "graylog"
-        current_spec["Labels"] = current_labels
-
-        current_node.update(current_spec)
-
-        logger.info(f"Labeled node '{hostname}' with app=graylog")
-    else:
-        logger.warning("Could not find current node for labeling")
-
-
-    if not cli_pass:
-        cli_pass = SecretStr(utils.generate_string(10))
-
-    logger.info("Adding new cluster object")
-    cluster = Cluster()
-    cluster.uuid = str(uuid.uuid4())
-    cluster.cluster_name = name
-    # New clusters use per-chunk (shared) placement from the start: every
-    # distrib and JM created at add-node / activation / restart picks up the
-    # flag via cluster.shared_placement (see create_lvstore and
-    # bdev_jm_create). No legacy-then-migrate phase. The deferred migration
-    # path (shared_placement_migration_pending) is only for clusters UPGRADED
-    # from a legacy release, whose pre-existing bdevs need the one-shot
-    # runtime flip via set_shared_placement.
-    cluster.shared_placement = True
-    # New clusters create every distrib with v2 write protection from the
-    # start, so there is nothing to migrate and the runtime
-    # distr_write_protection_v2 RPC is never needed here. Only a cluster
-    # UPGRADED from a release without v2 goes through
-    # `cluster switch-write-protection`.
-    cluster.write_protection_v2 = True
-    # New clusters build journals with the current RAID 0+1 layout.
-    cluster.jm_raid_layout = jm_raid.LAYOUT_RAID01
-    cluster.blk_size = blk_size
-    cluster.page_size_in_blocks = page_size_in_blocks
-    cluster.nqn = f"{constants.CLUSTER_NQN}:{cluster.uuid}"
-    cluster.cli_pass = cli_pass
-    cluster.secret = SecretStr(utils.generate_string(20))
-    cluster.grafana_secret = monitoring_secret if mode == "kubernetes" else cluster.secret
-    if cap_warn and cap_warn > 0:
-        cluster.cap_warn = cap_warn
-    if cap_crit and cap_crit > 0:
-        cluster.cap_crit = cap_crit
-    if prov_cap_warn and prov_cap_warn > 0:
-        cluster.prov_cap_warn = prov_cap_warn
-    if prov_cap_crit and prov_cap_crit > 0:
-        cluster.prov_cap_crit = prov_cap_crit
-    cluster.distr_ndcs = distr_ndcs
-    cluster.distr_npcs = distr_npcs
-    cluster.distr_bs = distr_bs
-    cluster.distr_chunk_bs = distr_chunk_bs
-    cluster.ha_type = ha_type
-    protocols = parse_protocols(fabric)
-    cluster.fabric_tcp = protocols["tcp"]
-    cluster.fabric_rdma = protocols["rdma"]
-    cluster.is_single_node = is_single_node
-    if ingress_host_source == "hostip":
-        base = dev_ip
-    else:
-        base = dns_name
-
-    graylog_endpoint = f"http://{base}/graylog"
-    os_endpoint      = f"http://{base}/opensearch"
-    default_grafana  = f"http://{base}/grafana"
-
-    cluster.grafana_endpoint = grafana_endpoint or default_grafana
-    cluster.enable_node_affinity = enable_node_affinity
-    cluster.enable_hang_device = enable_hang_device
-    cluster.qpair_count = qpair_count or constants.QPAIR_COUNT
-    cluster.client_qpair_count = client_qpair_count or constants.CLIENT_QPAIR_COUNT
-
-    cluster.max_queue_size = max_queue_size
-    cluster.inflight_io_threshold = inflight_io_threshold
-    cluster.strict_node_anti_affinity = strict_node_anti_affinity
-    cluster.enable_failure_domain = enable_failure_domain
-    cluster.sync_replication = bool(sync_replication)
-    validate_spdk_sizing(max_subsys, hugepages_mem, spdk_vcpu_count)
-    cluster.max_subsys = max_subsys or 0
-    cluster.hugepages_mem = hugepages_mem or 0
-    cluster.spdk_vcpu_count = spdk_vcpu_count or 0
-    cluster.device_mode = _validated_device_mode(device_mode)
-    cluster.contact_point = contact_point or ""
-    cluster.disable_monitoring = disable_monitoring
-    cluster.mode = mode
-    cluster.full_page_unmap = False
-    cluster.inline_checksum = bool(inline_checksum)
-    cluster.atomic_4k = bool(atomic_4k)
-    cluster.page_copy = bool(page_copy)
-    cluster.md_journal = bool(md_journal)
-    cluster.client_data_nic = client_data_nic or ""
-    cluster.max_fault_tolerance = max_fault_tolerance
-    cluster.nvmf_base_port = nvmf_base_port
-    cluster.rpc_base_port = rpc_base_port
-    cluster.snode_api_port = snode_api_port
-    cluster.container_image_prefix = container_image_prefix or ""
-    cluster.hashicorp_vault_settings = hashicorp_vault_settings
-    cluster.backup_local_path = os.path.join(constants.KVD_DB_BACKUP_PATH, cluster.uuid)
-    cluster.cluster_vip = cluster_vip or ""
-    if nvmeof_tls_config:
-        cluster.tls = True
-        cluster.tls_config = nvmeof_tls_config
-
-    if backup_config:
-        cluster.set_backup_config(backup_config)
-
-    if not disable_monitoring:
-        utils.render_and_deploy_alerting_configs(alert_config, contact_point, cluster.grafana_endpoint, cluster.uuid, cluster.secret.get_secret_value())
-
-    logger.info("Deploying swarm stack ...")
-    log_level = "DEBUG" if constants.LOG_WEB_DEBUG else "INFO"
-    scripts.deploy_stack(cli_pass.get_secret_value(), dev_ip, constants.SIMPLY_BLOCK_DOCKER_IMAGE, cluster.secret.get_secret_value(), cluster.uuid,
-                            log_del_interval, metrics_retention_period, log_level, cluster.grafana_endpoint, str(disable_monitoring))
-    logger.info("Deploying swarm stack > Done")
-
-    logger.info("Configuring DB...")
-    scripts.set_db_config_single()
-    logger.info("Configuring DB > Done")
-    monitoring_secret = cluster.secret
-
-
-    cfg = DeployConfig()
-    cfg.mode = mode
-    cfg.grafana_endpoint = grafana_endpoint or default_grafana
-    cfg.grafana_secret = monitoring_secret if mode == "kubernetes" else cluster.secret
-    cfg.db_connection = db_connection if db_connection else SecretStr("")
-    cfg.disable_monitoring = disable_monitoring
-    cfg.write_to_db()
-
-    # Monitoring stack configuration (OpenSearch max_result_window, Graylog
-    # GELF input + JSON extractor, Grafana admin user). Must run after the
-    # mode-specific deploy block has produced a reachable graylog endpoint.
-    # Pre-KMS (commit 7700b866) this lived in a single shared block after
-    # the if/elif; the KMS refactor accidentally moved it into the
-    # kubernetes branch only, which silently left every docker-swarm
-    # deployment without a Graylog input — services were emitting GELF on
-    # port 12201 but graylog was dropping them on the floor because no
-    # input was configured. Restore the shared placement so both modes
-    # provision monitoring.
-    if not disable_monitoring:
-        _set_max_result_window(os_endpoint)
-        _add_graylog_input(graylog_endpoint, monitoring_secret)
-        _create_update_user(cluster.uuid, cluster.grafana_endpoint, monitoring_secret, cluster.secret)
-
-    cluster.db_connection = db_connection  # type: ignore[assignment]
-    cluster.status = Cluster.STATUS_UNREADY
-    cluster.create_dt = str(datetime.now())
-
-    cluster.write_to_db(db_controller.kv_store)
-
-    cluster_events.cluster_create(cluster)
-
-    # Every declared index is complete from the first write on a cluster that
-    # starts empty, so flip them to `ready` now rather than leaving every read
-    # on the scan fallback until someone runs the backfill by hand. The walk is
-    # over empty tables here; on a deployment that already holds clusters it
-    # indexes what is there, which is equally correct.
-    for line in index_ops.build_indices(log=logger.info):
-        logger.info(line)
-
-    mgmt_node_ops.add_mgmt_node(dev_ip, mode, cluster.uuid)
-
-    logger.info("New Cluster has been created")
-    logger.info(cluster.uuid)
-    return cluster.uuid
-
 def parse_nvme_list_output(output, target_model):
     lines = output.splitlines()
     for line in lines:
@@ -815,22 +545,19 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
 
     if clusters:
         cfg = db_controller.get_deploy_config()
-        cluster.mode = cfg.mode
         cluster.db_connection = cfg.db_connection
         cluster.grafana_secret = cfg.grafana_secret
         cluster.grafana_endpoint = cfg.grafana_endpoint
         cluster.disable_monitoring = cfg.disable_monitoring
     else:
         # Bootstrapping the very first cluster of a fresh deployment: no
-        # DeployConfig exists yet (only the docker-swarm create_cluster()
-        # path writes one), so derive the cluster-wide settings here and
-        # persist them as the DeployConfig every later add_cluster() call
+        # DeployConfig exists yet, so derive the cluster-wide settings here
+        # and persist them as the DeployConfig every later add_cluster() call
         # will read.
         logger.info("No previous clusters found, bootstrapping first cluster")
         enable_monitoring = os.environ.get("ENABLE_MONITORING", "")
         monitoring_secret = SecretStr(os.environ.get("MONITORING_SECRET", ""))
 
-        cluster.mode = "kubernetes"
         cluster.disable_monitoring = enable_monitoring != "true"
         logger.info("Retrieving foundationdb connection string...")
         cluster.db_connection = utils.get_fdb_cluster_string(constants.FDB_CONFIG_NAME, constants.K8S_NAMESPACE)
@@ -842,14 +569,13 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
             raise ValueError("monitoring_secret is required")
         cluster.grafana_endpoint = constants.GRAFANA_K8S_ENDPOINT
 
-        mgmt_node_ops.add_mgmt_node("0.0.0.0", "kubernetes", cluster.uuid)
+        mgmt_node_ops.add_mgmt_node("0.0.0.0", cluster.uuid)
 
         if not cluster.disable_monitoring:
             _set_max_result_window(constants.OS_K8S_ENDPOINT)
             _add_graylog_input(constants.GRAYLOG_K8S_ENDPOINT, cluster.grafana_secret)
 
         cfg = DeployConfig()
-        cfg.mode = cluster.mode
         cfg.grafana_endpoint = cluster.grafana_endpoint
         cfg.grafana_secret = cluster.grafana_secret
         cfg.db_connection = cluster.db_connection
@@ -859,8 +585,7 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
     if not cluster.disable_monitoring:
         _create_update_user(cluster.uuid, cluster.grafana_endpoint, cluster.grafana_secret, cluster.secret)
 
-    if cluster.mode == "kubernetes":
-        utils.patch_prometheus_configmap(cluster.uuid, cluster.secret.get_secret_value())
+    utils.patch_prometheus_configmap(cluster.uuid, cluster.secret.get_secret_value())
 
     cluster.distr_ndcs = distr_ndcs
     cluster.distr_npcs = distr_npcs
@@ -908,7 +633,6 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
     if backup_config:
         cluster.set_backup_config(backup_config)
 
-    cluster.backup_local_path = os.path.join(constants.KVD_DB_BACKUP_PATH, cluster.uuid)
     cluster.status = Cluster.STATUS_UNREADY
     cluster.create_dt = str(datetime.now())
     cluster.write_to_db(db_controller.kv_store)
@@ -3468,175 +3192,6 @@ def get_logs(cluster_id, limit=50, **kwargs) -> builtins.list[dict]:
     return out
 
 
-# Grafana's provisioning paths inside the monitoring container, as mounted by
-# docker-compose-swarm-monitoring.yml.
-GRAFANA_DATASOURCE_TARGET = "/etc/grafana/provisioning/datasources/datasource.yaml"
-GRAFANA_ALERTING_TARGET = "/etc/grafana/provisioning/alerting"
-GRAFANA_EVENT_DATASOURCE_TARGET = "/etc/grafana/provisioning/datasources/datasource-events.yaml"
-
-_GRAFANA_DURATION = re.compile(r'^(?:\d+(?:ms|[smhdwy]))+$')
-
-
-def _event_alert_settings(enabled, log_limit, interval, pending_period,
-                          plugin_url, plugin_preinstalled) -> dict[str, t.Any]:
-    """Validate the tuning knobs and shape them for the templates.
-
-    Validated here because Grafana answers a malformed duration or limit by
-    refusing to start, long after the command that caused it.
-    """
-    settings = {
-        'enabled': enabled,
-        'logLimit': 1000 if log_limit is None else log_limit,
-        'interval': interval or '1m',
-        'for': pending_period or '1m',
-        'plugin': {
-            'url': constants.GRAFANA_EVENT_ALERTS_PLUGIN_URL if plugin_url is None else plugin_url,
-            'preinstalled': plugin_preinstalled,
-        },
-    }
-
-    if not enabled:
-        return settings
-
-    if settings['logLimit'] < 1:
-        raise ValueError(f"--log-limit must be at least 1, got {settings['logLimit']}")
-
-    for flag, key in (('--interval', 'interval'), ('--pending-period', 'for')):
-        if not _GRAFANA_DURATION.match(settings[key]):
-            raise ValueError(
-                f"{flag} must be a Grafana duration such as 30s, 1m or 1h, got {settings[key]!r}")
-
-    if not settings['plugin']['preinstalled'] and not settings['plugin']['url']:
-        raise ValueError(
-            "--plugin-url is empty and --plugin-preinstalled was not given, so the data source "
-            "plugin the rules query would never be installed")
-
-    return settings
-
-
-def _grafana_provisioning_dirs(cluster_docker) -> tuple[str, str]:
-    """The host directories the running Grafana reads its provisioning from.
-
-    Read off the service rather than computed from this package's location, so
-    the files land where the cluster's own mounts point.
-    """
-    try:
-        service = cluster_docker.services.get(constants.MONITORING_GRAFANA_SERVICE)
-    except docker.errors.NotFound as e:
-        raise ValueError(
-            f"Service {constants.MONITORING_GRAFANA_SERVICE} not found: this cluster has no "
-            f"monitoring stack") from e
-
-    mounts = service.attrs['Spec']['TaskTemplate']['ContainerSpec'].get('Mounts') or []
-    sources = {mount.get('Target'): mount.get('Source') for mount in mounts}
-    for target in (GRAFANA_DATASOURCE_TARGET, GRAFANA_ALERTING_TARGET):
-        if not sources.get(target):
-            raise ValueError(
-                f"Service {constants.MONITORING_GRAFANA_SERVICE} has no bind mount at {target}; "
-                f"redeploy the monitoring stack before provisioning event log alerts")
-
-    return os.path.dirname(sources[GRAFANA_DATASOURCE_TARGET]), sources[GRAFANA_ALERTING_TARGET]
-
-
-def _install_provisioning_on_all_managers(files: dict[str, str]) -> None:
-    """Write Grafana's provisioning files onto every management node.
-
-    Grafana is constrained to node.role == manager and may be rescheduled to
-    any of them, and these are host paths, so a manager that lacks them
-    provisions no rules the first time Grafana lands there. They cannot ship
-    with the package the way alert_rules.yaml does, carrying this cluster's id
-    and secret. Written through each node's docker API, the same way SNodeAPI
-    is started on a remote node; base64 keeps the YAML out of shell quoting,
-    and user=root because the image runs as USER simplyblock, which cannot
-    write into the package directory.
-    """
-    script = "; ".join(
-        f"umask 022 && echo {base64.b64encode(content.encode('utf-8')).decode('ascii')} "
-        f"| base64 -d > {shlex.quote(path)}"
-        for path, content in files.items()
-    )
-    volumes = sorted({os.path.dirname(path) for path in files})
-
-    failed = {}
-    for node in db_controller.get_mgmt_nodes():
-        try:
-            node_docker = docker.DockerClient(
-                base_url=f"tcp://{node.docker_ip_port}", version="auto", timeout=60)
-            node_docker.containers.run(
-                constants.SIMPLY_BLOCK_DOCKER_IMAGE, ["sh", "-c", script], user="root",
-                volumes=[f"{directory}:{directory}" for directory in volumes],
-                remove=True, detach=False)
-            logger.info("Provisioning files written on %s", node.mgmt_ip)
-        except Exception as e:
-            failed[node.mgmt_ip] = str(e)
-
-    if failed:
-        raise RuntimeError(
-            "Could not write the provisioning files on: "
-            + "; ".join(f"{ip} ({reason})" for ip, reason in failed.items())
-            + ". Fix those nodes and re-run; Grafana provisions nothing on a node it cannot "
-              "read them from")
-
-
-def set_event_alerts(cluster_id, enabled=True, log_limit=None, interval=None, pending_period=None,
-                     plugin_url=None, plugin_preinstalled=False) -> None:
-    """Provision (or remove) the Grafana alert rules read from the cluster event log.
-
-    Unlike the Thanos-backed rules in alerting/alert_rules.yaml, which ship
-    with the package and are provisioned unconditionally, these are opt-in:
-    they query the control plane's REST API, which needs a Grafana plugin the
-    deployed image does not carry and downloads once.
-
-    Runs against the live stack -- files onto every management node, then the
-    Grafana task recreated so it re-reads them -- so it configures a cluster
-    that already exists.
-    """
-    cluster = db_controller.get_cluster_by_id(cluster_id)
-
-    if cluster.mode != "docker":
-        raise ValueError(
-            "Event log alerts are provisioned by the simplyblock-operator Helm chart on "
-            "kubernetes; this command configures the docker monitoring stack only")
-
-    if cluster.disable_monitoring:
-        raise ValueError("This cluster was created with --disable-monitoring, so it has no Grafana")
-
-    settings = _event_alert_settings(enabled, log_limit, interval, pending_period,
-                                     plugin_url, plugin_preinstalled)
-
-    cluster_docker = utils.get_docker_client(cluster_id)
-    scripts_dir, alerting_dir = _grafana_provisioning_dirs(cluster_docker)
-
-    # The secret is the bearer token the data source sends, and reaches
-    # plaintext only here, on its way into a file Grafana reads -- the same
-    # treatment prometheus.yml gets.
-    rendered = utils.render_event_alert_configs(
-        settings, [(cluster.get_id(), cluster.secret.get_secret_value())])
-    datasource_path = os.path.join(scripts_dir, utils.EVENT_ALERT_DATASOURCE_FILE)
-    _install_provisioning_on_all_managers({
-        os.path.join(alerting_dir, utils.EVENT_ALERT_RULES_FILE):
-            rendered[utils.EVENT_ALERT_RULES_FILE],
-        datasource_path: rendered[utils.EVENT_ALERT_DATASOURCE_FILE],
-    })
-
-    # --force recreates the task, which is what makes Grafana re-read
-    # provisioning; a single-file bind mount also tracks the inode it started
-    # with, so the rewritten data source is only picked up here. Mounts are
-    # keyed by target and env by name, so re-running updates both in place.
-    # Disabling leaves them: both files are empty now, and keeping the plugin
-    # makes re-enabling a restart instead of another download.
-    update = ["sudo", "docker", "service", "update", "--force"]
-    if enabled:
-        if not settings['plugin']['preinstalled']:
-            update += ["--env-add", (f"GF_INSTALL_PLUGINS={settings['plugin']['url']};"
-                                    f"{constants.GRAFANA_EVENT_ALERTS_PLUGIN_ID}")]
-        update += ["--mount-add", (f"type=bind,src={datasource_path},"
-                                  f"dst={GRAFANA_EVENT_DATASOURCE_TARGET},readonly")]
-
-    logger.info("Restarting Grafana...")
-    subprocess.check_call(update + [constants.MONITORING_GRAFANA_SERVICE])
-
-
 def get_cluster(cl_id) -> dict:
     cluster = db_controller.get_cluster_by_id(cl_id)
     data = cluster.get_clean_dict()
@@ -3655,58 +3210,6 @@ def get_cluster(cl_id) -> dict:
     else:
         data['write_protection'] = 'v1 (legacy)'
     return data
-
-
-#: Releases whose `cluster update` must restart Grafana to load a changed
-#: alert_rules.yaml. Add a version here when a release changes that file.
-GRAFANA_RESTART_RELEASE = "26.3.0.4"
-
-
-#: Swarm service -> compose service, for the monitoring args reconciled on every
-#: Docker ``cluster update``. Those args are fixed at ``docker stack deploy``
-#: time, so a compose change otherwise never reaches a deployed cluster.
-#:
-#: An allowlist on purpose. Grafana must not be added: set_event_alerts() mutates
-#: its spec at runtime, and the compose file would overwrite that.
-_RECONCILED_MONITORING_ARGS = {"monitoring_node-exporter": "node-exporter"}
-
-
-def _compose_monitoring_command_args(compose: dict[str, t.Any], service_key: str) -> builtins.list[str]:
-    command = compose["services"][service_key]["command"]
-    if isinstance(command, str):
-        command = shlex.split(command)
-
-    # Compose escapes a literal '$' as '$$'; Swarm stores it interpolated.
-    return [arg.replace("$$", "$") for arg in command]
-
-
-def _reconcile_monitoring_args(cluster_docker) -> None:
-    compose_path = os.path.join(
-        os.path.dirname(scripts.__file__), "docker-compose-swarm-monitoring.yml")
-    with open(compose_path, encoding="utf-8") as f:
-        compose = yaml.safe_load(f)
-
-    for service_name, compose_key in _RECONCILED_MONITORING_ARGS.items():
-        desired = _compose_monitoring_command_args(compose, compose_key)
-        try:
-            service = cluster_docker.services.get(service_name)
-        except docker.errors.NotFound:
-            logger.info("%s is not deployed; nothing to reconcile", service_name)
-            continue
-
-        spec = service.attrs["Spec"]
-        current = spec["TaskTemplate"]["ContainerSpec"].get("Args", [])
-        if current == desired:
-            logger.info("%s args already current", service_name)
-            continue
-
-        logger.info("Reconciling %s args from %s to %s",
-                    service_name, current, desired)
-        task_template = copy.deepcopy(spec["TaskTemplate"])
-        task_template["ContainerSpec"]["Args"] = desired
-        cluster_docker.api.update_service(
-            service.id, service.attrs["Version"]["Index"],
-            task_template=task_template, fetch_current_spec=True)
 
 
 def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, mgmt_image=None,
@@ -3771,176 +3274,70 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
             "back online", cluster_id)
 
     logger.info("Updating mgmt cluster")
-    if cluster.mode == "docker":
-        cluster_docker = utils.get_docker_client(cluster_id)
-        service_image = constants.SIMPLY_BLOCK_DOCKER_IMAGE
-        if mgmt_image:
-            service_image = mgmt_image
-        logger.info(f"Pulling image {service_image}")
-        pull_docker_image_with_retry(cluster_docker, service_image)
-        service_names = []
-        image_parts = ["simplyblock-io/simplyblock:", "simplyblock/simplyblock:", "simply-block/simplyblock:"]
-        for service in cluster_docker.services.list():
-            container_image=service.attrs['Spec']['Labels']['com.docker.stack.image']
+    utils.load_kube_config_with_fallback()
+    apps_v1 = k8s_client.AppsV1Api()
+    namespace = constants.K8S_NAMESPACE
+    image_parts = ["simplyblock-io/simplyblock:", "simplyblock/simplyblock:", "simply-block/simplyblock:"]
+    service_image = mgmt_image or constants.SIMPLY_BLOCK_DOCKER_IMAGE
+    deployment_names = []
+    # Update Deployments
+    deployments = apps_v1.list_namespaced_deployment(namespace=namespace)
+    for deploy in deployments.items:
+        if deploy.metadata.name == constants.ADMIN_DEPLOY_NAME:
+            logger.info(f"Skipping deployment {deploy.metadata.name}")
+            continue
+        deployment_names.append(deploy.metadata.name)
+        for c in deploy.spec.template.spec.containers:
             for part in image_parts:
-                if part in container_image:
-                    if service.name in ["app_CachingNodeMonitor", "app_CachedLVolStatsCollector"]:
-                        logger.info(f"Removing service {service.name}")
-                        service.remove()
-                    else:
-                        logger.info(f"Updating service {service.name}")
-                        service_env = service.attrs['Spec']['TaskTemplate']['ContainerSpec']['Env']
-                        if "SIMPLYBLOCK_LOG_LEVEL=DEBUG" in service_env:
-                            service_env.remove("SIMPLYBLOCK_LOG_LEVEL=DEBUG")
-                            service_env.append("SIMPLYBLOCK_LOG_LEVEL=INFO")
-
-                        service.update(image=service_image, env=service_env, force_update=True)
-                        service_names.append(service.attrs['Spec']['Name'])
+                if part in c.image:
+                    logger.info(f"Updating deployment {deploy.metadata.name} image to {service_image}")
+                    c.image = service_image
+                    annotations = deploy.spec.template.metadata.annotations or {}
+                    annotations["pod.kubernetes.io/restartedAt"] = datetime.now(UTC).isoformat()
+                    deploy.spec.template.metadata.annotations = annotations
+                    apps_v1.patch_namespaced_deployment(
+                        name=deploy.metadata.name,
+                        namespace=namespace,
+                        body={"spec": {"template": deploy.spec.template}})
                     break
 
-        if "app_SnapshotMonitor" not in service_names:
-            utils.create_docker_service(
-                cluster_docker=cluster_docker,
-                service_name="app_SnapshotMonitor",
-                command=["python3", "simplyblock_core/services/snapshot_monitor.py"],
-                service_image=service_image)
+    if "simplyblock-tasks-runner-sync-lvol-del" not in deployment_names:
+        utils.create_k8s_service(
+            namespace=namespace,
+            deployment_name="simplyblock-tasks-runner-sync-lvol-del",
+            container_name="tasks-runner-sync-lvol-del",
+            command=["simplyblock-task-runner", "tasks-runner-sync-lvol-del"],
+            container_image=service_image)
 
-        if "app_TasksRunnerLVolSyncDelete" not in service_names:
-            utils.create_docker_service(
-                cluster_docker=cluster_docker,
-                service_name="app_TasksRunnerLVolSyncDelete",
-                command=["simplyblock-task-runner", "tasks-runner-sync-lvol-del"],
-                service_image=service_image)
+    if "simplyblock-snapshot-monitor" not in deployment_names:
+        utils.create_k8s_service(
+            namespace=namespace,
+            deployment_name="simplyblock-snapshot-monitor",
+            container_name="snapshot-monitor",
+            command=["python", "simplyblock_core/services/snapshot_monitor.py"],
+            container_image=service_image)
 
-        if "app_TasksRunnerJCCompResume" not in service_names:
-            utils.create_docker_service(
-                cluster_docker=cluster_docker,
-                service_name="app_TasksRunnerJCCompResume",
-                command=["simplyblock-task-runner", "tasks-runner-jc-comp"],
-                service_image=service_image)
+    # Update DaemonSets
+    daemonsets = apps_v1.list_namespaced_daemon_set(namespace=namespace)
+    for ds in daemonsets.items:
+        for c in ds.spec.template.spec.containers:
+            for part in image_parts:
+                if part in c.image:
+                    logger.info(f"Updating daemonset {ds.metadata.name} image to {service_image}")
+                    c.image = service_image
+                    annotations = ds.spec.template.metadata.annotations or {}
+                    annotations["pod.kubernetes.io/restartedAt"] = datetime.now(UTC).isoformat()
+                    ds.spec.template.metadata.annotations = annotations
+                    apps_v1.patch_namespaced_daemon_set(
+                        name=ds.metadata.name,
+                        namespace=namespace,
+                        body={"spec": {"template": ds.spec.template}})
+                    break
 
-        if "app_TasksRunnerSyncResync" not in service_names:
-            utils.create_docker_service(
-                cluster_docker=cluster_docker,
-                service_name="app_TasksRunnerSyncResync",
-                command=["simplyblock-task-runner", "tasks-runner-sync-resync"],
-                service_image=service_image)
-
-        if "app_TasksRunnerSyncPromote" not in service_names:
-            utils.create_docker_service(
-                cluster_docker=cluster_docker,
-                service_name="app_TasksRunnerSyncPromote",
-                command=["simplyblock-task-runner", "tasks-runner-sync-promote"],
-                service_image=service_image)
-
-        if "app_BackupService" not in service_names:
-            utils.create_docker_service(
-                cluster_docker=cluster_docker,
-                service_name="app_BackupService",
-                command=["simplyblock-task-runner", "tasks-runner-fdb-backup"],
-                service_image=service_image)
-
-        if not cluster.disable_monitoring:
-            try:
-                _reconcile_monitoring_args(cluster_docker)
-            except Exception as e:
-                logger.error(f"Failed to reconcile monitoring service args: {e}")
-
-        # Grafana reads provisioning at startup, and its upstream image is not
-        # matched by the loop above, so the alert rules `pip` refreshed in the
-        # directory it mounts are only picked up here. Gated on the release
-        # that adds API_request_latency_high, so an update that changes no rule
-        # does not interrupt Grafana; a later release that does has to add its
-        # version here. Logged, not raised: a Grafana that will not restart
-        # must not fail the whole update.
-        if not cluster.disable_monitoring and release_upgrades.release_matches(
-                constants.SIMPLY_BLOCK_VERSION, GRAFANA_RESTART_RELEASE):
-            try:
-                cluster_docker.services.get(
-                    constants.MONITORING_GRAFANA_SERVICE).update(force_update=True)
-                logger.info("Restarted Grafana to reload the alert rules")
-            except Exception as e:
-                logger.error(f"Failed to restart Grafana: {e}")
-
-        logger.info("Done updating mgmt cluster")
-
-    elif cluster.mode == "kubernetes":
-        utils.load_kube_config_with_fallback()
-        apps_v1 = k8s_client.AppsV1Api()
-        namespace = constants.K8S_NAMESPACE
-        image_parts = ["simplyblock-io/simplyblock:", "simplyblock/simplyblock:", "simply-block/simplyblock:"]
-        service_image = mgmt_image or constants.SIMPLY_BLOCK_DOCKER_IMAGE
-        deployment_names = []
-        # Update Deployments
-        deployments = apps_v1.list_namespaced_deployment(namespace=namespace)
-        for deploy in deployments.items:
-            if deploy.metadata.name == constants.ADMIN_DEPLOY_NAME:
-                logger.info(f"Skipping deployment {deploy.metadata.name}")
-                continue
-            deployment_names.append(deploy.metadata.name)
-            for c in deploy.spec.template.spec.containers:
-                for part in image_parts:
-                    if part in c.image:
-                        logger.info(f"Updating deployment {deploy.metadata.name} image to {service_image}")
-                        c.image = service_image
-                        annotations = deploy.spec.template.metadata.annotations or {}
-                        annotations["pod.kubernetes.io/restartedAt"] = datetime.now(UTC).isoformat()
-                        deploy.spec.template.metadata.annotations = annotations
-                        apps_v1.patch_namespaced_deployment(
-                            name=deploy.metadata.name,
-                            namespace=namespace,
-                            body={"spec": {"template": deploy.spec.template}})
-                        break
-
-        if "simplyblock-tasks-runner-sync-lvol-del" not in deployment_names:
-            utils.create_k8s_service(
-                namespace=namespace,
-                deployment_name="simplyblock-tasks-runner-sync-lvol-del",
-                container_name="tasks-runner-sync-lvol-del",
-                command=["simplyblock-task-runner", "tasks-runner-sync-lvol-del"],
-                container_image=service_image)
-
-        if "simplyblock-snapshot-monitor" not in deployment_names:
-            utils.create_k8s_service(
-                namespace=namespace,
-                deployment_name="simplyblock-snapshot-monitor",
-                container_name="snapshot-monitor",
-                command=["python", "simplyblock_core/services/snapshot_monitor.py"],
-                container_image=service_image)
-
-        # Update DaemonSets
-        daemonsets = apps_v1.list_namespaced_daemon_set(namespace=namespace)
-        for ds in daemonsets.items:
-            for c in ds.spec.template.spec.containers:
-                for part in image_parts:
-                    if part in c.image:
-                        logger.info(f"Updating daemonset {ds.metadata.name} image to {service_image}")
-                        c.image = service_image
-                        annotations = ds.spec.template.metadata.annotations or {}
-                        annotations["pod.kubernetes.io/restartedAt"] = datetime.now(UTC).isoformat()
-                        ds.spec.template.metadata.annotations = annotations
-                        apps_v1.patch_namespaced_daemon_set(
-                            name=ds.metadata.name,
-                            namespace=namespace,
-                            body={"spec": {"template": ds.spec.template}})
-                        break
-
-        logger.info("Done updating mgmt cluster")
-
+    logger.info("Done updating mgmt cluster")
 
     if mgmt_only:
         return
-
-    if cluster.mode == "docker":
-        logger.info("Updating spdk image on storage nodes")
-        for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
-            if node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
-                node_docker = docker.DockerClient(base_url=f"tcp://{node.mgmt_ip}:2375", version="auto", timeout=60 * 5)
-                img = constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE
-                if spdk_image:
-                    img = spdk_image
-                logger.info(f"Pulling image {img}")
-                pull_docker_image_with_retry(node_docker, img)
 
     if not restart:
         return

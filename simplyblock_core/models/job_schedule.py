@@ -76,7 +76,6 @@ class JobSchedule(BaseModel):
     # lvol delta to the target, flip ANA so the client fails over. Used for
     # migration commit and fail-back (fresh or recovered source).
     FN_REPLICATION_FINAL = "replication_final"
-    FN_FDB_BACKUP = "fdb_backup"
     # Sync replication: move the leadership of one or more LVS to the other
     # site's triplet and open the promoted volumes there (promote,
     # tasks_runner_sync_promote). ``node_id`` is the owner of the first LVS;

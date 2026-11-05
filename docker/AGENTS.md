@@ -69,9 +69,8 @@ let the scan go green while the published image still carries the vulnerability.
 ## Constraints when editing the Dockerfile
 
 - **Do not remove the `secure_path` line from `/etc/sudoers.d/simplyblock`.** Several entry points
-  start as `sudo -E python3 ...`: the storage-node API (`storage_node_ops.py`), the SPDK proxy
-  (`simplyblock_web/api/internal/storage_node/docker.py`,
-  `simplyblock_web/templates/storage_deploy_spdk.yaml.j2`) and `node_configure.py` (from the
+  start as `sudo -E python3 ...`: the SPDK proxy
+  (`simplyblock_web/templates/storage_deploy_spdk.yaml.j2`) and `node_configure.py` (from the
   operator's init script, `kubernetes/operator/internal/utils/storage_nodeset_ds.go`). UBI's
   `/etc/sudoers` sets `Defaults secure_path = /sbin:/bin:/usr/sbin:/usr/bin`, which replaces
   `PATH` **even with `-E`**. Measured on `ubi10/ubi:10.2`, with `/opt/venv/bin` first on `PATH`:
@@ -90,24 +89,22 @@ let the scan go green while the published image still carries the vulnerability.
   dependencies. This is why an earlier attempt at a venv image was abandoned rather than fixed.
 
 - **Keep the source tree at `/app`, and keep the install editable — for now.** The Helm charts
-  (`kubernetes/helm-charts/.../controlplane_deploy.yaml`, `.../storage-node.yaml`), the CSI chart,
-  `simplyblock_core/scripts/docker-compose-swarm.yml` and `cluster_ops.py` all name source files
-  (`python3 simplyblock_core/services/<name>.py`), and Swarm services created by an older control
-  plane keep their original command string across an image upgrade. Those paths resolve only
-  because `/app` *is* the installed package.
+  (`kubernetes/helm-charts/.../controlplane_deploy.yaml`, `.../storage-node.yaml`), the CSI chart
+  and `cluster_ops.py` all name source files (`python3 simplyblock_core/services/<name>.py`).
+  Those paths resolve only because `/app` *is* the installed package.
 
   This is compatibility scaffolding with a defined exit. The packaging half is already done —
   `uv sync --no-editable` installs cleanly and every data file (`env_var`, `scripts/**`,
   `templates/**`, dashboards) resolves from `site-packages`, so nothing in the wheel blocks the
   switch. The only thing left is the consumers: once they all use the `simplyblock-task-runner` /
   `simplyblock-service` / `sbctl` entry points, the change is `uv sync --locked --no-editable` in
-  the builder plus dropping `COPY . /app` from the runtime stage. The compose file's task runners
-  and `cluster_ops.py`'s runner services are already off the paths. Remaining offenders:
+  the builder plus dropping `COPY . /app` from the runtime stage. `cluster_ops.py`'s runner
+  services are already off the paths. Remaining offenders:
 
   ```bash
   # from the sbcli repository root, not from docker/
   grep -rnE 'python3? +simplyblock_(core|web)/[a-z_/]+\.py' \
-    ../kubernetes simplyblock_core/scripts/docker-compose-swarm.yml simplyblock_core/cluster_ops.py
+    ../kubernetes simplyblock_core/cluster_ops.py
   ```
 
 - **`python3` in `base` is for `dnf`, not the application.** dnf and subscription-manager are

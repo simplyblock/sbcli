@@ -16,7 +16,7 @@ from simplyblock_cli import cli as cli_module
 from simplyblock_cli import clibase
 from simplyblock_core import cluster_ops, constants, storage_node_ops
 from simplyblock_web import node_configure
-from simplyblock_web.api.internal.storage_node.docker import PersistNodeConfigParams
+from simplyblock_web.api.internal.storage_node.kubernetes import PersistNodeConfigParams
 
 CAP = constants.MAX_SUBSYSTEMS_PER_NODE
 

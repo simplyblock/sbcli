@@ -265,7 +265,6 @@ _COVERED_ELSEWHERE: dict = {}
 # test_migrated_runners_delegate_retry below pins that they really did hand the
 # retry counter over.
 _DRIVER_MIGRATED = {
-    "tasks_runner_fdb_backup.py",
     "tasks_runner_jc_comp.py",
     "tasks_runner_replication_final.py",
     "tasks_runner_sync_lvol_del.py",

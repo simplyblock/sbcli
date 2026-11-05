@@ -8,7 +8,7 @@ Tests cover:
   - Legacy wrappers: get_next_port, get_next_dev_port, next_free_hublvol_port
   - RPC port allocation with cluster config
   - Firewall/SNodeAPI port: per-storage-node allocation (unique per SPDK)
-  - Port config propagation through cluster_ops (create_cluster, add_cluster)
+  - Port config propagation through cluster_ops (add_cluster)
   - CLI argument parsing for port params
   - Port uniqueness across port types in the unified pool
   - Edge cases: empty cluster, all ports exhausted, gaps in port ranges
@@ -454,17 +454,7 @@ class TestSelectiveBlockingPorts(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestClusterOpsPortConfig(unittest.TestCase):
-    """Test that create_cluster and add_cluster store port configuration."""
-
-    def test_create_cluster_default_ports(self):
-        """Verify create_cluster accepts default port params."""
-        import inspect
-
-        from simplyblock_core.cluster_ops import create_cluster
-        sig = inspect.signature(create_cluster)
-        self.assertEqual(sig.parameters["nvmf_base_port"].default, 4420)
-        self.assertEqual(sig.parameters["rpc_base_port"].default, 8080)
-        self.assertEqual(sig.parameters["snode_api_port"].default, 50001)
+    """Test that add_cluster stores port configuration."""
 
     def test_add_cluster_default_ports(self):
         """Verify add_cluster accepts default port params."""

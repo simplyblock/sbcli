@@ -12,7 +12,5 @@ class MgmtNode(BaseNodeObject):
 
     baseboard_sn: str = ""
     cluster_id: str = ""
-    docker_ip_port: str = ""
     hostname: str = ""
     mgmt_ip: str = ""
-    mode: str = ""

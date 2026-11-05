@@ -785,9 +785,8 @@ def add_node_to_auto_restart(node):
     # fails DNS resolution every time and leaves the node in a
     # permanently-unreachable retry loop that also blocks any manual
     # `sn restart`/`sn shutdown` on the node (2026-08-10 helm-to-operator
-    # upgrade test). Docker deployments are unaffected: cr_namespace is
-    # legitimately always empty there, so gate on cluster.mode as well.
-    if cluster.mode == "kubernetes" and not node.cr_namespace:
+    # upgrade test).
+    if not node.cr_namespace:
         logger.info(
             "Node %s is k8s-managed but not yet CR-linked (cr_namespace unset); "
             "skipping auto-restart until adoption completes",
