@@ -27,12 +27,22 @@ def configure_docker(docker_ip):
     __run_script(['bash', '-x', os.path.join(DIR_PATH, 'config_docker.sh'), docker_ip])
 
 
+#: deploy_stack phases, in the order create_cluster must run them. The
+#: database is configured between "fdb" and "app": the simplyblock services
+#: exit on an unconfigured database, so deploying them first never converges.
+STACK_PHASES = ("monitoring", "fdb", "app")
+
+
 def deploy_stack(cli_pass, dev_ip, image_name, graylog_password, cluster_id,
-                 log_del_interval, metrics_retention_period, log_level, grafana_endpoint, disable_monitoring):
+                 log_del_interval, metrics_retention_period, log_level, grafana_endpoint, disable_monitoring,
+                 *, phase):
+    if phase not in STACK_PHASES:
+        raise ValueError(f"Unknown deploy phase {phase!r}, expected one of {STACK_PHASES}")
     pass_hash = hashlib.sha256(graylog_password.encode('utf-8')).hexdigest()
     __run_script(
         ['sudo', 'bash', '-x', os.path.join(DIR_PATH, 'deploy_stack.sh'), cli_pass, dev_ip, image_name, pass_hash,
-         graylog_password, cluster_id, log_del_interval, metrics_retention_period, log_level, grafana_endpoint, disable_monitoring])
+         graylog_password, cluster_id, log_del_interval, metrics_retention_period, log_level, grafana_endpoint, disable_monitoring,
+         phase])
 
 def deploy_k8s_stack(cli_pass, dev_ip, image_name, graylog_password, cluster_id,
                  log_del_interval, metrics_retention_period, log_level, grafana_endpoint, contact_point, k8s_namespace, disable_monitoring, tls_secret, ingress_host_source, dns_name):
