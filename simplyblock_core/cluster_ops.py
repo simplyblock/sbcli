@@ -587,11 +587,9 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     log_level = "DEBUG" if constants.LOG_WEB_DEBUG else "INFO"
     scripts.deploy_stack(cli_pass.get_secret_value(), dev_ip, constants.SIMPLY_BLOCK_DOCKER_IMAGE, cluster.secret.get_secret_value(), cluster.uuid,
                             log_del_interval, metrics_retention_period, log_level, cluster.grafana_endpoint, str(disable_monitoring))
+    # deploy_stack.sh configures the database between the FoundationDB and the
+    # app service waits, since the app services cannot start without it.
     logger.info("Deploying swarm stack > Done")
-
-    logger.info("Configuring DB...")
-    scripts.set_db_config_single()
-    logger.info("Configuring DB > Done")
     monitoring_secret = cluster.secret
 
 

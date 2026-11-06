@@ -42,6 +42,13 @@ bash "$DIR"/stack_deploy_wait.sh monitoring
 
 docker stack deploy --compose-file="$DIR"/docker-compose-swarm.yml app
 
+# The app services read the database on start and exit while it is not
+# configured, so the full wait below cannot converge before it is. Wait for
+# the FoundationDB servers only, configure the database, then wait for the rest.
+bash "$DIR"/stack_deploy_wait.sh -n fdb-server -n fdb-server1 -n fdb-server2 \
+     -n fdb-server3 -n fdb-server4 app || exit 1
+bash "$DIR"/db_config_single.sh || exit 1
+
 # wait for the services to become online
 bash "$DIR"/stack_deploy_wait.sh app
 exit $?
