@@ -158,15 +158,17 @@ class TestResumePathsHonourFlag(unittest.TestCase):
 
 class TestCli(unittest.TestCase):
 
-    def _parse(self, argv):
+    def _parse(self, argv, dev=False):
         from simplyblock_cli.cli import CLIWrapper
-        with patch("sys.argv", ["sbctl", *argv]):
+        with patch("sys.argv", ["sbctl", *(["--dev"] if dev else []), *argv]):
             return CLIWrapper().parser.parse_args(argv)
 
-    def test_create_and_add_flag(self):
+    def test_create_and_add_flag_is_developer_only(self):
         for cmd in (["cluster", "add"], ["cluster", "create"]):
-            self.assertFalse(self._parse(cmd).disable_jc_compression)
-            self.assertTrue(self._parse([*cmd, "--disable-jc-compression"]).disable_jc_compression)
+            self.assertFalse(self._parse(cmd, dev=True).disable_jc_compression)
+            self.assertTrue(self._parse([*cmd, "--disable-jc-compression"], dev=True).disable_jc_compression)
+            with self.assertRaises(SystemExit), patch("sys.stderr"):
+                self._parse([*cmd, "--disable-jc-compression"])
 
     def test_set_jc_compression_dispatch(self):
         from simplyblock_cli.clibase import CLIWrapperBase
