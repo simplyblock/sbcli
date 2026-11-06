@@ -983,14 +983,96 @@ class ConsistencyGroupMemberJoinDTO(BaseModel):
     lvol_id: str
 
 
+class ConsistencyGroupColocationDTO(BaseModel):
+    """The subsystem move a late join would end in, computed against the state
+    the pinned node has once the join's migration landed. Nothing is reserved.
+    ``target_nqn`` is empty for a fresh subsystem (``target_is_new``), and
+    ``refusal`` names why the group could not be brought into one subsystem
+    (``SubsystemLimitReached: ...``) -- the join would be refused for it."""
+    target_nqn: str = ""
+    target_is_new: bool = False
+    moving_lvol_ids: list[str] = []
+    refusal: str = ""
+
+
 class ConsistencyGroupJoinPlanDTO(BaseModel):
     """The steps a late join of an existing volume takes (co-location design
     §5): ``migrate`` (live-migrate ``migrate_lvol_ids`` to ``target_node_id``
-    first), ``join``, ``colocate`` (move into ``target_nqn``)."""
+    first), ``join``, ``colocate`` (move into ``target_nqn``). ``colocation``
+    is absent when the group has no other member to share a subsystem with."""
     steps: list[str]
     target_node_id: str = ""
     migrate_lvol_ids: list[str] = []
     target_nqn: str = ""
+    colocation: ConsistencyGroupColocationDTO | None = None
+
+
+class ConsistencyGroupSubsystemMoveCreateDTO(BaseModel):
+    """Request body for a subsystem move. With ``purpose`` ``join`` (the
+    default), ``lvol_id`` is the member that just joined and the group is
+    brought into one subsystem. With ``leave``, ``lvol_id`` is a member about
+    to leave, and its namespace moves out of the subsystem it shares into a
+    fresh one of its own. A retry with the same ``request_id`` answers with
+    the same move."""
+    lvol_id: str
+    request_id: Annotated[str, Field(min_length=1, max_length=128)]
+    purpose: Literal["join", "leave"] = "join"
+
+
+class ConsistencyGroupSubsystemMoveVolumeDTO(BaseModel):
+    """One volume whose namespace changes subsystem: where it is exported
+    from and at which nsid, its wire identity, and its nsid in the target."""
+    lvol_id: str
+    source_nqn: str = ""
+    source_nsid: int = 0
+    ns_uuid: str = ""
+    nguid: str = ""
+    target_nsid: int = 0
+
+
+class ConsistencyGroupSubsystemMoveDTO(BaseModel):
+    """A consistency group's subsystem move. ``id`` is empty, and ``volumes``
+    too, when nothing had to move. ``namespaces_at`` is ``source`` or
+    ``target``; ``deadline`` is the hosts' suspend deadline in Unix seconds
+    the move was started under (0 before it started)."""
+    id: str
+    request_id: str = ""
+    target_nqn: str = ""
+    target_is_new: bool = False
+    namespaces_at: str = "source"
+    deadline: int = 0
+    status: str = ""
+    purpose: str = "join"
+    volumes: list[ConsistencyGroupSubsystemMoveVolumeDTO] = []
+
+    @classmethod
+    def from_record(cls, record: dict) -> "ConsistencyGroupSubsystemMoveDTO":
+        fields = {k: record[k] for k in ("id", "request_id", "target_nqn", "target_is_new",
+                                         "namespaces_at", "deadline", "status", "purpose")
+                  if k in record}
+        volumes = [ConsistencyGroupSubsystemMoveVolumeDTO(
+            **{k: v[k] for k in ConsistencyGroupSubsystemMoveVolumeDTO.model_fields if k in v})
+            for v in record.get("volumes") or []]
+        return cls(**fields, volumes=volumes)
+
+
+class ConsistencyGroupSubsystemMovePrepareDTO(BaseModel):
+    """Request body for preparing a move: ``host_nqn`` asks for the target
+    subsystem's connect entries for that host."""
+    host_nqn: str | None = None
+
+
+class ConsistencyGroupSubsystemMovePreparedDTO(BaseModel):
+    """A prepared move, and the connect entries of its target subsystem for
+    the requested host, shaped like the volume connect route's."""
+    move: ConsistencyGroupSubsystemMoveDTO
+    connect: list[dict] = []
+
+
+class ConsistencyGroupSubsystemMoveStartDTO(BaseModel):
+    """Request body for moving the namespaces: the hosts' suspend deadline in
+    Unix seconds. The move refuses to begin once it has passed."""
+    deadline: Annotated[int, Field(ge=0)]
 
 
 class ConsistencyGroupColocateDTO(BaseModel):

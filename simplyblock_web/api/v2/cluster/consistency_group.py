@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 from simplyblock_core import constants
 from simplyblock_core.controllers import (
     cg_colocation,
+    cg_subsystem_move,
     consistency_group_controller,
     lvol_controller,
     migration_controller,
@@ -34,6 +35,7 @@ from .. import util
 from .._dependencies import Cluster, ConsistencyGroupResource
 from .._dtos import (
     ConsistencyGroupColocateDTO,
+    ConsistencyGroupColocationDTO,
     ConsistencyGroupDTO,
     ConsistencyGroupGenerationDTO,
     ConsistencyGroupGenerationMemberDTO,
@@ -47,6 +49,11 @@ from .._dtos import (
     ConsistencyGroupReplicationIntentDTO,
     ConsistencyGroupReplicationStatusDTO,
     ConsistencyGroupResolutionDTO,
+    ConsistencyGroupSubsystemMoveCreateDTO,
+    ConsistencyGroupSubsystemMoveDTO,
+    ConsistencyGroupSubsystemMovePreparedDTO,
+    ConsistencyGroupSubsystemMovePrepareDTO,
+    ConsistencyGroupSubsystemMoveStartDTO,
     SyncPromoteResultDTO,
     SyncReplicationStatusDTO,
 )
@@ -154,8 +161,10 @@ def plan_member_join(cluster: Cluster, group: ConsistencyGroupResource,
         plan = cg_colocation.late_join_plan(group, volume)
     except cg_colocation.ColocationError as e:
         raise HTTPException(409, str(e))
-    return ConsistencyGroupJoinPlanDTO(steps=plan.steps, target_node_id=plan.target_node_id,
-                                       migrate_lvol_ids=plan.migrate_ids, target_nqn=plan.target_nqn)
+    return ConsistencyGroupJoinPlanDTO(
+        steps=plan.steps, target_node_id=plan.target_node_id,
+        migrate_lvol_ids=plan.migrate_ids, target_nqn=plan.target_nqn,
+        colocation=ConsistencyGroupColocationDTO(**plan.colocation) if plan.colocation else None)
 
 
 @instance_api.post('/members/{lvol_id}/colocate', name='clusters:consistency-groups:members:colocate',
@@ -173,6 +182,123 @@ def colocate_member(cluster: Cluster, group: ConsistencyGroupResource, lvol_id: 
         cg_colocation.colocate_member(group, volume, client_swap_ready=body.client_swap_ready)
     except cg_colocation.ColocationError as e:
         raise HTTPException(409, str(e))
+    return Response(status_code=204)
+
+
+def _conflict(reason: str, message: str, **extra) -> HTTPException:
+    """A 409 whose detail names the condition, for a caller that branches on
+    it rather than on the message text."""
+    return HTTPException(409, {"reason": reason, "message": message, **extra})
+
+
+@instance_api.post('/subsystem-moves', name='clusters:consistency-groups:subsystem-moves:create',
+                   response_model=ConsistencyGroupSubsystemMoveDTO)
+def create_subsystem_move(cluster: Cluster, group: ConsistencyGroupResource,
+                          body: ConsistencyGroupSubsystemMoveCreateDTO) -> ConsistencyGroupSubsystemMoveDTO:
+    """Bring the group into one subsystem now that ``lvol_id`` joined it
+    (design-cg-live-subsystem-flip §5, §9), or, with ``purpose`` ``leave``,
+    take ``lvol_id`` out of the subsystem it shares before it leaves the
+    group: picks the target and reserves it.
+
+    409 ``SubsystemLimitReached`` (with ``node_id`` and ``limit``) when the
+    group needs a fresh subsystem on a node at its limit, ``MoveConflict`` while
+    another move or a migration is active, ``ColocationRefused`` for a volume
+    that is not a member or a stretched cluster."""
+    try:
+        record = cg_subsystem_move.create_subsystem_move(group, body.lvol_id, body.request_id,
+                                                          purpose=body.purpose)
+    except cg_colocation.SubsystemLimitReached as e:
+        raise _conflict("SubsystemLimitReached", str(e), node_id=e.node_id, limit=e.limit)
+    except cg_subsystem_move.MoveConflictError as e:
+        raise _conflict("MoveConflict", str(e))
+    except cg_colocation.ColocationError as e:
+        raise _conflict("ColocationRefused", str(e))
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    return ConsistencyGroupSubsystemMoveDTO.from_record(record)
+
+
+@instance_api.get('/subsystem-moves/{move_id}', name='clusters:consistency-groups:subsystem-moves:get',
+                  response_model=ConsistencyGroupSubsystemMoveDTO)
+def get_subsystem_move(cluster: Cluster, group: ConsistencyGroupResource,
+                       move_id: str) -> ConsistencyGroupSubsystemMoveDTO:
+    """The move, or its outcome once committed or rolled back."""
+    try:
+        return ConsistencyGroupSubsystemMoveDTO.from_record(
+            cg_subsystem_move.get_subsystem_move(group, move_id))
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+
+
+@instance_api.post('/subsystem-moves/{move_id}/prepare',
+                   name='clusters:consistency-groups:subsystem-moves:prepare',
+                   response_model=ConsistencyGroupSubsystemMovePreparedDTO)
+def prepare_subsystem_move(cluster: Cluster, group: ConsistencyGroupResource, move_id: str,
+                           body: ConsistencyGroupSubsystemMovePrepareDTO | None = None
+                           ) -> ConsistencyGroupSubsystemMovePreparedDTO:
+    """Create a fresh target on every HA node and assign the moving
+    namespaces their nsids there. Returns the target's connect entries for
+    ``host_nqn``. Idempotent."""
+    host_nqn = body.host_nqn if body is not None else None
+    try:
+        record, entries = cg_subsystem_move.prepare_subsystem_move(group, move_id, host_nqn=host_nqn)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    return ConsistencyGroupSubsystemMovePreparedDTO(
+        move=ConsistencyGroupSubsystemMoveDTO.from_record(record), connect=entries)
+
+
+@instance_api.post('/subsystem-moves/{move_id}/move',
+                   name='clusters:consistency-groups:subsystem-moves:move',
+                   response_model=ConsistencyGroupSubsystemMoveDTO)
+def move_subsystem_move(cluster: Cluster, group: ConsistencyGroupResource, move_id: str,
+                        body: ConsistencyGroupSubsystemMoveStartDTO) -> ConsistencyGroupSubsystemMoveDTO:
+    """Move every namespace into the target while the hosts hold their I/O.
+
+    409 ``DeadlinePassed`` before anything is touched once ``deadline`` has
+    passed; 409 ``MoveFailed`` with ``namespaces_at`` when a namespace could
+    not be moved (the sources are restored first). A repeat after success
+    answers with ``namespaces_at: target``."""
+    try:
+        record = cg_subsystem_move.move_subsystem_move(group, move_id, body.deadline)
+    except cg_subsystem_move.DeadlinePassedError as e:
+        raise _conflict("DeadlinePassed", str(e))
+    except cg_subsystem_move.MoveFailedError as e:
+        raise _conflict("MoveFailed", str(e), namespaces_at=e.namespaces_at)
+    except cg_subsystem_move.MoveConflictError as e:
+        raise _conflict("MoveConflict", str(e))
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    return ConsistencyGroupSubsystemMoveDTO.from_record(record)
+
+
+@instance_api.post('/subsystem-moves/{move_id}/commit',
+                   name='clusters:consistency-groups:subsystem-moves:commit',
+                   status_code=204, responses={204: {"content": None}})
+def commit_subsystem_move(cluster: Cluster, group: ConsistencyGroupResource, move_id: str) -> Response:
+    """Switch the moving volumes to the target and end the move. Idempotent;
+    409 ``MoveConflict`` while the namespaces are not on the target."""
+    try:
+        cg_subsystem_move.commit_subsystem_move(group, move_id)
+    except cg_subsystem_move.MoveConflictError as e:
+        raise _conflict("MoveConflict", str(e))
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    return Response(status_code=204)
+
+
+@instance_api.post('/subsystem-moves/{move_id}/rollback',
+                   name='clusters:consistency-groups:subsystem-moves:rollback',
+                   status_code=204, responses={204: {"content": None}})
+def rollback_subsystem_move(cluster: Cluster, group: ConsistencyGroupResource, move_id: str) -> Response:
+    """Put every namespace back into its source and end the move. Idempotent;
+    409 ``MoveFailed`` when a namespace could not be restored."""
+    try:
+        cg_subsystem_move.rollback_subsystem_move(group, move_id)
+    except cg_subsystem_move.MoveFailedError as e:
+        raise _conflict("MoveFailed", str(e), namespaces_at=e.namespaces_at)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
     return Response(status_code=204)
 
 

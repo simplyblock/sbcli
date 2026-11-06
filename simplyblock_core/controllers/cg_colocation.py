@@ -217,6 +217,10 @@ class JoinPlan:
     migrate_ids: list = field(default_factory=list)
     target_node_id: str = ""
     target_nqn: str = ""
+    # The subsystem move the join would end in (late_join_plan only):
+    # {"target_nqn", "target_is_new", "moving_lvol_ids", "refusal"}. Empty
+    # when the group has no other open member to share a subsystem with.
+    colocation: dict = field(default_factory=dict)
 
 
 def plan_late_join(group, lvol, lvols, groups) -> JoinPlan:
@@ -273,6 +277,178 @@ def plan_late_join(group, lvol, lvols, groups) -> JoinPlan:
         plan.steps.append(STEP_COLOCATE)
         plan.target_nqn = nqn
     return plan
+
+
+# --------------------------------------------------------------------------- #
+# Subsystem move target (design-cg-live-subsystem-flip.md §5)
+# --------------------------------------------------------------------------- #
+
+class SubsystemLimitReached(ColocationError):
+    """A group that needs a fresh subsystem is pinned to a node already holding
+    as many subsystems as it may. The only capacity refusal of a move."""
+
+    def __init__(self, node_id, limit):
+        self.node_id = node_id
+        self.limit = limit
+        super().__init__(f"node {node_id} holds its maximum of {limit} subsystems")
+
+
+@dataclass
+class MoveTarget:
+    """Where a joining volume's group ends up. ``target_nqn`` is empty when
+    the target is a fresh subsystem (``target_is_new``); ``moving_ids`` are
+    the volumes whose namespaces change subsystem, empty when nothing moves."""
+    target_nqn: str = ""
+    target_is_new: bool = False
+    moving_ids: list = field(default_factory=list)
+
+
+def _capacity(lv) -> int:
+    from simplyblock_core import constants
+    return min(getattr(lv, "max_namespace_per_subsys", 1) or 1,
+               constants.MAX_NAMESPACES_PER_SUBSYSTEM)
+
+
+def count_node_subsystems(node_id, lvols) -> int:
+    """Distinct subsystems ``node_id`` is primary for, counted the way the
+    slot claim counts them (lvol_controller.count_lvol_subsystems)."""
+    return len({lv.nqn for lv in lvols
+                if lv.node_id == node_id and lv.status not in _GONE})
+
+
+def select_move_target(group, joining_lvol, lvols, *, node_max_subsystems,
+                       node_subsystem_count=None, busy_nqns=(), reserved_fresh=0) -> MoveTarget:
+    """The subsystem ``group`` ends up in once ``joining_lvol`` joins it.
+
+    1. The group's subsystem -- the one holding the most of its OTHER open
+       members, so the joiner never elects its own -- takes the joiner alone
+       while it has a free slot. No shared group subsystem: nothing moves.
+    2. Otherwise the whole group moves. A candidate is a shared subsystem on
+       the pinned node made up solely of the joiner's pool and not ``busy``
+       (an active migration or move); it fits when its free slots cover every
+       member not already in it. Smallest moving set wins (fewest consumers
+       paused), then the fuller candidate, then the lower NQN.
+    3. No candidate: a fresh subsystem, unless the node's subsystem count plus
+       the fresh subsystems other moves reserved reaches its limit.
+
+    Raises SubsystemLimitReached in the last case and nowhere else.
+    """
+    jid = joining_lvol.get_id()
+    node = group.node_id
+    live = [lv for lv in lvols if _alive(lv)]
+    member_ids = (_open_members(group) - {jid}) | {jid}
+    g = group_subsystem_nqn(group, [lv for lv in live if lv.get_id() != jid])
+    if not g or joining_lvol.nqn == g:
+        return MoveTarget(g or joining_lvol.nqn, False, [])
+
+    by_nqn: dict[str, list] = {}
+    for lv in live:
+        if lv.node_id == node:
+            by_nqn.setdefault(lv.nqn, []).append(lv)
+    in_g = by_nqn.get(g, [])
+    if in_g and len(in_g) < _capacity(in_g[0]):
+        return MoveTarget(g, False, [jid])
+
+    busy = set(busy_nqns)
+    best = None
+    for nqn, subs in by_nqn.items():
+        if nqn in busy or not _shares_subsystem(subs[0]):
+            continue
+        if any(lv.pool_uuid != joining_lvol.pool_uuid for lv in subs):
+            continue
+        moving = sorted(member_ids - {lv.get_id() for lv in subs})
+        if _capacity(subs[0]) - len(subs) < len(moving):
+            continue
+        key = (len(moving), -len(subs), nqn)
+        if best is None or key < best[0]:
+            best = (key, nqn, moving)
+    if best is not None:
+        return MoveTarget(best[1], False, best[2])
+
+    count = (node_subsystem_count if node_subsystem_count is not None
+             else count_node_subsystems(node, lvols))
+    if count + reserved_fresh < node_max_subsystems:
+        return MoveTarget("", True, sorted(member_ids))
+    raise SubsystemLimitReached(node, node_max_subsystems)
+
+
+class SubsystemBusy(ColocationError):
+    """The subsystem a volume would leave is held by an active migration or
+    another subsystem move."""
+
+
+def select_leave_target(leaving_lvol, lvols, *, node_max_subsystems,
+                        node_subsystem_count=None, busy_nqns=(), reserved_fresh=0) -> MoveTarget:
+    """Where ``leaving_lvol`` goes when it leaves its consistency group: out of
+    the subsystem it shares, into a fresh one of its own, so the next group it
+    joins finds it alone. A volume no other live volume shares a subsystem with
+    has nothing to leave, and nothing moves.
+
+    Raises SubsystemBusy when the shared subsystem is ``busy``, and
+    SubsystemLimitReached when the node has no room for a fresh subsystem.
+    """
+    lid = leaving_lvol.get_id()
+    shared = any(_alive(lv) and lv.nqn == leaving_lvol.nqn and lv.get_id() != lid for lv in lvols)
+    if not shared:
+        return MoveTarget(leaving_lvol.nqn, False, [])
+    if leaving_lvol.nqn in set(busy_nqns):
+        raise SubsystemBusy(f"subsystem {leaving_lvol.nqn} is held by an active migration or move")
+    node = leaving_lvol.node_id
+    count = (node_subsystem_count if node_subsystem_count is not None
+             else count_node_subsystems(node, lvols))
+    if count + reserved_fresh < node_max_subsystems:
+        return MoveTarget("", True, [lid])
+    raise SubsystemLimitReached(node, node_max_subsystems)
+
+
+def predict_move_target(group, joining_lvol, lvols, migrate_ids, *, node_max_subsystems,
+                        busy_nqns=(), reserved_fresh=0) -> MoveTarget:
+    """:func:`select_move_target` against the state the pinned node has once
+    the join's migration landed: the joiner and every volume migrating with it
+    (``migrate_ids``) are counted on the pin, their subsystem included. This is
+    the preflight -- a refusal here means the volume must not be migrated."""
+    import copy
+    moved = set(migrate_ids) | {joining_lvol.get_id()}
+    predicted = []
+    for lv in lvols:
+        if lv.get_id() in moved and lv.node_id != group.node_id:
+            lv = copy.copy(lv)
+            lv.node_id = group.node_id
+            lv.lvs_name = group.lvs_name
+        predicted.append(lv)
+    joiner = next(lv for lv in predicted if lv.get_id() == joining_lvol.get_id()) \
+        if any(lv.get_id() == joining_lvol.get_id() for lv in predicted) else joining_lvol
+    return select_move_target(group, joiner, predicted, node_max_subsystems=node_max_subsystems,
+                              busy_nqns=busy_nqns, reserved_fresh=reserved_fresh)
+
+
+def busy_nqns(db, cluster_id, lvols) -> set:
+    """Subsystems with an active migration of any of their volumes."""
+    active = {m.lvol_id for m in db.get_migrations(cluster_id) if m.is_active()}
+    return {lv.nqn for lv in lvols if lv.get_id() in active}
+
+
+def _reserved_on_node(node_id):
+    """(subsystems held by active moves, fresh subsystems they reserved)."""
+    return _db().subsystem_move_reservations(node_id)
+
+
+def _colocation_outcome(group, lvol, lvols, plan) -> dict:
+    from simplyblock_core.controllers import lvol_controller
+    db = _db()
+    node = db.get_storage_node_by_id(group.node_id)
+    reserved, fresh = _reserved_on_node(group.node_id)
+    try:
+        t = predict_move_target(
+            group, lvol, lvols, plan.migrate_ids,
+            node_max_subsystems=lvol_controller.max_subsystems_for_node(node),
+            busy_nqns=busy_nqns(db, group.cluster_id, lvols) | set(reserved),
+            reserved_fresh=fresh)
+    except SubsystemLimitReached as e:
+        return {"target_nqn": "", "target_is_new": False, "moving_lvol_ids": [],
+                "refusal": f"SubsystemLimitReached: {e}"}
+    return {"target_nqn": t.target_nqn, "target_is_new": t.target_is_new,
+            "moving_lvol_ids": t.moving_ids, "refusal": ""}
 
 
 # --------------------------------------------------------------------------- #
@@ -482,9 +658,13 @@ def colocate_new_member(group, lvol, group_nqn):
 
 
 def late_join_plan(group, lvol):
-    """:func:`plan_late_join` against the cluster's records."""
+    """:func:`plan_late_join` against the cluster's records, with the
+    colocation outcome the join would end in. Reserves nothing."""
     lvols, groups = _cluster_records(group.cluster_id)
-    return plan_late_join(group, lvol, lvols, groups)
+    plan = plan_late_join(group, lvol, lvols, groups)
+    if group.node_id and _open_members(group) - {lvol.get_id()}:
+        plan.colocation = _colocation_outcome(group, lvol, lvols, plan)
+    return plan
 
 
 def colocate_member(group, lvol, *, client_swap_ready=False):
@@ -515,3 +695,4 @@ def colocate_member(group, lvol, *, client_swap_ready=False):
         move_namespace(db.get_lvol_by_id(victim.lvol_id), lvol.nqn,
                        client_swap_ready=client_swap_ready)
     return move_namespace(lvol, plan.target_nqn, client_swap_ready=client_swap_ready)
+

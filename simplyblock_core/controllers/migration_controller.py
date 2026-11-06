@@ -2217,6 +2217,10 @@ def create_group_migration(lvol_id, target_node_id,
         if g is not None:
             groups[g.get_id()] = g
     for g in groups.values():
+        if getattr(g, "subsystem_move", None):
+            raise MigrationConflictError(
+                f"Consistency group {g.get_id()} has an active subsystem move "
+                f"{g.subsystem_move.get('id', '')}; migrate it once the move ended")
         if g.migration:
             raise MigrationConflictError(
                 f"Consistency group {g.get_id()} already has an active migration "
