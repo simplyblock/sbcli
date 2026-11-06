@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends
 
-from . import cluster, management_node, meta, metrics
+from . import cluster, management_node, meta, metrics, peer
 from ._auth import verify_api_token, verify_metrics_token
 
 api = APIRouter()
@@ -8,3 +8,4 @@ api.include_router(cluster.api, prefix='/clusters', dependencies=[Depends(verify
 api.include_router(management_node.api, prefix='/management-nodes', dependencies=[Depends(verify_api_token)])
 api.include_router(meta.api, prefix='/_meta')
 api.include_router(metrics.api, prefix='/metrics', dependencies=[Depends(verify_metrics_token)])
+api.include_router(peer.api, prefix='/_peer/clusters/{cluster_id}', dependencies=[Depends(verify_api_token)])

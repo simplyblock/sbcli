@@ -883,6 +883,9 @@ class ReplicationTargetDTO(BaseModel):
     target_pool_uuid: util.OptionalUUID
     timeout_sec: util.Unsigned
     status: ReplicationTargetStatus
+    #: Root URL of the peer control plane that manages target_cluster_id; null
+    #: when it is this control plane. The peer's credential is never returned.
+    peer_endpoint: str | None = None
 
     @staticmethod
     def from_model(model: ReplicationTarget):
@@ -894,6 +897,7 @@ class ReplicationTargetDTO(BaseModel):
             target_pool_uuid=UUID(model.target_pool_uuid) if model.target_pool_uuid else None,
             timeout_sec=model.timeout_sec,
             status=cast(ReplicationTargetStatus, model.status),
+            peer_endpoint=model.peer_endpoint or None,
         )
 
 

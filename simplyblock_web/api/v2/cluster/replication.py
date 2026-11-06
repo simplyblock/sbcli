@@ -2,14 +2,16 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request, Response
-from pydantic import BaseModel, Field
+from pydantic import AnyHttpUrl, BaseModel, Field, SecretStr, model_validator
 
 from simplyblock_core.controllers import lvol_controller, replication_policy_controller
 from simplyblock_core.controllers.replication_policy_controller import (
+    PeerConnection,
     ReplicationConfigError,
 )
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.replication import ConsistencyGroup
+from simplyblock_core.peer.client import PeerError
 
 from .. import util
 from .._dependencies import Cluster, ReplicationPolicy, ReplicationTarget
@@ -32,6 +34,28 @@ class TargetParams(BaseModel):
     target_cluster_id: UUID
     target_pool_id: UUID | None = None
     timeout_sec: util.Unsigned | None = None
+    #: Root URL of the control plane that manages target_cluster_id, when that
+    #: is not this one. Omitted: the target cluster is in this control plane.
+    peer_endpoint: AnyHttpUrl | None = None
+    #: The bearer credential the peer accepts for target_cluster_id.
+    peer_secret: SecretStr | None = None
+    #: PEM CA bundle that signs the peer's certificate; omitted uses the system trust store.
+    peer_ca_cert: str | None = None
+
+    @model_validator(mode='after')
+    def _peer_fields_together(self) -> 'TargetParams':
+        if self.peer_endpoint is None:
+            if self.peer_secret is not None or self.peer_ca_cert is not None:
+                raise ValueError('peer_secret and peer_ca_cert need peer_endpoint')
+        elif self.peer_secret is None or not self.peer_secret.get_secret_value():
+            raise ValueError('peer_endpoint needs peer_secret')
+        return self
+
+    def peer(self) -> PeerConnection | None:
+        if self.peer_endpoint is None or self.peer_secret is None:
+            return None
+        return PeerConnection(endpoint=str(self.peer_endpoint), secret=self.peer_secret,
+                              ca_cert=self.peer_ca_cert or '')
 
 
 class PolicyParams(BaseModel):
@@ -115,9 +139,12 @@ def create_target(request: Request, cluster: Cluster, parameters: TargetParams,
         target_id = replication_policy_controller.add_target(
             cluster.get_id(), parameters.target_name, str(parameters.target_cluster_id),
             target_pool=str(parameters.target_pool_id) if parameters.target_pool_id else None,
-            timeout_sec=parameters.timeout_sec)
+            timeout_sec=parameters.timeout_sec,
+            peer=parameters.peer())
     except ReplicationConfigError as e:
         raise _config_error(e)
+    except PeerError as e:
+        raise HTTPException(status_code=502, detail=f"Peer control plane: {e}")
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
