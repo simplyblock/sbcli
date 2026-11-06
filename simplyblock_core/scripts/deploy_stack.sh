@@ -42,6 +42,22 @@ bash "$DIR"/stack_deploy_wait.sh monitoring
 
 docker stack deploy --compose-file="$DIR"/docker-compose-swarm.yml app
 
+# The database has to be configured before the rest of the app stack can
+# converge. Every control-plane service reads the cluster list on startup and
+# exits 1 on FDBError 1031 until a database exists, so swarm restarts it and
+# its replica count oscillates. Waiting for the whole stack first therefore
+# cannot finish: the wait needs the database that the step after it creates.
+# That deadlock used to be survivable by luck -- the poll occasionally caught
+# every service up at once, which took 420s of the caller's 720s budget on
+# 2026-11-03 -- until two more services made it miss every time.
+#
+# So wait for the FDB processes alone, configure the database, and only then
+# wait for the services that need it. cluster_ops.create_cluster still calls
+# db_config_single.sh after this returns; it is a no-op once configured.
+bash "$DIR"/stack_deploy_wait.sh \
+    -n fdb-server -n fdb-server1 -n fdb-server2 -n fdb-server3 -n fdb-server4 app
+bash "$DIR"/db_config_single.sh
+
 # wait for the services to become online
 bash "$DIR"/stack_deploy_wait.sh app
 exit $?
