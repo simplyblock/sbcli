@@ -10,6 +10,9 @@ auto-recovers when its SPDK containers restart), so a decision keyed on it
 reverts itself silently.
 """
 import uuid as uuid_module
+from dataclasses import dataclass
+
+from pydantic import SecretStr
 
 from simplyblock_core import db_controller as db_module
 from simplyblock_core import snapshot_retention, utils
@@ -23,6 +26,8 @@ from simplyblock_core.models.lvol_model import LVol, LVolReplication
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.replication import ReplicationPolicy, ReplicationTarget
 from simplyblock_core.models.snapshot import SnapShot
+from simplyblock_core.peer.client import HttpPeerClient
+from simplyblock_core.peer.protocol import PEER_API_VERSION
 
 logger = utils.get_logger(__name__)
 db = db_module.DBController()
@@ -36,12 +41,30 @@ class ReplicationConfigError(Exception):
 # Targets
 # --------------------------------------------------------------------------- #
 
-def add_target(cluster_id, target_name, target_cluster_id, target_pool=None, timeout_sec=None):
-    """Create a named replication destination for *cluster_id*."""
+@dataclass(frozen=True)
+class PeerConnection:
+    """How to reach a target cluster managed by another control plane."""
+
+    endpoint: str
+    secret: SecretStr
+    ca_cert: str = ""
+
+
+def add_target(cluster_id, target_name, target_cluster_id, target_pool=None, timeout_sec=None,
+               peer: PeerConnection | None = None):
+    """Create a named replication destination for *cluster_id*.
+
+    With *peer*, the target cluster belongs to another control plane: it is
+    checked through that control plane's peer API instead of the local database,
+    and a PeerError propagates when the peer cannot confirm it.
+    """
     db.get_cluster_by_id(cluster_id)                      # raises when unknown
     if target_cluster_id == cluster_id:
         raise ReplicationConfigError("A cluster cannot replicate to itself")
-    db.get_cluster_by_id(target_cluster_id)
+    if peer is None:
+        db.get_cluster_by_id(target_cluster_id)
+    else:
+        _check_peer(target_cluster_id, peer)
 
     for existing in db.get_replication_targets(cluster_id):
         if existing.target_name == target_name:
@@ -49,7 +72,16 @@ def add_target(cluster_id, target_name, target_cluster_id, target_pool=None, tim
                 f"Replication target '{target_name}' already exists on cluster {cluster_id}")
 
     pool_uuid = ""
-    if target_pool:
+    if target_pool and peer is not None:
+        # The peer's pools are not in this database. Accept only an ID, which the
+        # landing step checks on the peer; a name could not be resolved here.
+        try:
+            pool_uuid = str(uuid_module.UUID(target_pool))
+        except ValueError as e:
+            raise ReplicationConfigError(
+                f"Pool {target_pool}: a target on a peer control plane takes a pool ID, not a name"
+            ) from e
+    elif target_pool:
         # Resolve to a UUID now: storing a NAME is what made the old
         # add_replication fail later with a KeyError despite accepting "id or name".
         pool = db.get_pool_by_id_or_name(target_pool)
@@ -69,10 +101,26 @@ def add_target(cluster_id, target_name, target_cluster_id, target_pool=None, tim
     if timeout_sec:
         target.timeout_sec = timeout_sec
     target.status = ReplicationTarget.STATUS_ACTIVE
+    if peer is not None:
+        target.peer_endpoint = peer.endpoint
+        target.peer_secret = peer.secret
+        target.peer_ca_cert = peer.ca_cert
     target.write_to_db(db.kv_store)
     logger.info("Created replication target %s -> cluster %s (%s)",
                 target_name, target_cluster_id, target.get_id())
     return target.get_id()
+
+
+def _check_peer(target_cluster_id, peer: PeerConnection):
+    """Confirm that *peer* manages *target_cluster_id* and speaks our peer API."""
+    info = HttpPeerClient(peer.endpoint, target_cluster_id, peer.secret, peer.ca_cert).info()
+    if str(info.cluster_id) != target_cluster_id:
+        raise ReplicationConfigError(
+            f"Peer {peer.endpoint} answered for cluster {info.cluster_id}, not {target_cluster_id}")
+    if info.api_version != PEER_API_VERSION:
+        raise ReplicationConfigError(
+            f"Peer {peer.endpoint} speaks peer API version {info.api_version}, "
+            f"this control plane speaks {PEER_API_VERSION}")
 
 
 def list_targets(cluster_id=None):
