@@ -240,8 +240,15 @@ jobs:
         if: steps.grype-branch.outcome == 'failure' || steps.trivy-branch.outcome == 'failure'
         run: exit 1
 
-      - name: Notify Slack on scan failure
-        if: failure()
+      # Scoped to the two gating-scan steps specifically (not bare failure()):
+      # a bare failure() also fires when an earlier infra step (image pull,
+      # registry login, tag resolution) fails before any scan ran, and
+      # gating-summary -- the only source of the Findings field below --
+      # never ran either in that case, posting a "vulnerabilities found"
+      # alert with an empty Findings field for a problem that has nothing to
+      # do with vulnerabilities.
+      - name: Notify Slack on gating scan failure
+        if: steps.grype-branch.outcome == 'failure' || steps.trivy-branch.outcome == 'failure'
         uses: slackapi/slack-github-action@v2
         with:
           webhook: ${{ secrets.SLACK_CONTROL_PLANE_WEBHOOK }}
@@ -256,6 +263,29 @@ jobs:
                     { "title": "Branch",   "value": "${{ matrix.branch }}", "short": true },
                     { "title": "Image",    "value": "${{ env.IMAGE_NAME }}:${{ steps.tags.outputs.branch_tag }}", "short": true },
                     { "title": "Findings (${{ steps.gating-summary.outputs.count }})", "value": ${{ toJSON(steps.gating-summary.outputs.list) }}, "short": false },
+                    { "title": "Workflow", "value": "<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View run>", "short": false }
+                  ]
+                }
+              ]
+            }
+
+      # Catches everything else that fails the job -- a flaky image pull,
+      # registry login, or tag resolution -- so it still gets surfaced, but
+      # as an infra failure rather than a false CVE alert.
+      - name: Notify Slack on workflow failure
+        if: failure() && steps.grype-branch.outcome != 'failure' && steps.trivy-branch.outcome != 'failure'
+        uses: slackapi/slack-github-action@v2
+        with:
+          webhook: ${{ secrets.SLACK_CONTROL_PLANE_WEBHOOK }}
+          webhook-type: incoming-webhook
+          payload: |
+            {
+              "text": ":warning: *Security scan workflow failed* (not a vulnerability finding) in `${{ github.repository }}`",
+              "attachments": [
+                {
+                  "color": "warning",
+                  "fields": [
+                    { "title": "Branch",   "value": "${{ matrix.branch }}", "short": true },
                     { "title": "Workflow", "value": "<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View run>", "short": false }
                   ]
                 }
