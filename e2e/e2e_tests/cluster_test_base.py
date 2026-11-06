@@ -899,6 +899,13 @@ class TestClusterBase:
         #
         # if not self.k8s_test:
         #     self.start_root_monitor()
+        #
+        # What actually fills the mgmt node is the monitoring stack: 73G of
+        # OpenSearch indices and 15G of FDB backups. start_graylog_rotation_monitor
+        # reclaims both, and unlike the monitor above it saves the logs to the
+        # NFS share before dropping them, so a long run stays readable.
+        if not self.k8s_test:
+            self.start_graylog_rotation_monitor()
 
         self.start_nvme_iostat_monitor()
         try:
@@ -3727,6 +3734,9 @@ class TestClusterBase:
                                             process_name="fio")
 
         self.stop_root_monitor()
+        # Before the teardown export, so the two cannot run at once and
+        # overlap their windows.
+        self.stop_graylog_rotation_monitor()
         self.collect_bdev_snapshot(tag="end")
         self.stop_nvme_iostat_monitor()
         try:
@@ -4724,11 +4734,20 @@ class TestClusterBase:
 
         return written, state["truncated"]
 
-    def export_graylog_logs(self):
+    def export_graylog_logs(self, window_from=None, window_to=None,
+                            subdir="graylog_logs"):
         """Export all container logs from Graylog / OpenSearch for the test window.
 
         Each (container, source) pair gets its own file under
-        ``<docker_logs_path>/graylog_logs/<container>__<source>.log``.
+        ``<docker_logs_path>/<subdir>/<container>__<source>.log``.
+
+        ``window_from`` / ``window_to`` are datetimes bounding the export, and
+        default to the whole run (test start -> now), which is what the
+        teardown path wants. ``rotate_graylog_logs`` passes an explicit window
+        and its own ``subdir`` instead: it deletes the indices it has just
+        exported, so a later call with the default window would re-export only
+        what is left in OpenSearch and overwrite the file holding the window
+        before it. The window and the subdirectory have to move together.
         This ensures containers like SNodeAPI that run on every node get
         separate log files per node.
 
@@ -4769,10 +4788,19 @@ class TestClusterBase:
             return
 
         try:
-            from_iso = self.test_start_time_utc.strftime(
+            # With rotation running, the span before the last rotation is
+            # already saved under graylog_logs_windows/ and its indices are
+            # gone. Defaulting to test start would make this export *claim*
+            # the whole run and hold only the tail of it, which is the kind of
+            # file someone later reads as evidence of absence.
+            default_from = (
+                getattr(self, "_graylog_rotated_through", None)
+                or self.test_start_time_utc
+            )
+            from_iso = (window_from or default_from).strftime(
                 "%Y-%m-%dT%H:%M:%S.000Z"
             )
-            to_iso = datetime.now(UTC).strftime(
+            to_iso = (window_to or datetime.now(UTC)).strftime(
                 "%Y-%m-%dT%H:%M:%S.000Z"
             )
 
@@ -4868,7 +4896,7 @@ class TestClusterBase:
                 return
 
             # Create output directory
-            graylog_dir = os.path.join(self.docker_logs_path, "graylog_logs")
+            graylog_dir = os.path.join(self.docker_logs_path, subdir)
             os.makedirs(graylog_dir, exist_ok=True)
 
             # Prefer OpenSearch scroll for fetching (handles large time
@@ -5042,6 +5070,12 @@ class TestClusterBase:
                     f"[delay-extract] Failed: {delay_exc}"
                 )
 
+            # (lines, complete). rotate_graylog_logs deletes the indices this
+            # export just read, so it needs both: a truncated or empty export
+            # must not be mistaken for a saved window. Every other path here
+            # returns None, which is falsy for the same reason.
+            return total_lines, not budget.truncated
+
         except Exception as exc:
             self.logger.warning(
                 f"[graylog-export] Unexpected error, skipping: {exc}"
@@ -5051,6 +5085,286 @@ class TestClusterBase:
             # port-forward outlives the export and holds a local port for the
             # rest of the run.
             self._close_opensearch_port_forward()
+
+    # ── Rolling Graylog export + index reclaim ──────────────────────────────
+    #
+    # Graylog already bounds its own disk use: the monitoring stack sets
+    # rotation=time, MAX_TIME_PER_INDEX=1d, retention=delete and
+    # MAX_NUMBER_OF_INDICES to the numeric part of `--log-del-interval`
+    # (default `3d`, so three daily indices). That is a *plateau*, not a leak
+    # -- but on 210 three days of our log rate is 73G of a 126G disk, which
+    # with images and the FDB backup directory leaves the mgmt node at 96%.
+    # Run 20261103-031813 died there at iteration 500: FDB went unavailable,
+    # every API call returned 500, and the harness exhausted its retry budget.
+    #
+    # Lowering `--log-del-interval` alone would fix the disk and lose the
+    # evidence: a 3-day soak would keep only its last day of Graylog. So the
+    # window is exported to the NFS share first and the indices are dropped
+    # only once that export is on disk, which bounds the disk *and* keeps the
+    # whole run readable afterwards.
+
+    def _graylog_index_rotation_candidates(self, os_session, os_url, cutoff_iso):
+        """Return the graylog indices whose newest document predates *cutoff_iso*.
+
+        Chosen by document timestamp rather than by the index's creation date:
+        the write-active index is created when the day rolls over but keeps
+        receiving documents, and deleting it would drop log lines the export
+        never saw.
+        """
+        resp = os_session.get(
+            f"{os_url}/_cat/indices/graylog*",
+            params={"h": "index,docs.count", "format": "json"},
+            timeout=30,
+        )
+        resp.raise_for_status()
+
+        candidates = []
+        for row in resp.json():
+            index = row.get("index")
+            if not index:
+                continue
+            # The max @timestamp in the index. An index whose newest document
+            # is older than the cutoff is wholly contained in windows already
+            # exported.
+            agg = os_session.post(
+                f"{os_url}/{index}/_search",
+                json={"size": 0, "aggs": {"newest": {"max": {"field": "timestamp"}}}},
+                timeout=30,
+            )
+            if agg.status_code != 200:
+                self.logger.warning(
+                    "[graylog-rotate] %s: could not read newest timestamp "
+                    "(HTTP %s), leaving it alone", index, agg.status_code)
+                continue
+            newest = (agg.json().get("aggregations", {})
+                      .get("newest", {}).get("value_as_string"))
+            if not newest:
+                # No documents at all -- nothing to lose, but nothing to gain
+                # either. Skip rather than delete something we cannot date.
+                continue
+            if newest < cutoff_iso:
+                candidates.append((index, newest, row.get("docs.count")))
+
+        return candidates
+
+    def rotate_graylog_logs(self):
+        """Export everything since the last rotation, then drop those indices.
+
+        Returns the number of indices deleted (0 if nothing was safe to
+        delete). Never raises: it runs on a background thread beside a live
+        test, and reclaiming disk must not be able to fail the run.
+        """
+        if self.k8s_test:
+            return 0
+        now = datetime.now(UTC)
+        window_from = getattr(self, "_graylog_rotated_through", None) \
+            or self.test_start_time_utc
+        if window_from is None:
+            self.logger.warning(
+                "[graylog-rotate] test_start_time_utc not set, skipping")
+            return 0
+
+        self._graylog_rotation_index = getattr(
+            self, "_graylog_rotation_index", 0) + 1
+        subdir = os.path.join(
+            "graylog_logs_windows",
+            f"window_{self._graylog_rotation_index:02d}_"
+            f"{window_from.strftime('%Y%m%dT%H%M%SZ')}_"
+            f"{now.strftime('%Y%m%dT%H%M%SZ')}",
+        )
+
+        self.logger.info(
+            "[graylog-rotate] Window %d: %s -> %s into %s",
+            self._graylog_rotation_index, window_from.isoformat(),
+            now.isoformat(), subdir)
+
+        result = self.export_graylog_logs(
+            window_from=window_from, window_to=now, subdir=subdir)
+
+        if not result:
+            self.logger.warning(
+                "[graylog-rotate] Export returned nothing; keeping indices. "
+                "The disk is not reclaimed, which is the right way to fail: "
+                "a deleted index whose export did not land is gone.")
+            return 0
+
+        lines, complete = result
+        if not complete or lines <= 0:
+            self.logger.warning(
+                "[graylog-rotate] Export was %s (%s lines); keeping indices.",
+                "incomplete" if not complete else "empty", lines)
+            return 0
+
+        # The export is on the share. Only now is it safe to reclaim.
+        deleted = 0
+        try:
+            os_url = self._opensearch_base_url()
+            os_session = self._build_opensearch_session()
+            cutoff_iso = now.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+            candidates = self._graylog_index_rotation_candidates(
+                os_session, os_url, cutoff_iso)
+
+            if not candidates:
+                self.logger.info(
+                    "[graylog-rotate] %s lines exported; no index is wholly "
+                    "older than the window end, nothing to delete.", lines)
+            for index, newest, docs in candidates:
+                r = os_session.delete(f"{os_url}/{index}", timeout=60)
+                if r.status_code in (200, 202):
+                    deleted += 1
+                    self.logger.info(
+                        "[graylog-rotate] Deleted %s (newest doc %s, %s docs)",
+                        index, newest, docs)
+                else:
+                    self.logger.warning(
+                        "[graylog-rotate] Could not delete %s: HTTP %s",
+                        index, r.status_code)
+        except Exception as exc:
+            self.logger.warning(
+                "[graylog-rotate] Index reclaim failed: %s", exc)
+        finally:
+            self._close_opensearch_port_forward()
+
+        # Advance the window only on a landed export, so a failed rotation
+        # retries the same span next time instead of leaving a hole.
+        self._graylog_rotated_through = now
+        self.logger.info(
+            "[graylog-rotate] Window %d done: %s lines saved, %d index(es) "
+            "deleted", self._graylog_rotation_index, lines, deleted)
+        return deleted
+
+    def start_graylog_rotation_monitor(self, interval_hours=None,
+                                       threshold=None):
+        """Roll the Graylog indices to the NFS share periodically, and on pressure.
+
+        Two triggers, because time alone is not enough: a log storm can fill
+        126G well inside the interval, and once the disk is full the export
+        needs the Graylog and OpenSearch this is meant to keep alive. The
+        threshold fires first so the collection happens while it still can.
+        """
+        if self.k8s_test:
+            return
+        if getattr(self, "_graylog_rotation_thread", None) and \
+                self._graylog_rotation_thread.is_alive():
+            self.logger.info(
+                "[graylog-rotate] Monitor already running; skipping start.")
+            return
+
+        every_h = interval_hours if interval_hours is not None else float(
+            os.getenv("GRAYLOG_ROTATE_INTERVAL_HOURS", "24"))
+        thr = threshold if threshold is not None else int(
+            os.getenv("GRAYLOG_ROTATE_DISK_THRESHOLD", "70"))
+        self._graylog_rotation_stop = threading.Event()
+
+        def _loop():
+            self.logger.info(
+                "[graylog-rotate] Monitor started. every=%sh threshold=%s%%",
+                every_h, thr)
+            last = datetime.now(UTC)
+            while not self._graylog_rotation_stop.is_set():
+                # 10-minute cadence: fine enough to catch a fill, coarse
+                # enough to cost nothing beside a running test.
+                if self._graylog_rotation_stop.wait(600):
+                    break
+                try:
+                    used = self._mgmt_disk_usage_pct()
+                    elapsed_h = (
+                        datetime.now(UTC) - last).total_seconds() / 3600.0
+                    due = elapsed_h >= every_h
+                    pressured = used >= thr
+                    if not (due or pressured):
+                        continue
+                    self.logger.warning(
+                        "[graylog-rotate] Rotating (%s): mgmt disk %s%%, "
+                        "%.1fh since last",
+                        "scheduled" if due else f"disk >= {thr}%",
+                        used, elapsed_h)
+                    self.rotate_graylog_logs()
+                    if pressured:
+                        # Only under pressure: the backup dirs are the other
+                        # half of the fill, and the newest ones are worth
+                        # keeping while there is room for them.
+                        self.prune_fdb_backup_dirs()
+                    after = self._mgmt_disk_usage_pct()
+                    self.logger.warning(
+                        "[graylog-rotate] mgmt disk %s%% -> %s%%", used, after)
+                    last = datetime.now(UTC)
+                except Exception as exc:
+                    self.logger.error("[graylog-rotate] Monitor error: %s", exc)
+            self.logger.info("[graylog-rotate] Monitor exiting.")
+
+        t = threading.Thread(target=_loop, name="GraylogRotate", daemon=True)
+        t.start()
+        self._graylog_rotation_thread = t
+
+    def stop_graylog_rotation_monitor(self):
+        """Stop the rolling export thread."""
+        stop = getattr(self, "_graylog_rotation_stop", None)
+        if stop:
+            stop.set()
+        t = getattr(self, "_graylog_rotation_thread", None)
+        if t and t.is_alive():
+            t.join(timeout=30)
+
+    def prune_fdb_backup_dirs(self, keep=None):
+        """Drop all but the newest *keep* directories under /etc/foundationdb/backup.
+
+        Not Graylog, and so not covered by rotating the indices: the FDB
+        backup agent writes a directory per backup and nothing expires them.
+        On 210 that was 15G in 117 directories, climbing about 5G a day --
+        enough on its own to refill a disk the index rotation has just freed.
+
+        These are backups of a throwaway test cluster's control-plane DB. The
+        newest few are kept so a post-mortem still has something to restore.
+        """
+        if self.k8s_test or not getattr(self, "mgmt_nodes", None):
+            return 0
+        n = keep if keep is not None else int(os.getenv("FDB_BACKUP_KEEP", "2"))
+        node = self.mgmt_nodes[0]
+        # -mindepth/-maxdepth 1: the backup root itself must survive.
+        cmd = (
+            "find /etc/foundationdb/backup -mindepth 1 -maxdepth 1 -type d "
+            "-printf '%T@ %p\\n' 2>/dev/null | sort -rn | "
+            f"awk 'NR>{n}{{print $2}}'"
+        )
+        try:
+            out, _ = self.ssh_obj.exec_command(
+                node=node, command=cmd, supress_logs=True)
+            stale = [line.strip() for line in (out or "").splitlines()
+                     if line.strip().startswith("/etc/foundationdb/backup/")]
+            if not stale:
+                self.logger.info(
+                    "[fdb-backup-prune] Nothing older than the newest %d.", n)
+                return 0
+            self.logger.warning(
+                "[fdb-backup-prune] Removing %d backup dir(s), keeping "
+                "newest %d", len(stale), n)
+            for path in stale:
+                self.ssh_obj.delete_file_dir(
+                    node=node, entity=path, recursive=True)
+            return len(stale)
+        except Exception as exc:
+            self.logger.warning("[fdb-backup-prune] Failed: %s", exc)
+            return 0
+
+    def _mgmt_disk_usage_pct(self):
+        """Root-filesystem usage on the first mgmt node, or -1 if unknown.
+
+        `/` rather than `/root`: what fills is /var/lib/docker/volumes and
+        /etc/foundationdb/backup. On the lab mgmt nodes these are all one
+        filesystem, so the number is the same -- but naming the mount point
+        we actually care about keeps that an observation rather than a
+        coincidence a future partitioning change would silently break.
+        """
+        if not getattr(self, "mgmt_nodes", None):
+            return -1
+        cmd = r"df -P / | awk 'NR==2{print $5}' | tr -dc '0-9'"
+        try:
+            out, _ = self.ssh_obj.exec_command(
+                node=self.mgmt_nodes[0], command=cmd, supress_logs=True)
+            return int((out or "").strip())
+        except Exception:
+            return -1
 
     def _extract_delay_logs(self, graylog_dir):
         """Extract delay-qpair entries from SPDK logs into separate files.
