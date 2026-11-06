@@ -391,9 +391,17 @@ class BaseModel(object):
             kv_store.set(prefix.encode(), st.encode())
             return True
         except Exception:
+            # Propagate, like read_from_db / remove. This used
+            # to exit(1), which in the threaded web API raised SystemExit out of
+            # the event loop: the loop died, the half-shut-down process kept
+            # its listen socket open, and the replica accepted connections it
+            # never served until restarted by hand. A failed write is the
+            # caller's error to handle (a 500 in the API, a retried pass in a
+            # service), not a reason to kill the process.
             from simplyblock_core import utils
-            utils.get_logger(__name__).exception("Error writing to FDB")
-            exit(1)
+            utils.get_logger(__name__).exception(
+                "Error writing %s to FDB", self.get_db_id())
+            raise
 
     def remove(self, kv_store):
         prefix = self.get_db_id()
