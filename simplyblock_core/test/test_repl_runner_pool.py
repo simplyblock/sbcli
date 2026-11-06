@@ -136,12 +136,19 @@ class TestWorkerPool:
         snap = MagicMock()
         snap.get_id.return_value = "S1"
         with patch.object(sr, "db", db), \
+                patch.object(sr, "_WORKERS", sr._Workers(2)), \
                 patch.object(sr, "_submit") as submit, \
                 patch.object(sr, "_resume_finish") as inline:
             sr._hand_off_to_successor(_task("PRED"), snap)
         submit.assert_called_once()
         assert submit.call_args.args[0].uuid == "SUCC"
         inline.assert_not_called()
+        # without a pool the successor is finished inline, as before
+        with patch.object(sr, "db", db), \
+                patch.object(sr, "_WORKERS", None), \
+                patch.object(sr, "_resume_finish") as inline:
+            sr._hand_off_to_successor(_task("PRED"), snap)
+        inline.assert_called_once()
 
 
 class TestHubLock:

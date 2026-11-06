@@ -465,10 +465,18 @@ def _hand_off_to_successor(task, snapshot):
             return
         logger.info("Replication task %s: %s has its copy; finishing %s now",
                     task.uuid, snapshot.get_id(), succ.get_id())
-        # Through the pool, never by calling into the other task from here:
-        # a worker may be running it already (then this is a no-op), and two
-        # workers must never mutate one task row.
-        _submit(t)
+        # With a pool: through it, never by calling into the other task from
+        # here -- a worker may be running it already (then this is a no-op),
+        # and two workers must never mutate one task row. Inline (no pool):
+        # finish it right here, as always.
+        if _WORKERS is not None and _WORKERS.size:
+            _submit(t)
+            return
+        try:
+            _resume_finish(t, succ)
+        except Exception as e:                            # noqa: BLE001
+            # the next pass finishes it as before
+            logger.warning("Hand-off to task %s failed: %s", t.uuid, e)
         return
 
 
