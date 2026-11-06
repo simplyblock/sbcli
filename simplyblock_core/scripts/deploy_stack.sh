@@ -20,7 +20,16 @@ PHASE=${12}
 # stack_deploy_wait.sh timeout, set by the caller below its own script timeout
 # so this script reports a stuck stack before it is killed.
 STACK_WAIT_TIMEOUT=${13}
+# File the caller logs at error level if this script fails. It must only ever
+# receive text that cannot carry a secret: the arguments above include
+# passwords, and `bash -x` traces echo them, so the regular output stays at
+# debug level and this file is the readable account of a failure.
+REPORT_FILE=${14:-/dev/null}
 export DIR="$(dirname "$(realpath "$0")")"
+
+report() {
+   echo "$*" | tee -a "$REPORT_FILE"
+}
 
 if [ -s "/etc/foundationdb/fdb.cluster" ]
 then
@@ -33,14 +42,16 @@ if [[ "$LOG_DELETION_INTERVAL" == *d ]]; then
 elif [[ "$LOG_DELETION_INTERVAL" == *h || "$LOG_DELETION_INTERVAL" == *m ]]; then
    export MAX_NUMBER_OF_INDICES=1
 else
-    echo "Invalid LOG_DELETION_INTERVAL format. Please use a value ending in 'd', 'h', or 'm'."
+    report "Invalid LOG_DELETION_INTERVAL format. Please use a value ending in 'd', 'h', or 'm'."
     exit 1
 fi
 
-set -e
+set -e -o pipefail
+# BASH_COMMAND is the command as written, before expansion: no secret values.
+trap 'report "Phase $PHASE: command failed: $BASH_COMMAND"' ERR
 
 if ! [[ "$STACK_WAIT_TIMEOUT" =~ ^[1-9][0-9]*$ ]]; then
-   echo "Invalid stack wait timeout: '$STACK_WAIT_TIMEOUT'" >&2
+   report "Invalid stack wait timeout: '$STACK_WAIT_TIMEOUT'"
    exit 1
 fi
 
@@ -49,12 +60,14 @@ fi
 # the wait script itself only reports the last state it saw.
 wait_stack() {
    local stack="${!#}"
-   if ! bash "$DIR"/stack_deploy_wait.sh -t "$STACK_WAIT_TIMEOUT" "$@"; then
-      echo "Stack '$stack' did not converge within ${STACK_WAIT_TIMEOUT}s. Services:"
-      docker stack services --format '{{.Name}} {{.Replicas}}' "$stack" || true
-      echo "Failed tasks:"
-      docker stack ps --no-trunc --filter desired-state=shutdown \
-         --format '{{.Name}} {{.CurrentState}} {{.Error}}' "$stack" | head -n 50 || true
+   if ! bash "$DIR"/stack_deploy_wait.sh -t "$STACK_WAIT_TIMEOUT" "$@" 2>&1 | tee -a "$REPORT_FILE"; then
+      {
+         echo "Stack '$stack' did not converge within ${STACK_WAIT_TIMEOUT}s. Services:"
+         docker stack services --format '{{.Name}} {{.Replicas}}' "$stack" || true
+         echo "Failed tasks:"
+         docker stack ps --no-trunc --filter desired-state=shutdown \
+            --format '{{.Name}} {{.CurrentState}} {{.Error}}' "$stack" | head -n 50 || true
+      } 2>&1 | tee -a "$REPORT_FILE"
       exit 1
    fi
 }
@@ -87,7 +100,7 @@ case "$PHASE" in
     wait_stack app
     ;;
   *)
-    echo "Unknown deploy phase: '$PHASE' (expected monitoring, fdb or app)" >&2
+    report "Unknown deploy phase: '$PHASE' (expected monitoring, fdb or app)"
     exit 1
     ;;
 esac
