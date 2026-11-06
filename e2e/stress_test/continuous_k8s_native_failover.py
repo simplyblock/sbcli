@@ -2557,7 +2557,12 @@ class K8sNativeFailoverTest(TestClusterBase):
         cp_seen = self._control_plane_downtime()
         while True:
             try:
-                self.sbcli_utils.shutdown_node(node_uuid=node, force=False)
+                # force=True: v1's shutdown endpoint defaults force to True and
+                # cannot be talked out of it, so no run before the v2 migration
+                # ever took the graceful path. v2 honours the flag and refuses a
+                # graceful shutdown with 409 while migration tasks are in
+                # flight. continuous_failover_ha_multi_client_quick_outage.py's _perform_outage carries the full explanation.
+                self.sbcli_utils.shutdown_node(node_uuid=node, force=True)
             except Exception as e:
                 self.logger.warning(f"shutdown_node raised: {e}")
             sleep_n_sec(20)

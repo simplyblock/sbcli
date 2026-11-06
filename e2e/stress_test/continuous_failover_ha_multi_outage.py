@@ -578,19 +578,27 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
         return outage_combinations
 
     def _graceful_shutdown_node(self, node):
-        """Shutdown node without --force; retry every 20 s for up to 5 minutes.
+        """Shutdown node; retry every 20 s for up to 5 minutes.
 
-        The shutdown command now triggers an internal suspend before shutting
+        The shutdown command triggers an internal suspend before shutting
         down.  After each call we wait 20 seconds and check the node status.
         If the node is still not offline we re-issue the command and try again
-        until the 5-minute deadline, then raise so the test captures the failure
-        rather than masking it with a force-kill.
+        until the 5-minute deadline, then raise so the test captures the
+        failure.
+
+        The name is historical. This sends force=True, because v1's shutdown
+        endpoint defaults force to True and parses it as
+        bool(args.get('force', True)) -- "false" is True and no query string
+        is True -- so no run of this helper has ever taken the graceful path.
+        v2 honours the flag and refuses a graceful shutdown with 409 while
+        migration tasks are in flight, which would turn correct product
+        behaviour into a test failure. continuous_failover_ha_multi_client_quick_outage.py's _perform_outage carries the full explanation.
         """
-        self.logger.info(f"Issuing graceful shutdown (no --force) for node {node}.")
+        self.logger.info(f"Issuing shutdown for node {node}.")
         deadline = time.time() + 300  # 5 minutes
         while True:
             try:
-                self.sbcli_utils.shutdown_node(node_uuid=node, force=False)
+                self.sbcli_utils.shutdown_node(node_uuid=node, force=True)
             except Exception as e:
                 self.logger.warning(f"shutdown_node raised (may already be shutting down): {e}")
             sleep_n_sec(20)

@@ -312,11 +312,17 @@ class RandomRDMAFailoverTest(TestLvolHACluster):
         self.logger.info(f"Performing {outage_type} on node {self.current_outage_node}.")
         self.log_outage_event(self.current_outage_node, outage_type, "Outage started")
         if outage_type == "graceful_shutdown":
-            self.logger.info(f"Issuing graceful shutdown (no --force) for node {self.current_outage_node}.")
+            self.logger.info(f"Issuing shutdown for node {self.current_outage_node}.")
             deadline = time.time() + 300  # 5 minutes
             while True:
                 try:
-                    self.sbcli_utils.shutdown_node(node_uuid=self.current_outage_node, force=False)
+                    # force=True because that is what this outage has always
+                    # been: v1's shutdown endpoint defaults force to True and
+                    # cannot be talked out of it, so no run before the v2
+                    # migration ever took the graceful path. v2 honours the
+                    # flag and refuses a graceful shutdown with 409 while
+                    # migration tasks are in flight. continuous_failover_ha_multi_client_quick_outage.py's _perform_outage carries the full explanation.
+                    self.sbcli_utils.shutdown_node(node_uuid=self.current_outage_node, force=True)
                 except Exception as e:
                     self.logger.warning(f"shutdown_node raised (may already be shutting down): {e}")
                 sleep_n_sec(20)

@@ -1049,8 +1049,15 @@ class _DeviceFailureMigrationBase:
             deadline = time.time() + 300
             while True:
                 try:
+                    # force=True: v1's shutdown endpoint defaults force to True
+                    # and cannot be talked out of it, so this never took the
+                    # graceful path. v2 honours the flag and refuses a graceful
+                    # shutdown with 409 while migration tasks are in flight --
+                    # which this test, being about migration, always has.
+                    # continuous_failover_ha_multi_client_quick_outage.py's
+                    # _perform_outage carries the full explanation.
                     self.sbcli_utils.shutdown_node(
-                        node_uuid=restart_node_id, force=False
+                        node_uuid=restart_node_id, force=True
                     )
                 except Exception as e:
                     self.logger.warning(
