@@ -900,10 +900,27 @@ class TestClusterBase:
         # if not self.k8s_test:
         #     self.start_root_monitor()
         #
-        # What actually fills the mgmt node is the monitoring stack: 73G of
-        # OpenSearch indices and 15G of FDB backups. start_graylog_rotation_monitor
-        # reclaims both, and unlike the monitor above it saves the logs to the
-        # NFS share before dropping them, so a long run stays readable.
+        # Leave it off. The comment above says its delete targets had gone
+        # stale, which undersells it: cleanup_root_when_high_usage goes through
+        # delete_file_dir, i.e. an unquoted `sudo rm -rf <glob>` on the remote
+        # node, and cleanup_logs builds those globs from `Path.home()`
+        # evaluated on the *runner* and used as a path on the node. Pointed at
+        # a tree that holds, or is mounted from, /mnt/nfs_share, that deletes
+        # the shared evidence directory for every run on the lab, not just
+        # this one. Nothing here should grow a new caller of it.
+        #
+        # What fills the mgmt node is 73G of OpenSearch indices under
+        # /var/lib/docker/volumes/monitoring_os_data. The rotation monitor
+        # reclaims those over the OpenSearch HTTP API -- it deletes indices,
+        # never files, so there is no glob to widen and no path on the node it
+        # can get wrong -- after saving each window to the NFS share.
+        #
+        # The other 16G, /etc/foundationdb/backup, is deliberately left alone.
+        # It is not FDB's database (that is ~1G) but the backup agent's
+        # output: one directory per cluster ever created here, 115 of them
+        # going back to September, none expired when its cluster was deleted.
+        # That wants `fdbbackup expire`, or no backup agent on a throwaway
+        # lab -- not the test harness running rm -rf on a shared mgmt node.
         if not self.k8s_test:
             self.start_graylog_rotation_monitor()
 
@@ -5280,11 +5297,6 @@ class TestClusterBase:
                         "scheduled" if due else f"disk >= {thr}%",
                         used, elapsed_h)
                     self.rotate_graylog_logs()
-                    if pressured:
-                        # Only under pressure: the backup dirs are the other
-                        # half of the fill, and the newest ones are worth
-                        # keeping while there is room for them.
-                        self.prune_fdb_backup_dirs()
                     after = self._mgmt_disk_usage_pct()
                     self.logger.warning(
                         "[graylog-rotate] mgmt disk %s%% -> %s%%", used, after)
@@ -5305,47 +5317,6 @@ class TestClusterBase:
         t = getattr(self, "_graylog_rotation_thread", None)
         if t and t.is_alive():
             t.join(timeout=30)
-
-    def prune_fdb_backup_dirs(self, keep=None):
-        """Drop all but the newest *keep* directories under /etc/foundationdb/backup.
-
-        Not Graylog, and so not covered by rotating the indices: the FDB
-        backup agent writes a directory per backup and nothing expires them.
-        On 210 that was 15G in 117 directories, climbing about 5G a day --
-        enough on its own to refill a disk the index rotation has just freed.
-
-        These are backups of a throwaway test cluster's control-plane DB. The
-        newest few are kept so a post-mortem still has something to restore.
-        """
-        if self.k8s_test or not getattr(self, "mgmt_nodes", None):
-            return 0
-        n = keep if keep is not None else int(os.getenv("FDB_BACKUP_KEEP", "2"))
-        node = self.mgmt_nodes[0]
-        # -mindepth/-maxdepth 1: the backup root itself must survive.
-        cmd = (
-            "find /etc/foundationdb/backup -mindepth 1 -maxdepth 1 -type d "
-            "-printf '%T@ %p\\n' 2>/dev/null | sort -rn | "
-            f"awk 'NR>{n}{{print $2}}'"
-        )
-        try:
-            out, _ = self.ssh_obj.exec_command(
-                node=node, command=cmd, supress_logs=True)
-            stale = [line.strip() for line in (out or "").splitlines()
-                     if line.strip().startswith("/etc/foundationdb/backup/")]
-            if not stale:
-                self.logger.info(
-                    "[fdb-backup-prune] Nothing older than the newest %d.", n)
-                return 0
-            self.logger.warning(
-                "[fdb-backup-prune] Removing %d backup dir(s), keeping "
-                "newest %d", len(stale), n)
-            for path in stale:
-                self.ssh_obj.delete_file_dir(
-                    node=node, entity=path, recursive=True)
-            return len(stale)
-        except Exception as exc:
-            self.logger.warning("[fdb-backup-prune] Failed: %s", exc)
-            return 0
 
     def _mgmt_disk_usage_pct(self):
         """Root-filesystem usage on the first mgmt node, or -1 if unknown.
