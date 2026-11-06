@@ -54,7 +54,8 @@ class TargetParams(BaseModel):
     def peer(self) -> PeerConnection | None:
         if self.peer_endpoint is None or self.peer_secret is None:
             return None
-        return PeerConnection(endpoint=str(self.peer_endpoint), secret=self.peer_secret,
+        # AnyHttpUrl appends a '/' to a bare host; store the root as given.
+        return PeerConnection(endpoint=str(self.peer_endpoint).rstrip('/'), secret=self.peer_secret,
                               ca_cert=self.peer_ca_cert or '')
 
 

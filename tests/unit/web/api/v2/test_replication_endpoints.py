@@ -139,7 +139,7 @@ class TestCreatePeerTarget:
         assert response.status_code == 201
         peer = replication_policy_controller.add_target.call_args.kwargs['peer']
         assert isinstance(peer, PeerConnection)
-        assert peer.endpoint.startswith('https://cp-b.example:8443')
+        assert peer.endpoint == 'https://cp-b.example:8443'
         assert peer.secret.get_secret_value() == 'peer-plaintext'
         assert peer.ca_cert == self.BODY['peer_ca_cert']
 
