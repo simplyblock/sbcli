@@ -1000,6 +1000,12 @@ commands:
             dest: enable_failure_domain
             type: bool
             action: store_true
+          - name: "--disable-jc-compression"
+            help: "Disable JC (journal) compression. Enabled by default; can be changed later with `cluster set-jc-compression`."
+            dest: disable_jc_compression
+            type: bool
+            action: store_true
+            private: true
           - name: "--name"
             help: >
               Assigns a name to the newly created cluster.
@@ -1208,6 +1214,12 @@ commands:
           - name: "--enable-failure-domain"
             help: "Enable failure-domain anti-affinity. Each storage node must then be added with a --failure-domain tag (rack/cabinet/DC); data, journal and secondary/tertiary copies are spread across distinct failure domains (best-effort). Deploy-time only: a cluster cannot be upgraded into this feature, it must be redeployed."
             dest: enable_failure_domain
+            type: bool
+            action: store_true
+          - name: "--disable-jc-compression"
+            help: "Disable JC (journal) compression. Enabled by default; can be changed later with `cluster set-jc-compression`."
+            dest: disable_jc_compression
+            private: true
             type: bool
             action: store_true
           - name: "--name"
@@ -1600,6 +1612,23 @@ commands:
           - name: "--force"
             help: "Bypass the rebalancing / non-online-node guards. Required when --disable is passed."
             dest: force
+            type: bool
+            action: store_true
+      - name: set-jc-compression
+        help: "Enable or disable JC (journal) compression on the cluster."
+        usage: >
+          Persists the setting on the cluster, then resumes (enable) or suspends (disable) JC compression on every
+          online storage node. Nodes with running data migrations resume once the migration completes; offline
+          nodes pick up the setting on restart.
+        arguments:
+          - name: "cluster_id"
+            help: "The cluster id."
+            dest: cluster_id
+            type: str
+            completer: _completer_get_cluster_list
+          - name: "--disable"
+            help: "Disable JC compression (default action is to enable it)."
+            dest: disable
             type: bool
             action: store_true
       - name: event-alerts

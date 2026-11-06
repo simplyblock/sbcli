@@ -264,6 +264,11 @@ class Cluster(BaseModel):
     # Deploy-time only — set at cluster create/add, never toggled at runtime;
     # an existing cluster must be redeployed to gain the feature.
     enable_failure_domain: bool = False
+    # JC (journal) compression. SPDK keeps it suspended until the control
+    # plane resumes it with jc_suspend_compression(suspend=False); when False
+    # every resume path is skipped, so compression never starts. Toggled at
+    # runtime with `cluster set-jc-compression`.
+    jc_compression_enabled: bool = True
     snapshot_replication_target_cluster: str = ""
     snapshot_replication_target_pool: str = ""
     snapshot_replication_timeout: int = 60*10

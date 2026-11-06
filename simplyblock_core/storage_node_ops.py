@@ -11867,7 +11867,10 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
     # unless a release upgrade holds all resumes until `cluster
     # upgrade-complete` (release-upgrade guard, remove with the
     # jc_compression_upgrade plugin).
-    if jc_compression_upgrade.resume_is_held(DBController().get_cluster_by_id(snode.cluster_id)):
+    snode_cluster = DBController().get_cluster_by_id(snode.cluster_id)
+    if not snode_cluster.jc_compression_enabled:
+        logger.info("JC compression is disabled on the cluster, not resuming")
+    elif jc_compression_upgrade.resume_is_held(snode_cluster):
         logger.info("JC compression resume held: cluster upgrade in progress")
     else:
         ret, err = snode.rpc_client().jc_suspend_compression(jm_vuid=primary_node.jm_vuid, suspend=False)
@@ -14986,7 +14989,10 @@ def create_lvstore(snode: StorageNode, ndcs, npcs, distr_bs, distr_chunk_bs, pag
         # sending to the other node (sec_node) with the primary group jm_vuid (snode.jm_vuid)
         # (release-upgrade guard: held until `cluster upgrade-complete`,
         # remove with the jc_compression_upgrade plugin)
-        if jc_compression_upgrade.resume_is_held(DBController().get_cluster_by_id(sec_node.cluster_id)):
+        sec_cluster = DBController().get_cluster_by_id(sec_node.cluster_id)
+        if not sec_cluster.jc_compression_enabled:
+            logger.info("JC compression is disabled on the cluster, not resuming")
+        elif jc_compression_upgrade.resume_is_held(sec_cluster):
             logger.info("JC compression resume held: cluster upgrade in progress")
         else:
             ret, err = sec_node.rpc_client().jc_suspend_compression(jm_vuid=snode.jm_vuid, suspend=False)
