@@ -458,7 +458,18 @@ class SbcliUtils:
         data = self.get_management_nodes()
 
         for nodes in data["results"]:
-            management_nodes.append(nodes["mgmt_ip"])
+            # v1 spells this mgmt_ip, v2 spells it ip -- and only for
+            # management nodes: StorageNodeDTO below still carries mgmt_ip, so
+            # the two are deliberately not symmetric. Mirrors ManagementNodeDTO
+            # and StorageNodeDTO in simplyblock_web/api/v2/_dtos.py; a rename
+            # there has to be reflected here. Reading only mgmt_ip is what made
+            # the first v2 stress run die in setup with KeyError: 'mgmt_ip'.
+            address = nodes.get("ip") or nodes.get("mgmt_ip")
+            if not address:
+                raise KeyError(
+                    "management node carries neither 'ip' (v2) nor 'mgmt_ip' "
+                    f"(v1): {sorted(nodes)}")
+            management_nodes.append(str(address))
 
         data = self.get_storage_nodes()
 
