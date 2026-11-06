@@ -102,8 +102,10 @@ def test_max_retry_with_a_vanished_receiving_lvol_does_not_raise(monkeypatch):
 
 def test_runner_loop_catches_task_exceptions():
     """A failing task is logged and skipped, not fatal to the service."""
-    # main() hands each task to _dispatch, which the endgame wake-up shares.
-    assert "_dispatch(task" in inspect.getsource(sr.main)
+    # main() hands each task to the worker pool, whose workers run _dispatch;
+    # the endgame wake-up submits through the same pool.
+    assert "_WORKERS.submit(task)" in inspect.getsource(sr.main)
+    assert "_dispatch(task)" in inspect.getsource(sr._Workers._run)
     src = inspect.getsource(sr._dispatch)
     assert "try:" in src and "task_runner(task)" in src
     assert "except Exception" in src, (
@@ -153,6 +155,7 @@ def test_runner_skips_a_task_that_vanished_before_dispatch(monkeypatch):
         return True
 
     monkeypatch.setattr(sr, "db", _DB())
+    monkeypatch.setattr(sr.constants, "REPL_RUNNER_WORKERS", 0)   # inline: the order is asserted
     monkeypatch.setattr(sr, "task_runner", _dispatch)
     monkeypatch.setattr(sr.time, "sleep", _stop)
 

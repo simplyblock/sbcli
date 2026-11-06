@@ -121,7 +121,73 @@ def _record(task, **params):
 
 def _release_lvs_claim(task):
     """Let other volumes on this LVS replicate again."""
+    _restore_source_throttle(task)
     drop_params(task, "cutover_lvs", "cutover_group")
+
+
+def _throttle_source(task, lvol):
+    """Cap the source volume's write bandwidth for the rest of the endgame.
+
+    See REPL_CUTOVER_THROTTLE_AFTER_ROUND. The volume's own QoS values are
+    kept on the task (throttle_restore) and put back by
+    _restore_source_throttle. Once per endgame: a refusal (pool-level QoS,
+    an RPC failure) is recorded and not retried every round.
+    """
+    params = task.function_params or {}
+    if "throttle_restore" in params or params.get("throttle_tried"):
+        return task
+    cap = constants.REPL_CUTOVER_THROTTLE_W_MBPS
+    if cap <= 0 or not hasattr(lvol, "w_mbytes_per_sec"):
+        return task
+    try:
+        restore = [int(getattr(lvol, n, 0) or 0) for n in
+                   ("rw_ios_per_sec", "rw_mbytes_per_sec", "r_mbytes_per_sec", "w_mbytes_per_sec")]
+    except (TypeError, ValueError):
+        return _record(task, throttle_tried=True)     # no usable QoS record
+    if 0 < restore[3] <= cap:
+        return _record(task, throttle_tried=True)     # already slower than the cap
+    from simplyblock_core.controllers import lvol_controller
+    try:
+        ret = lvol_controller.set_lvol(lvol.get_id(), lvol.rw_ios_per_sec,
+                                       lvol.rw_mbytes_per_sec, lvol.r_mbytes_per_sec, cap)
+    except Exception as e:                                # noqa: BLE001
+        ret = str(e)
+    if ret is not True:
+        logger.warning("cutover for lvol %s: source writes not throttled (%s); the "
+                       "rounds converge at the application's write rate",
+                       lvol.get_id(), ret or "QoS refused")
+        return _record(task, throttle_tried=True)
+    logger.info("cutover for lvol %s: source writes capped at %d MB/s until the "
+                "endgame ends (was %s)", lvol.get_id(), cap, restore)
+    xfer_timing.stamp("source_throttled", lvol=lvol.get_id(), mbps=cap,
+                      round=params.get("shrink_round", 0))
+    return _record(task, throttle_restore=restore, throttle_tried=True)
+
+
+def _restore_source_throttle(task):
+    """Put the source volume's own QoS back (see _throttle_source). Best
+    effort: a source already deleted after its cutover has nothing to restore."""
+    params = task.function_params or {}
+    restore = params.get("throttle_restore")
+    if restore is None:
+        drop_params(task, "throttle_tried")
+        return
+    lvol_id = params.get("lvol_id")
+    from simplyblock_core.controllers import lvol_controller
+    try:
+        ret = lvol_controller.set_lvol(lvol_id, *restore)
+    except KeyError:
+        ret = True                                       # source gone with the cutover
+    except Exception as e:                                # noqa: BLE001
+        ret = str(e)
+    if ret is True:
+        logger.info("cutover for lvol %s: source write cap lifted (QoS restored to %s)",
+                    lvol_id, restore)
+        xfer_timing.stamp("source_throttle_lifted", lvol=lvol_id)
+    else:
+        logger.error("cutover for lvol %s: could not restore the source QoS %s: %s; "
+                     "restore it by hand (sbctl volume update)", lvol_id, restore, ret)
+    drop_params(task, "throttle_restore", "throttle_tried")
 
 
 def _record_cutover_done(task):
@@ -162,6 +228,7 @@ def _record_cutover_done(task):
     checkpoint(task, end_time=int(time.time()))
     set_result(task, "cutover done")
 
+    _restore_source_throttle(task)
     _stop_source_replication(task)
     _prune_endgame_snapshots(task)
     _delete_source_if_requested(task)
@@ -957,6 +1024,16 @@ def _discard_spare_landing(task):
     Best effort: a landing volume that survives this is an internal volume
     without a transfer, which nothing else reclaims, so say so loudly.
     """
+    # The cadence spare of the volume (replication_spare) is idle too once the
+    # rounds are over: the volume cuts over or gives up, either way no cadence
+    # snapshot of it lands here again.
+    lvol_id = (task.function_params or {}).get("lvol_id")
+    if lvol_id:
+        try:
+            from simplyblock_core import replication_spare
+            replication_spare.discard(lvol_id)
+        except Exception as e:                                # noqa: BLE001
+            logger.warning("Could not discard the cadence spare of %s: %s", lvol_id, e)
     try:
         # The caller's copy may predate the rounds _shrink_step just ran.
         name = (db.get_task_by_id(task.uuid).function_params or {}).get(
@@ -1140,6 +1217,13 @@ def _shrink_step(task, lvol):
                 params["shrink_round"], elapsed,
                 constants.REPL_CUTOVER_FREEZE_MAX_ROUND_SEC,
                 constants.REPL_CUTOVER_FINAL_STEP_LIMIT_SEC)
+
+        # Not converged after the first rounds: the loop is at its floor
+        # (overhead / (1 - W/T)); cap the source's writes so the next rounds
+        # and the freeze carry a fraction of the delta (REPL_CUTOVER_THROTTLE_*).
+        if params["shrink_round"] >= constants.REPL_CUTOVER_THROTTLE_AFTER_ROUND:
+            task = _throttle_source(task, lvol)
+            params = task.function_params
 
         # IMMEDIATELY take the next snapshot. This is the whole mechanism: the
         # next round carries only what was written while this one transferred,
@@ -1408,6 +1492,7 @@ def _cleanup_unfinished_cutover(task):
     params = task.function_params or {}
     if params.get("end_time") or task.function_result == "cutover done":
         return
+    _restore_source_throttle(task)
     if not _revert_cutover_relationship(params.get("discard_replication_id")
                                         or params.get("replication_id")):
         # The relationship says it cut over: the clone serves IO.

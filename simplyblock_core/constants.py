@@ -569,6 +569,18 @@ REPL_CUTOVER_FREEZE_MAX_ROUND_SEC = (REPL_CUTOVER_FINAL_STEP_LIMIT_SEC
 # released, the volume replicates on its ordinary cadence, and the endgame is
 # retried after this long (the abandon burns one attempt of the task's budget).
 REPL_CUTOVER_ENDGAME_BACKOFF_SEC = 300
+# --- cutover source throttle ----------------------------------------------
+# A round converges to overhead / (1 - W/T): with the application writing at
+# W and the delta transferring at T, no number of rounds gets under the
+# per-round fixed cost divided by that factor (bed bf13 2026-11-05: W/T = 0.4,
+# ~5 s of fixed cost, rounds settled at 6-13 s against a 2 s target for 34
+# rounds). Once the first rounds show the delta is not shrinking, the source
+# volume's write bandwidth is capped for the rest of the endgame -- including
+# the clone build and the preconnect wait, whose writes the frozen final step
+# must copy -- and restored when the endgame ends (cutover done, abandoned or
+# failed). A volume whose pool carries QoS of its own is not throttled.
+REPL_CUTOVER_THROTTLE_AFTER_ROUND = 2
+REPL_CUTOVER_THROTTLE_W_MBPS = 8
 # How long after its freeze_started_at stamp a cutover counts as freezing (and
 # so is spared by a plan cancel or a policy detach). A freeze is bounded by the
 # final-step limit plus fence/restore RPCs; a stamp older than this is a pass
@@ -658,6 +670,17 @@ REPL_MERGE_POLL_SEC = 1.0
 # merge is in flight; TASK_EXEC_INTERVAL_SEC when idle. Not sub-second: each
 # pass reads the task table (see test_transfer_completion_latency).
 REPL_ACTIVE_PASS_SEC = 1.0
+# Worker pool of the snapshot replication runner: how many replication tasks
+# run at the same time. One runner used to execute every task of every volume
+# of every cluster one after the other, and a task holds it for its whole
+# transfer (a cutover round waits inline up to REPL_XFER_INLINE_WAIT_CUTOVER_SEC)
+# and for every slow metadata RPC on the target (bed bf13 2026-11-05: landing
+# creates of 20-47 s, converts of 32 s, so four replicating volumes got 1.7-way
+# concurrency and a converging cutover waited 22-34 s for its round to start).
+# 0 runs the tasks inline on the pass loop (tests, single-volume debugging).
+REPL_RUNNER_WORKERS = int(os.getenv("REPL_RUNNER_WORKERS", "8"))
+# Pause before a task that returned a failure is dispatched again.
+REPL_RUNNER_RETRY_PAUSE_SEC = 3.0
 # Requests a replication transfer keeps in flight. A full transfer sends one
 # whole cluster per request (16 x 2 MiB = 32 MiB in flight); a delta
 # (allow_partial) sends at most 64 KiB per request, so it needs a deeper window
