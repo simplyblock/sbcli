@@ -675,11 +675,14 @@ class RandomRapidFailoverNoGap(RapidFioLifecycle, TestLvolHACluster):
         node_rpc_port = node_details[0]["rpc_port"]
 
         if outage_type == "graceful_shutdown":
-            self.logger.info(f"Issuing graceful shutdown (no --force) for node {self.current_outage_node}.")
+            self.logger.info(f"Issuing shutdown for node {self.current_outage_node}.")
             deadline = time.time() + 300  # 5 minutes
             while True:
                 try:
-                    self.sbcli_utils.shutdown_node(node_uuid=self.current_outage_node, force=False)
+                    # force=True for the reason spelled out in _perform_outage:
+                    # v1 could not express a graceful shutdown, so this outage
+                    # has always been a forced one, and v2 honours the flag.
+                    self.sbcli_utils.shutdown_node(node_uuid=self.current_outage_node, force=True)
                 except Exception as e:
                     self.logger.warning(f"shutdown_node raised (may already be shutting down): {e}")
                 sleep_n_sec(20)
@@ -1193,7 +1196,23 @@ class RandomRapidFailoverNoGapV2WithMigration(RandomRapidFailoverNoGap):
             deadline = time.time() + 300
             while True:
                 try:
-                    self.sbcli_utils.shutdown_node(node_uuid=self.current_outage_node, force=False)
+                    # force=True, and not because forcing is gentler on the
+                    # cluster: it is what this outage has always actually been.
+                    # The v1 endpoint defaults force to True and parses it as
+                    # bool(args.get('force', True)), so "false" is True and no
+                    # query string at all is True -- every graceful_shutdown
+                    # outage run before the v2 migration was a forced one.
+                    # simplyblock_web/api/v2/.../shutdown honours the flag and
+                    # refuses a graceful shutdown with 409 while device_migration
+                    # tasks are in flight (storage_node_ops.check_node_shutdown_
+                    # preconditions), which is correct and which this test, with
+                    # no gap between outages, hits almost every time.
+                    #
+                    # So this keeps the two lanes comparable rather than silently
+                    # changing what the outage is. Exercising the graceful path
+                    # against the migration guard is worth doing, but it is a
+                    # different case with its own drain budget, not this one.
+                    self.sbcli_utils.shutdown_node(node_uuid=self.current_outage_node, force=True)
                 except Exception as e:
                     self.logger.warning(f"[V2] shutdown_node raised: {e}")
                 sleep_n_sec(30)
@@ -1879,7 +1898,8 @@ class RandomRapidFailoverNoGapV2WithMigration(RandomRapidFailoverNoGap):
                 deadline = time.time() + 300
                 while True:
                     try:
-                        self.sbcli_utils.shutdown_node(node_uuid=node_uuid, force=False)
+                        # force=True: see _perform_outage.
+                        self.sbcli_utils.shutdown_node(node_uuid=node_uuid, force=True)
                     except Exception as e:
                         self.logger.warning(f"[V2-dual] shutdown_node raised for {node_uuid}: {e}")
                     sleep_n_sec(30)
