@@ -21,3 +21,32 @@ ignore:
     package:
       name: python
       type: binary
+
+  # Chunked/Content-Length response parsing mishandles non-hex or negative
+  # integers, letting HTTP response framing be misinterpreted
+  # (python/cpython#150751). Fixed in 3.16.0 only; there is no 3.14.x release
+  # carrying it, so `only-fixed` does not filter it out.
+  # The control plane never parses an HTTP response through stdlib
+  # http.client or urllib.request: rpc_client.py imports http.client only
+  # for the RemoteDisconnected exception class, and every actual RPC/HTTP
+  # call goes through requests, which parses chunked/length framing via
+  # urllib3, not this code path.
+  - vulnerability: CVE-2026-103995
+    package:
+      name: python
+      type: binary
+
+  # socket.getaddrinfo() silently truncates a host/port value containing a
+  # null byte instead of rejecting it (python/cpython#160898). Fixed in
+  # 3.16.0 only; there is no 3.14.x release carrying it, so `only-fixed`
+  # does not filter it out.
+  # utils.resolve_address() and tasks_runner_node_add's connectivity probe
+  # do pass a caller-supplied node address into getaddrinfo/create_connection
+  # (storage node add/restart), so this path is reachable -- but only from
+  # an already-authenticated management-plane caller naming a node address
+  # directly, so a truncated host at worst misdirects a connection to an
+  # address that same caller chose, not a path an untrusted party can reach.
+  - vulnerability: CVE-2026-116566
+    package:
+      name: python
+      type: binary
