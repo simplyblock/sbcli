@@ -7,15 +7,51 @@ DIR_PATH = os.path.dirname(os.path.realpath(__file__))
 
 logger = logging.getLogger()
 
+#: Hard limit on one script run.
+SCRIPT_TIMEOUT_SEC = 720
+#: stack_deploy_wait.sh's limit inside one deploy_stack.sh phase. Kept well
+#: below SCRIPT_TIMEOUT_SEC so the wait times out first and reports which
+#: services never converged; if the Python limit fires first, the script is
+#: killed mid-wait and that report is lost. The margin covers
+#: `docker stack deploy` and the failure diagnostics deploy_stack.sh prints.
+STACK_WAIT_TIMEOUT_SEC = SCRIPT_TIMEOUT_SEC - 120
 
-def __run_script(args: list):
+
+def _script_messages(output) -> str:
+    """The script's own output, without `bash -x` trace lines: those echo
+    every command with its arguments, secrets included, so they stay at
+    debug level. Only for scripts whose own output carries no secret
+    (set_db_config.sh, for one, echoes the connection string)."""
+    if isinstance(output, bytes):
+        output = output.decode(errors="replace")
+    return "\n".join(line for line in (output or "").splitlines()
+                     if line.strip() and not line.startswith("+"))
+
+
+def _script_name(args: list) -> str:
+    return next((os.path.basename(a) for a in args if str(a).endswith(".sh")), str(args[0]))
+
+
+def __run_script(args: list, report_failure_output=False):
+    """Run a script. With report_failure_output, a failure also logs the
+    script's own (non-trace) output at error level, so the reason is visible
+    without debug logging."""
     try:
-        output = subprocess.check_output(args, timeout=720, text=True, stderr=subprocess.STDOUT)
+        output = subprocess.check_output(args, timeout=SCRIPT_TIMEOUT_SEC, text=True, stderr=subprocess.STDOUT)
         if output:
             logger.debug(output.strip())
     except subprocess.CalledProcessError as e:
         logger.debug(f"Command failed with return code: {e.returncode}")
         logger.debug(f"Captured output:\n {e.output}")
+        if report_failure_output:
+            logger.error(f"{_script_name(args)} failed with return code {e.returncode}:\n"
+                         f"{_script_messages(e.output)}")
+        raise
+    except subprocess.TimeoutExpired as e:
+        logger.debug(f"Captured output:\n {e.output}")
+        if report_failure_output:
+            logger.error(f"{_script_name(args)} killed after {SCRIPT_TIMEOUT_SEC}s:\n"
+                         f"{_script_messages(e.output)}")
         raise
 
 
@@ -42,7 +78,8 @@ def deploy_stack(cli_pass, dev_ip, image_name, graylog_password, cluster_id,
     __run_script(
         ['sudo', 'bash', '-x', os.path.join(DIR_PATH, 'deploy_stack.sh'), cli_pass, dev_ip, image_name, pass_hash,
          graylog_password, cluster_id, log_del_interval, metrics_retention_period, log_level, grafana_endpoint, disable_monitoring,
-         phase])
+         phase, str(STACK_WAIT_TIMEOUT_SEC)],
+        report_failure_output=True)
 
 def deploy_k8s_stack(cli_pass, dev_ip, image_name, graylog_password, cluster_id,
                  log_del_interval, metrics_retention_period, log_level, grafana_endpoint, contact_point, k8s_namespace, disable_monitoring, tls_secret, ingress_host_source, dns_name):
