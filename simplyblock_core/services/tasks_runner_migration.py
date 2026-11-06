@@ -341,10 +341,14 @@ def main():
                         update_master_task(task, cl)
                         if res:
                             node_task = tasks_controller.get_active_node_tasks(task.cluster_id, task.node_id)
+                            # Re-read: the migration may have run long enough
+                            # for `cluster set-jc-compression` to change the flag.
+                            if not node_task and not db.get_cluster_by_id(cl.get_id()).jc_compression_enabled:
+                                logger.info("JC compression is disabled on the cluster, not resuming")
                             # Release-upgrade guard (remove with the
                             # jc_compression_upgrade plugin): resumes are
                             # held until `cluster upgrade-complete`.
-                            if not node_task and jc_compression_upgrade.resume_is_held(cl):
+                            elif not node_task and jc_compression_upgrade.resume_is_held(cl):
                                 logger.info("JC compression resume held: cluster upgrade in progress")
                             elif not node_task:
                                 logger.info("no task found on same node, resuming compression")

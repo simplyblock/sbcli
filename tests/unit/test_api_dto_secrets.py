@@ -89,6 +89,7 @@ def _build_cluster_dto():
         node_affinity=False,
         anti_affinity=False,
         enable_failure_domain=False,
+        jc_compression_enabled=True,
         secret=SecretStr("CLUSTER-SECRET"),
         tls_enabled=False,
         max_fault_tolerance=1,

@@ -111,9 +111,13 @@ def pre_lvol_delete_rebalance():
 def resume_comp(lvol):
     logger.info("resuming compression")
     node = db.get_storage_node_by_id(lvol.node_id)
+    cluster = db.get_cluster_by_id(node.cluster_id)
+    if not cluster.jc_compression_enabled:
+        logger.info("JC compression is disabled on the cluster, not resuming")
+        return
     # Release-upgrade guard (remove with the jc_compression_upgrade plugin):
     # resumes are held until `cluster upgrade-complete`.
-    if jc_compression_upgrade.resume_is_held(db.get_cluster_by_id(node.cluster_id)):
+    if jc_compression_upgrade.resume_is_held(cluster):
         logger.info("JC compression resume held: cluster upgrade in progress")
         return
     for n in db.get_storage_nodes_by_cluster_id(node.cluster_id):

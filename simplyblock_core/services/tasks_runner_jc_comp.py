@@ -47,6 +47,12 @@ def main():
                                 task.write_to_db(db.kv_store)
                                 continue
 
+                            if not cl.jc_compression_enabled:
+                                task.function_result = "JC compression is disabled on the cluster"
+                                task.status = JobSchedule.STATUS_DONE
+                                task.write_to_db(db.kv_store)
+                                continue
+
                             # Release-upgrade guard (remove with the
                             # jc_compression_upgrade plugin): resumes are
                             # held until `cluster upgrade-complete`.

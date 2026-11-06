@@ -112,10 +112,10 @@ class JCCompressionUpgrade(UpgradePlugin):
                     "timeout waiting for JC compression to finish on: "
                     + ", ".join(f"{m.get_id()}/JM:{v}" for m, v in pending))
         except ReleaseUpgradeError:
-            self._rollback(suspended)
+            self._rollback(cluster, suspended)
             raise
         except Exception as e:
-            self._rollback(suspended)
+            self._rollback(cluster, suspended)
             raise ReleaseUpgradeError(f"failed to suspend JC compression: {e}")
 
         cluster = db.get_cluster_by_id(cluster_id)
@@ -125,7 +125,11 @@ class JCCompressionUpgrade(UpgradePlugin):
                     "`cluster upgrade-complete` is run")
 
     @staticmethod
-    def _rollback(suspended) -> None:
+    def _rollback(cluster, suspended) -> None:
+        if not cluster.jc_compression_enabled:
+            # Compression is disabled on the cluster: the suspends above
+            # were no-ops, and resuming would start it.
+            return
         for member, jm_vuid in suspended:
             try:
                 member.rpc_client().jc_suspend_compression(jm_vuid=jm_vuid, suspend=False)
@@ -149,6 +153,9 @@ class JCCompressionUpgrade(UpgradePlugin):
         cluster = db.get_cluster_by_id(cluster_id)
         cluster.release_upgrade_state.pop(STATE_KEY, None)
         cluster.write_to_db(db.kv_store)
+
+        if not cluster.jc_compression_enabled:
+            return ["JC compression is disabled on the cluster, not resuming"]
 
         messages = []
         for member, jm_vuid in _lvs_group_members(db, cluster_id):
