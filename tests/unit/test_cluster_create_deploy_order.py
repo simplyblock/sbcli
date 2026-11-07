@@ -94,14 +94,36 @@ class TestComposeSplit(unittest.TestCase):
     def test_fdb_services_only_in_fdb_file(self):
         fdb = self._load("docker-compose-swarm-fdb.yml")["services"]
         app = self._load("docker-compose-swarm.yml")["services"]
-        self.assertEqual(set(fdb), {"fdb-server", "fdb-server1", "fdb-server2", "fdb-server3",
+        self.assertEqual(set(fdb), {"HAProxy", "fdb-server", "fdb-server1", "fdb-server2", "fdb-server3",
                                     "fdb-server4", "fdb-backup-agent"})
         self.assertFalse(set(fdb) & set(app))
 
+    def test_gelf_endpoint_is_deployed_with_the_fdb_tier(self):
+        # Docker refuses to create a container whose gelf log driver cannot
+        # connect. With the endpoint deployed in the app phase, the FDB
+        # servers never started and the configure step found no database.
+        fdb = self._load("docker-compose-swarm-fdb.yml")
+        ports = set()
+        for svc in fdb["services"].values():
+            gelf = svc.get("logging", {}).get("options", {}).get("gelf-address")
+            if gelf:
+                ports.add(gelf.rsplit(":", 1)[1])
+        self.assertTrue(ports)
+        published = {str(p).split(":")[0] for p in fdb["services"]["HAProxy"]["ports"]}
+        self.assertLessEqual(ports, published)
+        self.assertNotIn("logging", fdb["services"]["HAProxy"])
+
+    def test_fdb_phase_waits_for_the_log_sink_first(self):
+        with open(os.path.join(SCRIPTS_DIR, "deploy_stack.sh"), encoding="utf-8") as f:
+            script = f.read()
+        fdb_phase = script[script.index("  fdb)"):script.index("  app)")]
+        self.assertLess(fdb_phase.index("wait_stack -n HAProxy app"), fdb_phase.index("wait_stack $WAIT_ARGS app"))
+
     def test_fdb_file_declares_the_fdb_volumes(self):
         fdb = self._load("docker-compose-swarm-fdb.yml")
+        # A named volume has no "/" in its source; a bind mount does.
         used = {v.split(":")[0] for svc in fdb["services"].values()
-                for v in svc.get("volumes", []) if not v.startswith("/")}
+                for v in svc.get("volumes", []) if "/" not in v.split(":")[0]}
         self.assertTrue(used)
         self.assertLessEqual(used, set(fdb["volumes"]))
 
@@ -262,3 +284,58 @@ class TestDeployStackScript(unittest.TestCase):
         self.assertEqual(proc.returncode, 1)
         self.assertNotIn("wait", calls)
         self.assertIn("Invalid stack wait timeout", report)
+
+
+class TestConfigureDbSingle(unittest.TestCase):
+    """Swarm reports the FDB services converged once their containers run,
+    which can be ~110s before fdbserver listens (PR 1620). The configure step
+    must wait for FDB itself, and must fail rather than report "Done" over a
+    database that does not exist."""
+
+    TIMED_OUT = (1, "Specified timeout reached -- exiting...")
+    CREATED = (0, "Database created")
+    EXISTS = (1, "ERROR: Database already exists! To change configuration, don't say `new'")
+    AVAILABLE = (0, "The database is available.")
+    UNAVAILABLE = (1, "The database is unavailable; type `status' for more information.")
+
+    def _run(self, *responses, reachable_timeout=60, available_timeout=60):
+        commands = []
+        replies = iter(responses)
+
+        def fdbcli(command):
+            commands.append(command)
+            return next(replies)
+
+        with patch.object(scripts, "_fdbcli", side_effect=fdbcli), \
+                patch.object(scripts, "FDB_RETRY_INTERVAL_SEC", 0), \
+                patch.object(scripts, "FDB_REACHABLE_TIMEOUT_SEC", reachable_timeout), \
+                patch.object(scripts, "FDB_AVAILABLE_TIMEOUT_SEC", available_timeout):
+            scripts.set_db_config_single()
+        return commands
+
+    def test_waits_for_fdbserver_before_configuring(self):
+        commands = self._run(self.TIMED_OUT, self.TIMED_OUT, self.CREATED, self.AVAILABLE)
+        self.assertEqual(commands, ["configure new single ssd"] * 3 + ["status minimal"])
+
+    def test_database_created_by_a_timed_out_attempt_is_accepted(self):
+        commands = self._run(self.TIMED_OUT, self.EXISTS, self.AVAILABLE)
+        self.assertEqual(commands[-1], "status minimal")
+
+    def test_waits_for_the_database_to_become_available(self):
+        commands = self._run(self.CREATED, self.UNAVAILABLE, self.UNAVAILABLE, self.AVAILABLE)
+        self.assertEqual(commands.count("status minimal"), 3)
+
+    def test_unreachable_fdb_raises(self):
+        with patch.object(scripts, "_fdbcli", return_value=self.TIMED_OUT), \
+                patch.object(scripts, "FDB_RETRY_INTERVAL_SEC", 0), \
+                patch.object(scripts, "FDB_REACHABLE_TIMEOUT_SEC", 0):
+            with self.assertRaisesRegex(scripts.FdbConfigureError, "Specified timeout reached"):
+                scripts.set_db_config_single()
+
+    def test_unavailable_database_raises(self):
+        replies = iter([self.CREATED])
+        with patch.object(scripts, "_fdbcli", side_effect=lambda c: next(replies, self.UNAVAILABLE)), \
+                patch.object(scripts, "FDB_RETRY_INTERVAL_SEC", 0), \
+                patch.object(scripts, "FDB_AVAILABLE_TIMEOUT_SEC", 0):
+            with self.assertRaisesRegex(scripts.FdbConfigureError, "not available"):
+                scripts.set_db_config_single()

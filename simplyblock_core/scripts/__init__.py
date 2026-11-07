@@ -4,6 +4,14 @@ import os
 import subprocess
 import tempfile
 
+from tenacity import (
+    Retrying,
+    before_sleep_log,
+    retry_if_exception_type,
+    stop_after_delay,
+    wait_fixed,
+)
+
 DIR_PATH = os.path.dirname(os.path.realpath(__file__))
 
 logger = logging.getLogger()
@@ -97,8 +105,62 @@ def set_db_config(DEV_IP):
     __run_script(['sudo', 'bash', '-x', os.path.join(DIR_PATH, 'set_db_config.sh'), DEV_IP])
 
 
+FDB_CLUSTER_FILE = "/etc/foundationdb/fdb.cluster"
+#: How long configure_db_single waits for the fdbserver processes to accept
+#: connections. Swarm reports the FDB services converged once their containers
+#: run, which can be well before fdbserver listens (~110s apart, PR 1620).
+FDB_REACHABLE_TIMEOUT_SEC = 300
+#: How long configure_db_single waits for a configured database to report
+#: itself available.
+FDB_AVAILABLE_TIMEOUT_SEC = 120
+#: fdbcli --timeout of one attempt. Short, so one attempt cannot use up the
+#: overall wait while fdbserver is still coming up.
+FDBCLI_ATTEMPT_TIMEOUT_SEC = 30
+FDB_RETRY_INTERVAL_SEC = 5
+
+
+class FdbConfigureError(RuntimeError):
+    """The database could not be created, or did not become available."""
+
+
+def _fdbcli(command):
+    """Run one fdbcli command; return (exit code, combined output)."""
+    result = subprocess.run(
+        ['fdbcli', '--exec', command, '--timeout', str(FDBCLI_ATTEMPT_TIMEOUT_SEC), '-C', FDB_CLUSTER_FILE],
+        capture_output=True, text=True, timeout=FDBCLI_ATTEMPT_TIMEOUT_SEC + 30)
+    return result.returncode, (result.stdout + result.stderr).strip()
+
+
+def _fdb_retrying(timeout_sec):
+    return Retrying(
+        stop=stop_after_delay(timeout_sec),
+        wait=wait_fixed(FDB_RETRY_INTERVAL_SEC),
+        retry=retry_if_exception_type((FdbConfigureError, subprocess.TimeoutExpired)),
+        before_sleep=before_sleep_log(logger, logging.WARNING),
+        reraise=True)
+
+
+def _create_database_single():
+    rc, output = _fdbcli("configure new single ssd")
+    # A retry after an attempt that timed out client-side but went through.
+    if rc == 0 or "Database already exists" in output:
+        return
+    raise FdbConfigureError(f"configure new single ssd failed (rc={rc}): {output}")
+
+
+def _check_database_available():
+    rc, output = _fdbcli("status minimal")
+    if rc != 0 or "The database is available" not in output:
+        raise FdbConfigureError(f"database not available (rc={rc}): {output}")
+
+
 def set_db_config_single():
-    __run_script(['bash', os.path.join(DIR_PATH, 'db_config_single.sh')])
+    """Create a single-replica database on a freshly deployed FDB, and return
+    only once it is available. Raises FdbConfigureError otherwise: every
+    simplyblock service exits on an unavailable database, so carrying on
+    would only turn this into a transaction timeout minutes later."""
+    _fdb_retrying(FDB_REACHABLE_TIMEOUT_SEC)(_create_database_single)
+    _fdb_retrying(FDB_AVAILABLE_TIMEOUT_SEC)(_check_database_available)
 
 
 def set_db_config_double():

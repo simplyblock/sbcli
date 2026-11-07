@@ -1,4 +1,5 @@
-# FoundationDB tier of the `app` stack. deploy_stack.sh deploys it on its own
+# FoundationDB tier of the `app` stack, plus HAProxy, the log sink everything
+# in the stack logs through. deploy_stack.sh deploys it on its own
 # first, waits for it, configures the database, and only then deploys it
 # together with docker-compose-swarm.yml: the simplyblock services exit on an
 # unconfigured database, so they must not start before the configure step.
@@ -16,6 +17,30 @@ x-service-base: &service-base
 
 
 services:
+
+  # The log sink: every service here and in docker-compose-swarm.yml logs
+  # through the gelf driver to 127.0.0.1:12202, which is this proxy's
+  # forward to graylog. Docker cannot create a container whose log driver
+  # has nowhere to connect, so it must be up before anything that logs
+  # through it -- the FDB servers included. It needs no database.
+  HAProxy:
+    image: haproxytech/haproxy-debian:latest
+    deploy:
+      mode: global
+      placement:
+        constraints: [node.role == manager]
+    ports:
+      - 80:80
+      - 12202:12202
+      - 9200:9200
+      - 9090:9090
+    networks:
+      - localnet
+      - monitoring-net
+    volumes:
+      - "$DIR/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg"
+    environment:
+      SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
 
   fdb-server:
     <<: *service-base
@@ -124,9 +149,18 @@ services:
         constraints: [ node.role == manager ]
 
 networks:
+  monitoring-net:
+    external: true
+
   hostnet:
     external: true
     name: host
+
+  localnet:
+    driver: overlay
+    ipam:
+      config:
+        - subnet: 192.168.1.0/24
 
 volumes:
   fdb_server_1_data:

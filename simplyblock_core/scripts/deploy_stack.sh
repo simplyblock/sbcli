@@ -15,7 +15,7 @@ export LOG_LEVEL=$9
 export GRAFANA_ENDPOINT=${10}
 export DISABLE_MONITORING=${11}
 # monitoring | fdb | app -- run in that order, with the database configured
-# (db_config_single.sh) between fdb and app. See cluster_ops.create_cluster.
+# (scripts.set_db_config_single) between fdb and app. See cluster_ops.create_cluster.
 PHASE=${12}
 # stack_deploy_wait.sh timeout, set by the caller below its own script timeout
 # so this script reports a stuck stack before it is killed.
@@ -86,8 +86,11 @@ case "$PHASE" in
     fi
     ;;
   fdb)
-    # Only the FoundationDB services: nothing in the stack needs the database yet.
+    # FoundationDB and its log sink: nothing deployed here needs the database.
     docker stack deploy --compose-file="$DIR"/docker-compose-swarm-fdb.yml app
+    # HAProxy first: it is the gelf endpoint every container here logs to,
+    # and docker will not create a container whose log driver cannot connect.
+    wait_stack -n HAProxy app
     WAIT_ARGS=""
     for name in $FDB_SERVERS; do WAIT_ARGS="$WAIT_ARGS -n $name"; done
     wait_stack $WAIT_ARGS app
