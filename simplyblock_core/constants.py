@@ -629,6 +629,10 @@ REPL_MIGRATION_DEFAULT_INTERVAL_MIN = 1
 REPL_CUTOVER_POLL_INTERVAL_SEC = 0.2
 # How long a single runner pass may stay inside the convergence loop.
 REPL_CUTOVER_CONVERGE_BUDGET_SEC = 60
+# ... and however short its rounds, one pass never stays inline longer than
+# this: the window above is re-armed per round, and the runner is single
+# threaded (other cutovers wait to freeze, their dirty sets growing).
+REPL_CUTOVER_PASS_MAX_INLINE_SEC = 120
 # Always worth polling inline for at least this long: a round that finishes
 # just after the pass is handed back costs a full TASK_EXEC_INTERVAL_SEC of
 # writes in the next round.

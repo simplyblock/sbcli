@@ -200,8 +200,21 @@ def test_a_converging_volume_yields_to_a_cutover_ready_to_freeze(monkeypatch):
     waiting = _task("t2", "LV2", tgt_lvol_composite="lvs/X", replication_id="R2")
     reps = {"R2": SimpleNamespace(cutover_proceed=False)}
     monkeypatch.setattr(runner.db, "get_lvol_replication_by_id", lambda rid: reps[rid])
+    fresh = {"t1": me, "t2": waiting}
+    monkeypatch.setattr(runner.db, "get_task_by_id", lambda tid: fresh[tid])
     assert runner._other_cutover_ready(me, [me, waiting]) == ""
     reps["R2"].cutover_proceed = True
     assert runner._other_cutover_ready(me, [me, waiting]) == "LV2"
     # never to itself
     assert runner._other_cutover_ready(waiting, [waiting]) == ""
+
+
+def test_yield_reads_the_other_task_fresh(monkeypatch):
+    """bf16: the pass's task list predates the other task's clone."""
+    me = _task("t1", "LV1", shrink_snap_id="S9")
+    stale = _task("t2", "LV2")
+    prepared = _task("t2", "LV2", tgt_lvol_composite="lvs/X", replication_id="R2")
+    monkeypatch.setattr(runner.db, "get_lvol_replication_by_id",
+                        lambda rid: SimpleNamespace(cutover_proceed=True))
+    monkeypatch.setattr(runner.db, "get_task_by_id", lambda tid: prepared)
+    assert runner._other_cutover_ready(me, [me, stale]) == "LV2"

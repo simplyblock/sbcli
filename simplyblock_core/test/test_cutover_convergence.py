@@ -246,12 +246,24 @@ class TestConvergence(unittest.TestCase):
             with self.assertRaises(TaskRetry):
                 runner._shrink_step(task.frozen_view(), _lvol())
 
+    def test_one_pass_hands_the_runner_back_after_the_inline_cap(self):
+        """bf16: the per-round re-armed window kept one volume inline for
+        11 min with 10-35 s rounds; a pass now ends after the cap."""
+        slow = constants.REPL_CUTOVER_FREEZE_MAX_ROUND_SEC + 10.0
+        outcome, _task, taken, _ = self._run([slow] * 50, max_rounds=3,
+                                             deadline=1000 + 10 * slow)
+        self.assertIsInstance(outcome, TaskDefer)
+        self.assertLess(len(taken) * slow, constants.REPL_CUTOVER_PASS_MAX_INLINE_SEC + 2 * slow)
+
     def test_the_round_cap_does_not_freeze_a_round_the_final_step_cannot_copy(self):
         """Past the round cap a round longer than the safe final-step window
         keeps converging -- here until the deadline, which then abandons."""
         slow = constants.REPL_CUTOVER_FREEZE_MAX_ROUND_SEC + 10.0
-        outcome, task, taken, _ = self._run([slow] * 50, max_rounds=3,
-                                            deadline=1000 + 10 * slow)
+        # one pass through all rounds: the per-pass inline cap is not what
+        # this tests (it would hand the runner back after ~120 s)
+        with patch.object(constants, "REPL_CUTOVER_PASS_MAX_INLINE_SEC", 10 ** 9):
+            outcome, task, taken, _ = self._run([slow] * 50, max_rounds=3,
+                                                deadline=1000 + 10 * slow)
         self.assertIsInstance(outcome, TaskRetry,
                               "never a freeze with a residual this large")
         self.assertGreater(len(taken), 3, "rounds continue past the cap")

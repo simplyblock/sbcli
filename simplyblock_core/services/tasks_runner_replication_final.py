@@ -1202,6 +1202,10 @@ def _shrink_step(task, lvol, tasks=()):
     # yielding costs nothing there because we are far from the freeze anyway.
     budget_end = time.time() + _inline_window(
         (params.get("shrink_round_times") or [0])[-1])
+    # The window is re-armed after every round, so rounds of 10-35 s kept one
+    # volume inline for 11 min on bed bf16 (2026-11-07) while a prepared
+    # cutover's dirty set grew to 5 GB. Bound the whole pass as well.
+    pass_end = time.time() + constants.REPL_CUTOVER_PASS_MAX_INLINE_SEC
 
     while True:
         if int(time.time()) > deadline:
@@ -1319,8 +1323,8 @@ def _shrink_step(task, lvol, tasks=()):
         # Re-arm the inline window from what this round just measured: rounds
         # near convergence are short and stay inline, a slow one hands the
         # runner back so other volumes' cutovers are not stuck behind it.
-        budget_end = time.time() + _inline_window(
-            elapsed if elapsed != float("inf") else 0)
+        budget_end = min(pass_end, time.time() + _inline_window(
+            elapsed if elapsed != float("inf") else 0))
         if time.time() >= budget_end:
             raise TaskDefer(f"shrink round {params['shrink_round'] - 1} done "
                             f"({elapsed:.2f}s); continuing next pass")
@@ -1346,6 +1350,14 @@ def _other_cutover_ready(task, tasks):
         if (other.get_id() == task.get_id()
                 or other.function_name != JobSchedule.FN_REPLICATION_FINAL
                 or other.status == JobSchedule.STATUS_DONE or other.canceled):
+            continue
+        # The pass's task list predates whatever the other task did since;
+        # its clone may have been prepared after this pass started (bf16).
+        try:
+            other = db.get_task_by_id(other.get_id())
+        except KeyError:
+            continue
+        if other.status == JobSchedule.STATUS_DONE or other.canceled:
             continue
         params = other.function_params or {}
         if "tgt_lvol_composite" not in params or not params.get("replication_id"):
