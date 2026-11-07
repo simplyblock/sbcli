@@ -1150,11 +1150,7 @@ def process_snap_replicate_start(task, snapshot):
             # sends requests of at most 64 KiB, so 16 of them were only ~1 MiB in
             # flight and the transfer could not keep up with the writes it chases;
             # it keeps 256 in flight (16 MiB) instead.
-            # A resumed transfer (offset > 0) is always sent in whole clusters
-            # (SPDK refuses the delta for it), and 256 whole clusters are a
-            # 512 MiB DMA pool: bf15 (2026-11-07) failed every retry of two
-            # resumed transfers with ENOMEM ("Unable to allocate pdu pool").
-            batch_size=(constants.REPL_XFER_PARTIAL_BATCH if allow_partial and not offset
+            batch_size=(constants.REPL_XFER_PARTIAL_BATCH if allow_partial
                         else constants.REPL_XFER_BATCH),
             bdev_name=hub_bdev,
             operation="replicate",
