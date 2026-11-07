@@ -6049,8 +6049,13 @@ class K8sNativeRapidFailoverNoGapTest(RapidFioLifecycle,
       * ``validate_migration_for_node`` -- a deliberate drain wait, which is
         exactly what this test exists to avoid
       * three ``collect_outage_diagnostics`` calls
-      * ``wait_for_fio_complete`` / ``validate_fio_jobs``, which block for the
-        whole FIO runtime
+
+    The checkpoint itself no longer drains the FIO wave. ``wait_for_fio_complete``
+    and ``validate_fio_jobs`` both block for a whole FIO runtime, which cost
+    pnfs_rwx_rapid_nogap_k8s-20261106-223856 ~110 minutes per window against
+    ~40 minutes of actual outages. They are replaced by
+    ``_assert_fio_jobs_healthy`` plus ``rapid_check_and_revive``, neither of
+    which waits; see the comment at the checkpoint for why nothing is lost.
 
     Everything else is inherited from the Resilient parent: permanent
     node-pinned PVCs with their snapshots and clones (which therefore age
@@ -6294,14 +6299,52 @@ class K8sNativeRapidFailoverNoGapTest(RapidFioLifecycle,
                     self.check_core_dump(nodes=self._outaged_since_checkpoint)
                     self._outaged_since_checkpoint.clear()
 
-                    self.wait_for_fio_complete()
+                    # The wave is NOT drained here, deliberately. It used to
+                    # be, twice over: wait_for_fio_complete() blocks until
+                    # every Job reports completion, and validate_fio_jobs()
+                    # then blocks again inside k8s_utils.validate_fio_job,
+                    # which calls wait_job_complete and insists on
+                    # status == "succeeded". Between them the checkpoint cost
+                    # a whole FIO wave.
+                    #
+                    # Measured on pnfs_rwx_rapid_nogap_k8s-20261106-223856,
+                    # from the node_dumps_after_outage_* timestamps: the five
+                    # outages of a window took ~40 minutes and the checkpoint
+                    # that followed took ~110, the same shape in all seven
+                    # windows of the run. 88 node-outages in 22h24m, while the
+                    # docker twin did 91 in 10h15m on the same day.
+                    #
+                    # Nothing is given up by not waiting. rapid_after_outage()
+                    # reads these same logs after EVERY outage, so a real IO
+                    # error has already stopped the run long before here;
+                    # rapid_check_and_revive repeats that scan and also
+                    # catches a job that is overdue, which is the "volume
+                    # stopped taking IO" case the barrier was credited with.
+                    # The docker twin dropped the identical barrier -- see the
+                    # "NOT manage_fio_threads" note in
+                    # continuous_failover_ha_multi_client_quick_outage.py,
+                    # where it was 88 of that run's 105 minutes.
+                    #
+                    # restart_fio() deletes each Job before recreating it and
+                    # waits for the volume to be released, so a wave still
+                    # running is torn down there; it never needed draining.
+                    #
+                    # Order matters: resume anything we quiesced ourselves
+                    # before judging it, and save the logs before restart_fio
+                    # deletes the pods that hold them.
+                    self._resume_quiesced_fio()
+                    self._save_all_fio_logs()
+                    self._save_fio_mapping_summary()
                     try:
-                        self.validate_fio_jobs()
+                        self._assert_fio_jobs_healthy(iteration)
                     except Exception as exc:
                         msg = f"[iteration {iteration}] FIO validation failed: {exc}"
                         self.logger.error(msg)
                         failure_reasons.append(msg)
                         test_failed = True
+                    # Raises RapidFioFailure on a real IO error, which the
+                    # outer handler turns into failure diagnostics.
+                    self.rapid_check_and_revive("at checkpoint")
 
                     self._run_checkpoint_churn(iteration)
                     # Sizing has to follow churn: it divides the per-node data
@@ -6382,22 +6425,57 @@ class K8sNativeRapidFailoverNoGapTest(RapidFioLifecycle,
 
 
 
-    def rapid_allow_relaunch(self):
-        """No relaunching on the outage immediately before a checkpoint.
+    def _assert_fio_jobs_healthy(self, iteration):
+        """Fail on a job that died, without waiting for any job to finish.
 
-        This test's checkpoint still ends in wait_for_fio_complete(), which
-        blocks until every job has finished. A job relaunched on the outage
-        just before it would hold that barrier for a full FIO_RUNTIME, so the
-        checkpoint would be slower than it was before the lifecycle existed.
-        Errors are still scanned for on that outage -- only the relaunch waits.
+        This is the half of validate_fio_jobs() worth keeping once the
+        checkpoint stops draining the wave. That method judged a job by
+        ``status == "succeeded"``, which answers two questions at once --
+        "did it finish?" and "did it finish well?" -- and could only answer
+        the first by waiting. Here the first question is not asked: a job
+        still doing IO is exactly what a checkpoint should find.
+
+        What it does catch is the case the barrier used to catch and the
+        lifecycle deliberately will not: a job that is not running, wrote no
+        run summary, and was not evicted by us. rapid_check_and_revive logs
+        that and moves on, because relaunching would erase whatever stopped
+        it -- correct in the hot path, but a volume in that state has had no
+        IO since, and every outage until the next checkpoint lands on an idle
+        one. That is a failed run, not a warning.
+
+        Pod phase and reason are included because the usual causes
+        (ImagePullBackOff, OOMKilled, a failed mount) are invisible in the
+        FIO log, which is the whole reason this is not a log scan.
         """
-        every = getattr(self, "validate_every", 0) or 0
-        if every <= 0:
-            return True
-        # self._iter has already been advanced for this outage by the time
-        # the checkpoint test runs, so the outage whose NEXT increment lands
-        # on the boundary is the one to hold back.
-        return (self._iter + 1) % every != 0
+        dead = []
+        for name, rec in self.fio_jobs():
+            if self.fio_job_alive(name, rec):
+                continue
+            if self.rapid_job_finished_cleanly(name, rec):
+                continue
+            if self.rapid_job_was_evicted(name, rec):
+                continue
+            job = (rec or {}).get("job_name") or "?"
+            detail = {}
+            try:
+                self._ensure_k8s_utils()
+                pod = self.k8s_utils.get_job_pod_name(job)
+                if pod:
+                    detail = self.k8s_utils.get_pod_status_detail(pod) or {}
+            except Exception:                         # noqa: BLE001
+                pass
+            dead.append(
+                f"{name} (job {job}, phase={detail.get('phase')}, "
+                f"reason={detail.get('reason')}, "
+                f"msg={str(detail.get('message', ''))[:120]!r})")
+
+        if dead:
+            raise RuntimeError(
+                f"[checkpoint {iteration}] {len(dead)} FIO job(s) stopped "
+                f"without an error and without a run summary, and we did not "
+                f"evict them. Their volumes have taken no IO since, so the "
+                f"outages in this window landed on idle volumes:\n    "
+                + "\n    ".join(dead[:8]))
 
     def restart_fio_for(self, name, record, runtime=None):
         """Relaunch a single job's FIO. Every other job keeps running.
