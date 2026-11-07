@@ -1146,12 +1146,10 @@ def process_snap_replicate_start(task, snapshot):
         snode.rpc_client().bdev_lvol_transfer(
             name=snapshot.snap_bdev,
             offset=offset,
-            # A full transfer keeps 16 whole clusters in flight (32 MiB). A delta
-            # sends requests of at most 64 KiB, so 16 of them were only ~1 MiB in
-            # flight and the transfer could not keep up with the writes it chases;
-            # it keeps 256 in flight (16 MiB) instead.
-            batch_size=(constants.REPL_XFER_PARTIAL_BATCH if allow_partial
-                        else constants.REPL_XFER_BATCH),
+            # SPDK sends every replication request in pieces of at most 64 KiB
+            # (spdk #89: no whole-cluster requests), so every transfer, delta,
+            # full or resumed, keeps 256 in flight (16 MiB).
+            batch_size=constants.REPL_XFER_PARTIAL_BATCH,
             bdev_name=hub_bdev,
             operation="replicate",
             lvol_id=remote_map_id,
