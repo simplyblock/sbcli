@@ -712,7 +712,7 @@ def task_runner(task: JobSchedule, tasks):
     early = bool(params.get("early_prepared"))
     if "tgt_lvol_composite" not in params or (early and not params.get("shrink_converged")):
         if "shrink_snap_id" in params and params.get("shrink_round", 0) > 0:
-            _shrink_step(task, lvol)
+            _shrink_step(task, lvol, tasks)
             task = _record(task, **({"shrink_converged": True} if early else {}))
             params = task.function_params
         # The rounds are over: the landing volume pre-staged for the next
@@ -1175,7 +1175,7 @@ def _inline_window(last_round_secs):
                max(constants.REPL_CUTOVER_MIN_INLINE_SEC, last_round_secs * 3))
 
 
-def _shrink_step(task, lvol):
+def _shrink_step(task, lvol, tasks=()):
     """Converge the delta, then hand straight over to the cutover.
 
     Returns once the delta is as small as it is going to get and the freeze
@@ -1324,6 +1324,39 @@ def _shrink_step(task, lvol):
         if time.time() >= budget_end:
             raise TaskDefer(f"shrink round {params['shrink_round'] - 1} done "
                             f"({elapsed:.2f}s); continuing next pass")
+        ready = _other_cutover_ready(task, tasks)
+        if ready:
+            raise TaskDefer(f"shrink round {params['shrink_round'] - 1} done; yielding "
+                            f"the runner to {ready}, ready to freeze")
+
+
+def _other_cutover_ready(task, tasks):
+    """The lvol id of another cutover that waits only for the runner to freeze
+    it -- clone prepared, preconnect signalled -- or "".
+
+    The runner is single-threaded and a converging volume polls its rounds
+    inline for up to REPL_CUTOVER_CONVERGE_BUDGET_SEC per pass. Every second
+    a READY cutover waits behind that is a second of writes its frozen final
+    step must copy: bf15 (2026-11-07) froze one 3.5 min after its preconnect
+    completed while another volume converged in 10-25 s rounds, and the
+    final step failed at SPDK's 12 s limit. A round boundary is where the
+    converging volume can hand over at the least cost.
+    """
+    for other in tasks or ():
+        if (other.get_id() == task.get_id()
+                or other.function_name != JobSchedule.FN_REPLICATION_FINAL
+                or other.status == JobSchedule.STATUS_DONE or other.canceled):
+            continue
+        params = other.function_params or {}
+        if "tgt_lvol_composite" not in params or not params.get("replication_id"):
+            continue
+        try:
+            rep = db.get_lvol_replication_by_id(params["replication_id"])
+        except KeyError:
+            continue
+        if rep.cutover_proceed:
+            return params.get("lvol_id", other.get_id())
+    return ""
 
 
 def _final_delta_estimate(params):

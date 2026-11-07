@@ -176,3 +176,32 @@ def test_final_step_without_delta_still_lands_on_the_clone():
     params = sent[0][1]
     assert params["cow_landing"] is True and "allow_partial" not in params
     assert applied == {"partial": False, "cow_landing": True}
+
+
+# ---- bf15: no cadence snapshot in an endgame; yield to a ready cutover --------
+
+def _task(tid, lvol_id, **params):
+    return SimpleNamespace(get_id=lambda: tid, function_name=runner.JobSchedule.FN_REPLICATION_FINAL,
+                           status="running", canceled=False,
+                           function_params=dict(lvol_id=lvol_id, **params))
+
+
+def test_cadence_skips_volumes_in_their_endgame(monkeypatch):
+    from simplyblock_core.services import snapshot_monitor
+    tasks = [_task("t1", "LV1", shrink_snap_id="S9"), _task("t2", "LV2", cutover_lvs="lvs"),
+             _task("t3", "LV3"), _task("t4", "LV4", shrink_snap_id="S1")]
+    tasks[3].status = runner.JobSchedule.STATUS_DONE
+    monkeypatch.setattr(snapshot_monitor.db, "get_job_tasks", lambda cid: tasks)
+    assert snapshot_monitor._cutover_endgame_lvol_ids("C1") == {"LV1", "LV2"}
+
+
+def test_a_converging_volume_yields_to_a_cutover_ready_to_freeze(monkeypatch):
+    me = _task("t1", "LV1", shrink_snap_id="S9")
+    waiting = _task("t2", "LV2", tgt_lvol_composite="lvs/X", replication_id="R2")
+    reps = {"R2": SimpleNamespace(cutover_proceed=False)}
+    monkeypatch.setattr(runner.db, "get_lvol_replication_by_id", lambda rid: reps[rid])
+    assert runner._other_cutover_ready(me, [me, waiting]) == ""
+    reps["R2"].cutover_proceed = True
+    assert runner._other_cutover_ready(me, [me, waiting]) == "LV2"
+    # never to itself
+    assert runner._other_cutover_ready(waiting, [waiting]) == ""
