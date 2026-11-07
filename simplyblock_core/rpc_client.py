@@ -2355,7 +2355,8 @@ class RPCClient:
         """
         return self._request("bdev_lvol_get_lvols", lvs_name=lvs_name)
 
-    def bdev_lvol_transfer_final_step(self, lvol_name, lvol_id, snapshot_name, batch_size, gateway, operation):
+    def bdev_lvol_transfer_final_step(self, lvol_name, lvol_id, snapshot_name, batch_size, gateway, operation,
+                                      partial_base=0, applied=None):
         """
         Start the final (live) transfer of a writable lvol from source to target.
         The source I/O is frozen for the brief delta transfer, then resumed.
@@ -2371,16 +2372,50 @@ class RPCClient:
             batch_size:    cluster batch size – pass ``2`` for the final step
             gateway:       target hub lvol bdev name (NVMe-oF attached on source)
             operation:     ``"migrate"`` or ``"replicate"``
+            partial_base:  SOURCE blob id of the snapshot whose copy the target
+                           lvol is a clone of. Non-zero asks for the dirty-page
+                           delta written since that snapshot instead of every
+                           dirty cluster whole, landed copy-on-write in the clone
+                           (``allow_partial`` + ``cow_landing``). The caller must
+                           have checked what SPDK cannot see (no other member
+                           wrote, the target really is that copy's clone). SPDK
+                           still falls back to whole clusters on its own when the
+                           volume's dirty generation does not qualify.
+            applied:       optional dict; receives ``partial`` -- whether SPDK
+                           accepted the delta parameters (not whether it used
+                           them; its log says that).
+
+        A delta never goes without ``cow_landing``: the target is a clone and
+        has no merge step afterwards, so pre-allocated clusters would read the
+        blocks the delta does not carry as zeroes. An SPDK that does not decode
+        the parameters gets the plain request: whole clusters, as before.
 
         Poll progress with :meth:`bdev_lvol_transfer_stat` using *lvol_name*.
         """
-        return self._request("bdev_lvol_transfer_final_step",
-                              lvol_name=lvol_name,
-                              lvol_id=lvol_id,
-                              snapshot_name=snapshot_name,
-                              cluster_batch=batch_size,
-                              gateway=gateway,
-                              operation=operation)
+        params = {
+            "lvol_name": lvol_name,
+            "lvol_id": lvol_id,
+            "snapshot_name": snapshot_name,
+            "cluster_batch": batch_size,
+            "gateway": gateway,
+            "operation": operation,
+        }
+        if applied is not None:
+            applied["partial"] = False
+        if partial_base:
+            try:
+                ret = self._request("bdev_lvol_transfer_final_step", allow_partial=True,
+                                    partial_base=int(partial_base), cow_landing=True, **params)
+            except RPCRemoteError as e:
+                if "decode" not in str(e):
+                    raise
+                logger.warning("bdev_lvol_transfer_final_step: SPDK does not take a delta; "
+                               "sending %s in whole clusters", lvol_name)
+            else:
+                if applied is not None:
+                    applied["partial"] = True
+                return ret
+        return self._request("bdev_lvol_transfer_final_step", **params)
 
     def bdev_lvol_batch_transfer_final_step(self, lvol_names, lvol_ids, snapshot_names, batch_size, gateway, operation):
         """

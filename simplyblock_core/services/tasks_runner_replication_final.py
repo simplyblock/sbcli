@@ -652,7 +652,19 @@ def task_runner(task: JobSchedule, tasks):
                 int(time.time()) + constants.REPL_CUTOVER_SHRINK_TIMEOUT_SEC))
             raise TaskDefer("waiting for the initial copy to replicate before "
                             "the endgame")
+        backlog = None
         if lag is not None and lag > constants.REPL_CUTOVER_ENDGAME_LAG_SEC:
+            backlog, why = _endgame_backlog_bytes(lvol)
+            if backlog is not None and backlog <= constants.REPL_CUTOVER_ENDGAME_BACKLOG_BYTES:
+                logger.info("cutover for lvol %s: lag %.0fs is over the %ds gate but the "
+                            "volume keeps up (%d MiB outstanding): entering the endgame",
+                            lvol_id, lag, constants.REPL_CUTOVER_ENDGAME_LAG_SEC,
+                            backlog >> 20)
+            else:
+                logger.debug("cutover for lvol %s: backlog gate closed: %s", lvol_id, why)
+        if (lag is not None and lag > constants.REPL_CUTOVER_ENDGAME_LAG_SEC
+                and (backlog is None
+                     or backlog > constants.REPL_CUTOVER_ENDGAME_BACKLOG_BYTES)):
             task = _bound_catchup_after_failed_endgame(task, lag)
             xfer_timing.stamp("await_catchup", lvol=lvol_id, ms=lag * 1000.0)
             # Not a failure: no retry burned, and the deadline is pushed out
@@ -766,7 +778,8 @@ def task_runner(task: JobSchedule, tasks):
                 params["tgt_lvol_composite"], params["tgt_map_id"],
                 params["tgt_snap_composite"],
                 operation=params.get("operation", "replicate"),
-                src_exec=src_exec, tgt_exec=tgt_exec)
+                src_exec=src_exec, tgt_exec=tgt_exec,
+                delta_base=_clone_base_source(lvol, params))
     except replication_final_step.CutoverUnreachable as e:
         _cutover_failed(task, str(e), transient=True)
     except RPCConnectionError as e:
@@ -982,6 +995,73 @@ def _replication_lag_sec(lvol):
     if newest is None:
         return None
     return max(0.0, time.time() - float(newest.created_at))
+
+
+def _volume_snapshots(lvol):
+    """The volume's internal snapshots, oldest first; [] when unreadable."""
+    try:
+        snaps = db.get_snapshots_by_node_id(lvol.node_id)
+    except Exception as e:                                # noqa: BLE001
+        logger.warning("Cannot read snapshots of %s: %s", lvol.get_id(), e)
+        return []
+    own = [s for s in snaps
+           if s.lvol.get_id() == lvol.get_id() and s.snap_type == SnapShot.TYPE_INTERNAL]
+    return sorted(own, key=lambda s: float(s.created_at))
+
+
+def _endgame_backlog_bytes(lvol):
+    """(bytes the target is behind, "") when the volume keeps up, else (None, why).
+
+    The lag gate measures time: the age of the newest replicated snapshot. A
+    volume written gigabytes per cadence interval never gets under it -- each
+    cadence transfer alone takes minutes -- although its replication keeps
+    pace (bf14, 2026-11-06: RPO 100-400 s for five of eight volumes, which
+    never entered the endgame in two hours). What the endgame has to move is
+    bytes: the snapshot still in flight, if any, plus what the live volume
+    wrote since the newest snapshot. "Keeps up" means at most one snapshot
+    is outstanding; a queue of them is a volume falling behind, which the
+    endgame cannot fix and would only hold the lvstore through. Byte counts
+    are the source leader's dirty-page counts (bdev_lvol_dirty_bitmap_info);
+    a volume or snapshot without a complete count means "unknown" -- closed.
+    """
+    own = _volume_snapshots(lvol)
+    replicated = [s for s in own if getattr(s, "target_replicated_snap_uuid", "")]
+    if not replicated:
+        return None, "nothing replicated yet"
+    newest = replicated[-1]
+    outstanding = [s for s in own if float(s.created_at) > float(newest.created_at)]
+    if len(outstanding) > 1:
+        return None, f"{len(outstanding)} snapshots not replicated yet (falling behind)"
+    leader, why = _cutover_source(lvol)
+    if leader is None:
+        return None, f"no source leader to ask ({why})"
+    try:
+        rpc = leader.rpc_client(timeout=constants.REPL_FINAL_DELTA_COUNTS_TIMEOUT_SEC, retry=0)
+        total = 0
+        for bdev in [s.snap_bdev for s in outstanding] + [lvol.top_bdev]:
+            info = rpc.bdev_lvol_dirty_bitmap_info(bdev)
+            if not (isinstance(info, dict) and info.get("tracking") and info.get("complete")):
+                return None, f"no complete dirty count for {bdev}"
+            total += int(info.get("dirty_bytes") or 0)
+    except Exception as e:                                # noqa: BLE001
+        return None, f"dirty counts unavailable: {e}"
+    return total, ""
+
+
+def _clone_base_source(lvol, params):
+    """The SOURCE snapshot whose copy the cutover clone sits on, or None.
+
+    That is what the final step's delta is computed against (partial_base).
+    None -- an older task without tgt_snap_id, a copy no source snapshot
+    claims -- sends the final step in whole clusters, as before.
+    """
+    copy_id = params.get("tgt_snap_id")
+    if not copy_id:
+        return None
+    for s in reversed(_volume_snapshots(lvol)):
+        if getattr(s, "target_replicated_snap_uuid", "") == copy_id:
+            return s
+    return None
 
 
 def _take_shrink_snapshot(task, lvol):
@@ -1302,7 +1382,7 @@ def _abandon_endgame(task, lvol, reason) -> NoReturn:
 # snapshots, and a retry from the old base would copy a delta that no longer
 # starts where the clone does.
 _PREPARED_CUTOVER_PARAMS = ("tgt_lvol_composite", "tgt_lvol_id", "tgt_map_id",
-                            "tgt_snap_composite", "replication_id",
+                            "tgt_snap_composite", "tgt_snap_id", "replication_id",
                             "failback_source_lvol_id",
                             "failback_prior_replication_id",
                             "cutover_proceed_timeout", "freeze_started_at",
@@ -1581,6 +1661,7 @@ def _prepare_cutover(task, lvol, src_node, tgt_node):
         "tgt_lvol_id": new_lvol.get_id(),
         "tgt_map_id": tgt_map_id,
         "tgt_snap_composite": snapshot.snap_bdev,
+        "tgt_snap_id": snapshot.get_id(),
         "replication_id": rep.get_id(),
     })
     # Checkpointed rather than left for the outcome: the clone and the

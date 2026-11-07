@@ -252,7 +252,7 @@ def _install_runner(monkeypatch, nodes, tgt_leader):
     calls = []
 
     def _run_cutover(src, tgt, lvol, comp, map_id, snap, operation="replicate",
-                     src_exec=None, tgt_exec=None):
+                     src_exec=None, tgt_exec=None, delta_base=None):
         calls.append((src.get_id(), tgt.get_id(), src_exec.get_id(), tgt_exec.get_id()))
         return True, None
     monkeypatch.setattr(runner.replication_final_step, "run_cutover", _run_cutover)

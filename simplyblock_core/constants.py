@@ -595,6 +595,23 @@ REPL_CUTOVER_FREEZE_GUARD_SEC = 120
 # seconds. Before that the cutover waits and takes NO snapshots of its own --
 # the iterative snapshots ARE the endgame.
 REPL_CUTOVER_ENDGAME_LAG_SEC = 50
+# ... or once it keeps up in bytes: at most one replication snapshot is still
+# outstanding and that snapshot plus what the live volume wrote since the
+# newest snapshot is at most this much (dirty-page counts of the source
+# leader). A volume written gigabytes per cadence interval keeps pace with an
+# RPO of minutes and never meets the time gate (bf14, 2026-11-06: 5 of 8
+# volumes never entered the endgame in two hours). The shrink deadline and
+# the abandon/back-off rules still end an endgame that does not converge.
+REPL_CUTOVER_ENDGAME_BACKLOG_BYTES = 8 * 1024 ** 3
+# The cutover's final step sends the dirty-page delta written since the
+# clone's base snapshot (cow_landing into the clone) instead of every dirty
+# cluster whole, when SPDK and the write-count check allow it. Off: whole
+# clusters, as before.
+REPL_FINAL_STEP_DELTA = True
+# Timeout of each member's write-count / dirty-count read made for the
+# delta decisions above. The final step's read runs with the source fenced,
+# so it must stay short; a member that does not answer means "no delta".
+REPL_FINAL_DELTA_COUNTS_TIMEOUT_SEC = 2
 # Migration-plan forecast fallbacks, used until the plan's own transfers and
 # cutovers have been measured (simplyblock_core/migration_forecast.py).
 REPL_FORECAST_DEFAULT_BYTES_PER_SEC = 200 * 1024 * 1024
