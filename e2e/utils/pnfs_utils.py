@@ -228,7 +228,16 @@ def assert_layouts_taken(k8s, pod_names, mountpoint="/spdkvol",
         if why:
             failures.append(f"{pod}: " + "; ".join(why))
         else:
+            # LAYOUTRETURN and GETDEVICEINFO are carried for the soaks, not
+            # for B-03. When a mount falls back they are what separates "the
+            # server stopped granting layouts" from "the client cannot use
+            # the ones it is granted": SFAM-2850 was the second, and the only
+            # way to tell was to go back to the raw mountstats in a 743 MB
+            # log. Cheap to collect, and a caller that ignores them pays
+            # nothing.
             proven[pod] = {"layout_type": lt, "LAYOUTGET": lg,
+                           "LAYOUTRETURN": st["ops"].get("LAYOUTRETURN", 0),
+                           "GETDEVICEINFO": st["ops"].get("GETDEVICEINFO", 0),
                            "server_ops": sum(data.values())}
             if logger:
                 logger.info(

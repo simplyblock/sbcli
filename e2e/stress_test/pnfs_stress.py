@@ -24,6 +24,8 @@ Mirrors the shape of ``lblk_stress.py`` deliberately; read that one first if
 this is unfamiliar.
 """
 
+import time
+
 from stress_test.continuous_k8s_native_failover import (
     K8sNativeFailoverTest,
     K8sNativeRapidFailoverNoGapTest,
@@ -121,6 +123,12 @@ class _PnfsRwxMixin:
 
     #: Server-side data ops per pod at the previous check, for growth.
     _pnfs_srv = None
+    #: ``time.time()`` of the sample held in ``_pnfs_srv``, so a reported
+    #: growth carries the width of the interval it was measured over.
+    _pnfs_srv_at = None
+    #: Was the cluster settled when that sample was taken? A comparison needs
+    #: a settled cluster at *both* ends; see ``_assert_still_pnfs``.
+    _pnfs_srv_settled = False
 
     def _cluster_settled(self):
         """Is the cluster actually healthy right now?
@@ -207,20 +215,83 @@ class _PnfsRwxMixin:
                 f"verifying while every byte went through the metadata "
                 f"server. {exc}") from exc
 
-        now = {p: v.get("server_ops", 0) for p, v in proven.items()}
-        if when.startswith("before") and self._pnfs_srv and self._cluster_settled():
-            grew = {p: (self._pnfs_srv[p], n) for p, n in now.items()
-                    if p in self._pnfs_srv and n > self._pnfs_srv[p]}
+        settled = self._cluster_settled()
+        at = time.time()
+        now = dict(proven)
+
+        # Both ends settled, not just this one. The previous version probed
+        # the cluster once, at the second sample, and reported growth across
+        # the whole interval as having happened "after the cluster
+        # recovered". It cannot know that: the interval starts at the
+        # previous sample, and on this test that is moments after an outage,
+        # with migration still draining by design. SFAM-2850 survived that
+        # objection only because the cluster logged no STATUS_CHANGE at all
+        # across the window -- which took going back to the raw log to
+        # establish, and would not have held for a different window.
+        #
+        # Requiring both ends settled does not close the gap completely --
+        # the cluster could still dip and recover in between -- but it does
+        # bound it, and the interval is reported so a reader can judge. The
+        # real fix for width is sampling often: pnfs_sample() exists so the
+        # per-outage path can narrow this from a checkpoint-wide window to
+        # about a minute.
+        # Compare at every sample except the one taken straight after an
+        # outage: that interval contains the outage, where falling back to
+        # the server is the product keeping IO alive and not a finding. Any
+        # other pair brackets an interval with no outage in it.
+        comparable = (not when.startswith("after") and self._pnfs_srv
+                      and settled and self._pnfs_srv_settled)
+        if comparable:
+            span = max(1.0, at - (self._pnfs_srv_at or at))
+            grew = {}
+            for p, rec in now.items():
+                prev = self._pnfs_srv.get(p)
+                if prev is None:
+                    continue
+                a, b = prev.get("server_ops", 0), rec.get("server_ops", 0)
+                if b > a:
+                    grew[p] = (prev, rec, a, b, span)
             if grew:
+                # Report the layout counters alongside the data ops. Growth
+                # on its own says the data path is wrong; LAYOUTGET and
+                # LAYOUTRETURN say which way. Both climbing is the client
+                # taking layouts it cannot use and giving them back --
+                # look for "pNFS: no device found for volume" in that pod's
+                # node's kernel log.
+                lines = []
+                for p, (prev, rec, a, b, span) in grew.items():
+                    lines.append(
+                        f"{p} server_ops {a}->{b} (+{b - a}, "
+                        f"{(b - a) / span:.0f}/s over {span:.0f}s); "
+                        f"LAYOUTGET {prev.get('LAYOUTGET')}->"
+                        f"{rec.get('LAYOUTGET')}, "
+                        f"LAYOUTRETURN {prev.get('LAYOUTRETURN')}->"
+                        f"{rec.get('LAYOUTRETURN')}, "
+                        f"GETDEVICEINFO {prev.get('GETDEVICEINFO')}->"
+                        f"{rec.get('GETDEVICEINFO')}, "
+                        f"layout={rec.get('layout_type')}")
                 raise PnfsEvidenceError(
                     "[pnfs-stress] the data path is still falling back to "
-                    "the metadata server after the cluster recovered. These "
-                    "mounts held a layout and drove server-side IO anyway, "
-                    "between one outage's recovery and the next: "
-                    + ", ".join(f"{p} {a}->{b}" for p, (a, b) in grew.items()))
-        self._pnfs_srv = now
+                    "the metadata server. These mounts held a layout and "
+                    "drove server-side IO anyway, across an interval with a "
+                    "fully active cluster at both ends. If LAYOUTGET and "
+                    "LAYOUTRETURN both climbed, the client is being granted "
+                    "layouts it cannot use -- grep the kernel log of the "
+                    "node running the pod for 'pNFS: no device found for "
+                    "volume' (SFAM-2850):\n    " + "\n    ".join(lines))
+        elif not when.startswith("after") and self._pnfs_srv and not settled:
+            # Say so rather than silently re-baselining. A soak that never
+            # reaches a settled pair never runs this check at all, and the
+            # only way to notice is to see how often this line appears.
+            self.logger.info(
+                "[pnfs-stress] %s: cluster not settled, re-baselining "
+                "without comparing", when)
 
-        served = sum(1 for n in now.values() if n)
+        self._pnfs_srv = now
+        self._pnfs_srv_at = at
+        self._pnfs_srv_settled = settled
+
+        served = sum(1 for v in now.values() if v.get("server_ops", 0))
         self.logger.info(
             "[pnfs-stress] %s: %d mount(s) hold a layout%s", when, len(proven),
             f"; {served} carry historic server-side IO from earlier outages"
@@ -263,6 +334,34 @@ class _PnfsRwxMixin:
         self._assert_still_pnfs("before outage")
         out = super().perform_n_plus_k_outages(*args, **kwargs)
         self._assert_still_pnfs("after outage")
+        return out
+
+    def rapid_after_outage(self, context):
+        """Sample again inside the inter-outage gap, where there is one.
+
+        Only the rapid bases have this hook, so it is wrapped rather than
+        required -- ``getattr`` on super() keeps the mixin usable on the
+        bases that do not.
+
+        It exists because two samples per iteration are not enough to
+        attribute anything. On run 42303580199 the pair that failed was
+        20:24:33 and 20:35:32: eleven minutes, most of it the loop reading
+        FIO logs out of sixty pods. A third sample here splits that, and
+        every sample is also a chance to re-baseline on a settled cluster,
+        which is what the comparison needs at both ends.
+        """
+        parent = getattr(super(), "rapid_after_outage", None)
+        out = parent(context) if parent else None
+        try:
+            self._assert_still_pnfs("between outages")
+        except PnfsEvidenceError:
+            raise
+        except Exception as exc:                      # noqa: BLE001
+            # A probe failure here is not evidence about the product, and
+            # this is an extra sample, not the gating one.
+            self.logger.warning(
+                "[pnfs-stress] between-outages sample failed, carrying on: "
+                "%s", str(exc)[:160])
         return out
 
 
