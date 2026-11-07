@@ -46,7 +46,7 @@ def test_final_step_delta_always_lands_copy_on_write():
     assert params["allow_partial"] is True
     assert params["partial_base"] == 0x100000031
     assert params["cow_landing"] is True
-    assert applied == {"partial": True}
+    assert applied == {"partial": True, "cow_landing": True}
 
 
 def test_final_step_delta_falls_back_to_whole_clusters_on_an_old_spdk():
@@ -58,7 +58,7 @@ def test_final_step_delta_falls_back_to_whole_clusters_on_an_old_spdk():
     assert ret == {"transfer_state": "Done"}
     assert len(sent) == 2
     assert "allow_partial" not in sent[1][1] and "cow_landing" not in sent[1][1]
-    assert applied == {"partial": False}
+    assert applied == {"partial": False, "cow_landing": False}
 
 
 def test_final_step_delta_other_errors_are_not_swallowed():
@@ -166,3 +166,13 @@ def test_backlog_gate_closed_without_a_complete_count(monkeypatch):
     assert total is None
     total, _ = _gate(monkeypatch, [_isnap("S1", 1)], {})
     assert total is None
+
+
+def test_final_step_without_delta_still_lands_on_the_clone():
+    client, sent = _client([{"transfer_state": "Done"}])
+    applied = {}
+    client.bdev_lvol_transfer_final_step("lvs/L", 7, "tlvs/S", 2, "hub", "replicate",
+                                         cow_landing=True, applied=applied)
+    params = sent[0][1]
+    assert params["cow_landing"] is True and "allow_partial" not in params
+    assert applied == {"partial": False, "cow_landing": True}

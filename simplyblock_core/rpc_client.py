@@ -2356,7 +2356,7 @@ class RPCClient:
         return self._request("bdev_lvol_get_lvols", lvs_name=lvs_name)
 
     def bdev_lvol_transfer_final_step(self, lvol_name, lvol_id, snapshot_name, batch_size, gateway, operation,
-                                      partial_base=0, applied=None):
+                                      partial_base=0, cow_landing=False, applied=None):
         """
         Start the final (live) transfer of a writable lvol from source to target.
         The source I/O is frozen for the brief delta transfer, then resumed.
@@ -2381,9 +2381,17 @@ class RPCClient:
                            wrote, the target really is that copy's clone). SPDK
                            still falls back to whole clusters on its own when the
                            volume's dirty generation does not qualify.
-            applied:       optional dict; receives ``partial`` -- whether SPDK
-                           accepted the delta parameters (not whether it used
-                           them; its log says that).
+            cow_landing:   the target lvol is already a clone of *snapshot_name*:
+                           SPDK sends no "transfer_task_completed" chaining page.
+                           A cross-cluster receiver never intercepts that page (it
+                           does so only for lvols with the intra-cluster
+                           migration flag), so without this it lands as DATA on
+                           the clone's first 4 KiB. Always true for the
+                           replicate cutover, whose target is always that clone.
+            applied:       optional dict; receives ``partial`` and
+                           ``cow_landing`` -- whether SPDK accepted those
+                           parameters (not whether it used the delta; its log
+                           says that).
 
         A delta never goes without ``cow_landing``: the target is a clone and
         has no merge step afterwards, so pre-allocated clusters would read the
@@ -2401,19 +2409,23 @@ class RPCClient:
             "operation": operation,
         }
         if applied is not None:
-            applied["partial"] = False
+            applied.update(partial=False, cow_landing=False)
+        extra = {}
+        if cow_landing or partial_base:
+            extra["cow_landing"] = True
         if partial_base:
+            extra.update(allow_partial=True, partial_base=int(partial_base))
+        if extra:
             try:
-                ret = self._request("bdev_lvol_transfer_final_step", allow_partial=True,
-                                    partial_base=int(partial_base), cow_landing=True, **params)
+                ret = self._request("bdev_lvol_transfer_final_step", **extra, **params)
             except RPCRemoteError as e:
                 if "decode" not in str(e):
                     raise
-                logger.warning("bdev_lvol_transfer_final_step: SPDK does not take a delta; "
-                               "sending %s in whole clusters", lvol_name)
+                logger.warning("bdev_lvol_transfer_final_step: SPDK does not take %s; "
+                               "sending %s in whole clusters", ", ".join(sorted(extra)), lvol_name)
             else:
                 if applied is not None:
-                    applied["partial"] = True
+                    applied.update(partial=bool(partial_base), cow_landing=True)
                 return ret
         return self._request("bdev_lvol_transfer_final_step", **params)
 

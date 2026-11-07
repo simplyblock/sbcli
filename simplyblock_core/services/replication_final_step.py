@@ -450,8 +450,8 @@ def run_cutover(src_node, tgt_node, lvol, tgt_lvol_composite, tgt_map_id,
             ret = src_rpc.bdev_lvol_transfer_final_step(
                 src_lvol_composite, tgt_map_id, tgt_snap_composite,
                 batch, hub_bdev, operation,
-                **({"partial_base": partial_base, "applied": applied}
-                   if partial_base else {}))
+                **({"partial_base": partial_base, "cow_landing": True,
+                    "applied": applied} if operation == "replicate" else {}))
         except RPCException as e:
             # A raise used to skip the restore below and leave the source
             # fenced (the volume dark) through every retry (SFAM-2834). SPDK
