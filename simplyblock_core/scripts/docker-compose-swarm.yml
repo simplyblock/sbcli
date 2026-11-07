@@ -123,25 +123,6 @@ services:
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
 
-  HAProxy:
-    image: haproxytech/haproxy-debian:latest
-    deploy:
-      mode: global
-      placement:
-        constraints: [node.role == manager]
-    ports:
-      - 80:80
-      - 12202:12202
-      - 9200:9200
-      - 9090:9090
-    networks:
-      - localnet
-      - monitoring-net
-    volumes:
-      - "$DIR/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg"
-    environment:
-      SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
-
   CapacityAndStatsCollector:
     <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE

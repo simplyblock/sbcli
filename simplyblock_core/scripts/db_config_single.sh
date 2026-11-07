@@ -24,55 +24,45 @@ FDB_CLUSTER_FILE=${FDB_CLUSTER_FILE:-/etc/foundationdb/fdb.cluster}
 # reason instead of being killed mid-wait.
 READY_TIMEOUT=${FDB_READY_TIMEOUT:-300}
 
-# `status minimal` separates the three states we care about. Reaching for it
-# rather than just retrying `configure new` keeps an unreachable coordinator
-# from costing a 100s configure timeout per attempt.
-db_state() {
-    local out
-    out="$(fdbcli --exec 'status minimal' --timeout 10 -C "$FDB_CLUSTER_FILE" 2>&1 || true)"
-    case "$out" in
-        *'The database is available'*)   echo available ;;
-        *'The database is unavailable'*) echo unconfigured ;;
-        *)                               echo unreachable ;;
-    esac
+# `status minimal` answers one question honestly -- is the database usable --
+# and that is all this is asked to do. It does NOT distinguish "coordinators
+# are up and waiting to be configured" from "nothing is running at all": it
+# prints "The database is unavailable" for both, which is why the failure path
+# below dumps full `status` instead, where a cluster with no processes in it
+# says so.
+db_available() {
+    fdbcli --exec 'status minimal' --timeout 10 -C "$FDB_CLUSTER_FILE" 2>&1         | grep -q 'The database is available'
 }
 
 deadline=$(( $(date +%s) + READY_TIMEOUT ))
-configured=0
+attempt=0
 
 while :; do
-    state="$(db_state)"
-
-    case "$state" in
-    available)
-        echo "Database is available"
+    # Re-read before every attempt. `configure new` is not idempotent -- fdbcli
+    # refuses it once the database exists -- and an attempt whose reply timed
+    # out may still have taken effect, so "the last call failed" is not a safe
+    # assumption to retry on.
+    if db_available; then
+        echo "Database is available after ${attempt} configure attempt(s)"
         exit 0
-        ;;
-    unconfigured)
-        # `configure new` is not idempotent: fdbcli refuses it once the
-        # database exists. That is why every pass through this loop re-reads
-        # the state instead of assuming the last attempt failed -- an attempt
-        # whose report timed out may still have taken effect.
-        if [ "$configured" -eq 0 ]; then
-            echo "Coordinators are up; configuring the database"
-        else
-            echo "Still unconfigured; retrying"
-        fi
-        fdbcli --exec "configure new single ssd" --timeout 100 -C "$FDB_CLUSTER_FILE" || true
-        configured=1
-        sleep 10
-        ;;
-    unreachable)
-        echo "Waiting for the FoundationDB coordinators to answer"
-        sleep 5
-        ;;
-    esac
+    fi
 
     if [ "$(date +%s)" -ge "$deadline" ]; then
         break
     fi
+
+    attempt=$(( attempt + 1 ))
+    echo "Configure attempt ${attempt}"
+    fdbcli --exec "configure new single ssd" --timeout 100 -C "$FDB_CLUSTER_FILE" || true
+    sleep 10
 done
 
-echo "ERROR: the database is not available ${READY_TIMEOUT}s after the FDB services converged (last state: ${state})." >&2
-fdbcli --exec 'status minimal' --timeout 20 -C "$FDB_CLUSTER_FILE" >&2 || true
+{
+    echo "ERROR: the database is not available ${READY_TIMEOUT}s after the FDB"
+    echo "services converged, over ${attempt} configure attempt(s). Full status"
+    echo "follows. 'Unable to locate all fdbserver processes' here means the FDB"
+    echo "containers never started -- check 'docker service ps app_fdb-server'"
+    echo "for a task that failed before its process ran."
+} >&2
+fdbcli --exec 'status' --timeout 20 -C "$FDB_CLUSTER_FILE" >&2 || true
 exit 1

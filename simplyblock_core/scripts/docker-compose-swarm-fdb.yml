@@ -123,10 +123,53 @@ services:
       placement:
         constraints: [ node.role == manager ]
 
+  # HAProxy belongs to this file, not to the simplyblock one, because it binds
+  # 12202 -- the GELF endpoint every other service's log driver dials. The
+  # docker daemon initialises a container's logging driver BEFORE it starts the
+  # container, so a service whose gelf-address refuses the connection never
+  # starts at all: the task fails with "failed to initialize logging driver"
+  # and swarm retries it forever. With HAProxy still in the simplyblock tier,
+  # the fdb phase deployed five fdbservers that could not start, the fdb wait
+  # passed anyway, and `configure new` then timed out against a cluster with no
+  # processes in it (runs 42305217397 and 42362320032, both dead at 14 min).
+  # The single-shot deploy this phase split replaced never hit it, because
+  # HAProxy came up alongside FDB in the same deploy.
+  #
+  # It has no logging options of its own, deliberately: it cannot dial the
+  # endpoint it is the endpoint for. Its backends all carry `init-addr
+  # libc,none`, so it starts with the simplyblock tier still absent.
+  HAProxy:
+    image: haproxytech/haproxy-debian:latest
+    deploy:
+      mode: global
+      placement:
+        constraints: [node.role == manager]
+    ports:
+      - 80:80
+      - 12202:12202
+      - 9200:9200
+      - 9090:9090
+    networks:
+      - localnet
+      - monitoring-net
+    volumes:
+      - "$DIR/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg"
+    environment:
+      SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+
 networks:
+  monitoring-net:
+    external: true
+
   hostnet:
     external: true
     name: host
+
+  localnet:
+    driver: overlay
+    ipam:
+      config:
+        - subnet: 192.168.1.0/24
 
 volumes:
   fdb_server_1_data:
