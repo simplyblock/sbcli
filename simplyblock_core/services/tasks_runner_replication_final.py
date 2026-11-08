@@ -1137,7 +1137,13 @@ def _take_shrink_snapshot(task, lvol):
             lvol, params.get("next_shrink_snap_name") or _new_shrink_snap_name(),
             snap_type=SnapShot.TYPE_INTERNAL)
     if err:
-        return None, f"shrink round {params.get('shrink_round', 0) + 1} snapshot failed: {err}"
+        # Three values like the success path: every caller unpacks three, and
+        # the two-value return crashed the pass instead of retrying it -- and
+        # nothing logged why (bf17, 2026-11-08: one volume's attempts went to
+        # 4/8 on "not enough values to unpack" within minutes).
+        msg = f"shrink round {params.get('shrink_round', 0) + 1} snapshot failed: {err}"
+        logger.warning("cutover for lvol %s: %s", lvol.get_id(), msg)
+        return None, msg, task
     # Name the NEXT round's snapshot now: the replication runner creates that
     # round's landing volume (REP_<name>) while this round transfers
     # (snapshot_replication._prestage_next_landing), so the next round adopts

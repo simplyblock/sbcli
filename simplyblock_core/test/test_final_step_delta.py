@@ -247,3 +247,11 @@ def test_a_retry_waits_until_the_old_chain_is_pruned_to_one(monkeypatch):
 def test_the_source_throttle_tightens_with_every_failed_attempt():
     caps = [runner._throttle_cap(SimpleNamespace(retry=r)) for r in range(6)]
     assert caps == [8, 4, 2, 1, 1, 1]
+
+
+def test_a_failed_shrink_snapshot_returns_three_values(monkeypatch):
+    from simplyblock_core.controllers import replication_delta
+    monkeypatch.setattr(replication_delta, "add_snapshot", lambda *a, **k: (None, "refused"))
+    task = SimpleNamespace(function_params={"shrink_round": 2})
+    snap, err, back = runner._take_shrink_snapshot(task, _lvol())
+    assert snap is None and "refused" in err and back is task
