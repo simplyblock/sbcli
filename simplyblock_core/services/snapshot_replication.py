@@ -1691,7 +1691,39 @@ def prune_after_cutover(source_lvol):
     _prune_internal_snapshots(source_lvol, after_cutover=True)
 
 
-def _prune_internal_snapshots(source_lvol, after_cutover=False):
+_PRUNING: set = set()
+_PRUNING_LOCK = threading.Lock()
+
+
+def prune_async(source_lvol, keep=None):
+    """Run retention for *source_lvol* in the background and return at once.
+
+    Pruning runs alongside replication and the cutover endgame but nothing
+    waits for it: a delete is a merge that moves data on both clusters and
+    takes seconds to minutes under load (bf16, 2026-11-07). At most one prune
+    per volume runs at a time; a call while one runs is dropped -- the next
+    replication finish starts another.
+    """
+    vid = source_lvol.get_id()
+    with _PRUNING_LOCK:
+        if vid in _PRUNING:
+            return False
+        _PRUNING.add(vid)
+
+    def _run():
+        try:
+            _prune_internal_snapshots(source_lvol, keep=keep)
+        except Exception as e:                            # noqa: BLE001
+            logger.error("Retention for lvol %s failed: %s", vid, e)
+        finally:
+            with _PRUNING_LOCK:
+                _PRUNING.discard(vid)
+
+    threading.Thread(target=_run, name=f"prune-{vid[:8]}", daemon=True).start()
+    return True
+
+
+def _prune_internal_snapshots(source_lvol, after_cutover=False, keep=None):
     """Retention for replication-driven internal snapshots.
 
     Internal snapshots are transient checkpoints taken at a fixed interval
@@ -1706,11 +1738,11 @@ def _prune_internal_snapshots(source_lvol, after_cutover=False):
     snapshot are pruned, so the newest internal snapshot — which serves as the
     base for the next delta transfer — always remains.
     """
-    if not after_cutover and _cutover_holds_retention(source_lvol):
-        logger.info("Holding retention for lvol %s: its cutover endgame is in "
-                    "progress; pruned once the cutover completes",
-                    source_lvol.get_id())
-        return
+    # No hold during a cutover endgame any more: bf16 (2026-11-07) held
+    # retention through three failed attempts of one volume, its chain on the
+    # target passed the page-copy limit (chain_max), and every copy-on-write
+    # into its landing volumes became a 2 MiB read+write (240-370 ms each).
+    # Pruning runs alongside the rounds instead (prune_async), never waited on.
     replicated_internal = [
         s for s in db.get_snapshots_by_node_id(source_lvol.node_id)
         if s.lvol.get_id() == source_lvol.get_id()
@@ -1719,14 +1751,15 @@ def _prune_internal_snapshots(source_lvol, after_cutover=False):
         and s.target_replicated_snap_uuid
     ]
     # After a cutover there is no next delta to chain: one pair is enough.
-    keep = 1 if after_cutover else _keep_replicated_for(source_lvol)
+    if keep is None:
+        keep = 1 if after_cutover else _keep_replicated_for(source_lvol)
     replicated_internal.sort(key=lambda s: s.created_at)
 
     # A retention SCHEDULE, when the policy defines one, decides which older
     # snapshots survive; without it retention stays the flat "newest N".
     # Either way the newest `keep` are protected, because deleting a snapshot
     # swap-merges its segments into the successor chained to it.
-    schedule = [] if after_cutover else _retention_schedule_for(source_lvol)
+    schedule = [] if (after_cutover or keep == 1) else _retention_schedule_for(source_lvol)
     # Say which retention is in force, every time it prunes. Soak run
     # 20260827_224741 ended with 2 snapshots at consecutive cadence ticks after
     # 124 minutes under `5m:15m,7m:30m,10m:1h` -- which is exactly what the FLAT
@@ -2627,7 +2660,7 @@ def process_snap_replicate_finish(task, snapshot):
                          f"anyway (its bdev lives on as the converted snapshot)")
     remote_lv.remove(db.kv_store)
     snapshot_events.replication_task_finished(snapshot)
-    _prune_internal_snapshots(snapshot.lvol)
+    prune_async(snapshot.lvol)
     return new_snapshot_uuid
 
 

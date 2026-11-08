@@ -581,6 +581,9 @@ REPL_CUTOVER_ENDGAME_BACKOFF_SEC = 300
 # failed). A volume whose pool carries QoS of its own is not throttled.
 REPL_CUTOVER_THROTTLE_AFTER_ROUND = 2
 REPL_CUTOVER_THROTTLE_W_MBPS = 8
+# Each failed or abandoned attempt of the same cutover halves the cap (8, 4,
+# 2, 1 MB/s), never below this.
+REPL_CUTOVER_THROTTLE_MIN_MBPS = 1
 # How long after its freeze_started_at stamp a cutover counts as freezing (and
 # so is spared by a plan cancel or a policy detach). A freeze is bounded by the
 # final-step limit plus fence/restore RPCs; a stamp older than this is a pass

@@ -218,3 +218,32 @@ def test_yield_reads_the_other_task_fresh(monkeypatch):
                         lambda rid: SimpleNamespace(cutover_proceed=True))
     monkeypatch.setattr(runner.db, "get_task_by_id", lambda tid: prepared)
     assert runner._other_cutover_ready(me, [me, stale]) == "LV2"
+
+
+# ---- between cutover attempts: prune to one replicated snapshot first ----------
+
+def _osnap(sid, created):
+    s = _isnap(sid, created, copy="C" + sid)
+    s.status = runner.SnapShot.STATUS_ONLINE
+    return s
+
+
+def test_a_retry_waits_until_the_old_chain_is_pruned_to_one(monkeypatch):
+    from simplyblock_core.services import snapshot_replication as sr
+    snaps = [_osnap("S1", 1), _osnap("S2", 2), _osnap("S3", 3)]
+    monkeypatch.setattr(runner.db, "get_snapshots_by_node_id", lambda nid: snaps)
+    kicked = []
+    monkeypatch.setattr(sr, "prune_async", lambda lv, keep=None: kicked.append(keep) or True)
+    task = SimpleNamespace(function_params={"prune_gate_since": 10.0})
+    with pytest.raises(runner.TaskDefer):
+        runner._prune_gate(task, _lvol())
+    assert kicked == [1]
+    # pruned down to one; a snapshot replicated after the gate opened is fine
+    snaps[:] = [_osnap("S3", 3), _osnap("S4", 20)]
+    monkeypatch.setattr(runner, "drop_params", lambda t, *k: t)
+    assert runner._prune_gate(task, _lvol()) is task
+
+
+def test_the_source_throttle_tightens_with_every_failed_attempt():
+    caps = [runner._throttle_cap(SimpleNamespace(retry=r)) for r in range(6)]
+    assert caps == [8, 4, 2, 1, 1, 1]

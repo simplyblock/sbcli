@@ -125,6 +125,23 @@ def _release_lvs_claim(task):
     drop_params(task, "cutover_lvs", "cutover_group")
 
 
+def _throttle_cap(task):
+    """The endgame's source write cap in MB/s: REPL_CUTOVER_THROTTLE_W_MBPS,
+    halved for every attempt of this cutover that already failed or was
+    abandoned (task.retry), down to REPL_CUTOVER_THROTTLE_MIN_MBPS.
+
+    bf16 (2026-11-07): a volume replicating into a saturated cluster sent its
+    rounds at 7-17 MB/s; at the 8 MB/s cap its random 4K writes dirtied about
+    as much per round as it could ship, and three attempts never converged.
+    Halving per failed attempt reaches a rate the slow path can outrun.
+    """
+    base = constants.REPL_CUTOVER_THROTTLE_W_MBPS
+    if base <= 0:
+        return base
+    cap = base >> min(int(getattr(task, "retry", 0) or 0), 8)
+    return max(cap, constants.REPL_CUTOVER_THROTTLE_MIN_MBPS)
+
+
 def _throttle_source(task, lvol):
     """Cap the source volume's write bandwidth for the rest of the endgame.
 
@@ -136,7 +153,7 @@ def _throttle_source(task, lvol):
     params = task.function_params or {}
     if "throttle_restore" in params or params.get("throttle_tried"):
         return task
-    cap = constants.REPL_CUTOVER_THROTTLE_W_MBPS
+    cap = _throttle_cap(task)
     if cap <= 0 or not hasattr(lvol, "w_mbytes_per_sec"):
         return task
     try:
@@ -635,6 +652,9 @@ def task_runner(task: JobSchedule, tasks):
     # own and holds nothing, so it adds no load to a cluster that is still
     # catching up -- exactly when it can least afford it.
     if not params.get("cutover_lvs"):
+        if task.retry > 0:
+            task = _prune_gate(task, lvol)
+            params = task.function_params
         lag = _replication_lag_sec(lvol)
         # lag is None when the volume has no internal snapshot replicated in the
         # current source→target direction yet (e.g. a freshly set-up failback
@@ -995,6 +1015,38 @@ def _replication_lag_sec(lvol):
     if newest is None:
         return None
     return max(0.0, time.time() - float(newest.created_at))
+
+
+def _prune_gate(task, lvol):
+    """Between cutover attempts the volume is first pruned to ONE replicated
+    snapshot pair; returns the task, raises TaskDefer while pruning runs.
+
+    During an attempt pruning runs alongside the rounds and nothing waits for
+    it (snapshot_replication.prune_async). A failed or abandoned attempt
+    leaves every round snapshot behind, on both clusters; the next endgame
+    would add its rounds on top. bf16 (2026-11-07): one volume went from 28 to
+    15 to 20 replicated snapshots across three attempts, its target chain
+    passed the page-copy limit and every landing write became a full 2 MiB
+    copy. So the next endgame starts only once what existed when this gate
+    opened is down to one; snapshots replicated since (the cadence keeps
+    running) are pruned alongside as usual.
+    """
+    from simplyblock_core.services import snapshot_replication
+    params = task.function_params
+    since = params.get("prune_gate_since")
+    if since is None:
+        since = time.time()
+        task = _record(task, prune_gate_since=since)
+    old = [s for s in _volume_snapshots(lvol)
+           if getattr(s, "target_replicated_snap_uuid", "")
+           and s.status == SnapShot.STATUS_ONLINE
+           and float(s.created_at) <= float(since)]
+    if len(old) <= 1:
+        return drop_params(task, "prune_gate_since") or task
+    snapshot_replication.prune_async(lvol, keep=1)
+    xfer_timing.stamp("prune_gate_wait", lvol=lvol.get_id(), left=len(old))
+    raise TaskDefer(f"between cutover attempts: pruning to one replicated snapshot "
+                    f"({len(old)} left)")
 
 
 def _volume_snapshots(lvol):
