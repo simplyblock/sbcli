@@ -181,7 +181,7 @@ def test_final_step_without_delta_still_lands_on_the_clone():
 # ---- bf15: no cadence snapshot in an endgame; yield to a ready cutover --------
 
 def _task(tid, lvol_id, **params):
-    return SimpleNamespace(get_id=lambda: tid, function_name=runner.JobSchedule.FN_REPLICATION_FINAL,
+    return SimpleNamespace(get_id=lambda: "C1/0/" + tid, uuid=tid, function_name=runner.JobSchedule.FN_REPLICATION_FINAL,
                            status="running", canceled=False,
                            function_params=dict(lvol_id=lvol_id, **params))
 

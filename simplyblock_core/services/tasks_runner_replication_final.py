@@ -757,6 +757,12 @@ def task_runner(task: JobSchedule, tasks):
         task = prepared
         params = task.function_params
 
+    # The clone is prepared: from here to the freeze every write lands in the
+    # final step. A volume that converged before REPL_CUTOVER_THROTTLE_AFTER_ROUND
+    # was never throttled and waited for the preconnect and the runner at full
+    # write speed -- bf17 (2026-11-08): 2.3 GB final steps, 11.6 s freezes.
+    task = _throttle_source(task, lvol)
+    params = task.function_params
     if params.get("early_prepared"):
         _await_proceed_converging(task, lvol, params)
     else:
@@ -1405,8 +1411,10 @@ def _other_cutover_ready(task, tasks):
             continue
         # The pass's task list predates whatever the other task did since;
         # its clone may have been prepared after this pass started (bf16).
+        # get_task_by_id takes the task's uuid; get_id() is cluster/date/uuid
+        # (bf17: every lookup raised KeyError, so the runner never yielded).
         try:
-            other = db.get_task_by_id(other.get_id())
+            other = db.get_task_by_id(other.uuid)
         except KeyError:
             continue
         if other.status == JobSchedule.STATUS_DONE or other.canceled:
