@@ -255,3 +255,18 @@ def test_a_failed_shrink_snapshot_returns_three_values(monkeypatch):
     task = SimpleNamespace(function_params={"shrink_round": 2})
     snap, err, back = runner._take_shrink_snapshot(task, _lvol())
     assert snap is None and "refused" in err and back is task
+
+
+def test_an_existing_shrink_snapshot_of_the_volume_is_adopted(monkeypatch):
+    from simplyblock_core.controllers import replication_delta
+    snap = _isnap("S7", 7)
+    snap.snap_name = "repl_commit_x"
+    snap.status = runner.SnapShot.STATUS_ONLINE
+    monkeypatch.setattr(runner.db, "get_snapshots_by_node_id", lambda nid: [snap])
+    monkeypatch.setattr(replication_delta, "add_snapshot",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not create")))
+    recorded = {}
+    monkeypatch.setattr(runner, "_record", lambda t, **kw: recorded.update(kw) or t)
+    task = SimpleNamespace(function_params={"shrink_round": 2, "next_shrink_snap_name": "repl_commit_x"})
+    new, err, _ = runner._take_shrink_snapshot(task, _lvol())
+    assert new == "S7" and err is None and recorded["shrink_snap_id"] == "S7"

@@ -710,7 +710,8 @@ def task_runner(task: JobSchedule, tasks):
         # committed before anything else can fail.
         _, snap_err, task = _take_shrink_snapshot(task, lvol)
         if snap_err:
-            raise TaskRetry(snap_err)
+            # a refused snapshot is transient: next pass, no attempt burned (bf17)
+            raise TaskDefer(snap_err)
         params = task.function_params
 
     # ---- EARLY PREPARE (REPL_CUTOVER_EARLY_PREPARE) ---------------------- #
@@ -1131,11 +1132,27 @@ def _take_shrink_snapshot(task, lvol):
     xfer_timing.gap("round_gap_to_next_snapshot",
                     params.get("shrink_round_done_at"), lvol=lvol.get_id(),
                     round=params.get("shrink_round", 0))
-    with xfer_timing.phase("take_shrink_snapshot", lvol=lvol.get_id(),
-                           round=params.get("shrink_round", 0) + 1):
-        new_snap, err = replication_delta.add_snapshot(
-            lvol, params.get("next_shrink_snap_name") or _new_shrink_snap_name(),
-            snap_type=SnapShot.TYPE_INTERNAL)
+    name = params.get("next_shrink_snap_name") or _new_shrink_snap_name()
+    # The pre-recorded name may already exist: an earlier pass created the
+    # snapshot but did not get to record it (bf17, 2026-11-08: "Snapshot name
+    # must be unique" on every retry, attempts 7/8). The volume's own snapshot
+    # by that name, online, IS this round's snapshot; anything else gets a
+    # fresh name.
+    existing = [x for x in _volume_snapshots(lvol) if getattr(x, "snap_name", "") == name]
+    if existing and existing[0].status == SnapShot.STATUS_ONLINE:
+        logger.info("cutover for lvol %s: adopting the existing shrink snapshot %s (%s)",
+                    lvol.get_id(), existing[0].get_id(), name)
+        new_snap, err = existing[0].get_id(), None
+    else:
+        if existing:
+            name = _new_shrink_snap_name()
+        with xfer_timing.phase("take_shrink_snapshot", lvol=lvol.get_id(),
+                               round=params.get("shrink_round", 0) + 1):
+            new_snap, err = replication_delta.add_snapshot(
+                lvol, name, snap_type=SnapShot.TYPE_INTERNAL)
+        if err and "must be unique" in str(err):
+            # taken by something not ours: next pass uses a fresh name
+            task = _record(task, next_shrink_snap_name=_new_shrink_snap_name())
     if err:
         # Three values like the success path: every caller unpacks three, and
         # the two-value return crashed the pass instead of retrying it -- and
@@ -1381,7 +1398,8 @@ def _shrink_step(task, lvol, tasks=()):
         # The round's snapshot exists once this returns and must not be retaken.
         _, err, task = _take_shrink_snapshot(task, lvol)
         if err:
-            raise TaskRetry(err)
+            # a refused snapshot is transient: next pass, no attempt burned (bf17)
+            raise TaskDefer(err)
         params = task.function_params
 
         # Re-arm the inline window from what this round just measured: rounds
