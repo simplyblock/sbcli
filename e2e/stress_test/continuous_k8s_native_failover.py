@@ -6542,6 +6542,14 @@ class K8sNativeRapidFailoverNoGapTest(RapidFioLifecycle,
                 self.k8s_utils.delete_configmap(old_cm)
             except Exception:                         # noqa: BLE001
                 pass
+        # The checkpoint relaunch and the quiesce relaunch both wait here and
+        # this one did not, which left the lifecycle path as the only one that
+        # could create a replacement while the old VolumeAttachment was still
+        # standing. That is a Multi-Attach waiting to happen, and worse, it is
+        # the one plausible way the harness could itself produce a verify
+        # failure -- so it has to be off the table before a corruption finding
+        # can be pinned on the product.
+        self._wait_volume_released(name)
         fio_config, warmup_config = self._build_fio_config(name, runtime=runtime)
         nid = record.get("node_id")
         avoid = self._get_k8s_node_for_storage_node(nid) if nid else None
