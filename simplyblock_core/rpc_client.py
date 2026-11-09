@@ -1367,7 +1367,7 @@ class RPCClient:
             params['bdev_io_cache_size'] = bdev_io_cache_size
         if iobuf_small_cache_size > 0:
             params['iobuf_small_cache_size'] = iobuf_small_cache_size
-        if iobuf_small_cache_size > 0:
+        if iobuf_large_cache_size > 0:
             params['iobuf_large_cache_size'] = iobuf_large_cache_size
         if params:
             return self._request("bdev_set_options", **params)
@@ -1390,7 +1390,12 @@ class RPCClient:
             return False
 
     def accel_set_options(self):
-        return self._request("accel_set_options", small_cache_size=512, large_cache_size=64)
+        # accel is not in the data path: its per-thread iobuf caches only park
+        # buffers (512 small + 64 large per thread used to hold ~160 MiB on a
+        # 13-thread node).
+        return self._request("accel_set_options",
+                             small_cache_size=constants.ACCEL_SMALL_CACHE_SIZE,
+                             large_cache_size=constants.ACCEL_LARGE_CACHE_SIZE)
 
     def distr_status_events_get(self):
         return self._request("distr_status_events_get")

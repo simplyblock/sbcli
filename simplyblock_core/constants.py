@@ -419,6 +419,22 @@ MIN_HUGE_PAGE_MEMORY_FOR_LVOL = 209715200
 MIN_SYS_MEMORY_FOR_LVOL = 524288000
 EXTRA_SMALL_POOL_COUNT = 30000
 EXTRA_LARGE_POOL_COUNT = 10240
+# iobuf pools (calculate_pool_count). Large buffers are not used in the data
+# path (NVMe-oF io_unit_size is 8 KiB, no zcopy, bdev callers supply buffers):
+# a fixed 100 MiB reserve instead of ~490 MiB. Small buffers get 300 MiB more,
+# for replication's transfers and merges (chains of 8 KiB). bed bf18
+# 2026-11-09: the hugepage heap ran out (5816 DMA allocation failures).
+IOBUF_SMALL_BUFSIZE = 8 * 1024
+IOBUF_LARGE_BUFSIZE = 132 * 1024
+IOBUF_LARGE_POOL_BYTES = 100 * 1024 * 1024
+IOBUF_SMALL_POOL_EXTRA_BYTES = 300 * 1024 * 1024
+# Per-thread iobuf caches of modules that do not draw buffers in the data
+# path: they only park pool buffers (bdev default 128/16, accel was 512/64).
+# The NVMe-oF poll-group cache (buf_cache_size) is kept: it is used.
+BDEV_IOBUF_SMALL_CACHE_SIZE = 16
+BDEV_IOBUF_LARGE_CACHE_SIZE = 2
+ACCEL_SMALL_CACHE_SIZE = 32
+ACCEL_LARGE_CACHE_SIZE = 2
 EXTRA_HUGE_PAGE_MEMORY = 3221225472
 EXTRA_SYS_MEMORY = 0.10
 
