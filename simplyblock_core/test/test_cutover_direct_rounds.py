@@ -322,6 +322,80 @@ class TestEnds:
             src.index("snap_err, task = _take_round(task, lvol)")
 
 
+class TestEarlyForDirect:
+    """bf19 (2026-11-09): REPL_CUTOVER_EARLY_PREPARE was off, so no clone
+    existed before round 1 and no endgame ever went direct -- silently."""
+
+    def test_direct_rounds_prepare_the_clone_even_with_early_prepare_off(self):
+        src = inspect.getsource(final.task_runner)
+        assert "early_for_direct = (not constants.REPL_CUTOVER_EARLY_PREPARE" in src
+        assert "(constants.REPL_CUTOVER_EARLY_PREPARE or early_for_direct)" in src
+
+    def test_wanted_only_when_enabled_for_a_replication_not_found_unsupported(self):
+        with patch.object(constants, "REPL_CUTOVER_DIRECT_ROUNDS", True):
+            assert final._direct_rounds_wanted({})
+            assert not final._direct_rounds_wanted({"operation": "migrate"})
+            assert not final._direct_rounds_wanted({"direct_unsupported": True})
+        with patch.object(constants, "REPL_CUTOVER_DIRECT_ROUNDS", False):
+            assert not final._direct_rounds_wanted({})
+
+    def test_unsupported_for_the_task_means_no_direct_mode(self):
+        with patch.object(final, "_clone_base_source", return_value=_snap("S0")), \
+                patch.object(constants, "REPL_CUTOVER_DIRECT_ROUNDS", True):
+            assert not final._direct_mode_possible(
+                _lvol(), dict(PREPARED, direct_unsupported=True))
+
+    def test_a_clone_for_direct_rounds_is_discarded_not_rebased(self):
+        # the mode decision finds direct impossible: the endgame and its clone
+        # are given up, and the task goes on without direct rounds
+        task = _task(early_for_direct=True, **PREPARED)
+        task.function_params.pop("shrink_snap_id")
+        with patch.object(final, "_record", side_effect=_record_inline), \
+                patch.object(final, "_direct_mode_possible", return_value=False), \
+                patch.object(final, "_abandon_prepared_cutover",
+                             side_effect=lambda t: t) as discard, \
+                patch.object(final, "_abandon_endgame",
+                             side_effect=TaskDefer("abandoned")) as ab, \
+                patch.object(final, "_take_shrink_snapshot") as take:
+            with pytest.raises(TaskDefer):
+                final._take_round(task, _lvol())
+        assert task.function_params["direct_unsupported"] is True
+        discard.assert_called_once()
+        ab.assert_called_once()
+        take.assert_not_called()
+
+    def test_an_spdk_without_dest_clone_discards_a_clone_for_direct_rounds(self):
+        task = _task(direct_rounds=True, early_for_direct=True, **PREPARED)
+        snap = _snap("S1")
+        with patch.object(final, "_record", side_effect=_record_inline), \
+                patch.object(final, "_abandon_prepared_cutover",
+                             side_effect=lambda t: t) as discard, \
+                patch.object(final, "_abandon_endgame",
+                             side_effect=TaskDefer("abandoned")) as ab, \
+                patch("simplyblock_core.controllers.tasks_controller."
+                      "add_snapshot_replication_task") as add:
+            with pytest.raises(TaskDefer):
+                final._direct_unsupported(task, _lvol(), snap, "decode")
+        assert task.function_params["direct_unsupported"] is True
+        discard.assert_called_once()
+        ab.assert_called_once()
+        add.assert_not_called()      # the abandon re-queues the round snapshots
+
+    def test_the_mode_is_logged_either_way(self):
+        task = _task(direct_rounds=None)
+        task.function_params.pop("direct_rounds")
+        with patch.object(final, "_record", side_effect=_record_inline), \
+                patch.object(final, "_direct_mode_possible", return_value=False), \
+                patch.object(final, "_take_shrink_snapshot", return_value=("S2", None, task)), \
+                patch.object(final.logger, "info") as info:
+            final._take_round(task, _lvol())
+        assert any("endgame rounds replicate into landing volumes" in (c.args[0] % c.args[1:])
+                   for c in info.call_args_list)
+
+    def test_a_new_attempt_prepares_again(self):
+        assert "early_for_direct" in final._PREPARED_CUTOVER_PARAMS
+
+
 class TestPlumbing:
 
     def test_snapshot_add_can_skip_the_replication_task(self):

@@ -753,9 +753,17 @@ def task_runner(task: JobSchedule, tasks):
     # instead of after them -- and, with REPL_CUTOVER_DIRECT_ROUNDS, the
     # rounds send their deltas straight into it. Built before the first round
     # for that; it sits on the last replicated copy either way.
-    if (constants.REPL_CUTOVER_EARLY_PREPARE and params.get("cutover_lvs")
+    # Direct rounds need the clone before round 1, so they prepare it early
+    # even with REPL_CUTOVER_EARLY_PREPARE off (bf19 2026-11-09: off, so no
+    # endgame ever went direct). Such a clone is never rebased onto an
+    # ordinary round's copy -- the rebase is what early prepare is off for.
+    early_for_direct = (not constants.REPL_CUTOVER_EARLY_PREPARE
+                        and _direct_rounds_wanted(params))
+    if ((constants.REPL_CUTOVER_EARLY_PREPARE or early_for_direct) and params.get("cutover_lvs")
             and "tgt_lvol_composite" not in params and not params.get("shrink_snap_id")):
         task = _prepare_early(task, lvol, src_node, tgt_node)
+        if early_for_direct and task.function_params.get("early_prepared"):
+            task = _record(task, early_for_direct=True)
         params = task.function_params
 
     # The first iterative snapshot belongs to the endgame, not to task creation:
@@ -1256,13 +1264,21 @@ def _new_shrink_snap_name(direct=False):
 DIRECT_ROUND_PREFIX = "repl_round_"
 
 
+def _direct_rounds_wanted(params):
+    """Whether this cutover's endgames should try direct rounds at all:
+    enabled, a replication (not a migration of a different kind), and not
+    found impossible for this task before (direct_unsupported outlives the
+    endgame)."""
+    return bool(constants.REPL_CUTOVER_DIRECT_ROUNDS
+                and params.get("operation", "replicate") == "replicate"
+                and not params.get("direct_unsupported"))
+
+
 def _direct_mode_possible(lvol, params):
     """Whether this endgame's rounds can go straight into the cutover clone:
     the clone exists (early prepare) and the source snapshot whose copy it
     sits on is known -- the first round's delta is taken against it."""
-    if not constants.REPL_CUTOVER_DIRECT_ROUNDS:
-        return False
-    if params.get("operation", "replicate") != "replicate":
+    if not _direct_rounds_wanted(params):
         return False
     if not (params.get("early_prepared") and params.get("tgt_lvol_composite")
             and params.get("tgt_map_id") is not None):
@@ -1298,11 +1314,28 @@ def _take_round(task, lvol):
     params = task.function_params
     if "direct_rounds" not in params:
         direct = _direct_mode_possible(lvol, params)
+        if not direct and params.get("early_for_direct"):
+            # a clone built only for direct rounds is never rebased onto an
+            # ordinary round's copy: this task goes on without direct rounds
+            # discard the clone with it, or the next attempt finds it again
+            task = _record(task, direct_unsupported=True)
+            task = _abandon_prepared_cutover(task)
+            _abandon_endgame(task, lvol, "the clone was prepared for direct rounds, "
+                                         "but this endgame cannot run them")
         task = _record(task, direct_rounds=direct)
         params = task.function_params
-        if direct:
-            logger.info("cutover for lvol %s: rounds go straight into the cutover clone %s",
-                        lvol.get_id(), params.get("tgt_lvol_composite"))
+        # say which mode the endgame runs in: a silent fallback hid that bf19
+        # never ran a direct round
+        logger.info("cutover for lvol %s: endgame rounds %s", lvol.get_id(),
+                    f"go straight into the cutover clone {params.get('tgt_lvol_composite')}"
+                    if direct else
+                    "replicate into landing volumes ("
+                    + ("direct rounds off" if not constants.REPL_CUTOVER_DIRECT_ROUNDS
+                       else "direct rounds unsupported for this task"
+                       if params.get("direct_unsupported")
+                       else "no early-prepared clone" if not params.get("early_prepared")
+                       else "the clone's base copy is unknown") + ")")
+        xfer_timing.stamp("endgame_mode", lvol=lvol.get_id(), direct=1 if direct else 0)
     if not params.get("direct_rounds"):
         _, err, task = _take_shrink_snapshot(task, lvol)
         return err, task
@@ -1388,6 +1421,14 @@ def _direct_unsupported(task, lvol, snap, err):
     from simplyblock_core.controllers import tasks_controller
     if task.function_params.get("direct_done_snap"):
         _abandon_endgame(task, lvol, f"the source SPDK no longer sends rounds into the "
+                                     f"cutover clone ({err})")
+    if task.function_params.get("early_for_direct"):
+        # the clone was built only for direct rounds and must not be rebased:
+        # give it up; the next attempt runs ordinary rounds without it (the
+        # abandon re-queues this round's snapshot: _requeue_direct_rounds)
+        task = _record(task, direct_unsupported=True)
+        task = _abandon_prepared_cutover(task)
+        _abandon_endgame(task, lvol, f"the source SPDK cannot send rounds into the "
                                      f"cutover clone ({err})")
     logger.warning("cutover for lvol %s: the source SPDK cannot send rounds into the "
                    "cutover clone (%s); ordinary rounds for this endgame",
@@ -1829,7 +1870,7 @@ _PREPARED_CUTOVER_PARAMS = ("tgt_lvol_composite", "tgt_lvol_id", "tgt_map_id",
                             "failback_prior_replication_id",
                             "cutover_proceed_timeout", "freeze_started_at",
                             # early-prepare mode: the next attempt re-prepares
-                            "early_prepared", "shrink_converged")
+                            "early_prepared", "early_for_direct", "shrink_converged")
 
 
 def _revert_cutover_relationship(replication_id):
