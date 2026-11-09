@@ -6912,43 +6912,61 @@ def list_replication_tasks(lvol_id):
     return tasks
 
 
-def suspend_lvol(lvol_id):
+def _set_lvol_paths_ana(lvol, primary_state, peer_state, verb):
+    """Set the ANA state of *lvol*'s listeners on EVERY member of its lvstore:
+    the primary to *primary_state*, the secondary AND the tertiary to
+    *peer_state*. A member that is offline is skipped (its SPDK serves no
+    listener); one that may still serve (online, down, suspended) is not.
 
+    Covering only the primary and the secondary left the tertiary's path of an
+    FTT2 lvstore usable: on bed bf10 (2026-11-02) every replication cutover
+    exposed the target clone, hid two of its three paths, and the host wrote
+    through the third -- the tertiary -- while the final delta was still in
+    transfer."""
+    db_controller = DBController()
+    logger.info("%s LVol subsystem: %s", verb, lvol.get_id())
+    snode = db_controller.get_storage_node_by_id(lvol.node_id)
+    members = [(snode, primary_state)]
+    for peer_id in (snode.secondary_node_id, snode.tertiary_node_id):
+        if not peer_id:
+            continue
+        try:
+            peer = db_controller.get_storage_node_by_id(peer_id)
+        except KeyError:
+            continue
+        if peer.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN,
+                           StorageNode.STATUS_SUSPENDED]:
+            members.append((peer, peer_state))
+    for node, state in members:
+        for iface in node.data_nics:
+            if not (iface.ip4_address and lvol.fabric == iface.trtype.lower()):
+                continue
+            logger.info("%s listener for %s on %s (%s): %s", verb, lvol.nqn,
+                        iface.ip4_address, node.get_id(), state)
+            if state == "inaccessible":
+                ret = node.rpc_client().nvmf_subsystem_listener_set_ana_state(
+                    lvol.nqn, iface.listen_address, lvol.subsys_port, ana="inaccessible",
+                    anagrpid=lvol.ns_id)
+            else:
+                ret = node.rpc_client().nvmf_subsystem_listener_set_ana_state(
+                    lvol.nqn, iface.listen_address, lvol.subsys_port,
+                    is_optimized=(state == "optimized"), anagrpid=lvol.ns_id)
+            if not ret:
+                logger.error(f"Failed to set subsystem listener state for {lvol.nqn} on {iface.ip4_address}")
+                return False
+    return True
+
+
+def suspend_lvol(lvol_id):
     db_controller = DBController()
     try:
         lvol = db_controller.get_lvol_by_id(lvol_id)
     except KeyError as e:
         logger.error(e)
         return False
-
-    logger.info(f"suspending LVol subsystem: {lvol.get_id()}")
     snode = db_controller.get_storage_node_by_id(lvol.node_id)
-    # It sets the home paths' ANA without the site rule of sync replication.
     reject_on_sync_replication(db_controller.get_cluster_by_id(snode.cluster_id), "Volume suspend")
-    for iface in snode.data_nics:
-        if iface.ip4_address and lvol.fabric == iface.trtype.lower():
-            logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
-            ret = snode.rpc_client().nvmf_subsystem_listener_set_ana_state(
-                lvol.nqn, iface.listen_address, lvol.subsys_port, ana="inaccessible",
-                anagrpid=lvol.ns_id)
-            if not ret:
-                logger.error(f"Failed to set subsystem listener state for {lvol.nqn} on {iface.ip4_address}")
-                return False
-
-    if snode.secondary_node_id:
-        sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
-        if sec_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN, StorageNode.STATUS_SUSPENDED]:
-            for iface in sec_node.data_nics:
-                if iface.ip4_address and lvol.fabric == iface.trtype.lower():
-                    logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
-                    ret = sec_node.rpc_client().nvmf_subsystem_listener_set_ana_state(
-                        lvol.nqn, iface.listen_address, lvol.subsys_port, ana="inaccessible",
-                        anagrpid=lvol.ns_id)
-                    if not ret:
-                        logger.error(f"Failed to set subsystem listener state for {lvol.nqn} on {iface.ip4_address}")
-                        return False
-
-    return True
+    return _set_lvol_paths_ana(lvol, "inaccessible", "inaccessible", "suspending")
 
 
 def resume_lvol(lvol_id):
@@ -6958,34 +6976,9 @@ def resume_lvol(lvol_id):
     except KeyError as e:
         logger.error(e)
         return False
-
-    logger.info(f"suspending LVol subsystem: {lvol.get_id()}")
     snode = db_controller.get_storage_node_by_id(lvol.node_id)
     reject_on_sync_replication(db_controller.get_cluster_by_id(snode.cluster_id), "Volume resume")
-    for iface in snode.data_nics:
-        if iface.ip4_address and lvol.fabric == iface.trtype.lower():
-            logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
-            ret = snode.rpc_client().nvmf_subsystem_listener_set_ana_state(
-                lvol.nqn, iface.listen_address, lvol.subsys_port, is_optimized=True,
-                anagrpid=lvol.ns_id)
-            if not ret:
-                logger.error(f"Failed to set subsystem listener state for {lvol.nqn} on {iface.ip4_address}")
-                return False
-
-    if snode.secondary_node_id:
-        sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
-        if sec_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN, StorageNode.STATUS_SUSPENDED]:
-            for iface in sec_node.data_nics:
-                if iface.ip4_address and lvol.fabric == iface.trtype.lower():
-                    logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
-                    ret = sec_node.rpc_client().nvmf_subsystem_listener_set_ana_state(
-                        lvol.nqn, iface.listen_address, lvol.subsys_port, is_optimized=False,
-                        anagrpid=lvol.ns_id)
-                    if not ret:
-                        logger.error(f"Failed to set subsystem listener state for {lvol.nqn} on {iface.ip4_address}")
-                        return False
-
-    return True
+    return _set_lvol_paths_ana(lvol, "optimized", "non_optimized", "resuming")
 
 
 def replicate_lvol_on_source_cluster(lvol_id, cluster_id=None, pool_uuid=None):
