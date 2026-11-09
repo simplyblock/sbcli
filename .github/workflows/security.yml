@@ -247,8 +247,14 @@ jobs:
       # never ran either in that case, posting a "vulnerabilities found"
       # alert with an empty Findings field for a problem that has nothing to
       # do with vulnerabilities.
+      #
+      # always() is required here: neither branch of this condition calls a
+      # status-check function, so GitHub Actions implicitly ANDs it with
+      # success() -- and by this point "Fail if a gating scan found
+      # vulnerabilities" has already failed the job, so without always() this
+      # step (and the one below) would always be skipped, silently.
       - name: Notify Slack on gating scan failure
-        if: steps.grype-branch.outcome == 'failure' || steps.trivy-branch.outcome == 'failure'
+        if: always() && (steps.grype-branch.outcome == 'failure' || steps.trivy-branch.outcome == 'failure')
         uses: slackapi/slack-github-action@v2
         with:
           webhook: ${{ secrets.SLACK_CONTROL_PLANE_WEBHOOK }}
@@ -292,8 +298,11 @@ jobs:
               ]
             }
 
+      # always() is required: this condition has no status-check function, so
+      # it would otherwise implicitly AND with success() -- and a run that
+      # fails the gate is exactly when the pending list is worth having.
       - name: Notify Slack on pending-release CVEs
-        if: steps.diff.outputs.has_pending == 'true'
+        if: always() && steps.diff.outputs.has_pending == 'true'
         uses: slackapi/slack-github-action@v2
         with:
           webhook: ${{ secrets.SLACK_CONTROL_PLANE_WEBHOOK }}
