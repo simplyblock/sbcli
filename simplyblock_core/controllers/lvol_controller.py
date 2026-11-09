@@ -4044,7 +4044,7 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, 
     # the window, and still pointing at the source after the commit. The
     # move's window is bounded, so the connect is refused and retried rather
     # than answered with the source. Same guard as the attach in add_lvol.
-    if lvol.nqn in _moving_nqns_on_node(lvol.node_id):
+    if lvol.nqn in _moving_nqns_on_node(lvol.node_id, db_controller):
         raise SubsystemMoveInProgressError(
             f"volume {uuid} is in subsystem {lvol.nqn}, which a consistency-group "
             f"subsystem move holds; connect again after the move completes")
@@ -7505,7 +7505,9 @@ def resolve_effective_ha_type(ha_type, host_node):
     return ha_type
 
 
-def _moving_nqns_on_node(node_id):
+def _moving_nqns_on_node(node_id, db_controller=None):
     """Subsystems an active consistency-group subsystem move holds on the
-    node (its sources and its target)."""
-    return DBController().subsystem_move_reservations(node_id)[0]
+    node (its sources and its target). ``db_controller`` is the caller's,
+    when it has one open; a fresh one otherwise."""
+    db = db_controller if db_controller is not None else DBController()
+    return db.subsystem_move_reservations(node_id)[0]

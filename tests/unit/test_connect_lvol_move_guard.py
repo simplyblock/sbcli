@@ -42,7 +42,9 @@ def test_a_moving_subsystem_refuses_the_connect_before_any_side_effect(world):
     with patch.object(lvol_controller, "_moving_nqns_on_node", return_value={NQN}) as moving:
         with pytest.raises(SubsystemMoveInProgressError, match="subsystem move holds"):
             lvol_controller.connect_lvol("vol-1", host_nqn="nqn.host")
-    moving.assert_called_once_with("node-1")
+    moving.assert_called_once()
+    node_id, db = moving.call_args.args
+    assert node_id == "node-1" and db is world.db, "the guard reads through the connect's own DB controller"
     world.marked.assert_not_called()
 
 
