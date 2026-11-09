@@ -10,7 +10,11 @@ from typing import ClassVar
 from unittest.mock import MagicMock, patch
 
 from simplyblock_core.controllers import replication_delta
+from simplyblock_core.peer.protocol import EnsureHubResponse
 from simplyblock_core.services import snapshot_replication
+
+# The destination's ensure_hub answer for a ready target whose pair is online.
+_HUB = EnsureHubResponse(state="ready", leader_node_id="tgt", pair_online=True)
 
 
 def _snap(before=None, after=None, blobid=0x1001):
@@ -139,9 +143,9 @@ class TestPartialDecision(unittest.TestCase):
                 patch.object(snapshot_replication, "_finishing_predecessor", return_value=None), \
                 patch.object(snapshot_replication, "_previous_replicated_snapshot", return_value=prev):
             first = snapshot_replication._partial_transfer_decision(
-                task, snap or _snap(after=CLEAN), False, remote_lv, None, "n1")
+                task, snap or _snap(after=CLEAN), False, remote_lv, _HUB, "n1")
             again = snapshot_replication._partial_transfer_decision(
-                task, snap or _snap(after=CLEAN), False, remote_lv, None, "n1")
+                task, snap or _snap(after=CLEAN), False, remote_lv, _HUB, "n1")
         self.assertEqual(first, again)      # cached for a resumed attempt
         return first
 
@@ -168,16 +172,14 @@ class TestOverlapWithMerge(unittest.TestCase):
     def _decide(self, pred, sec_status=None):
         task = SimpleNamespace(function_params={}, write_to_db=MagicMock(), uuid="t")
         remote_lv = SimpleNamespace(get_id=lambda: "landing")
-        node = SimpleNamespace(secondary_node_id="sec" if sec_status else "",
-                               get_id=lambda: "tgt")
-        db = MagicMock()
-        db.get_storage_node_by_id.return_value = SimpleNamespace(status=sec_status)
+        # The destination's ensure_hub answer: is the leader's pair online?
+        hub = EnsureHubResponse(state="ready", leader_node_id="tgt",
+                                pair_online=sec_status in (None, "online"))
         prechain = MagicMock()
         with patch.object(snapshot_replication, "_finishing_predecessor", return_value=pred), \
-                patch.object(snapshot_replication, "_prechain_landing_volume", prechain), \
-                patch.object(snapshot_replication, "db", db):
+                patch.object(snapshot_replication, "_prechain_landing_volume", prechain):
             res = snapshot_replication._partial_transfer_decision(
-                task, _snap(after=CLEAN), False, remote_lv, node, "n1")
+                task, _snap(after=CLEAN), False, remote_lv, hub, "n1")
         prechain.assert_not_called()        # nothing to chain onto yet
         return res, task.function_params
 

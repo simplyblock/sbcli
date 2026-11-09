@@ -23,6 +23,8 @@ from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.models.replication import ReplicationTarget
 from simplyblock_core.peer import service
 from simplyblock_core.peer.protocol import (
+    ChainRequest,
+    ChainResponse,
     DescribeRequest,
     DescribeResponse,
     EnsureHubRequest,
@@ -113,6 +115,15 @@ class PeerClient(Protocol):
             PeerError: the target's control plane cannot be reached or understood.
         """
 
+    def chain(self, request: ChainRequest) -> ChainResponse:
+        """Chain the landing volume onto the predecessor's copy on the leader and
+        its secondary, so the transfer can ship only the delta.
+
+        Raises:
+            PeerNotFoundError: the cluster, the landing volume or the leader is unknown.
+            PeerError: the target's control plane cannot be reached or understood.
+        """
+
 
 class LocalPeerClient:
     """A target cluster managed by this same control plane: calls the service directly."""
@@ -182,6 +193,17 @@ class LocalPeerClient:
         """
         try:
             return service.ensure_hub(self._cluster_id, request)
+        except KeyError as e:
+            raise PeerNotFoundError(str(e)) from e
+
+    def chain(self, request: ChainRequest) -> ChainResponse:
+        """Chain the landing volume (see ``PeerClient.chain``).
+
+        Raises:
+            PeerNotFoundError: the cluster, the landing volume or the leader is unknown.
+        """
+        try:
+            return service.chain(self._cluster_id, request)
         except KeyError as e:
             raise PeerNotFoundError(str(e)) from e
 
@@ -362,6 +384,21 @@ class HttpPeerClient:
             return EnsureHubResponse.model_validate(self._request("POST", path))
         except ValidationError as e:
             raise PeerProtocolError(f"Unexpected hub response from {self._base}: {e}") from e
+
+    def chain(self, request: ChainRequest) -> ChainResponse:
+        """Chain the landing volume (see ``PeerClient.chain``).
+
+        Not retried by the transport: the runner's next pass resends it with the
+        members the first answer reported, so none is chained twice.
+
+        Raises:
+            PeerError: as for every peer call (see ``_request``), and
+                PeerProtocolError when the answer is not a ChainResponse.
+        """
+        try:
+            return ChainResponse.model_validate(self._request("POST", "chain", request))
+        except ValidationError as e:
+            raise PeerProtocolError(f"Unexpected chain response from {self._base}: {e}") from e
 
 
 def peer_for_target(target: ReplicationTarget) -> PeerClient:

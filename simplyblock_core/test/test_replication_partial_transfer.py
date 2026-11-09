@@ -13,9 +13,13 @@ destination's copy of the previous snapshot BEFORE the transfer, and ask for a
 delta only when that actually succeeded on every online member of the target's
 HA pair.
 """
+import pytest
+
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.peer import service as peer_service
+from simplyblock_core.peer.protocol import EnsureHubResponse
 from simplyblock_core.services import snapshot_replication as sr
 
 # --------------------------------------------------------------------------
@@ -49,6 +53,9 @@ class _FakeRPC:
     def bdev_lvol_add_clone(self, clone_bdev, snap_bdev):
         self._owner.add_clone_calls.append((clone_bdev, snap_bdev))
         return self._add_clone_ok
+
+    def bdev_get(self, name):
+        return None                    # not a clone yet: SPDK has nothing to report
 
 
 class _Node:
@@ -89,6 +96,9 @@ class _FakeDB:
     def get_job_tasks(self, cluster_id):
         return []
 
+    def get_lvol_by_id(self, uuid):
+        return _LandingLV(uuid)
+
 
 class _Task:
     def __init__(self, **params):
@@ -114,6 +124,21 @@ class _LandingLV:
 # the landing volume becomes a clone of the predecessor when eligible
 # --------------------------------------------------------------------------
 
+# The destination's ensure_hub answer: N_TGT leads, its pair is online.
+_HUB = EnsureHubResponse(state="ready", leader_node_id="N_TGT", pair_online=True)
+
+
+@pytest.fixture(autouse=True)
+def _destination(monkeypatch):
+    """The destination chains through its peer service (control-plane split);
+    here the service runs against this file's fake records of the target."""
+    class _Peer:
+        def chain(self, request):
+            return peer_service.chain_landing(sr.db, request)
+
+    monkeypatch.setattr(sr, "_landing_peer", lambda snapshot, landing: _Peer())
+
+
 def _eligible_setup(monkeypatch, primary_ok=True, secondary_ok=True,
                     secondary_online=True):
     """A snapshot with a replicated predecessor whose remote copy sits on the
@@ -138,7 +163,7 @@ def test_landing_volume_is_chained_to_predecessor_when_eligible(monkeypatch):
     task = _Task()
 
     assert sr._prechain_landing_volume(
-        task, cur, False, _LandingLV(), leader) is True
+        task, cur, False, _LandingLV(), "N_TGT") is True
 
     # chained on BOTH members, onto the predecessor's remote copy
     assert leader.add_clone_calls == [("LVS/REP_SNAP_2", "LVS/T_SNAP_1")]
@@ -157,7 +182,7 @@ def test_no_predecessor_falls_back_to_a_fresh_full_transfer(monkeypatch):
     task = _Task()
 
     assert sr._prechain_landing_volume(
-        task, cur, False, _LandingLV(), leader) is False
+        task, cur, False, _LandingLV(), "N_TGT") is False
 
     assert leader.add_clone_calls == []
     assert sec.add_clone_calls == []
@@ -176,7 +201,7 @@ def test_unreplicated_predecessor_falls_back(monkeypatch):
     task = _Task()
 
     assert sr._prechain_landing_volume(
-        task, cur, False, _LandingLV(), leader) is False
+        task, cur, False, _LandingLV(), "N_TGT") is False
     assert leader.add_clone_calls == []
 
 
@@ -188,7 +213,7 @@ def test_offline_secondary_forces_a_full_transfer(monkeypatch):
     task = _Task()
 
     assert sr._prechain_landing_volume(
-        task, cur, False, _LandingLV(), leader) is False
+        task, cur, False, _LandingLV(), "N_TGT") is False
     # nothing was chained at all -- we bail before touching either node
     assert leader.add_clone_calls == []
     assert sec.add_clone_calls == []
@@ -199,7 +224,7 @@ def test_failed_primary_chain_forces_a_full_transfer(monkeypatch):
     task = _Task()
 
     assert sr._prechain_landing_volume(
-        task, cur, False, _LandingLV(), leader) is False
+        task, cur, False, _LandingLV(), "N_TGT") is False
     # the secondary is not touched once the primary refused
     assert sec.add_clone_calls == []
 
@@ -211,7 +236,7 @@ def test_failed_secondary_chain_forces_full_but_records_the_primary(monkeypatch)
     task = _Task()
 
     assert sr._prechain_landing_volume(
-        task, cur, False, _LandingLV(), leader) is False
+        task, cur, False, _LandingLV(), "N_TGT") is False
     assert task.function_params["prechained_node_ids"] == ["N_TGT"]
 
 
@@ -221,7 +246,7 @@ def test_prechain_is_not_repeated_for_a_node_already_chained(monkeypatch):
     task = _Task(prechained_node_ids=["N_TGT"])
 
     assert sr._prechain_landing_volume(
-        task, cur, False, _LandingLV(), leader) is True
+        task, cur, False, _LandingLV(), "N_TGT") is True
     assert leader.add_clone_calls == []          # already done
     assert sec.add_clone_calls == [("LVS/REP_SNAP_2", "LVS/T_SNAP_1")]
 
@@ -236,13 +261,13 @@ def test_decision_is_cached_for_the_same_landing_volume(monkeypatch):
     lv = _LandingLV("REP_LV_1")
     task = _Task()
 
-    assert sr._partial_transfer_decision(task, cur, False, lv, leader, "N_SRC") == (True, 0x51)
+    assert sr._partial_transfer_decision(task, cur, False, lv, _HUB, "N_SRC") == (True, 0x51)
     assert len(leader.add_clone_calls) == 1
 
     # second pass over the same landing volume: cached, nothing re-chained
     leader.add_clone_calls.clear()
     sec.add_clone_calls.clear()
-    assert sr._partial_transfer_decision(task, cur, False, lv, leader, "N_SRC") == (True, 0x51)
+    assert sr._partial_transfer_decision(task, cur, False, lv, _HUB, "N_SRC") == (True, 0x51)
     assert leader.add_clone_calls == []
     assert sec.add_clone_calls == []
 
@@ -263,7 +288,7 @@ def test_a_replaced_landing_volume_re_derives_and_never_inherits_partial(monkeyp
                  prechained_node_ids=["N_TGT", "N_TGT_SEC"])
 
     got = sr._partial_transfer_decision(
-        task, cur, False, _LandingLV("REP_LV_NEW"), leader, "N_SRC")
+        task, cur, False, _LandingLV("REP_LV_NEW"), _HUB, "N_SRC")
 
     assert got == (False, 0), "a replaced landing volume must not inherit partial"
     assert task.function_params["allow_partial"] is False

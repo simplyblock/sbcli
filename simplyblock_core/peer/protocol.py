@@ -15,7 +15,9 @@ PEER_API_VERSION = 1
 
 #: Peer endpoints this control plane serves, named so a caller can check for a
 #: step before relying on it during a rolling upgrade of the two sites.
-CAPABILITIES: frozenset[str] = frozenset({"info", "discard_landing", "describe", "prepare_landing", "ensure_hub"})
+CAPABILITIES: frozenset[str] = frozenset({
+    "info", "discard_landing", "describe", "prepare_landing", "ensure_hub", "chain",
+})
 
 #: Name prefix of a replication landing volume (``REP_<snapshot name>``). It is
 #: the only mark a landing volume carries in the database, and the peer API acts
@@ -154,4 +156,32 @@ class EnsureHubResponse(BaseModel):
     leader_node_id: str = ""
     map_id: int | None = None
     hub: HubAddress | None = None
+    #: The leader has no secondary, or its secondary is online: a delta can
+    #: land on every member of the pair.
+    pair_online: bool = False
     converted_on: list[str] = Field(default_factory=list)
+
+
+class ChainRequest(BaseModel):
+    """Chain the landing volume onto the copy of the snapshot before it, on the
+    leader and its secondary, so the transfer can ship only the delta.
+
+    Retry key: ``chained_on`` is what the source recorded from earlier answers;
+    a member in it is not chained again (add_clone is not idempotent in SPDK).
+    """
+
+    landing_lvol_id: str
+    leader_node_id: str
+    #: The predecessor's copy on this cluster.
+    predecessor_id: str
+    chained_on: list[str] = Field(default_factory=list)
+
+
+class ChainResponse(BaseModel):
+    #: chained: on every online member of the pair. declined: not (fully)
+    #: chained, a full transfer is needed (``reason``). unresolvable: the
+    #: predecessor's copy cannot be used here.
+    state: Literal["chained", "declined", "unresolvable"]
+    #: Every member the landing volume is chained on now, including earlier ones.
+    chained_on: list[str] = Field(default_factory=list)
+    reason: str = ""

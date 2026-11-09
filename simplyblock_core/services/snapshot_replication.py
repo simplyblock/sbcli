@@ -34,6 +34,7 @@ from simplyblock_core.peer.client import (
 )
 from simplyblock_core.peer.protocol import (
     ChainCheck,
+    ChainRequest,
     DescribeRequest,
     EnsureHubRequest,
     LandingRequest,
@@ -1000,12 +1001,9 @@ def process_snap_replicate_start(task, snapshot):
         return
     task.function_params["hub_ctrl"] = _hub_ctrl
     remote_map_id = hub.map_id
-    # The delta decision below still reads the target's records directly; it
-    # moves behind the peer client with the chain step.
-    remote_lv_node = db.get_storage_node_by_id(hub.leader_node_id)
 
     allow_partial, partial_base = _partial_transfer_decision(
-        task, snapshot, replicate_to_source, remote_lv, remote_lv_node, snode.get_id())
+        task, snapshot, replicate_to_source, remote_lv, hub, snode.get_id())
     logger.info("Transfer of %s into %s: %s", snapshot.get_id(),
                 remote_lv.top_bdev,
                 "PARTIAL allowed (landing volume is a clone of the previous "
@@ -1742,132 +1740,68 @@ def _resolve_chain_target(snapshot, replicate_to_source, remote_snode):
     return {"snap_bdev": _snap_obj.snap_bdev}, _snap_obj, True
 
 
-def _prechain_landing_volume(task, snapshot, replicate_to_source, remote_lv,
-                             remote_lv_node):
+def _prechain_landing_volume(task, snapshot, replicate_to_source, remote_lv, leader_id):
     """Chain the landing volume onto the destination's copy of the PREVIOUS
     snapshot, before the transfer runs, so only the delta has to be sent.
 
     Returns True when the landing volume (and every online member of its HA
     pair) is chained, which is the precondition for asking for a PARTIAL
     transfer. Returns False to mean "send a full transfer", which is always
-    correct and is what this pipeline did unconditionally until now.
+    correct.
 
-    Why chaining first is what makes a partial transfer correct
-    -----------------------------------------------------------
-    ``bdev_lvol_transfer`` sends a blob's OWN cluster map and nothing else, so a
-    partial transfer ships only the ranges written since the previous snapshot.
-    Everything OUTSIDE that delta therefore has to be on the destination
-    already, and a fresh empty landing volume does not have it -- that is
-    exactly why the delta path has never been switched on. Chaining the landing
-    volume onto the predecessor's remote copy supplies it: a cluster the new
-    snapshot does not own stays unallocated and reads through to the parent,
-    and the first write into a cluster the delta DOES touch makes the blobstore
-    copy-on-write the whole cluster from that same parent before applying the
-    incoming range. Both halves of the destination image thus come from the
-    same predecessor the source computed its delta against.
-
-    This is the very ``bdev_lvol_add_clone`` the finish step used to issue AFTER
-    the transfer; issuing it BEFORE is what turns the landing volume into a
-    valid delta target. Nodes chained here are recorded on the task so the
-    finish step does not add the same clone entry twice.
-
-    The bar for returning True is deliberately high:
-      * a predecessor copy must resolve cleanly on this node (``ok`` and a
-        non-empty ``target_prev_snap`` from :func:`_resolve_chain_target`);
-      * the LVS leader must accept the chain;
-      * the secondary must be ONLINE and accept it too. The transfer lands on
-        the leader and the lvstore mirrors it to the secondary; an unchained
-        secondary would read zeros wherever the delta did not write, so a
-        degraded pair gets a full transfer rather than a delta.
-    Anything short of that logs why and falls back to a full transfer.
+    This cluster picks the predecessor -- its own newest replicated snapshot
+    before this one -- and the destination chains onto that snapshot's copy
+    (peer.service.chain_landing explains why chaining first makes a delta
+    correct, and the bar it sets). Members chained are recorded on the task so
+    neither a retry nor the finish step adds the same clone entry twice.
     """
-    target_prev_snap, _prev_snap_for_db, ok = _resolve_chain_target(
-        snapshot, replicate_to_source, remote_lv_node)
-    if not ok:
-        logger.info(
-            "Landing volume %s stays a full-transfer target: the predecessor's "
-            "copy on the destination could not be resolved", remote_lv.top_bdev)
+    prev_snap = _previous_replicated_snapshot(snapshot, replicate_to_source)
+    if not prev_snap:
+        logger.info("Landing volume %s stays a full-transfer target: %s starts the chain, "
+                    "so there is no predecessor to clone from",
+                    remote_lv.top_bdev, snapshot.get_id())
         return False
-    if not target_prev_snap:
-        logger.info(
-            "Landing volume %s stays a full-transfer target: %s starts the "
-            "chain, so there is no predecessor to clone from",
-            remote_lv.top_bdev, snapshot.get_id())
-        return False
-
-    # A node without a secondary is a single-node cluster's: there is no
-    # member to leave holes on, so chaining the node itself is enough.
-    single = not remote_lv_node.secondary_node_id
-    sec_node = None
-    if not single:
-        try:
-            sec_node = db.get_storage_node_by_id(remote_lv_node.secondary_node_id)
-        except KeyError:
-            sec_node = None
-    if not single and (sec_node is None or sec_node.status != StorageNode.STATUS_ONLINE):
-        logger.info(
-            "Landing volume %s stays a full-transfer target: the secondary of "
-            "%s is not online, and a delta would leave holes on it",
-            remote_lv.top_bdev, remote_lv_node.get_id())
+    copy_id = (prev_snap.source_replicated_snap_uuid if replicate_to_source
+               else prev_snap.target_replicated_snap_uuid)
+    if not copy_id:
+        # A blank id is NO copy, not an unresolvable one: the predecessor was
+        # never replicated, so this snapshot starts the chain.
+        logger.info("Landing volume %s stays a full-transfer target: predecessor %s has "
+                    "no copy on the destination", remote_lv.top_bdev, prev_snap.get_id())
         return False
 
     prechained = list(task.function_params.get("prechained_node_ids") or [])
-
-    def _chain_on(node, role):
-        if node.get_id() in prechained:
-            return True
-        logger.info("Pre-chaining landing volume %s onto %s on %s (%s) so the "
-                    "transfer can ship only the delta",
-                    remote_lv.top_bdev, target_prev_snap['snap_bdev'],
-                    node.get_id(), role)
-        try:
-            ret = node.rpc_client().bdev_lvol_add_clone(
-                remote_lv.top_bdev, target_prev_snap['snap_bdev'])
-        except Exception as e:
-            logger.warning("Pre-chain of %s on %s (%s) raised %s; falling back "
-                           "to a full transfer", remote_lv.top_bdev,
-                           node.get_id(), role, e)
-            return False
-        if not ret:
-            logger.warning("Pre-chain of %s onto %s failed on %s (%s); falling "
-                           "back to a full transfer", remote_lv.top_bdev,
-                           target_prev_snap['snap_bdev'], node.get_id(), role)
-            return False
-        prechained.append(node.get_id())
-        return True
-
-    primary_ok = _chain_on(remote_lv_node, "primary")
-    # Record whatever actually landed even on the failure path: the entry exists
-    # on that node now, and the finish step must not add it a second time.
-    if single:
-        secondary_ok = True
-    else:
-        secondary_ok = _chain_on(sec_node, "secondary") if primary_ok else False
-    if prechained != (task.function_params.get("prechained_node_ids") or []):
-        task.function_params["prechained_node_ids"] = prechained
+    answer = _landing_peer(snapshot, remote_lv).chain(ChainRequest(
+        landing_lvol_id=remote_lv.get_id(), leader_node_id=leader_id,
+        predecessor_id=copy_id, chained_on=prechained))
+    # Record whatever actually landed, on the failure path too: the entry
+    # exists on that member now.
+    if answer.chained_on != prechained:
+        task.function_params["prechained_node_ids"] = answer.chained_on
         task.write_to_db()
-
-    if not (primary_ok and secondary_ok):
+    if answer.state != "chained":
         # A full transfer into a partially chained volume is still correct: it
-        # writes every cluster the snapshot owns, and the chained node reads the
-        # remainder from the parent exactly as it should.
+        # writes every cluster the snapshot owns, and a chained member reads
+        # the remainder from the parent exactly as it should.
+        logger.info("Landing volume %s stays a full-transfer target: %s",
+                    remote_lv.top_bdev, answer.reason)
         return False
     return True
 
 
 def _partial_transfer_decision(task, snapshot, replicate_to_source, remote_lv,
-                               remote_lv_node, source_node_id):
+                               hub, source_node_id):
     """Whether this transfer may ship only the delta, chaining the landing
-    volume first if that has not happened yet.
+    volume first if that has not happened yet. *hub* is the destination's
+    ensure_hub answer: its leader and whether that leader's pair is online.
 
     The verdict is cached on the task so a resumed transfer (offset > 0) keeps
     the mode its first attempt used -- but it is KEYED to the landing volume it
     was made about. An interrupted attempt can delete a half-created landing
-    volume and build a fresh, unchained one (see the adoption block in
-    process_snap_replicate_start); carrying "partial is fine" onto that volume
-    would ship a delta into something that holds nothing, which is precisely
-    the silent data loss this design exists to avoid. A key mismatch throws
-    away the old verdict AND the old chain record and re-derives both.
+    volume and build a fresh, unchained one; carrying "partial is fine" onto
+    that volume would ship a delta into something that holds nothing, which is
+    precisely the silent data loss this design exists to avoid. A key mismatch
+    throws away the old verdict AND the old chain record and re-derives both.
     """
     landing_key = remote_lv.get_id()
     if task.function_params.get("allow_partial_landing") == landing_key:
@@ -1881,7 +1815,7 @@ def _partial_transfer_decision(task, snapshot, replicate_to_source, remote_lv,
     pred = _finishing_predecessor(snapshot, replicate_to_source)
     if pred is not None:
         allow_partial, partial_base = _deferred_partial_decision(
-            task, snapshot, pred, remote_lv_node, source_node_id)
+            task, snapshot, pred, hub, source_node_id)
         task.function_params["allow_partial"] = allow_partial
         task.function_params["partial_base"] = partial_base
         task.function_params["allow_partial_landing"] = landing_key
@@ -1889,7 +1823,7 @@ def _partial_transfer_decision(task, snapshot, replicate_to_source, remote_lv,
         return allow_partial, partial_base
 
     allow_partial = _prechain_landing_volume(
-        task, snapshot, replicate_to_source, remote_lv, remote_lv_node)
+        task, snapshot, replicate_to_source, remote_lv, hub.leader_node_id)
     partial_base = 0
     if allow_partial:
         # The landing volume is chained onto the copy of this predecessor; the
@@ -1912,24 +1846,20 @@ def _partial_transfer_decision(task, snapshot, replicate_to_source, remote_lv,
     return allow_partial, partial_base
 
 
-def _deferred_partial_decision(task, snapshot, pred, remote_lv_node, source_node_id):
+def _deferred_partial_decision(task, snapshot, pred, hub, source_node_id):
     """The transfer mode while *pred*'s copy is still being merged on the
     target: the landing volume stays unchained until the finish (see
     _finishing_predecessor), and a delta is sent on the same terms as on a
     pre-chained volume -- a clean basis, and both members of the destination
-    pair online. A full transfer is chained there all the same."""
+    pair online (*hub*.pair_online). A full transfer is chained there all the
+    same."""
     task.function_params["chain_deferred_to"] = pred.get_id()
     logger.info("Transfer of %s runs while %s's copy is merged; its landing volume is "
                 "chained onto that copy after the transfer", snapshot.get_id(), pred.get_id())
-    if remote_lv_node.secondary_node_id:
-        try:
-            sec = db.get_storage_node_by_id(remote_lv_node.secondary_node_id)
-        except KeyError:
-            sec = None
-        if sec is None or sec.status != StorageNode.STATUS_ONLINE:
-            logger.info("Transfer of %s stays FULL: the secondary of %s is not online",
-                        snapshot.get_id(), remote_lv_node.get_id())
-            return False, 0
+    if not hub.pair_online:
+        logger.info("Transfer of %s stays FULL: the secondary of %s is not online",
+                    snapshot.get_id(), hub.leader_node_id)
+        return False, 0
     ok, why = replication_delta.delta_basis(pred, snapshot, source_node_id)
     if ok and pred.blobid:
         return True, int(pred.blobid)

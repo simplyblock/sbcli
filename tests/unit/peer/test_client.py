@@ -29,6 +29,7 @@ from simplyblock_core.peer.client import (
 from simplyblock_core.peer.protocol import (
     PEER_API_VERSION,
     ChainCheck,
+    ChainRequest,
     DescribeRequest,
     EnsureHubRequest,
     LandingRequest,
@@ -303,3 +304,19 @@ class TestEnsureHub:
 
         with pytest.raises(PeerNotFoundError):
             _client().ensure_hub(EnsureHubRequest(landing_lvol_id="R1"))
+
+
+class TestChain:
+
+    def test_posts_the_request_and_reads_the_answer(self, session_request):
+        session_request.return_value = _response(body={"state": "declined", "chained_on": ["TP"],
+                                                       "reason": "secondary failed"})
+
+        answer = _client().chain(ChainRequest(landing_lvol_id="R1", leader_node_id="TP",
+                                              predecessor_id="C1", chained_on=[]))
+
+        method, url = session_request.call_args.args
+        assert method == "POST"
+        assert url == f"https://cp-b.example:8443/api/v2/_peer/clusters/{CLUSTER_ID}/chain"
+        assert session_request.call_args.kwargs["json"]["predecessor_id"] == "C1"
+        assert (answer.state, answer.chained_on) == ("declined", ["TP"])

@@ -27,6 +27,7 @@ from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.peer import service
 from simplyblock_core.peer.protocol import (
+    ChainRequest,
     EnsureHubRequest,
     HubAddress,
     HubPath,
@@ -471,3 +472,82 @@ class TestEnsureHub:
             answer = _ensure(lvstore)
 
         assert answer.state == "failed" and "Failed to create transfer hub" in answer.reason
+
+
+def _predecessor_copy(db, nodes):
+    copy = SnapShot()
+    copy.uuid = "1b6f4a8e-1c2d-4e3f-9a0b-1c2d3e4f5a80"
+    copy.cluster_id = TGT
+    copy.snap_bdev = "LVS_1/SNAP_1"
+    copy.lvol = LVol()
+    copy.lvol.node_id, copy.lvol.nodes = nodes[0], list(nodes)
+    copy.write_to_db(db.kv_store)
+    return copy
+
+
+def _chain(db, landing, copy, chained_on=()):
+    return service.chain(TGT, ChainRequest(landing_lvol_id=landing.get_id(), leader_node_id=TP,
+                                           predecessor_id=copy.get_id(), chained_on=list(chained_on)))
+
+
+class TestChain:
+
+    def test_chains_the_leader_and_its_secondary(self, db, lvstore, spdk):
+        spdk.bdev_get.return_value = None
+        spdk.bdev_lvol_add_clone.return_value = True
+        copy = _predecessor_copy(db, [TP, TS, TT])
+
+        answer = _chain(db, lvstore, copy)
+
+        assert (answer.state, answer.chained_on) == ("chained", [TP, TS])
+        assert spdk.bdev_lvol_add_clone.call_count == 2
+        spdk.bdev_lvol_add_clone.assert_called_with("LVS_1/REP_snap-1", "LVS_1/SNAP_1")
+
+    def test_a_member_already_chained_is_not_chained_again(self, db, lvstore, spdk):
+        """add_clone is not idempotent in SPDK: the source's record, and SPDK's
+        own base snapshot when an answer was lost, both count."""
+        spdk.bdev_get.return_value = {"driver_specific": {"lvol": {"base_snapshot": "SNAP_1"}}}
+        copy = _predecessor_copy(db, [TP, TS, TT])
+
+        answer = _chain(db, lvstore, copy, chained_on=[TP])
+
+        assert (answer.state, answer.chained_on) == ("chained", [TP, TS])
+        spdk.bdev_lvol_add_clone.assert_not_called()
+
+    def test_an_offline_secondary_declines_before_chaining_anything(self, db, lvstore, spdk):
+        """The lvstore mirrors the transfer to the secondary; an unchained one
+        would read zeros wherever a delta did not write."""
+        secondary = db.get_storage_node_by_id(TS)
+        secondary.status = StorageNode.STATUS_OFFLINE
+        secondary.write_to_db(db.kv_store)
+        copy = _predecessor_copy(db, [TP, TS, TT])
+
+        answer = _chain(db, lvstore, copy)
+
+        assert (answer.state, answer.chained_on) == ("declined", [])
+        spdk.bdev_lvol_add_clone.assert_not_called()
+
+    def test_a_failed_secondary_chain_still_reports_the_primary(self, db, lvstore, spdk):
+        spdk.bdev_get.return_value = None
+        spdk.bdev_lvol_add_clone.side_effect = [True, False]
+        copy = _predecessor_copy(db, [TP, TS, TT])
+
+        answer = _chain(db, lvstore, copy)
+
+        assert (answer.state, answer.chained_on) == ("declined", [TP])
+
+    def test_a_copy_in_another_lvstore_cannot_be_chained_onto(self, db, lvstore, spdk):
+        copy = _predecessor_copy(db, ["1b6f4a8e-1c2d-4e3f-9a0b-1c2d3e4f5a99"])
+
+        answer = _chain(db, lvstore, copy)
+
+        assert answer.state == "unresolvable" and "across lvstores" in answer.reason
+        spdk.bdev_lvol_add_clone.assert_not_called()
+
+    def test_a_copy_that_is_gone_cannot_be_chained_onto(self, db, lvstore, spdk):
+        missing = SnapShot()
+        missing.uuid = "1b6f4a8e-1c2d-4e3f-9a0b-1c2d3e4f5a81"
+
+        answer = _chain(db, lvstore, missing)
+
+        assert answer.state == "unresolvable"

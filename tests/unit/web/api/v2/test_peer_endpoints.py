@@ -10,6 +10,7 @@ import simplyblock_web.api.v2 as v2
 import simplyblock_web.api.v2.peer as peer_module
 from simplyblock_core.peer.protocol import (
     PEER_API_VERSION,
+    ChainResponse,
     DescribeRequest,
     DescribeResponse,
     EnsureHubResponse,
@@ -171,3 +172,28 @@ class TestEnsureHub:
         peer_service.ensure_hub.side_effect = KeyError('LVol not found')
 
         assert client.post(HUB_URL).status_code == 404
+
+
+CHAIN_URL = f'/api/v2/_peer/clusters/{CLUSTER_ID}/chain'
+
+
+class TestChain:
+
+    def test_answers_through_the_service(self, client, db, cluster, peer_service):
+        peer_service.chain.return_value = ChainResponse(state='chained', chained_on=['TP', 'TS'])
+
+        response = client.post(CHAIN_URL, json={'landing_lvol_id': 'R1', 'leader_node_id': 'TP',
+                                                'predecessor_id': 'C1'})
+
+        assert response.status_code == 200
+        assert response.json()['chained_on'] == ['TP', 'TS']
+        cluster_id, request = peer_service.chain.call_args.args
+        assert (cluster_id, request.leader_node_id) == (CLUSTER_ID, 'TP')
+
+    def test_an_unknown_landing_volume_is_404(self, client, db, cluster, peer_service):
+        peer_service.chain.side_effect = KeyError('LVol not found')
+
+        response = client.post(CHAIN_URL, json={'landing_lvol_id': 'R1', 'leader_node_id': 'TP',
+                                                'predecessor_id': 'C1'})
+
+        assert response.status_code == 404

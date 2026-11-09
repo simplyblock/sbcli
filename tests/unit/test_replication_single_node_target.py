@@ -7,6 +7,8 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from simplyblock_core.models.job_schedule import JobSchedule
+from simplyblock_core.peer import service as peer_service
+from simplyblock_core.peer.protocol import ChainRequest
 from simplyblock_core.services import snapshot_replication
 
 
@@ -63,20 +65,23 @@ class TestDeltaIntoASingleNodeTarget(unittest.TestCase):
 
     def test_a_node_without_a_secondary_takes_the_delta(self):
         """No secondary means no member to leave holes on: chaining the only
-        node is the whole precondition, and the transfer ships the delta."""
+        node is the whole precondition, and the transfer ships the delta. The
+        destination decides that (peer.service.chain_landing)."""
         node = MagicMock()
         node.get_id.return_value = "n-p"
         node.secondary_node_id = ""
-        node.rpc_client.return_value.bdev_lvol_add_clone.return_value = True
-        remote_lv = SimpleNamespace(top_bdev="LVS_1/LVOL_92")
+        rpc = node.rpc_client.return_value
+        rpc.bdev_lvol_add_clone.return_value = True
+        rpc.bdev_get.return_value = None            # not a clone yet
         db = MagicMock()
-        db.get_storage_node_by_id.side_effect = _blank_id_raises
-        task = _task()
-        with patch.object(snapshot_replication, "db", db), \
-                patch.object(snapshot_replication, "_resolve_chain_target",
-                             return_value=({"snap_bdev": "LVS_1/SNAP_1"}, None, True)):
-            allowed = snapshot_replication._prechain_landing_volume(
-                task, MagicMock(), False, remote_lv, node)
+        db.get_lvol_by_id.return_value = SimpleNamespace(top_bdev="LVS_1/LVOL_92")
+        db.get_snapshot_by_id.return_value = SimpleNamespace(
+            snap_bdev="LVS_1/SNAP_1", lvol=SimpleNamespace(nodes=["n-p"], node_id="n-p"))
+        db.get_storage_node_by_id.side_effect = (
+            lambda node_id: node if node_id == "n-p" else _blank_id_raises(node_id))
 
-        self.assertTrue(allowed)
-        self.assertEqual(task.function_params["prechained_node_ids"], ["n-p"])
+        answer = peer_service.chain_landing(db, ChainRequest(
+            landing_lvol_id="landing", leader_node_id="n-p", predecessor_id="copy"))
+
+        self.assertEqual((answer.state, answer.chained_on), ("chained", ["n-p"]))
+        rpc.bdev_lvol_add_clone.assert_called_once_with("LVS_1/LVOL_92", "LVS_1/SNAP_1")

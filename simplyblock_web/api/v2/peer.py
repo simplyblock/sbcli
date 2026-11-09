@@ -20,6 +20,8 @@ from fastapi import APIRouter, HTTPException, Response
 from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.peer import service
 from simplyblock_core.peer.protocol import (
+    ChainRequest,
+    ChainResponse,
     DescribeRequest,
     DescribeResponse,
     EnsureHubRequest,
@@ -79,5 +81,15 @@ def ensure_hub(cluster: Cluster, lvol_id: UUID) -> EnsureHubResponse:
     settled leader, the receiving hub's attach address and the volume's map id."""
     try:
         return service.ensure_hub(cluster.get_id(), EnsureHubRequest(landing_lvol_id=str(lvol_id)))
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@api.post('/chain', name='peer:chain')
+def chain(cluster: Cluster, request: ChainRequest) -> ChainResponse:
+    """Chain a landing volume onto the copy of the snapshot before it, on the
+    leader and its secondary, so the transfer can ship only the delta."""
+    try:
+        return service.chain(cluster.get_id(), request)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))

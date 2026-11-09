@@ -22,6 +22,8 @@ from simplyblock_core.peer.protocol import (
     LANDING_PREFIX,
     PEER_API_VERSION,
     ChainCheck,
+    ChainRequest,
+    ChainResponse,
     ChainState,
     DescribeRequest,
     DescribeResponse,
@@ -525,4 +527,123 @@ def ensure_hub(cluster_id: str, request: EnsureHubRequest) -> EnsureHubResponse:
         return EnsureHubResponse(state="not_leader", leader_node_id=leader.get_id(),
                                  reason=f"target node {leader.get_id()} not LVS leader of "
                                         f"{lvol.lvs_name}")
-    return EnsureHubResponse(state="ready", leader_node_id=leader.get_id(), map_id=map_id, hub=hub)
+    return EnsureHubResponse(state="ready", leader_node_id=leader.get_id(), map_id=map_id, hub=hub,
+                             pair_online=_pair_online(db, leader))
+
+
+def _pair_online(db, leader):
+    """Whether *leader* has no secondary (a single-node cluster: no member to
+    leave holes on) or its secondary is online."""
+    if not leader.secondary_node_id:
+        return True
+    try:
+        return db.get_storage_node_by_id(leader.secondary_node_id).status == StorageNode.STATUS_ONLINE
+    except KeyError:
+        return False
+
+
+def chain(cluster_id: str, request: ChainRequest) -> ChainResponse:
+    """Chain the landing volume onto the predecessor's copy (see chain_landing).
+
+    Raises:
+        KeyError: this control plane does not manage *cluster_id*, or the
+            landing volume or the leader is unknown.
+    """
+    db = DBController()
+    db.get_cluster_by_id(cluster_id)
+    return chain_landing(db, request)
+
+
+def chain_landing(db, request: ChainRequest) -> ChainResponse:
+    """Chain the landing volume onto the copy of the snapshot before it, on the
+    leader and its secondary, BEFORE the transfer, so it can ship only the delta.
+
+    ``bdev_lvol_transfer`` sends a blob's own cluster map and nothing else, so a
+    partial transfer ships only the ranges written since the previous snapshot;
+    everything outside that delta has to be on the destination already. A
+    landing volume chained onto the predecessor's copy supplies it: a cluster
+    the new snapshot does not own reads through to the parent, and the first
+    write into one the delta touches copies the whole cluster from that same
+    parent before applying the incoming range.
+
+    The bar for "chained" is high: the copy must be in the leader's lvstore,
+    and the secondary must be online and accept the chain too. The transfer
+    lands on the leader and the lvstore mirrors it to the secondary; an
+    unchained secondary would read zeros wherever the delta did not write. A
+    member already in ``request.chained_on`` is not chained again: the same
+    clone entry twice is not idempotent in SPDK. Anything short of the bar
+    declines, and a full transfer -- always correct -- is sent.
+
+    Raises:
+        KeyError: the landing volume or the leader is unknown.
+    """
+    lvol = db.get_lvol_by_id(request.landing_lvol_id)
+    chained = list(request.chained_on)
+    try:
+        copy = db.get_snapshot_by_id(request.predecessor_id)
+    except KeyError as e:
+        return ChainResponse(state="unresolvable", chained_on=chained,
+                             reason=f"the predecessor's copy {request.predecessor_id} "
+                                    f"cannot be resolved ({e})")
+    # Any member of the copy's lvstore can chain onto it: the bdev is the
+    # lvstore's, the same on primary, secondary and tertiary (bf8 2026-11-02).
+    members = list(getattr(copy.lvol, "nodes", None) or [copy.lvol.node_id])
+    if request.leader_node_id not in members:
+        return ChainResponse(state="unresolvable", chained_on=chained,
+                             reason=f"the predecessor's copy {request.predecessor_id} lives on "
+                                    f"{copy.lvol.node_id}, not in the lvstore of "
+                                    f"{request.leader_node_id}; cannot chain across lvstores")
+    leader = db.get_storage_node_by_id(request.leader_node_id)
+    secondary = None
+    if leader.secondary_node_id:
+        with contextlib.suppress(KeyError):
+            secondary = db.get_storage_node_by_id(leader.secondary_node_id)
+        if secondary is None or secondary.status != StorageNode.STATUS_ONLINE:
+            return ChainResponse(state="declined", chained_on=chained,
+                                 reason=f"the secondary of {leader.get_id()} is not online, "
+                                        f"and a delta would leave holes on it")
+
+    def chain_on(node, role):
+        if node.get_id() in chained:
+            return True
+        # An answer lost after the add_clone landed leaves the member out of
+        # the source's record; SPDK knows, and is asked before chaining again.
+        if _reads_through(node, lvol.top_bdev, copy.snap_bdev):
+            chained.append(node.get_id())
+            return True
+        logger.info("Pre-chaining landing volume %s onto %s on %s (%s) so the transfer can "
+                    "ship only the delta", lvol.top_bdev, copy.snap_bdev, node.get_id(), role)
+        try:
+            ok = node.rpc_client().bdev_lvol_add_clone(lvol.top_bdev, copy.snap_bdev)
+        except RPCException as e:
+            logger.warning("Pre-chain of %s on %s (%s) raised %s", lvol.top_bdev,
+                           node.get_id(), role, e)
+            return False
+        if not ok:
+            logger.warning("Pre-chain of %s onto %s failed on %s (%s)", lvol.top_bdev,
+                           copy.snap_bdev, node.get_id(), role)
+            return False
+        chained.append(node.get_id())
+        return True
+
+    # Whatever lands is reported even when the pair is not complete: the entry
+    # exists on that member now, and must not be added a second time.
+    if not chain_on(leader, "primary"):
+        return ChainResponse(state="declined", chained_on=chained,
+                             reason=f"the chain on {leader.get_id()} failed")
+    if secondary is not None and not chain_on(secondary, "secondary"):
+        return ChainResponse(state="declined", chained_on=chained,
+                             reason=f"the chain on the secondary {secondary.get_id()} failed")
+    return ChainResponse(state="chained", chained_on=chained)
+
+
+def _reads_through(node, lvol_bdev, snap_bdev):
+    """Whether *lvol_bdev* is already a clone of *snap_bdev* on *node*."""
+    try:
+        ret = node.rpc_client().bdev_get(lvol_bdev)
+    except RPCException:
+        return False
+    if isinstance(ret, list):
+        ret = ret[0] if ret else {}
+    base = (((ret or {}).get("driver_specific") or {}).get("lvol") or {}).get("base_snapshot")
+    return bool(base) and base == snap_bdev.split("/")[-1]
