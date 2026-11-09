@@ -26,6 +26,8 @@ from simplyblock_core.peer.protocol import (
     DescribeResponse,
     EnsureHubRequest,
     EnsureHubResponse,
+    FinishRequest,
+    FinishResponse,
     LandingRequest,
     LandingResponse,
     PeerInfo,
@@ -93,3 +95,10 @@ def chain(cluster: Cluster, request: ChainRequest) -> ChainResponse:
         return service.chain(cluster.get_id(), request)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+
+@api.post('/finish', name='peer:finish')
+def finish(cluster: Cluster, request: FinishRequest) -> FinishResponse:
+    """Make a landing volume the copy of its source snapshot after the transfer:
+    chain, merge and convert it, record the copy and retire the landing volume."""
+    return service.finish(cluster.get_id(), request)

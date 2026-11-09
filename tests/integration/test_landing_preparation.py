@@ -29,9 +29,11 @@ from simplyblock_core.peer import service
 from simplyblock_core.peer.protocol import (
     ChainRequest,
     EnsureHubRequest,
+    FinishRequest,
     HubAddress,
     HubPath,
     LandingRequest,
+    SourceSnapshot,
 )
 
 SRC = "1b6f4a8e-1c2d-4e3f-9a0b-1c2d3e4f5a01"
@@ -551,3 +553,73 @@ class TestChain:
         answer = _chain(db, lvstore, missing)
 
         assert answer.state == "unresolvable"
+
+
+def _finish_request(landing, copy=None, **overrides):
+    fields = dict(source_cluster_id=SRC, landing_lvol_id=landing.get_id(), link="source",
+                  predecessor_id=copy.get_id() if copy is not None else "",
+                  snapshot=SourceSnapshot(snapshot_id="1b6f4a8e-1c2d-4e3f-9a0b-1c2d3e4f5a90",
+                                          snap_name="snap-2", size=1 << 30, data_uuid="D-2",
+                                          group_id="G", group_seq=4))
+    fields.update(overrides)
+    return FinishRequest(**fields)
+
+
+class TestFinish:
+
+    def test_makes_the_landing_volume_the_linked_copy_and_retires_it(self, db, lvstore, spdk):
+        spdk.bdev_get.return_value = None
+        spdk.bdev_lvol_add_clone.return_value = True
+        spdk.bdev_lvol_convert.return_value = True
+        copy = _predecessor_copy(db, [TP, TS, TT])
+        request = _finish_request(lvstore, copy)
+
+        with _leads(TP), patch.object(lvol_controller, "delete_lvol_from_node") as teardown:
+            answer = service.finish(TGT, request)
+
+        assert answer.state == "done"
+        assert answer.copy_id == service.copy_id_for(SRC, request.snapshot.snapshot_id,
+                                                     lvstore.get_id())
+        assert (answer.chained_on, answer.converted_on) == ([TP, TS], [TP, TS])
+        recorded = db.get_snapshot_by_id(answer.copy_id)
+        assert recorded.source_replicated_snap_uuid == request.snapshot.snapshot_id
+        assert (recorded.prev_snap_uuid, recorded.cluster_id) == (copy.get_id(), TGT)
+        assert (recorded.group_id, recorded.group_seq) == ("G", 4)
+        assert answer.record["uuid"] == answer.copy_id
+        assert db.get_snapshot_by_id(copy.get_id()).next_snap_uuid == answer.copy_id
+        with pytest.raises(KeyError):
+            db.get_lvol_by_id(lvstore.get_id())     # the landing volume is retired
+        assert teardown.call_count == 3
+
+    def test_a_repeated_finish_answers_with_the_recorded_copy(self, db, lvstore, spdk):
+        """A lost answer, or a crash before the source recorded it: the copy's
+        id is derived from the request, so nothing is written twice."""
+        spdk.bdev_get.return_value = None
+        spdk.bdev_lvol_convert.return_value = True
+        request = _finish_request(lvstore)
+        with _leads(TP), patch.object(lvol_controller, "delete_lvol_from_node"):
+            first = service.finish(TGT, request)
+        spdk.reset_mock()
+
+        again = service.finish(TGT, request)
+
+        assert (again.state, again.copy_id) == ("done", first.copy_id)
+        spdk.bdev_lvol_convert.assert_not_called()
+
+    def test_a_landing_volume_that_is_gone_is_reported(self, db, lvstore, spdk):
+        lvstore.remove(db.kv_store)
+
+        answer = service.finish(TGT, _finish_request(lvstore))
+
+        assert answer.state == "gone"
+
+    def test_an_instance_copy_carries_no_links(self, db, lvstore, spdk):
+        spdk.bdev_get.return_value = None
+        spdk.bdev_lvol_add_clone.return_value = True
+        spdk.bdev_lvol_convert.return_value = True
+        copy = _predecessor_copy(db, [TP, TS, TT])
+        with _leads(TP), patch.object(lvol_controller, "delete_lvol_from_node"):
+            answer = service.finish(TGT, _finish_request(lvstore, copy, link="none"))
+
+        recorded = db.get_snapshot_by_id(answer.copy_id)
+        assert not recorded.source_replicated_snap_uuid and not recorded.prev_snap_uuid

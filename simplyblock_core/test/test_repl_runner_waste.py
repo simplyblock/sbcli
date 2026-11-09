@@ -17,6 +17,7 @@ import pytest
 
 from simplyblock_core.controllers import tasks_controller as tc
 from simplyblock_core.models.job_schedule import JobSchedule
+from simplyblock_core.peer.protocol import FinishResponse
 from simplyblock_core.services import snapshot_replication as sr
 
 
@@ -89,11 +90,24 @@ def test_a_blocked_chain_backs_off():
 def test_a_leaderless_target_keeps_the_finish_pending(monkeypatch):
     """Both target members down is an outage, not a failure: the finish stays
     pending (re-checked every pass) instead of taking the doubling retry
-    backoff that delayed the resume by 7 min on bf8 (2026-11-02, round 6)."""
+    backoff that delayed the resume by 7 min on bf8 (2026-11-02, round 6).
+    The destination reports it (finish: waiting_for_leader)."""
     t = _T()
-    t.function_params["remote_lvol_id"] = "LAND"
-    monkeypatch.setattr(sr.db, "get_lvol_by_id", lambda lid: SimpleNamespace(get_id=lambda: lid))
-    monkeypatch.setattr(sr, "_stable_target_leader", lambda lv: (None, "0 members report leadership"))
-    assert sr.process_snap_replicate_finish(t, SimpleNamespace(get_id=lambda: "S")) == sr.FINISH_PENDING
+    t.function_params.update(remote_lvol_id="LAND", replicate_to_source=False)
+
+    class _Peer:
+        def finish(self, request):
+            return FinishResponse(state="pending", waiting_for_leader=True,
+                                  reason="waiting for the target lvstore to have a leader "
+                                         "(0 members report leadership)")
+
+    monkeypatch.setattr(sr, "_deferred_chain_gate", lambda task, snap, to_source: "ok")
+    monkeypatch.setattr(sr, "_previous_replicated_snapshot", lambda snap, to_source: None)
+    monkeypatch.setattr(sr, "_task_peer", lambda task, snap: _Peer())
+    snap = SimpleNamespace(get_id=lambda: "S", cluster_id="CL", snap_name="s", size=1,
+                           used_size=0, data_uuid="", lvol=SimpleNamespace(get_id=lambda: "LV"))
+    assert sr.process_snap_replicate_finish(t, snap) == sr.FINISH_PENDING
     assert t.retry == 0 and "not_before" not in t.function_params
     assert "leader" in t.function_params["pending_why"]
+
+

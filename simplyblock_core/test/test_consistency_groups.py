@@ -333,10 +333,16 @@ def test_failover_result_carries_membership_warnings():
 
 
 def test_target_snapshot_copy_inherits_group_provenance():
+    """The source sends the group provenance and the destination records it
+    on the copy (control-plane split: the copy is written by peer.service)."""
+    from simplyblock_core.peer import service
     from simplyblock_core.services import snapshot_replication as sr
-    src = inspect.getsource(sr)
-    assert 'new_snapshot.group_id = getattr(snapshot, "group_id", "")' in src
-    assert 'new_snapshot.group_seq = getattr(snapshot, "group_seq", 0)' in src
+    runner = inspect.getsource(sr.process_snap_replicate_finish)
+    assert 'group_id=getattr(snapshot, "group_id", "")' in runner
+    assert 'group_seq=getattr(snapshot, "group_seq", 0)' in runner
+    record = inspect.getsource(service._record_copy)
+    assert "copy.group_id = source.group_id" in record
+    assert "copy.group_seq = source.group_seq" in record
 
 
 # --------------------------------------------------------------------------- #

@@ -8,8 +8,7 @@ from unittest.mock import MagicMock, patch
 
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.peer import service as peer_service
-from simplyblock_core.peer.protocol import ChainRequest
-from simplyblock_core.services import snapshot_replication
+from simplyblock_core.peer.protocol import ChainRequest, FinishRequest, SourceSnapshot
 
 
 def _task():
@@ -36,29 +35,32 @@ def _blank_id_raises(node_id):
 class TestFinishOnASingleNodeTarget(unittest.TestCase):
 
     def test_the_landing_volume_is_converted_on_the_only_node(self):
+        """No secondary: the only node's convert makes the copy
+        (peer.service.finish_landing)."""
         primary = MagicMock()
         primary.get_id.return_value = "n-p"
         primary.secondary_node_id = ""
-        primary.transfer_hublvol = None
         primary.rpc_client.return_value.bdev_lvol_convert.return_value = True
-        remote_lv = MagicMock(top_bdev="LVS_1/LVOL_92", lvs_name="LVS_1", node_id="n-p")
+        landing = SimpleNamespace(top_bdev="LVS_1/LVOL_92", lvs_name="LVS_1", node_id="n-p",
+                                  nodes=["n-p"], status="online", lvol_priority_class=0,
+                                  get_id=lambda: "landing")
         db = MagicMock()
-        db.get_lvol_by_id.return_value = remote_lv
+        db.get_snapshot_by_id.side_effect = KeyError("no copy recorded yet")
+        db.get_lvol_by_id.return_value = landing
         db.get_storage_node_by_id.side_effect = _blank_id_raises
-        db.get_snapshots.side_effect = _RecordStep
-        task = _task()
-        with patch.object(snapshot_replication, "db", db), \
-                self.assertRaises(_RecordStep), \
-                patch.object(snapshot_replication, "_stable_target_leader", return_value=(primary, "")), \
-                patch.object(snapshot_replication, "_transfer_source_node", return_value=MagicMock()), \
-                patch.object(snapshot_replication, "_resolve_chain_target", return_value=(None, None, True)), \
-                patch.object(snapshot_replication, "_require_lvs_leader", return_value=True), \
-                patch.object(snapshot_replication, "_prechained_nodes_for", return_value=set()), \
-                patch.object(snapshot_replication, "SnapShot"):
-            snapshot_replication.process_snap_replicate_finish(task, MagicMock())
+        record = MagicMock()
+        record.to_dict.return_value = {"uuid": "copy"}
+        with patch.object(peer_service, "stable_leader", return_value=(primary, "")), \
+                patch.object(peer_service, "require_leader", return_value=True), \
+                patch.object(peer_service, "_record_copy", return_value=record), \
+                patch.object(peer_service, "_retire_landing") as retire:
+            answer = peer_service.finish_landing(db, FinishRequest(
+                source_cluster_id="c-a", landing_lvol_id="landing", link="source",
+                snapshot=SourceSnapshot(snapshot_id="s-1", snap_name="s-1", size=1)))
 
         primary.rpc_client.return_value.bdev_lvol_convert.assert_called_once_with("LVS_1/LVOL_92")
-        self.assertEqual(task.function_params["converted_nodes"], ["n-p"])
+        self.assertEqual((answer.state, answer.converted_on), ("done", ["n-p"]))
+        retire.assert_called_once()
 
 
 class TestDeltaIntoASingleNodeTarget(unittest.TestCase):

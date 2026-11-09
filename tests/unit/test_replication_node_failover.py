@@ -15,7 +15,13 @@ import pytest
 from simplyblock_core import constants
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.peer.protocol import DescribeResponse, EnsureHubResponse
+from simplyblock_core.peer import service as peer_service
+from simplyblock_core.peer.protocol import (
+    DescribeResponse,
+    EnsureHubResponse,
+    FinishRequest,
+    SourceSnapshot,
+)
 from simplyblock_core.services import snapshot_replication as sr
 
 ONLINE = StorageNode.STATUS_ONLINE
@@ -259,15 +265,20 @@ def test_failed_transfer_with_unchanged_leader_is_an_ordinary_retry():
 
 
 def test_finish_waits_while_target_leadership_is_unsettled():
-    task = _task(remote_lvol_id="R", target_node_id="TP")
+    """Pending, not failed: no retry backoff while the target has no leader,
+    and nothing is resolved, chained or converted meanwhile. The destination
+    decides it (peer.service.finish_landing)."""
     db = MagicMock()
+    db.get_snapshot_by_id.side_effect = KeyError("no copy recorded yet")
     db.get_lvol_by_id.return_value = _remote()
-    with patch.object(sr, "db", db), \
-            patch.object(sr, "_stable_target_leader", return_value=(None, "leadership moving")), \
-            patch.object(sr, "_resolve_chain_target") as chain:
-        # Pending, not failed: no retry backoff while the target has no leader.
-        assert sr.process_snap_replicate_finish(task, MagicMock()) == sr.FINISH_PENDING
-    chain.assert_not_called()
+    db.get_lvol_by_id.return_value.status = "online"
+    with patch.object(peer_service, "stable_leader", return_value=(None, "leadership moving")):
+        answer = peer_service.finish_landing(db, FinishRequest(
+            source_cluster_id="CL", landing_lvol_id="R", predecessor_id="P", link="source",
+            snapshot=SourceSnapshot(snapshot_id="S", snap_name="S", size=1)))
+    assert answer.state == "pending" and answer.waiting_for_leader
+    assert "leadership moving" in answer.reason
+    db.get_snapshot_by_id.assert_called_once()     # its own record only, not the predecessor
 
 
 def test_start_never_transfers_without_a_settled_target_leader():

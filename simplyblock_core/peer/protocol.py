@@ -16,7 +16,7 @@ PEER_API_VERSION = 1
 #: Peer endpoints this control plane serves, named so a caller can check for a
 #: step before relying on it during a rolling upgrade of the two sites.
 CAPABILITIES: frozenset[str] = frozenset({
-    "info", "discard_landing", "describe", "prepare_landing", "ensure_hub", "chain",
+    "info", "discard_landing", "describe", "prepare_landing", "ensure_hub", "chain", "finish",
 })
 
 #: Name prefix of a replication landing volume (``REP_<snapshot name>``). It is
@@ -185,3 +185,59 @@ class ChainResponse(BaseModel):
     #: Every member the landing volume is chained on now, including earlier ones.
     chained_on: list[str] = Field(default_factory=list)
     reason: str = ""
+
+
+class SourceSnapshot(BaseModel):
+    """What the copy's record carries over from the source snapshot."""
+
+    snapshot_id: str
+    snap_name: str
+    size: Annotated[int, Field(ge=0)]
+    used_size: Annotated[int, Field(ge=0)] = 0
+    data_uuid: str = ""
+    group_id: str = ""
+    group_seq: Annotated[int, Field(ge=0)] = 0
+
+
+class FinishRequest(BaseModel):
+    """Make the landing volume the copy of the source snapshot, after its transfer.
+
+    Retry key: the copy's record id is derived from (``source_cluster_id``,
+    ``snapshot.snapshot_id``, ``landing_lvol_id``); ``chained_on``,
+    ``converted_on`` and ``merged`` are what earlier answers reported.
+    """
+
+    source_cluster_id: str
+    landing_lvol_id: str
+    snapshot: SourceSnapshot
+    #: The member the transfer was sent to.
+    sent_to: str = ""
+    #: The predecessor's copy here, to chain onto; empty: this copy starts the chain.
+    predecessor_id: str = ""
+    #: The base blob of a delta transfer; non-zero means the volume must be
+    #: merged with its base before the convert.
+    partial_base: Annotated[int, Field(ge=0)] = 0
+    chained_on: list[str] = Field(default_factory=list)
+    converted_on: list[str] = Field(default_factory=list)
+    merged: bool = False
+    #: Which field of the copy names the source snapshot: ``source`` for a
+    #: forward copy, ``target`` for a fail-back, ``none`` for an instance copy
+    #: (no links, no chain back-link).
+    link: Literal["source", "target", "none"]
+
+
+class FinishResponse(BaseModel):
+    #: done: ``copy_id`` is the copy (``record`` its record). pending: wait (a
+    #: merge running, or no settled leader: ``waiting_for_leader``). retry:
+    #: failed this time (``reason``). restart: the landing volume lost its
+    #: delta record; transfer again. gone: the landing volume is gone and no
+    #: copy was recorded; start over.
+    state: Literal["done", "pending", "retry", "restart", "gone"]
+    reason: str = ""
+    leader_node_id: str = ""
+    waiting_for_leader: bool = False
+    chained_on: list[str] = Field(default_factory=list)
+    converted_on: list[str] = Field(default_factory=list)
+    merged: bool = False
+    copy_id: str = ""
+    record: dict = Field(default_factory=dict)

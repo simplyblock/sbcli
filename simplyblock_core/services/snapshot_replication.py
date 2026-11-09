@@ -1,7 +1,6 @@
 import contextlib
 import logging
 import time
-import uuid
 from typing import NamedTuple
 
 from simplyblock_core import (
@@ -21,7 +20,6 @@ from simplyblock_core.controllers import (
     snapshot_events,
 )
 from simplyblock_core.models.job_schedule import JobSchedule
-from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.peer import service as peer_service
@@ -37,7 +35,9 @@ from simplyblock_core.peer.protocol import (
     ChainRequest,
     DescribeRequest,
     EnsureHubRequest,
+    FinishRequest,
     LandingRequest,
+    SourceSnapshot,
 )
 from simplyblock_core.rpc_client import RPCException
 
@@ -571,24 +571,11 @@ def _resume_finish(task, snapshot):
     over re-sent the transfer into it: every write failed, and the target LVS
     dropped its leadership and fenced its ports on each attempt (2026-09-29,
     LVS_1 on site A, 14 times). The data is complete, so resume the finish
-    instead: chain and convert where it has not happened yet.
+    instead: the destination chains and converts where it has not happened
+    yet, answers done when an earlier attempt already recorded the copy, and
+    gone when the landing volume is gone (the transfer then starts over).
     """
     if not task.function_params.get("transfer_done"):
-        return False
-    remote_lv_id = task.function_params.get("remote_lvol_id")
-    remote_lv = None
-    if remote_lv_id:
-        try:
-            remote_lv = db.get_lvol_by_id(remote_lv_id)
-        except KeyError:
-            remote_lv = None
-    if remote_lv is None or remote_lv.status == LVol.STATUS_IN_DELETION:
-        # The landing volume is gone: nothing to resume, start over.
-        logger.warning("Replication task %s: landing volume %s is gone; "
-                       "starting the transfer over", task.uuid, remote_lv_id)
-        for key in ("transfer_done", "converted_nodes", "remote_lvol_id", "offset"):
-            task.function_params.pop(key, None)
-        task.write_to_db()
         return False
     logger.info("Replication task %s: transfer of %s already completed; "
                 "resuming the finish (converted on: %s)", task.uuid,
@@ -934,6 +921,8 @@ def process_snap_replicate_start(task, snapshot):
                               lvol=snapshot.lvol.get_id())
             _t_landing = None          # nothing was created: no create time to report
         task.function_params["remote_lvol_id"] = landing.lvol_id
+        # The destination the later steps reach through _task_peer.
+        task.function_params["destination_cluster_id"] = destination_cluster_id
         task.write_to_db()
 
     remote_lv = db.get_lvol_by_id(task.function_params["remote_lvol_id"])
@@ -1122,7 +1111,6 @@ def _secondary_lacks_bdev(node, bdev_name):
 
 def _lvs_leader_among(nodes_ids, preferred_id, lvs_name):
     """The online node among *nodes_ids* that currently leads *lvs_name*."""
-    from simplyblock_core.controllers import lvol_controller
     candidates = []
     for node_id in (nodes_ids or ([preferred_id] if preferred_id else [])):
         try:
@@ -2023,336 +2011,168 @@ def _merge_landing(task, remote_lv, remote_snode):
     return "retry"
 
 
-def process_snap_replicate_finish(task, snapshot):
+def _task_peer(task, snapshot):
+    """The peer client of *task*'s destination: the cluster prepare_landing
+    recorded, reached through the policy of the volume whose destination it is
+    (a chain ancestor's is its descendant's, dest_lvol_id).
 
-    # Close the transfer session — but ONLY when this was the last active
-    # transfer into that target node. The hub is ONE shared session per target
-    # node: a naive per-cycle detach rips the qpair out from under the other
-    # volumes' in-flight transfers, mass-failing their IO on the hub and
-    # churning LVS leadership on the target ("receive io for hublvol in
-    # nonleader mode" storms, observed live 2026-08-13). This is the refcount
-    # discipline the migration runner's hub_manager exists for.
-    remote_lv = db.get_lvol_by_id(task.function_params["remote_lvol_id"])
-    # add_clone/convert must run on the leader too — a convert on a non-leader
-    # reports success and persists nothing. Follow leadership, not the node the
-    # receiving lvol was created on (see _receiving_leader_node).
-    # The convert goes to the target's leader once its leadership is settled
-    # (see _stable_target_leader): leadership may have moved since the
-    # transfer -- the data the old leader acknowledged is in the HA landing
-    # volume on every member, so the finish follows the move instead of
-    # resending.
-    remote_snode, lead_why = _stable_target_leader(remote_lv)
-    if remote_snode is None:
-        # Pending, not failed: the target is down (both members of its
-        # lvstore, or a leadership move in progress), and that is not the
-        # transfer's fault. Returned as a failure it took the retry backoff,
-        # which doubles per attempt: on bf8 (2026-11-02, round 6, both target
-        # members down 10 min) the attempts were 80, 74, 127, 244 and 501 s
-        # apart, so the finish resumed 7 min after the target was back. The
-        # check is cheap (one get_lvstore per member); every pass repeats it.
-        logger.warning("Replication task %s: not finishing %s yet -- target "
-                       "leadership not established (%s)", task.uuid,
-                       snapshot.get_id(), lead_why)
-        task.function_params["pending_why"] = (
-            f"waiting for the target lvstore to have a leader ({lead_why})")
-        return FINISH_PENDING
-    if task.function_params.get("target_node_id") not in (None, remote_snode.get_id()):
-        logger.warning("Replication task %s: target leadership moved %s -> %s "
-                       "after the transfer; finishing on the new leader",
-                       task.uuid, task.function_params.get("target_node_id"),
-                       remote_snode.get_id())
-    # The hub session belongs to the member the transfer was SENT to.
-    hub_node = remote_snode
-    sent_to = task.function_params.get("target_node_id")
-    if sent_to and sent_to != remote_snode.get_id():
-        try:
-            hub_node = db.get_storage_node_by_id(sent_to)
-        except KeyError:
-            hub_node = remote_snode
-    _src_node = (_transfer_source_node(task, snapshot)
-                 or db.get_storage_node_by_id(snapshot.lvol.node_id))
-    hub_ctrl = _attached_hub_ctrl(task, hub_node)
-    # A converging cutover sends its next round through the same hub within
-    # a second, and its final step after that: keep the session up for the
-    # whole endgame instead of detaching and re-attaching it every round.
-    # run_cutover leaves it attached as it always has.
-    keep_hub = hub_ctrl and _cutover_owns(snapshot.lvol.get_id(), task.cluster_id)
-    if keep_hub:
-        xfer_timing.stamp("hub_kept", snap=snapshot.get_id(),
-                          lvol=snapshot.lvol.get_id())
-    elif hub_ctrl:
-        if not _other_active_transfers_to_node(task, hub_node.get_id()):
-            xfer_timing.stamp("hub_detach", snap=snapshot.get_id(),
-                              lvol=snapshot.lvol.get_id())
-            # Non-fatal: a resumed finish (see _resume_finish) finds the hub
-            # already detached by the first attempt.
-            try:
-                _src_node.rpc_client().bdev_nvme_detach_controller(hub_ctrl)
-            except Exception as e:                        # noqa: BLE001
-                logger.warning("Transfer hub detach on %s failed (non-fatal): %s",
-                               _src_node.get_id(), e)
+    Raises:
+        KeyError: a task from before the record names a landing volume or
+            node unknown here.
+    """
+    lvol = snapshot.lvol
+    if task.function_params.get("dest_lvol_id"):
+        with contextlib.suppress(KeyError):
+            lvol = db.get_lvol_by_id(task.function_params["dest_lvol_id"])
+    cluster_id = task.function_params.get("destination_cluster_id")
+    if not cluster_id:
+        landing = db.get_lvol_by_id(task.function_params["remote_lvol_id"])
+        cluster_id = db.get_storage_node_by_id(landing.node_id).cluster_id
+    return _peer_for(lvol, cluster_id)
+
+
+def _close_hub(task, snapshot, hub_node_id):
+    """Detach the transfer session on the source -- but ONLY when this was the
+    last active transfer into that target member. The hub is ONE shared session
+    per target member: a naive per-cycle detach rips the qpair out from under
+    the other volumes' in-flight transfers, mass-failing their IO on the hub
+    and churning LVS leadership on the target ("receive io for hublvol in
+    nonleader mode" storms, 2026-08-13). A converging cutover sends its next
+    round through the same hub within a second: the session stays up for the
+    whole endgame (run_cutover leaves it attached as it always has)."""
+    hub_ctrl = task.function_params.get("hub_ctrl")
+    if not hub_ctrl:
+        # a task from before the record: the member's own transfer hub
+        with contextlib.suppress(KeyError):
+            hub_ctrl = _attached_hub_ctrl(task, db.get_storage_node_by_id(hub_node_id))
+    if not hub_ctrl:
+        return
+    if _cutover_owns(snapshot.lvol.get_id(), task.cluster_id):
+        xfer_timing.stamp("hub_kept", snap=snapshot.get_id(), lvol=snapshot.lvol.get_id())
+        return
+    if _other_active_transfers_to_node(task, hub_node_id):
+        return
+    xfer_timing.stamp("hub_detach", snap=snapshot.get_id(), lvol=snapshot.lvol.get_id())
+    src_node = (_transfer_source_node(task, snapshot)
+                or db.get_storage_node_by_id(snapshot.lvol.node_id))
+    # Non-fatal: a resumed finish finds the hub already detached by the first attempt.
+    try:
+        src_node.rpc_client().bdev_nvme_detach_controller(hub_ctrl)
+    except Exception as e:                                # noqa: BLE001
+        logger.warning("Transfer hub detach on %s failed (non-fatal): %s", src_node.get_id(), e)
+
+
+def process_snap_replicate_finish(task, snapshot):
+    """After the transfer: the destination makes the landing volume the copy of
+    *snapshot* (finish: chain, merge, convert, record, retire); this cluster
+    closes the transfer session, links its snapshot to the copy and runs
+    retention. Returns the copy's id, FINISH_PENDING, FINISH_ABANDONED, or
+    False (retried with backoff).
+    """
     replicate_to_source = task.function_params["replicate_to_source"]
-    if "replicate_as_snap_instance" in task.function_params:
-        replicate_as_snap_instance = task.function_params["replicate_as_snap_instance"]
-    else:
-        replicate_as_snap_instance = False
-    # Resolve the predecessor's copy on the REMOTE cluster and chain the new
-    # snapshot to it. Without this link every replicated snapshot is a
-    # standalone blob: a fail-over clone reads only the last delta and zeros
-    # elsewhere, and retention's delete cannot swap-merge segments into a
-    # successor (all-zeros DR fail-over, labs 2026-08-10..14; chain_attempts=0
-    # in every run because snap_ref_id is never populated on internal
-    # snapshots). Resolve the predecessor by lvol + age instead, and if one
-    # exists but its remote copy cannot be resolved, fail and retry rather
-    # than silently building an unchained snapshot.
-    #
+    as_instance = task.function_params.get("replicate_as_snap_instance", False)
+    landing_id = task.function_params["remote_lvol_id"]
+    sent_to = task.function_params.get("target_node_id") or ""
+
     # A transfer that ran while its predecessor was merged is chained onto the
     # predecessor's copy, which must exist first (_deferred_chain_gate).
     gate = _deferred_chain_gate(task, snapshot, replicate_to_source)
-    if gate == "pending":
-        task.function_params["pending_why"] = "waiting for the previous snapshot's copy"
-        return FINISH_PENDING
-    if gate == "restart":
-        _discard_landing_for_retry(
-            task, snapshot, remote_lv, f"the copy {task.function_params.get('chain_deferred_to')} this "
-                             f"delta builds on will not be made; discarded, retrying")
-        return FINISH_ABANDONED
-    target_prev_snap, _prev_snap_for_db, ok = _resolve_chain_target(
-        snapshot, replicate_to_source, remote_snode)
-    if not ok:
-        return False
-
-    # Leadership gate BEFORE chain/convert on the primary: a convert on a
-    # non-leader returns success without persisting (silent conversion error).
-    if not _require_lvs_leader(remote_snode, remote_lv.lvs_name, "add_clone/convert"):
-        return False
-
-    # Nodes whose landing volume was already chained BEFORE the transfer, so it
-    # could receive a delta (see _prechain_landing_volume). Those must be
-    # skipped here: adding the same clone entry twice is not idempotent.
-    _prechained = _prechained_nodes_for(task, remote_lv)
-
-    # Nodes on which an earlier attempt of this finish already converted the
-    # landing volume (see _resume_finish): chaining or converting them again
-    # is not idempotent, so skip them and carry on with the rest.
-    converted = list(task.function_params.get("converted_nodes") or [])
-
-    def _mark_converted(node):
-        converted.append(node.get_id())
-        task.function_params["converted_nodes"] = converted
-        task.write_to_db()
-
-    # chain snaps on primary
-    if remote_snode.get_id() in converted:
-        logger.info("Landing volume %s is already converted on %s; skipping "
-                    "its chain and convert", remote_lv.top_bdev, remote_snode.get_id())
-    elif (target_prev_snap and remote_snode.get_id() not in _prechained
-          and _chained_onto(remote_snode, remote_lv.top_bdev, target_prev_snap['snap_bdev'])):
-        # chained by an earlier pass of this finish that then waited for the
-        # merge: add_clone is not idempotent ("File exists")
-        _record_chained(task, remote_snode)
-    elif target_prev_snap and remote_snode.get_id() not in _prechained:
-        logger.info(f"Chaining replicated lvol: {remote_lv.top_bdev} to snap: {target_prev_snap['snap_bdev']}")
-        with xfer_timing.phase("chain_add_clone", snap=snapshot.get_id(),
-                               lvol=snapshot.lvol.get_id(), node="primary"):
-            ret = remote_snode.rpc_client().bdev_lvol_add_clone( remote_lv.top_bdev, target_prev_snap['snap_bdev'])
-        if not ret:
-            logger.error("Failed to chain replicated snapshot on primary node")
-            return False
-        # the merge may keep this finish pending for several passes
-        _record_chained(task, remote_snode)
-    elif target_prev_snap:
-        logger.info("Landing volume %s was already chained to %s on %s before "
-                    "the transfer; skipping the redundant add_clone",
-                    remote_lv.top_bdev, target_prev_snap['snap_bdev'],
-                    remote_snode.get_id())
-
-    # A delta landed only its own blocks in pre-allocated clusters: fill the
-    # rest from the base before the convert makes the volume a snapshot.
-    if remote_snode.get_id() not in converted:
-        merge = _merge_landing(task, remote_lv, remote_snode)
-        if merge == "restart":
-            _discard_landing_for_retry(task, snapshot, remote_lv, f"landing volume {remote_lv.top_bdev} "
-                                                        f"lost the record of its delta; discarded, retrying")
-            return FINISH_ABANDONED
-        if merge == "retry":
-            return False
-        if merge == "pending":
+    if gate in ("pending", "restart"):
+        _close_hub(task, snapshot, sent_to)
+        if gate == "pending":
+            task.function_params["pending_why"] = "waiting for the previous snapshot's copy"
             return FINISH_PENDING
+        _discard_landing_for_retry(
+            task, snapshot, db.get_lvol_by_id(landing_id),
+            f"the copy {task.function_params.get('chain_deferred_to')} this delta builds on "
+            f"will not be made; discarded, retrying")
+        return FINISH_ABANDONED
 
-    # convert to snapshot on primary
-    if remote_snode.get_id() not in converted:
-        with xfer_timing.phase("chain_convert", snap=snapshot.get_id(),
-                               lvol=snapshot.lvol.get_id(), node="primary"):
-            ret = remote_snode.rpc_client().bdev_lvol_convert(remote_lv.top_bdev)
-        if not ret:
-            logger.error("Failed to convert to snapshot on primary node")
-            return False
-        _mark_converted(remote_snode)
+    # The copy is chained onto the predecessor's copy. This cluster picks the
+    # predecessor by volume and age (snap_ref_id is never populated on internal
+    # snapshots: chain_attempts=0 in every run of labs 2026-08-10..14); the
+    # destination refuses to finish when that copy cannot be used.
+    prev = _previous_replicated_snapshot(snapshot, replicate_to_source)
+    predecessor_id = ""
+    if prev is not None:
+        predecessor_id = ((prev.source_replicated_snap_uuid if replicate_to_source
+                           else prev.target_replicated_snap_uuid) or "")
+    chained = (list(task.function_params.get("prechained_node_ids") or [])
+               if task.function_params.get("allow_partial_landing") == landing_id else [])
+    answer = _task_peer(task, snapshot).finish(FinishRequest(
+        source_cluster_id=snapshot.cluster_id, landing_lvol_id=landing_id,
+        snapshot=SourceSnapshot(
+            snapshot_id=snapshot.get_id(), snap_name=snapshot.snap_name, size=snapshot.size,
+            used_size=snapshot.used_size or 0, data_uuid=snapshot.data_uuid or "",
+            group_id=getattr(snapshot, "group_id", "") or "",
+            group_seq=getattr(snapshot, "group_seq", 0) or 0),
+        sent_to=sent_to, predecessor_id=predecessor_id,
+        partial_base=int(task.function_params.get("partial_base") or 0),
+        chained_on=chained,
+        converted_on=list(task.function_params.get("converted_nodes") or []),
+        merged=task.function_params.get("merged_landing") == landing_id,
+        link="none" if as_instance else ("target" if replicate_to_source else "source")))
 
-    # chain snaps on secondary; a single-node cluster's node has none
-    sec_node = (db.get_storage_node_by_id(remote_snode.secondary_node_id)
-                if remote_snode.secondary_node_id else None)
-    if sec_node is None:
-        pass
-    elif sec_node.status == StorageNode.STATUS_ONLINE and sec_node.get_id() in converted:
-        logger.info("Landing volume %s is already converted on %s; skipping "
-                    "its chain and convert", remote_lv.top_bdev, sec_node.get_id())
-    elif sec_node.status == StorageNode.STATUS_ONLINE:
-        if (target_prev_snap and sec_node.get_id() not in _prechained
-                and _chained_onto(sec_node, remote_lv.top_bdev, target_prev_snap['snap_bdev'])):
-            # A landing volume chained on the primary after its transfer can
-            # reach the secondary through the lvstore's metadata sync while
-            # its merge runs; add_clone then fails with "File exists" for ever
-            # (bed run 5, 2026-10-24: one volume stuck for 16 min).
-            logger.info("Landing volume %s already reads through %s on %s; skipping "
-                        "the add_clone", remote_lv.top_bdev, target_prev_snap['snap_bdev'],
-                        sec_node.get_id())
-        elif target_prev_snap and sec_node.get_id() not in _prechained:
-            logger.info(f"Chaining replicated lvol: {remote_lv.top_bdev} to snap: {target_prev_snap['snap_bdev']}")
-            with xfer_timing.phase("chain_add_clone", snap=snapshot.get_id(),
-                                   lvol=snapshot.lvol.get_id(), node="secondary"):
-                ret = _rpc_or_none(sec_node.rpc_client().bdev_lvol_add_clone,
-                                   remote_lv.top_bdev, target_prev_snap['snap_bdev'])
-            if not ret:
-                if _secondary_lacks_bdev(sec_node, target_prev_snap['snap_bdev']) or                         _secondary_lacks_bdev(sec_node, remote_lv.top_bdev):
-                    # The secondary does not hold the base (-19 No such
-                    # device): its view of the chain is already behind, and
-                    # failing here only re-runs the finish until the task
-                    # gives up, then re-transfers into a converted landing
-                    # (2026-10-02, LVS_1 site A: 8 retries, a duplicate
-                    # landing, a write into a snapshot). The primary's
-                    # convert made the copy; the secondary is repaired by
-                    # the lvstore sync, not by this task.
-                    logger.warning("Secondary %s does not hold %s or %s; the chain is "
-                                   "not repeated there", sec_node.get_id(),
-                                   target_prev_snap['snap_bdev'], remote_lv.top_bdev)
-                else:
-                    logger.error("Failed to chain replicated snapshot on secondary node")
-                    return False
-        elif target_prev_snap:
-            logger.info("Landing volume %s was already chained to %s on %s "
-                        "before the transfer; skipping the redundant add_clone",
-                        remote_lv.top_bdev, target_prev_snap['snap_bdev'],
-                        sec_node.get_id())
+    # What the destination did, so a later pass skips it (add_clone and
+    # convert are not idempotent in SPDK).
+    task.function_params["converted_nodes"] = answer.converted_on
+    task.function_params["prechained_node_ids"] = answer.chained_on
+    if answer.merged:
+        task.function_params["merged_landing"] = landing_id
+    task.write_to_db()
 
-        # convert to snapshot on secondary
-        with xfer_timing.phase("chain_convert", snap=snapshot.get_id(),
-                               lvol=snapshot.lvol.get_id(), node="secondary"):
-            ret = _rpc_or_none(sec_node.rpc_client().bdev_lvol_convert, remote_lv.top_bdev)
-        if not ret:
-            if _secondary_lacks_bdev(sec_node, remote_lv.top_bdev):
-                # The landing volume never reached the secondary (its
-                # registration there failed while the site recovered); the
-                # primary's convert is the copy, and the lvstore sync, not
-                # this task, repairs the secondary (2026-10-02, LVS_2 on B).
-                logger.warning("Secondary %s does not hold %s; nothing to convert there",
-                               sec_node.get_id(), remote_lv.top_bdev)
-            else:
-                logger.error("Failed to convert to snapshot on secondary node")
-                return False
-        _mark_converted(sec_node)
+    if answer.state == "pending" and answer.waiting_for_leader:
+        # The target is down, or its leadership moving: not the transfer's
+        # fault, so not a failure; every pass asks again.
+        logger.warning("Replication task %s: not finishing %s yet -- %s", task.uuid,
+                       snapshot.get_id(), answer.reason)
+        task.function_params["pending_why"] = answer.reason
+        return FINISH_PENDING
+    # The hub session belongs to the member the transfer was SENT to.
+    _close_hub(task, snapshot, sent_to or answer.leader_node_id)
+    if answer.state == "pending":
+        task.function_params["pending_why"] = answer.reason
+        return FINISH_PENDING
+    if answer.state == "restart":
+        _discard_landing_for_retry(task, snapshot, db.get_lvol_by_id(landing_id),
+                                   f"{answer.reason}; discarded, retrying")
+        return FINISH_ABANDONED
+    if answer.state == "gone":
+        # Nothing to finish: start the transfer over on a fresh landing volume.
+        logger.warning("Replication task %s: %s; starting the transfer over",
+                       task.uuid, answer.reason)
+        for key in ("transfer_done", "converted_nodes", "remote_lvol_id", "offset",
+                    "merged_landing", "chain_deferred_to"):
+            task.function_params.pop(key, None)
+        _suspend_for_retry(task, f"{answer.reason}; starting over", backoff=False)
+        return FINISH_ABANDONED
+    if answer.state != "done":
+        logger.error("Replication task %s: finish of %s failed: %s", task.uuid,
+                     snapshot.get_id(), answer.reason)
+        return False
 
-    # The landing volume is a snapshot now and will back fail-over and
-    # test-failover clones: drop the replication class from it.
-    if remote_lv.lvol_priority_class == constants.QOS_REPLICATION_CLASS_ID:
-        _set_transfer_class(remote_lv.nodes or [remote_snode.get_id()], remote_lv.top_bdev, 0,
-                            "replicated snapshot")
-
-    new_snapshot_uuid = str(uuid.uuid4())
-
-    new_snapshot = SnapShot()
-    new_snapshot.uuid = new_snapshot_uuid
-    new_snapshot.data_uuid = snapshot.data_uuid
-    new_snapshot.cluster_id = remote_snode.cluster_id
-    new_snapshot.lvol = remote_lv
-    new_snapshot.pool_uuid = remote_lv.pool_uuid
-    new_snapshot.snap_bdev = remote_lv.top_bdev
-    new_snapshot.snap_uuid = remote_lv.lvol_uuid
-    new_snapshot.size = snapshot.size
-    new_snapshot.used_size = snapshot.used_size
-    new_snapshot.snap_name = snapshot.snap_name
-    # Snapshot names are unique per cluster. The destination can hold a
-    # snapshot of this name already (the original of a chain coming back
-    # after a relocate, on another lvstore than this copy): the record must
-    # not fail AFTER the convert, which leaves a converted landing volume the
-    # control plane knows nothing about.
-    if any(s.snap_name == new_snapshot.snap_name
-           for s in db.get_snapshots(remote_snode.cluster_id)):
-        new_snapshot.snap_name = f"{snapshot.snap_name}-{new_snapshot_uuid[:8]}"
-        logger.warning("Snapshot name %s is taken on cluster %s; recording the copy as %s",
-                       snapshot.snap_name, remote_snode.cluster_id, new_snapshot.snap_name)
-    new_snapshot.blobid = remote_lv.blobid
-    new_snapshot.created_at = int(time.time())
-    new_snapshot.status = SnapShot.STATUS_ONLINE
-    # Consistency-group provenance travels with the copy: the fail-over
-    # generation selector returns the TARGET record, and requirement 4's
-    # membership warnings are computed from (group_id, group_seq) on it.
-    new_snapshot.group_id = getattr(snapshot, "group_id", "")
-    new_snapshot.group_seq = getattr(snapshot, "group_seq", 0)
-    snapshot.instances.append(new_snapshot)
-    if not replicate_as_snap_instance:
+    # Link this snapshot to its copy. The copy's record is kept on it as an
+    # instance, as before; a finish repeated after a lost answer adds it once.
+    if all(_instance_id(i) != answer.copy_id for i in (snapshot.instances or [])):
+        snapshot.instances.append(answer.record)
+    if not as_instance:
         if replicate_to_source:
-            new_snapshot.target_replicated_snap_uuid = snapshot.uuid
-            snapshot.source_replicated_snap_uuid = new_snapshot_uuid
+            snapshot.source_replicated_snap_uuid = answer.copy_id
         else:
-            snapshot.target_replicated_snap_uuid = new_snapshot_uuid
-            new_snapshot.source_replicated_snap_uuid = snapshot.uuid
-
-        if _prev_snap_for_db:
-            # The chain link is what lets retention delete this snapshot's
-            # predecessor safely: the prune path refuses to drop a predecessor
-            # until it can see the successor sitting on top of it. Swallowing a
-            # failure here used to leave SPDK chained but the record unlinked,
-            # so record it before the snapshot is published, and fail the task
-            # (it retries) rather than publishing a snapshot that looks
-            # unchained to retention.
-            new_snapshot.prev_snap_uuid = _prev_snap_for_db.get_id()
-            _prev_snap_for_db.next_snap_uuid = new_snapshot_uuid
-            try:
-                _prev_snap_for_db.write_to_db()
-            except Exception as e:
-                logger.error("Failed to record the chain back-link on %s: %s",
-                             _prev_snap_for_db.get_id(), e)
-                return False
-
-    new_snapshot.write_to_db()
-
+            snapshot.target_replicated_snap_uuid = answer.copy_id
     if snapshot.status == SnapShot.STATUS_IN_REPLICATION:
         snapshot.status = SnapShot.STATUS_ONLINE
-
     snapshot.write_to_db()
-
-    # Tear down the landing volume's plumbing (subsystem/namespace); its BLOB
-    # deliberately lives on -- it was just converted into the chained snapshot.
-    # The record removal must not depend on the teardown succeeding: delete_lvol
-    # can raise (SPDK refuses to delete a bdev that is now a cloned snapshot),
-    # and a record left in_deletion never converges -- the monitor re-issues
-    # its delete forever (297 warnings/10min, run 20260821_205111) and every
-    # later cleanup that waits for lvols to drain times out on it.
-    remote_lv.bdev_stack = []
-    remote_lv.write_to_db()
-    # Tear the subsystem/namespace down DIRECTLY, not via delete_lvol:
-    # delete_lvol flips the record to in_deletion and hands it to the
-    # monitor's async machinery, so an interruption anywhere before the
-    # remove() below stranded a record the monitor can never finish (empty
-    # stack -> nothing to issue -> status poll 4 forever; runs 20260824 and
-    # 20260825_125156). With the stack already emptied there is no blob work
-    # to do -- only nvmf plumbing on the volume's nodes.
-    for _node_id in remote_lv.nodes:
-        try:
-            _node = db.get_storage_node_by_id(_node_id)
-            if _node.status == StorageNode.STATUS_ONLINE:
-                lvol_controller.delete_lvol_from_node(
-                    remote_lv.get_id(), _node_id, force=True)
-        except Exception as e:
-            logger.error(f"Landing volume {remote_lv.get_id()} teardown on "
-                         f"{_node_id[:8]} raised: {e}; retiring the record "
-                         f"anyway (its bdev lives on as the converted snapshot)")
-    remote_lv.remove(db.kv_store)
     snapshot_events.replication_task_finished(snapshot)
     _prune_internal_snapshots(snapshot.lvol)
-    return new_snapshot_uuid
+    return answer.copy_id
+
+
+def _instance_id(instance):
+    """The id of an entry of SnapShot.instances: a SnapShot or its dict form."""
+    if isinstance(instance, dict):
+        return instance.get("uuid", "")
+    return getattr(instance, "uuid", "")
 
 
 def task_runner(task: JobSchedule):

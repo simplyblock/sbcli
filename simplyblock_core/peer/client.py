@@ -29,6 +29,8 @@ from simplyblock_core.peer.protocol import (
     DescribeResponse,
     EnsureHubRequest,
     EnsureHubResponse,
+    FinishRequest,
+    FinishResponse,
     LandingRequest,
     LandingResponse,
     PeerInfo,
@@ -124,6 +126,15 @@ class PeerClient(Protocol):
             PeerError: the target's control plane cannot be reached or understood.
         """
 
+    def finish(self, request: FinishRequest) -> FinishResponse:
+        """Make the landing volume the copy of the source snapshot after its
+        transfer: chain, merge and convert it, record the copy, retire it.
+
+        Raises:
+            PeerNotFoundError: the cluster is unknown.
+            PeerError: the target's control plane cannot be reached or understood.
+        """
+
 
 class LocalPeerClient:
     """A target cluster managed by this same control plane: calls the service directly."""
@@ -204,6 +215,17 @@ class LocalPeerClient:
         """
         try:
             return service.chain(self._cluster_id, request)
+        except KeyError as e:
+            raise PeerNotFoundError(str(e)) from e
+
+    def finish(self, request: FinishRequest) -> FinishResponse:
+        """Finish the copy (see ``PeerClient.finish``).
+
+        Raises:
+            PeerNotFoundError: the cluster is unknown.
+        """
+        try:
+            return service.finish(self._cluster_id, request)
         except KeyError as e:
             raise PeerNotFoundError(str(e)) from e
 
@@ -399,6 +421,22 @@ class HttpPeerClient:
             return ChainResponse.model_validate(self._request("POST", "chain", request))
         except ValidationError as e:
             raise PeerProtocolError(f"Unexpected chain response from {self._base}: {e}") from e
+
+    def finish(self, request: FinishRequest) -> FinishResponse:
+        """Finish the copy (see ``PeerClient.finish``).
+
+        Not retried by the transport: a lost answer is resent by the runner's
+        next pass; the copy's record id is derived from the request, so the
+        repeat answers done with the record the first one wrote.
+
+        Raises:
+            PeerError: as for every peer call (see ``_request``), and
+                PeerProtocolError when the answer is not a FinishResponse.
+        """
+        try:
+            return FinishResponse.model_validate(self._request("POST", "finish", request))
+        except ValidationError as e:
+            raise PeerProtocolError(f"Unexpected finish response from {self._base}: {e}") from e
 
 
 def peer_for_target(target: ReplicationTarget) -> PeerClient:

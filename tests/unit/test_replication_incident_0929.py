@@ -19,6 +19,8 @@ from unittest.mock import MagicMock, patch
 from simplyblock_core.controllers import lvol_controller
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
+from simplyblock_core.peer import service as peer_service
+from simplyblock_core.peer.protocol import FinishRequest, FinishResponse, SourceSnapshot
 from simplyblock_core.services import snapshot_replication, tasks_runner_backup
 
 
@@ -119,84 +121,89 @@ class TestResumeFinish(unittest.TestCase):
         start.assert_not_called()
 
     def test_gone_landing_volume_starts_over(self):
+        """The destination answers gone: no landing volume and no copy. The
+        transfer starts over on a fresh one."""
         task = _task(remote_lvol_id="r-1", transfer_done=True, converted_nodes=["n-p"], offset=5)
-        db = MagicMock()
-        db.get_lvol_by_id.side_effect = KeyError("r-1")
-        with patch.object(snapshot_replication, "db", db), \
+        peer = MagicMock()
+        peer.finish.return_value = FinishResponse(state="gone", reason="landing volume r-1 is gone")
+        snap = SimpleNamespace(get_id=lambda: "s-1", cluster_id="c-1", snap_name="s-1", size=1,
+                               used_size=0, data_uuid="", lvol=SimpleNamespace(get_id=lambda: "lv"))
+        with patch.object(snapshot_replication, "_deferred_chain_gate", return_value="ok"), \
+                patch.object(snapshot_replication, "_previous_replicated_snapshot", return_value=None), \
+                patch.object(snapshot_replication, "_task_peer", return_value=peer), \
+                patch.object(snapshot_replication, "_suspend_for_retry") as suspend, \
                 self.assertLogs(snapshot_replication.logger, "WARNING"):
-            self.assertFalse(snapshot_replication._resume_finish(task, MagicMock()))
+            self.assertEqual(snapshot_replication.process_snap_replicate_finish(task, snap),
+                             snapshot_replication.FINISH_ABANDONED)
         for key in ("transfer_done", "converted_nodes", "remote_lvol_id", "offset"):
             self.assertNotIn(key, task.function_params)
+        suspend.assert_called_once()
 
 
 class TestFinishSkipsConvertedNodes(unittest.TestCase):
+    """The destination's finish (peer.service.finish_landing) skips what an
+    earlier pass converted or chained: neither is idempotent in SPDK
+    (2026-09-29, and bed run 5)."""
 
-    def _run(self, task, sec_convert_ok):
+    def _finish(self, sec_convert_ok, converted_on=(), chained_on=(), predecessor=None,
+                secondary_base=None):
         primary = MagicMock()
         primary.get_id.return_value = "n-p"
         primary.secondary_node_id = "n-s"
-        primary.transfer_hublvol = None
+        primary.rpc_client.return_value.bdev_lvol_convert.return_value = True
         secondary = MagicMock()
         secondary.get_id.return_value = "n-s"
         secondary.status = "online"
-        secondary.rpc_client.return_value.bdev_lvol_convert.return_value = sec_convert_ok
-        primary.rpc_client.return_value.bdev_lvol_convert.return_value = True
-        remote_lv = SimpleNamespace(top_bdev="LVS_1/LVOL_92", lvs_name="LVS_1", node_id="n-p")
+        srpc = secondary.rpc_client.return_value
+        srpc.bdev_lvol_convert.return_value = sec_convert_ok
+        srpc.bdev_get.return_value = {"driver_specific": {"lvol": (
+            {"base_snapshot": secondary_base} if secondary_base else {})}}
+        landing = SimpleNamespace(top_bdev="LVS_1/LVOL_92", lvs_name="LVS_1", node_id="n-p",
+                                  nodes=["n-p", "n-s"], status=LVol.STATUS_ONLINE,
+                                  get_id=lambda: "r-1")
+
+        def snapshot(snapshot_id):
+            if predecessor is not None and snapshot_id == "pred":
+                return predecessor
+            raise KeyError(snapshot_id)
+
         db = MagicMock()
-        db.get_lvol_by_id.return_value = remote_lv
+        db.get_snapshot_by_id.side_effect = snapshot
+        db.get_lvol_by_id.return_value = landing
         db.get_storage_node_by_id.return_value = secondary
-        with patch.object(snapshot_replication, "db", db), \
-                patch.object(snapshot_replication, "_stable_target_leader", return_value=(primary, "")), \
-                patch.object(snapshot_replication, "_transfer_source_node", return_value=MagicMock()), \
-                patch.object(snapshot_replication, "_resolve_chain_target", return_value=(None, None, True)), \
-                patch.object(snapshot_replication, "_require_lvs_leader", return_value=True), \
-                patch.object(snapshot_replication, "_prechained_nodes_for", return_value=set()):
-            ret = snapshot_replication.process_snap_replicate_finish(task, MagicMock())
-        return ret, primary, secondary
+        request = FinishRequest(
+            source_cluster_id="c-a", landing_lvol_id="r-1",
+            snapshot=SourceSnapshot(snapshot_id="s-1", snap_name="s-1", size=1),
+            predecessor_id="pred" if predecessor is not None else "",
+            converted_on=list(converted_on), chained_on=list(chained_on), link="source")
+        with patch.object(peer_service, "stable_leader", return_value=(primary, "")), \
+                patch.object(peer_service, "require_leader", return_value=True):
+            answer = peer_service.finish_landing(db, request)
+        return answer, primary, secondary
 
     def test_failed_secondary_convert_records_the_primary(self):
-        task = _task(remote_lvol_id="r-1")
-        ret, primary, secondary = self._run(task, sec_convert_ok=False)
-        self.assertFalse(ret)
+        answer, primary, secondary = self._finish(sec_convert_ok=False)
+        self.assertEqual(answer.state, "retry")
         primary.rpc_client.return_value.bdev_lvol_convert.assert_called_once()
-        self.assertEqual(task.function_params["converted_nodes"], ["n-p"])
+        self.assertEqual(answer.converted_on, ["n-p"])
 
     def test_secondary_already_chained_is_not_chained_again(self):
         """Bed run 5: a landing volume chained on the primary after its
         transfer reached the secondary through the lvstore's metadata sync
         while it merged; add_clone there failed with "File exists" on every
         retry. A secondary that already reads through the base is skipped."""
-        task = _task(remote_lvol_id="r-1")
-        prev = {"snap_bdev": "LVS_1/LVOL_83"}
-        primary = MagicMock()
-        primary.get_id.return_value = "n-p"
-        primary.secondary_node_id = "n-s"
-        primary.transfer_hublvol = None
-        primary.rpc_client.return_value.bdev_lvol_convert.return_value = True
-        secondary = MagicMock()
-        secondary.get_id.return_value = "n-s"
-        secondary.status = "online"
-        secondary.rpc_client.return_value.bdev_get.return_value = {
-            "driver_specific": {"lvol": {"base_snapshot": "LVOL_83"}}}
-        secondary.rpc_client.return_value.bdev_lvol_convert.return_value = False
-        db = MagicMock()
-        db.get_lvol_by_id.return_value = SimpleNamespace(top_bdev="LVS_1/LVOL_92", lvs_name="LVS_1",
-                                                         node_id="n-p")
-        db.get_storage_node_by_id.return_value = secondary
-        with patch.object(snapshot_replication, "db", db), \
-                patch.object(snapshot_replication, "_stable_target_leader", return_value=(primary, "")), \
-                patch.object(snapshot_replication, "_transfer_source_node", return_value=MagicMock()), \
-                patch.object(snapshot_replication, "_resolve_chain_target", return_value=(prev, None, True)), \
-                patch.object(snapshot_replication, "_require_lvs_leader", return_value=True), \
-                patch.object(snapshot_replication, "_prechained_nodes_for", return_value={"n-p"}):
-            snapshot_replication.process_snap_replicate_finish(task, MagicMock())
+        predecessor = SimpleNamespace(snap_bdev="LVS_1/LVOL_83",
+                                      lvol=SimpleNamespace(nodes=["n-p", "n-s"], node_id="n-p"))
+        answer, primary, secondary = self._finish(
+            sec_convert_ok=False, chained_on=["n-p"], predecessor=predecessor,
+            secondary_base="LVOL_83")
         secondary.rpc_client.return_value.bdev_lvol_add_clone.assert_not_called()
         secondary.rpc_client.return_value.bdev_lvol_convert.assert_called_once()
+        self.assertEqual(answer.chained_on, ["n-p", "n-s"])
 
     def test_retry_converts_only_what_is_left(self):
-        task = _task(remote_lvol_id="r-1", converted_nodes=["n-p"])
-        ret, primary, secondary = self._run(task, sec_convert_ok=False)
-        self.assertFalse(ret)
+        answer, primary, secondary = self._finish(sec_convert_ok=False, converted_on=["n-p"])
+        self.assertEqual(answer.state, "retry")
         primary.rpc_client.return_value.bdev_lvol_convert.assert_not_called()
         secondary.rpc_client.return_value.bdev_lvol_convert.assert_called_once()
 

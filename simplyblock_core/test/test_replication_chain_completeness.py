@@ -725,13 +725,14 @@ def test_retirement_tears_down_plumbing_without_delete_lvol():
     interruption before remove() strands the record."""
     import inspect
 
-    from simplyblock_core.services import snapshot_replication as sr
-    src = inspect.getsource(sr)
-    empty = src.index("remote_lv.bdev_stack = []")
-    remove = src.index("remote_lv.remove(db.kv_store)", empty)
+    # The destination retires it (peer.service._retire_landing).
+    from simplyblock_core.peer import service
+    src = inspect.getsource(service._retire_landing)
+    empty = src.index("landing.bdev_stack = []")
+    remove = src.index("landing.remove(db.kv_store)", empty)
     seg = src[empty:remove]
     assert "delete_lvol_from_node" in seg, "teardown must be the direct per-node call"
-    assert "delete_lvol(remote_lv" not in seg, "must not route through delete_lvol"
+    assert "delete_lvol(landing" not in seg, "must not route through delete_lvol"
 
 
 def test_shared_subsystem_survives_one_members_teardown():

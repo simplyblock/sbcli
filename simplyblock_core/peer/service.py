@@ -8,9 +8,9 @@ control plane, so both paths run the same code.
 import contextlib
 import logging
 import time
-from uuid import UUID
+from uuid import UUID, uuid5
 
-from simplyblock_core import constants
+from simplyblock_core import constants, xfer_timing
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.models.lvol_model import LVol
@@ -29,6 +29,8 @@ from simplyblock_core.peer.protocol import (
     DescribeResponse,
     EnsureHubRequest,
     EnsureHubResponse,
+    FinishRequest,
+    FinishResponse,
     LandingRequest,
     LandingResponse,
     PeerInfo,
@@ -647,3 +649,364 @@ def _reads_through(node, lvol_bdev, snap_bdev):
         ret = ret[0] if ret else {}
     base = (((ret or {}).get("driver_specific") or {}).get("lvol") or {}).get("base_snapshot")
     return bool(base) and base == snap_bdev.split("/")[-1]
+
+
+#: -ESTALE as SPDK reports it: a Linux errno, whatever this host's errno says
+_SPDK_ESTALE = -116
+
+#: Namespace of the deterministic ids of replicated copies (finish_landing).
+_COPY_NAMESPACE = UUID("7d2c1a52-3f0b-4f6e-9d6a-2b1f3c0e8a11")
+
+
+def copy_id_for(source_cluster_id, snapshot_id, landing_lvol_id):
+    """The id of the copy one landing volume becomes: the same on every retry
+    of its finish, so a repeated finish finds the record instead of writing a
+    second one; a new landing volume (a new transfer) makes a new copy."""
+    return str(uuid5(_COPY_NAMESPACE, f"{source_cluster_id}/{snapshot_id}/{landing_lvol_id}"))
+
+
+def finish(cluster_id: str, request: FinishRequest) -> FinishResponse:
+    """Make the landing volume the replicated copy (see finish_landing).
+
+    Raises:
+        KeyError: this control plane does not manage *cluster_id*.
+    """
+    db = DBController()
+    db.get_cluster_by_id(cluster_id)
+    return finish_landing(db, request)
+
+
+def finish_landing(db, request: FinishRequest) -> FinishResponse:
+    """After the transfer: chain, merge and convert the landing volume into the
+    copy of the source snapshot, record it, and retire the landing volume.
+
+    Re-entrant: what the source recorded from earlier answers (``chained_on``,
+    ``converted_on``, ``merged``) is skipped, a merge still running answers
+    ``pending``, and the copy's record id is derived from the request, so a
+    finish repeated after a lost answer or a crash answers ``done`` with the
+    record it wrote.
+    """
+    copy_id = copy_id_for(request.source_cluster_id, request.snapshot.snapshot_id,
+                          request.landing_lvol_id)
+    with contextlib.suppress(KeyError):
+        written = db.get_snapshot_by_id(copy_id)
+        return FinishResponse(state="done", copy_id=copy_id, record=written.to_dict(),
+                              chained_on=request.chained_on, converted_on=request.converted_on,
+                              merged=request.merged)
+    try:
+        landing = db.get_lvol_by_id(request.landing_lvol_id)
+    except KeyError:
+        return FinishResponse(state="gone",
+                              reason=f"landing volume {request.landing_lvol_id} is gone")
+    if landing.status == LVol.STATUS_IN_DELETION:
+        return FinishResponse(state="gone",
+                              reason=f"landing volume {request.landing_lvol_id} is being deleted")
+    answer = FinishResponse(state="retry", chained_on=list(request.chained_on),
+                            converted_on=list(request.converted_on), merged=request.merged)
+
+    # add_clone and convert must run on the leader: a convert on a non-leader
+    # reports success and persists nothing. The finish follows the settled
+    # leader, not the node the transfer was sent to: the data the old leader
+    # acknowledged is in the HA landing volume on every member.
+    leader, why = stable_leader(db, landing)
+    if leader is None:
+        # Pending, not failed: the target is down, or its leadership moving,
+        # which is not the transfer's fault. Counted as a failure it took the
+        # doubling retry backoff (bf8 2026-11-02: the finish resumed 7 min after
+        # the target was back).
+        answer.state, answer.waiting_for_leader = "pending", True
+        answer.reason = f"waiting for the target lvstore to have a leader ({why})"
+        return answer
+    answer.leader_node_id = leader.get_id()
+    if request.sent_to and request.sent_to != leader.get_id():
+        logger.warning("Target leadership of %s moved %s -> %s after the transfer; "
+                       "finishing on the new leader", landing.lvs_name, request.sent_to,
+                       leader.get_id())
+
+    # The predecessor's copy the new copy is chained onto. Without this link
+    # every copy is a standalone blob: a fail-over clone reads only the last
+    # delta and zeros elsewhere, and retention cannot swap-merge segments into
+    # a successor (all-zeros DR fail-over, labs 2026-08-10..14). One that exists
+    # but cannot be used fails the finish (it retries) rather than building an
+    # unchained copy.
+    predecessor = None
+    if request.predecessor_id:
+        try:
+            predecessor = db.get_snapshot_by_id(request.predecessor_id)
+        except KeyError:
+            answer.reason = (f"the predecessor's copy {request.predecessor_id} cannot be "
+                             f"resolved; refusing to finish an unchained copy")
+            logger.error(answer.reason)
+            return answer
+        members = list(getattr(predecessor.lvol, "nodes", None) or [predecessor.lvol.node_id])
+        if leader.get_id() not in members:
+            answer.reason = (f"the predecessor's copy {request.predecessor_id} lives on "
+                             f"{predecessor.lvol.node_id}, not in the lvstore of {leader.get_id()}; "
+                             f"cannot chain across lvstores")
+            logger.error(answer.reason)
+            return answer
+
+    # Leadership gate BEFORE chain/convert on the leader.
+    if not require_leader(leader, landing.lvs_name, "add_clone/convert"):
+        answer.reason = f"{leader.get_id()} is not the LVS leader of {landing.lvs_name}"
+        return answer
+
+    if not _finish_on(answer, landing, leader, predecessor, request, "primary", required=True):
+        return answer
+    # A delta landed only its own blocks in pre-allocated clusters: fill the
+    # rest from the base before the convert makes the volume a snapshot.
+    if leader.get_id() not in answer.converted_on and not answer.merged and request.partial_base:
+        merge = _merge_landing(landing, leader)
+        if merge in ("pending", "retry", "restart"):
+            answer.state = merge
+            answer.reason = {"pending": "landing volume merging with its base",
+                             "retry": "the merge with the base failed",
+                             "restart": f"landing volume {landing.top_bdev} lost the record of "
+                                        f"its delta; it has to be transferred again"}[merge]
+            return answer
+        answer.merged = True
+    if not _convert_on(answer, landing, leader, "primary", required=True):
+        return answer
+
+    # The secondary; a single-node cluster's node has none.
+    secondary = (db.get_storage_node_by_id(leader.secondary_node_id)
+                 if leader.secondary_node_id else None)
+    if secondary is not None and secondary.status == StorageNode.STATUS_ONLINE:
+        if not _finish_on(answer, landing, secondary, predecessor, request, "secondary",
+                          required=False):
+            return answer
+        if not _convert_on(answer, landing, secondary, "secondary", required=False):
+            return answer
+
+    # The landing volume is a snapshot now and will back fail-over and
+    # test-failover clones: drop the replication class from it.
+    if landing.lvol_priority_class == constants.QOS_REPLICATION_CLASS_ID:
+        _reset_service_class(db, landing.nodes or [leader.get_id()], landing.top_bdev)
+
+    copy = _record_copy(db, request, landing, leader, predecessor, copy_id)
+    if copy is None:
+        answer.reason = f"failed to record the chain back-link on {request.predecessor_id}"
+        return answer
+    _retire_landing(db, landing)
+    answer.state, answer.copy_id, answer.record = "done", copy_id, copy.to_dict()
+    return answer
+
+
+def _finish_on(answer, landing, node, predecessor, request, role, required):
+    """Chain the landing volume onto the predecessor's copy on *node*, unless
+    that already happened (recorded, or SPDK shows it). False fails the finish."""
+    if predecessor is None or node.get_id() in answer.converted_on:
+        return True
+    if node.get_id() in answer.chained_on:
+        return True
+    if _reads_through(node, landing.top_bdev, predecessor.snap_bdev):
+        # chained by an earlier pass that then waited for the merge, or on the
+        # secondary through the lvstore's metadata sync (bed run 5, 2026-10-24:
+        # add_clone then failed "File exists" for 16 min): not idempotent.
+        answer.chained_on.append(node.get_id())
+        return True
+    logger.info("Chaining replicated lvol %s to snap %s on %s (%s)", landing.top_bdev,
+                predecessor.snap_bdev, node.get_id(), role)
+    with xfer_timing.phase("chain_add_clone", snap=request.snapshot.snapshot_id,
+                           lvol=landing.get_id(), node=role):
+        ok = _rpc_or_none(node.rpc_client().bdev_lvol_add_clone, landing.top_bdev,
+                          predecessor.snap_bdev)
+    if ok:
+        answer.chained_on.append(node.get_id())
+        return True
+    if not required and (_lacks_bdev(node, predecessor.snap_bdev)
+                         or _lacks_bdev(node, landing.top_bdev)):
+        # The secondary does not hold the base (-19): its view of the chain is
+        # behind, and failing here only re-runs the finish until the task gives
+        # up, then re-transfers into a converted landing (2026-10-02, LVS_1 site
+        # A). The primary's convert made the copy; the lvstore sync repairs the
+        # secondary.
+        logger.warning("Secondary %s does not hold %s or %s; the chain is not repeated there",
+                       node.get_id(), predecessor.snap_bdev, landing.top_bdev)
+        return True
+    answer.reason = f"failed to chain the replicated snapshot on the {role} {node.get_id()}"
+    logger.error(answer.reason)
+    return False
+
+
+def _convert_on(answer, landing, node, role, required):
+    """Convert the landing volume into a snapshot on *node*, unless an earlier
+    pass did. False fails the finish."""
+    if node.get_id() in answer.converted_on:
+        logger.info("Landing volume %s is already converted on %s", landing.top_bdev, node.get_id())
+        return True
+    with xfer_timing.phase("chain_convert", lvol=landing.get_id(), node=role):
+        ok = _rpc_or_none(node.rpc_client().bdev_lvol_convert, landing.top_bdev)
+    if not ok:
+        if not required and _lacks_bdev(node, landing.top_bdev):
+            # The landing volume never reached the secondary; the primary's
+            # convert is the copy, and the lvstore sync repairs the secondary
+            # (2026-10-02, LVS_2 on B).
+            logger.warning("Secondary %s does not hold %s; nothing to convert there",
+                           node.get_id(), landing.top_bdev)
+        else:
+            answer.reason = f"failed to convert to snapshot on the {role} {node.get_id()}"
+            logger.error(answer.reason)
+            return False
+    answer.converted_on.append(node.get_id())
+    return True
+
+
+def _merge_landing(landing, leader):
+    """Fill the landing volume from its base after a delta transfer.
+
+    The destination pre-allocates every cluster the delta touches and receives
+    only the delta's blocks; the rest of each such cluster comes from the base
+    the landing volume is chained onto, once, before the convert. The merge is
+    a job on the target (minutes for a large delta): started idempotently,
+    waited for briefly, then on later passes. Returns "ok", "pending", "retry"
+    (a failed job is started again) or "restart" (the target lost the record
+    of what arrived: transfer again into a fresh landing volume).
+    """
+    rpc = leader.rpc_client()
+    try:
+        # Look before starting: a start relaunches a failed job and answers
+        # "running" before the relaunch fails again, so a landing volume that
+        # lost its delta record (-ESTALE) stayed "merging" for ever (bed
+        # 2026-10-26).
+        st = rpc.bdev_lvol_merge_base_stat(landing.top_bdev) or {}
+        if st.get("state") not in ("running", "done") and st.get("rc") != _SPDK_ESTALE:
+            # The merge runs in the replication class, not in Default beside
+            # client IO and the journal (bf10 2026-11-02: journal heartbeats
+            # timed out and the lvstore was demoted).
+            merge_class = (constants.QOS_REPLICATION_WIRE_CLASS
+                           if _replication_class_on(leader.cluster_id) else None)
+            st = rpc.bdev_lvol_merge_base(landing.top_bdev, priority_class=merge_class)
+        deadline = time.time() + constants.REPL_MERGE_INLINE_WAIT_SEC
+        while (st or {}).get("state") == "running" and time.time() < deadline:
+            time.sleep(constants.REPL_MERGE_POLL_SEC)
+            st = rpc.bdev_lvol_merge_base_stat(landing.top_bdev)
+    except RPCException as e:
+        logger.error("Merge of %s with its base on %s: %s", landing.top_bdev, leader.get_id(), e)
+        return "retry"
+    st = st or {}
+    if st.get("state") == "running":
+        return "pending"
+    if st.get("state") == "done":
+        logger.info("Landing volume %s merged with its base on %s: %s", landing.top_bdev,
+                    leader.get_id(), st)
+        xfer_timing.stamp("landing_merge", lvol=landing.get_id(), ms=st.get("ms", 0),
+                          bytes=st.get("bytes", 0), clusters=st.get("clusters", 0))
+        return "ok"
+    if st.get("rc") == _SPDK_ESTALE:
+        logger.error("%s on %s no longer knows which blocks the transfer wrote; the "
+                     "transfer is repeated", landing.top_bdev, leader.get_id())
+        return "restart"
+    logger.error("Merge of %s with its base failed on %s: %s", landing.top_bdev,
+                 leader.get_id(), st)
+    return "retry"
+
+
+def _record_copy(db, request, landing, leader, predecessor, copy_id):
+    """Write the copy's record, linked back to the source snapshot and onto its
+    predecessor's copy; the copy, or None when the back-link cannot be written."""
+    source = request.snapshot
+    copy = SnapShot()
+    copy.uuid = copy_id
+    copy.data_uuid = source.data_uuid
+    copy.cluster_id = leader.cluster_id
+    copy.lvol = landing
+    copy.pool_uuid = landing.pool_uuid
+    copy.snap_bdev = landing.top_bdev
+    copy.snap_uuid = landing.lvol_uuid
+    copy.size = source.size
+    copy.used_size = source.used_size
+    copy.snap_name = source.snap_name
+    # Names are unique per cluster, and the destination can hold one of this
+    # name already (the original of a chain coming back after a relocate):
+    # the record must not fail AFTER the convert.
+    if any(s.snap_name == copy.snap_name for s in db.get_snapshots(leader.cluster_id)):
+        copy.snap_name = f"{source.snap_name}-{copy_id[:8]}"
+        logger.warning("Snapshot name %s is taken on cluster %s; recording the copy as %s",
+                       source.snap_name, leader.cluster_id, copy.snap_name)
+    copy.blobid = landing.blobid
+    copy.created_at = int(time.time())
+    copy.status = SnapShot.STATUS_ONLINE
+    # Consistency-group provenance travels with the copy: the fail-over
+    # generation selector returns this record.
+    copy.group_id = source.group_id
+    copy.group_seq = source.group_seq
+    if request.link == "source":
+        copy.source_replicated_snap_uuid = source.snapshot_id
+    elif request.link == "target":
+        copy.target_replicated_snap_uuid = source.snapshot_id
+    if request.link != "none" and predecessor is not None:
+        # The link that lets retention delete the predecessor safely: written
+        # before the copy is published, and a failure fails the finish rather
+        # than publishing a copy that looks unchained.
+        copy.prev_snap_uuid = predecessor.get_id()
+        predecessor.next_snap_uuid = copy_id
+        try:
+            predecessor.write_to_db()
+        except Exception as e:                            # noqa: BLE001
+            logger.error("Failed to record the chain back-link on %s: %s", predecessor.get_id(), e)
+            return None
+    copy.write_to_db()
+    return copy
+
+
+def _retire_landing(db, landing):
+    """Tear down the landing volume's plumbing; its blob lives on as the copy.
+
+    The record goes regardless of the teardown: delete_lvol can raise (SPDK
+    refuses to delete a bdev that is now a cloned snapshot), and a record left
+    in_deletion never converges (run 20260821_205111). The subsystem and
+    namespace are torn down directly, not through delete_lvol, whose async
+    path stranded records an interruption left behind (runs 20260824,
+    20260825_125156).
+    """
+    from simplyblock_core.controllers import lvol_controller
+
+    landing.bdev_stack = []
+    landing.write_to_db()
+    for node_id in landing.nodes:
+        try:
+            node = db.get_storage_node_by_id(node_id)
+            if node.status == StorageNode.STATUS_ONLINE:
+                lvol_controller.delete_lvol_from_node(landing.get_id(), node_id, force=True)
+        except Exception as e:                            # noqa: BLE001
+            logger.error("Landing volume %s teardown on %s raised: %s; retiring the record "
+                         "anyway (its bdev lives on as the converted snapshot)",
+                         landing.get_id(), node_id[:8], e)
+    landing.remove(db.kv_store)
+
+
+def _reset_service_class(db, node_ids, bdev):
+    """Best effort: give a converted landing volume the class every snapshot
+    has (0); SPDK does not persist it."""
+    for node_id in node_ids:
+        try:
+            node = db.get_storage_node_by_id(node_id)
+        except KeyError:
+            continue
+        if node.status != StorageNode.STATUS_ONLINE:
+            continue
+        try:
+            node.rpc_client(timeout=10).bdev_lvol_set_priority_class(bdev, 0)
+        except RPCException as e:
+            logger.warning("Resetting the service class of %s on %s failed (non-fatal): %s",
+                           bdev, node_id, e)
+
+
+def _rpc_or_none(fn, *args):
+    """Call an RPC whose failure the caller handles; a raise is logged and
+    reported as None so the caller's failure branch runs."""
+    try:
+        return fn(*args)
+    except RPCException as e:
+        logger.error("%s%s failed: %s", getattr(fn, "__name__", fn), args, e)
+        return None
+
+
+def _lacks_bdev(node, bdev_name):
+    """True when *node* has no bdev *bdev_name* (an add_clone's -19)."""
+    try:
+        return node.rpc_client(timeout=10).bdev_get(bdev_name) is None
+    except RPCException as e:
+        logger.warning("Could not probe %s on %s: %s", bdev_name, node.get_id(), e)
+        return False
