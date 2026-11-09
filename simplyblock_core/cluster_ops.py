@@ -1789,7 +1789,8 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False, site_activ
                 # stranding another node's secondary/tertiary with none at all.
                 # This also subsumes the plain "at least two domains" floor.
                 domain_count_violation = fd_planner.fd_activation_domain_count_violation(
-                    cluster.distr_npcs, len(fd_host_counts))
+                    cluster.distr_npcs, len(fd_host_counts),
+                    site_bound=bool(cluster.stretched_control_plane and not cluster.sync_replication))
                 if domain_count_violation:
                     _fd_fail(_on_site(domain_count_violation))
                 if len(set(fd_host_counts.values())) != 1:

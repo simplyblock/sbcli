@@ -83,22 +83,45 @@ def local_host() -> str:
     return socket.gethostname()
 
 
+def _host_candidates() -> list[str]:
+    """Names this process's host may be registered under as a MgmtNode: the
+    Swarm node's hostname handed in through the service template
+    (``NODE_HOSTNAME``, see docker-compose-swarm.yml), then the process's
+    own hostname; each also as its short form, which is what ``hostname -s``
+    stored at ``control-plane add``."""
+    names: list[str] = []
+    for raw in (os.environ.get(constants.CONTROL_PLANE_NODE_HOSTNAME_ENV, ""), local_host()):
+        raw = (raw or "").strip()
+        if not raw:
+            continue
+        for name in (raw, raw.split(".")[0]):
+            if name and name not in names:
+                names.append(name)
+    return names
+
+
 def local_site() -> str:
     """The site this control plane runs in: the ``SB_CONTROL_PLANE_SITE``
     environment variable (the operator sets it on every control-plane pod),
     or the ``site`` of this host's MgmtNode record (a Docker management
-    node). "" when neither knows, which a stretched cluster treats as "no
-    site": such a control plane never leads."""
+    node, found by the Swarm node hostname the service template passes in).
+    "" when neither knows, which a stretched cluster treats as "no site":
+    such a control plane never leads."""
     env = os.environ.get(constants.CONTROL_PLANE_SITE_ENV, "").strip()
     if env:
         return env
     if "site" in _local_site_cache:
         return _local_site_cache["site"]
     site = ""
-    try:
-        site = DBController().get_mgmt_node_by_hostname(local_host()).site or ""
-    except Exception as e:  # noqa: BLE001 - identity lookup, not a flow
-        logger.debug(f"no MgmtNode record for host {local_host()}: {e}")
+    db = DBController()
+    for name in _host_candidates():
+        try:
+            site = db.get_mgmt_node_by_hostname(name).site or ""
+        except Exception as e:  # noqa: BLE001 - identity lookup, not a flow
+            logger.debug(f"no MgmtNode record for host {name}: {e}")
+            continue
+        if site:
+            break
     if site:
         _local_site_cache["site"] = site
     return site

@@ -535,3 +535,15 @@ class TestPlannerDrivenExpansion(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_a_site_bound_failure_domain_needs_only_npcs_plus_one_domains():
+    """A stretched control plane binds the failure domain to the site
+    (docs/stretched-control-plane.md): 1+1 spans two sites, 1+2 three."""
+    from simplyblock_core.controllers.cluster_expansion import planner
+    assert planner.fd_activation_domain_count_violation(1, 2, site_bound=True) is None
+    assert planner.fd_activation_domain_count_violation(2, 3, site_bound=True) is None
+    assert "2 sites" in planner.fd_activation_domain_count_violation(1, 1, site_bound=True)
+    assert "3 sites" in planner.fd_activation_domain_count_violation(2, 2, site_bound=True)
+    # The plain rule is untouched.
+    assert planner.fd_activation_domain_count_violation(1, 2) is not None

@@ -340,6 +340,10 @@ CONTROL_PLANE_DISCONNECT_FAILURES = 3
 # Kubernetes the operator sets it on every control-plane pod. A Docker
 # management node falls back to its MgmtNode record (by hostname).
 CONTROL_PLANE_SITE_ENV = "SB_CONTROL_PLANE_SITE"
+# Docker Swarm: the service template hands every control-plane container
+# the hostname of the manager it runs on, which is how a container finds
+# its MgmtNode record (and so its site); a container's own hostname is its id.
+CONTROL_PLANE_NODE_HOSTNAME_ENV = "NODE_HOSTNAME"
 # The readiness gates of a planned leadership move: the target site's
 # FoundationDB region may lag the primary by at most this many seconds.
 CONTROL_PLANE_MAX_FDB_LAG_SEC = 1.0

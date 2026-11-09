@@ -504,7 +504,7 @@ def fd_balance_violation(
 
 
 def fd_activation_domain_count_violation(
-    npcs: int, distinct_domain_count: int,
+    npcs: int, distinct_domain_count: int, *, site_bound: bool = False,
 ) -> str | None:
     """Validate the number of distinct failure domains for fresh activation.
 
@@ -533,6 +533,19 @@ def fd_activation_domain_count_violation(
     human-readable reason on violation, ``None`` when the count is
     acceptable.
     """
+    if site_bound:
+        # A stretched control plane over 1+1 / 1+2 binds the failure domain
+        # to the site (docs/stretched-control-plane.md): there is no third
+        # site to spare, so the bare correctness floor of the rotation
+        # (npcs+1 domains: 2 for 1+1, 3 for 1+2) is the rule, and the
+        # relocation spare lives on the other hosts of each site instead.
+        min_domains = npcs + 1
+        if distinct_domain_count < min_domains:
+            return (
+                f"a stretched cluster with npcs={npcs} needs a storage node on each of "
+                f"{min_domains} sites (failure domain = site); currently {distinct_domain_count}. "
+                f"Add nodes on the missing site(s), then activate.")
+        return None
     min_domains = npcs + 2
     if distinct_domain_count < min_domains:
         return (
