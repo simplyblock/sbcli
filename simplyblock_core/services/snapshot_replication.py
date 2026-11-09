@@ -602,6 +602,91 @@ def _await_transfer_completion(task, snapshot, snode):
     return False
 
 
+def _create_landing_volume(name, snapshot, remote_node, remote_pool_uuid):
+    """add_lvol_ha for the landing copy of *snapshot*: (lvol id, error)."""
+    # Carry the source volume's subsystem-packing capacity onto the landing
+    # copy. Without it the copy defaults to a one-namespace subsystem, which
+    # can never be joined by later namespaced volumes -- so every replicated
+    # copy, and every clone taken from it (test-failover, fail-over), lands in
+    # its own subsystem at NSID 1, ignoring the source's
+    # max_namespace_per_subsys. namespaced is not a persisted field; a
+    # max_namespace_per_subsys > 1 IS the "shareable subsystem" signal.
+    src_max_ns = snapshot.lvol.max_namespace_per_subsys
+    # The landing volume is written only by the transfer: run it in the
+    # replication service class of the receiving cluster (its own QoS
+    # table decides whether that class exists).
+    landing_class = 0
+    if _replication_class_on(remote_node.cluster_id):
+        landing_class = constants.QOS_REPLICATION_CLASS_ID
+    return lvol_controller.add_lvol_ha(
+        name, snapshot.size, remote_node.get_id(), snapshot.lvol.ha_type,
+        remote_pool_uuid, internal=True,
+        namespaced=src_max_ns > 1,
+        max_namespace_per_subsys=src_max_ns,
+        lvol_priority_class=landing_class)
+
+
+def _endgame_next_snap_name(lvol_id, cluster_id):
+    """The name a converging cutover of *lvol_id* gives its NEXT shrink
+    snapshot (next_shrink_snap_name), or ""."""
+    if not lvol_id:
+        return ""
+    try:
+        tasks = db.get_job_tasks(cluster_id)
+    except Exception:                                     # noqa: BLE001
+        return ""
+    for t in tasks:
+        if _converging_cutover(t) and (t.function_params or {}).get("lvol_id") == lvol_id:
+            return (t.function_params or {}).get("next_shrink_snap_name") or ""
+    return ""
+
+
+def _prestage_next_landing(snapshot, remote_lv):
+    """Create the landing volume of a converging cutover's NEXT round now.
+
+    A landing volume cannot be reused across rounds: the finish converts it
+    into the round's snapshot on the target, so every round needs a new one,
+    and creating it cost 0.7-2.9 s of every round (bed bf12 2026-11-03). The
+    cutover names its next shrink snapshot in advance (next_shrink_snap_name),
+    so the landing volume of that round -- REP_<name>, the name the start path
+    adopts an existing landing volume by -- is created here, while this
+    round's data moves. Best effort: on any failure the next round simply
+    creates its own. The cutover discards a spare that ends up unused
+    (tasks_runner_replication_final._discard_spare_landing).
+    """
+    try:
+        lvol_id = snapshot.lvol.get_id()
+        next_name = _endgame_next_snap_name(lvol_id, snapshot.cluster_id)
+        if not next_name:
+            return None
+        rep_name = f"REP_{next_name}"
+        try:
+            db.get_lvol_by_name(rep_name, include_deleted=True)
+            return None                                   # already staged
+        except KeyError:
+            pass
+        remote_node = db.get_storage_node_by_id(remote_lv.node_id)
+        with xfer_timing.phase("landing_prestage", snap=snapshot.get_id(),
+                               lvol=lvol_id):
+            lv_id, err = _create_landing_volume(
+                rep_name, snapshot, remote_node, remote_lv.pool_uuid)
+        if not lv_id:
+            logger.warning("Could not pre-stage landing volume %s: %s", rep_name, err)
+            return None
+        # The cutover may have stopped converging while this was created; it
+        # discards spares it knows of, so one it no longer names goes here.
+        if _endgame_next_snap_name(lvol_id, snapshot.cluster_id) != next_name:
+            logger.info("Pre-staged landing volume %s is no longer needed; deleting it",
+                        rep_name)
+            lvol_controller.delete_lvol(db.get_lvol_by_id(lv_id), force_delete=True)
+            return None
+        return lv_id
+    except Exception as e:                                # noqa: BLE001
+        logger.warning("Pre-staging the next landing volume of %s failed: %s",
+                       snapshot.get_id(), e)
+        return None
+
+
 def process_snap_replicate_start(task, snapshot):
     # 1 create lvol on remote node
     logger.info("Starting snapshot replication task")
@@ -672,11 +757,16 @@ def process_snap_replicate_start(task, snapshot):
             replicate_to_source=replicate_to_source, dest_lvol_id=dest_lvol_id)
         msg = (f"waiting for chain ancestor {ancestor.get_id()} to replicate "
                f"first (a copy without it would have holes)")
-        logger.info(msg)
-        task.function_result = msg
-        task.status = JobSchedule.STATUS_SUSPENDED
-        task.retry += 1
-        task.write_to_db()
+        # Waiting is not a failure while the ancestor has a live task that can
+        # still deliver it: counting each pass spent the task's retries on its
+        # own prerequisite (bf11 2026-11-03: a round-trip volume reached retry
+        # 7 of 8 while its 10 GiB base copied, one pass from being dropped).
+        # Only a wait for an ancestor nothing is working on counts. A short
+        # fixed delay keeps the serial runner from re-walking the chain every
+        # pass meanwhile.
+        live = _live_replication_task(snapshot.cluster_id, ancestor.get_id())
+        _suspend_for_retry(task, msg, count=live is None, level=logging.INFO,
+                           backoff=True, backoff_step=0)
         return
     if verdict == "blocked":
         # Back off: a blocked chain (a blob without a snapshot record, an
@@ -802,10 +892,20 @@ def process_snap_replicate_start(task, snapshot):
             existing = db.get_lvol_by_name(rep_name, include_deleted=True)
         except KeyError:
             pass
+        # A converging cutover's landing volumes are created ahead of their
+        # round under the same name (_prestage_next_landing) and adopted here
+        # the same way -- unless the volume was resized in between.
+        if (existing is not None and existing.status == LVol.STATUS_ONLINE
+                and existing.size != snapshot.size):
+            logger.warning(f"Landing volume {existing.get_id()} ({rep_name}) has size "
+                           f"{existing.size}, the snapshot {snapshot.size}; replacing it")
+            existing.status = LVol.STATUS_IN_CREATION      # -> the delete branch below
         if existing is not None:
             if existing.status == LVol.STATUS_ONLINE:
                 logger.info(f"Adopting landing volume {existing.get_id()} "
-                            f"({rep_name}) left by an interrupted attempt")
+                            f"({rep_name}) left by an interrupted attempt or pre-staged")
+                xfer_timing.stamp("landing_adopted", snap=snapshot.get_id(),
+                                  lvol=snapshot.lvol.get_id())
                 task.function_params["remote_lvol_id"] = existing.get_id()
                 task.write_to_db()
             elif existing.status == LVol.STATUS_IN_DELETION:
@@ -829,32 +929,17 @@ def process_snap_replicate_start(task, snapshot):
         # replication on a node that is already full, which is precisely when
         # the transfers that would let retention free those slots are needed.
         _t_landing = xfer_timing.now()
-        # Carry the source volume's subsystem-packing capacity onto the landing
-        # copy. Without it the copy defaults to a one-namespace subsystem, which
-        # can never be joined by later namespaced volumes -- so every replicated
-        # copy, and every clone taken from it (test-failover, fail-over), lands in
-        # its own subsystem at NSID 1, ignoring the source's
-        # max_namespace_per_subsys. namespaced is not a persisted field; a
-        # max_namespace_per_subsys > 1 IS the "shareable subsystem" signal.
-        src_max_ns = snapshot.lvol.max_namespace_per_subsys
-        # The landing volume is written only by the transfer: run it in the
-        # replication service class of the receiving cluster (its own QoS
-        # table decides whether that class exists).
-        landing_class = 0
-        if _replication_class_on(remote_node_uuid.cluster_id):
-            landing_class = constants.QOS_REPLICATION_CLASS_ID
-        lv_id, err = lvol_controller.add_lvol_ha(
-            f"REP_{snapshot.snap_name}", snapshot.size, remote_node_uuid.get_id(), snapshot.lvol.ha_type,
-            remote_pool_uuid, internal=True,
-            namespaced=src_max_ns > 1,
-            max_namespace_per_subsys=src_max_ns,
-            lvol_priority_class=landing_class)
+        lv_id, err = _create_landing_volume(
+            f"REP_{snapshot.snap_name}", snapshot, remote_node_uuid, remote_pool_uuid)
         if lv_id:
             task.function_params["remote_lvol_id"] = lv_id
             task.write_to_db()
         else:
             logger.error(err)
-            task.function_result = "Error creating remote lvol"
+            # Keep the cause: "Storage node is not online" (the target primary
+            # is down and no member leads its lvstore yet) reads very
+            # differently from a capacity refusal.
+            task.function_result = f"Error creating remote lvol: {err}"
             task.write_to_db()
             return
 
@@ -1042,6 +1127,11 @@ def process_snap_replicate_start(task, snapshot):
     task.status = JobSchedule.STATUS_RUNNING
     task.function_params["start_time"] = int(time.time())
     task.write_to_db()
+
+    # A converging cutover's next round needs a landing volume too: create it
+    # now, while this transfer runs, so the next round adopts it instead of
+    # paying for the create on its critical path (_prestage_next_landing).
+    _prestage_next_landing(snapshot, remote_lv)
 
     # Do not hand the transfer back to the pass loop and forget about it: wait
     # for it here, polling every 100ms, and finish it in this same pass. Before
@@ -2209,7 +2299,15 @@ def process_snap_replicate_finish(task, snapshot):
     _src_node = (_transfer_source_node(task, snapshot)
                  or db.get_storage_node_by_id(snapshot.lvol.node_id))
     hub_ctrl = _attached_hub_ctrl(task, hub_node)
-    if hub_ctrl:
+    # A converging cutover sends its next round through the same hub within
+    # a second, and its final step after that: keep the session up for the
+    # whole endgame instead of detaching and re-attaching it every round.
+    # run_cutover leaves it attached as it always has.
+    keep_hub = hub_ctrl and _cutover_owns(snapshot.lvol.get_id(), task.cluster_id)
+    if keep_hub:
+        xfer_timing.stamp("hub_kept", snap=snapshot.get_id(),
+                          lvol=snapshot.lvol.get_id())
+    elif hub_ctrl:
         if not _other_active_transfers_to_node(task, hub_node.get_id()):
             xfer_timing.stamp("hub_detach", snap=snapshot.get_id(),
                               lvol=snapshot.lvol.get_id())
@@ -2632,8 +2730,186 @@ def _replication_in_flight(tasks):
                for t in tasks)
 
 
+def _converging_cutover(t):
+    """True for a final-cutover task between taking the lvstore and its
+    freeze: its shrink snapshots must start transferring the moment they
+    exist."""
+    if t.function_name != JobSchedule.FN_REPLICATION_FINAL:
+        return False
+    if t.status == JobSchedule.STATUS_DONE or t.canceled:
+        return False
+    params = t.function_params or {}
+    if not params.get("cutover_lvs"):
+        return False
+    # The cutover clone is built once the rounds are over -- unless it was
+    # built early (REPL_CUTOVER_EARLY_PREPARE), in which case rounds run
+    # until the freeze, the preconnect wait included.
+    if params.get("tgt_lvol_composite") and not params.get("early_prepared"):
+        return False
+    return True
+
+
+class _EndgameWake:
+    """Starts a cutover's shrink-snapshot transfer as soon as it is taken.
+
+    A shrink snapshot's replication task used to wait for this runner's next
+    pass -- TASK_EXEC_INTERVAL_SEC (10 s) when nothing else was transferring,
+    which is every round of a converging cutover (bed bf12 2026-11-03: ~12 s
+    of every ~21 s round). The cutover runner runs in another process, so the
+    hand-over goes through the database: while a cutover converges, this
+    runner re-reads THAT cutover's task row (a point read, one per converging
+    cutover -- at most the concurrent migration slots) every
+    REPL_ENDGAME_WAKE_POLL_SEC, and a new shrink_snap_id on it dispatches the
+    snapshot's replication task at once. Only this runner ever executes a
+    replication task, so there is no second executor to race; the task table
+    itself is still scanned only per pass, or when a wake fires.
+    """
+
+    def __init__(self):
+        self._watch = {}            # final task id -> (cluster id, shrink_snap_id seen)
+        self.serving = False
+
+    def refresh(self, cluster_id, tasks):
+        """Re-arm from a full read of *cluster_id*'s tasks; returns the
+        shrink snapshots in flight there (the pass dispatches those first)."""
+        for tid in [k for k, (cid, _) in self._watch.items() if cid == cluster_id]:
+            del self._watch[tid]
+        snaps = set()
+        for t in tasks:
+            if _converging_cutover(t):
+                snap = (t.function_params or {}).get("shrink_snap_id") or ""
+                self._watch[t.uuid] = (cluster_id, snap)
+                if snap:
+                    snaps.add(snap)
+        return snaps
+
+    def watching(self):
+        return bool(self._watch)
+
+    def poll(self):
+        """{cluster id: shrink snapshots taken since they were last seen}."""
+        fresh: dict = {}
+        for tid, (cid, seen) in list(self._watch.items()):
+            try:
+                t = db.get_task_by_id(tid)
+            except Exception:                             # noqa: BLE001
+                self._watch.pop(tid, None)
+                continue
+            if not _converging_cutover(t):
+                self._watch.pop(tid, None)
+                continue
+            snap = (t.function_params or {}).get("shrink_snap_id") or ""
+            if snap and snap != seen:
+                self._watch[tid] = (cid, snap)
+                fresh.setdefault(cid, set()).add(snap)
+        return fresh
+
+
+def _endgame_first(tasks, snap_ids):
+    """The pass in creation order, a converging cutover's shrink snapshot
+    first: it is the one whose every second of waiting lands in a freeze."""
+    if not snap_ids:
+        return list(tasks)
+    first = [t for t in tasks
+             if t.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION
+             and (t.function_params or {}).get("snapshot_id") in snap_ids]
+    return first + [t for t in tasks if t not in first]
+
+
+def _check_endgame_wake(wake):
+    """Dispatch the replication tasks of shrink snapshots taken since the last
+    look. Not re-entrant: a dispatch that sleeps does not serve from inside."""
+    if wake is None or wake.serving or not wake.watching():
+        return
+    fresh = wake.poll()
+    if not fresh:
+        return
+    wake.serving = True
+    try:
+        for cluster_id, snap_ids in fresh.items():
+            try:
+                tasks = db.get_job_tasks(cluster_id, reverse=False)
+            except Exception as e:                        # noqa: BLE001
+                logger.warning("Cannot read tasks to start shrink snapshot(s) %s: %s",
+                               ", ".join(sorted(snap_ids)), e)
+                continue
+            for t in tasks:
+                if (t.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION
+                        and t.status != JobSchedule.STATUS_DONE
+                        and (t.function_params or {}).get("snapshot_id") in snap_ids):
+                    xfer_timing.stamp("endgame_wake",
+                                      snap=t.function_params.get("snapshot_id"))
+                    _dispatch(t)
+    finally:
+        wake.serving = False
+
+
+def _wait(seconds, wake):
+    """Sleep *seconds*, serving converging cutovers' new shrink snapshots
+    meanwhile (see _EndgameWake). A plain sleep while none converges."""
+    end = time.time() + seconds
+    while True:
+        remaining = end - time.time()
+        if remaining <= 0:
+            return
+        if wake is None or wake.serving or not wake.watching():
+            time.sleep(remaining)
+            return
+        time.sleep(min(remaining, constants.REPL_ENDGAME_WAKE_POLL_SEC))
+        _check_endgame_wake(wake)
+
+
+def _dispatch(task):
+    """Run one replication task the way a pass does; task_runner's result
+    (False on a failure, which the caller follows with a short pause)."""
+    if task.status in [JobSchedule.STATUS_NEW, JobSchedule.STATUS_SUSPENDED]:
+        for t in db.get_job_tasks(task.cluster_id):
+            if t.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION and t.function_params["snapshot_id"] ==  task.function_params['snapshot_id']:
+                if t.status == JobSchedule.STATUS_RUNNING and t.canceled is False:
+                    logger.info("replication task found for same snapshot, retry")
+                    return True
+    if task.status == JobSchedule.STATUS_DONE:
+        return True
+    # Re-read the task in case cancel changed it. If it has
+    # since vanished -- retention, a concurrent cleanup, or a
+    # stale index entry a repair has yet to clear -- skip it.
+    # One missing task must never take the runner down with
+    # it: this KeyError used to propagate out of main() and
+    # stop replication for every cluster, then crash the
+    # restarted container on the same entry (live 2026-09-28).
+    try:
+        task = db.get_task_by_id(task.uuid)
+    except KeyError:
+        logger.warning("Replication task %s vanished before "
+                       "dispatch; skipping", task.uuid)
+        return True
+    # One task must never take the runner down with it:
+    # an RPC to a node that just went offline, or a
+    # malformed param, used to propagate out of main()
+    # and stop replication for the whole cluster until
+    # the container restarted (and then again).
+    try:
+        res = task_runner(task)
+    except Exception as e:
+        logger.error("Replication task %s failed: %s",
+                     task.get_id(), e)
+        res = False
+        # Spend a retry: a raise used to leave the task
+        # as it was, so the same failure re-ran on every
+        # pass and max_retry was never reached.
+        try:
+            task = db.get_task_by_id(task.uuid)
+            if task.status != JobSchedule.STATUS_DONE and not task.canceled:
+                _suspend_for_retry(task, f"task raised: {e}", backoff=True)
+        except Exception as e2:
+            logger.error("Could not record retry for task %s: %s",
+                         task.get_id(), e2)
+    return res
+
+
 def main():
     logger.info("Starting Tasks runner...")
+    wake = _EndgameWake()
     while True:
         try:
             db.get_clusters()
@@ -2649,58 +2925,21 @@ def main():
             for cl in clusters:
                 tasks = db.get_job_tasks(cl.get_id(), reverse=False)
                 active = active or _replication_in_flight(tasks)
-                for task in tasks:
-                    if task.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION:
-                        if task.status in [JobSchedule.STATUS_NEW, JobSchedule.STATUS_SUSPENDED]:
-                            active_task = False
-                            for t in db.get_job_tasks(task.cluster_id):
-                                if t.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION and t.function_params["snapshot_id"] ==  task.function_params['snapshot_id']:
-                                    if t.status == JobSchedule.STATUS_RUNNING and t.canceled is False:
-                                        active_task = True
-                                        break
-                            if active_task:
-                                logger.info("replication task found for same snapshot, retry")
-                                continue
-                        if task.status != JobSchedule.STATUS_DONE:
-                            # Re-read the task in case cancel changed it. If it has
-                            # since vanished -- retention, a concurrent cleanup, or a
-                            # stale index entry a repair has yet to clear -- skip it.
-                            # One missing task must never take the runner down with
-                            # it: this KeyError used to propagate out of main() and
-                            # stop replication for every cluster, then crash the
-                            # restarted container on the same entry (live 2026-09-28).
-                            try:
-                                task = db.get_task_by_id(task.uuid)
-                            except KeyError:
-                                logger.warning("Replication task %s vanished before "
-                                               "dispatch; skipping", task.uuid)
-                                continue
-                            # One task must never take the runner down with it:
-                            # an RPC to a node that just went offline, or a
-                            # malformed param, used to propagate out of main()
-                            # and stop replication for the whole cluster until
-                            # the container restarted (and then again).
-                            try:
-                                res = task_runner(task)
-                            except Exception as e:
-                                logger.error("Replication task %s failed: %s",
-                                             task.get_id(), e)
-                                res = False
-                                # Spend a retry: a raise used to leave the task
-                                # as it was, so the same failure re-ran on every
-                                # pass and max_retry was never reached.
-                                try:
-                                    task = db.get_task_by_id(task.uuid)
-                                    if task.status != JobSchedule.STATUS_DONE and not task.canceled:
-                                        _suspend_for_retry(task, f"task raised: {e}", backoff=True)
-                                except Exception as e2:
-                                    logger.error("Could not record retry for task %s: %s",
-                                                 task.get_id(), e2)
-                            if not res:
-                                time.sleep(3)
+                endgame_snaps = wake.refresh(cl.get_id(), tasks)
+                for task in _endgame_first(tasks, endgame_snaps):
+                    if task.function_name != JobSchedule.FN_SNAPSHOT_REPLICATION:
+                        continue
+                    if task.status == JobSchedule.STATUS_DONE:
+                        continue
+                    if not _dispatch(task):
+                        _wait(3, wake)
+                    # A round finished in this dispatch lets its cutover take
+                    # the next snapshot: start that one now, not after the
+                    # rest of the pass.
+                    _check_endgame_wake(wake)
 
-        time.sleep(constants.REPL_ACTIVE_PASS_SEC if active
-                   else constants.TASK_EXEC_INTERVAL_SEC)
+        _wait(constants.REPL_ACTIVE_PASS_SEC if active
+              else constants.TASK_EXEC_INTERVAL_SEC, wake)
 
 
 if __name__ == "__main__":

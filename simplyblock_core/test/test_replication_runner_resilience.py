@@ -102,7 +102,9 @@ def test_max_retry_with_a_vanished_receiving_lvol_does_not_raise(monkeypatch):
 
 def test_runner_loop_catches_task_exceptions():
     """A failing task is logged and skipped, not fatal to the service."""
-    src = inspect.getsource(sr.main)
+    # main() hands each task to _dispatch, which the endgame wake-up shares.
+    assert "_dispatch(task" in inspect.getsource(sr.main)
+    src = inspect.getsource(sr._dispatch)
     assert "try:" in src and "task_runner(task)" in src
     assert "except Exception" in src, (
         "an RPC error from one node would stop replication cluster-wide")
