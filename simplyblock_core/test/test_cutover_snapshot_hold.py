@@ -69,8 +69,9 @@ def harness(monkeypatch):
     monkeypatch.setattr(sr, "db", db)
     monkeypatch.setattr(sr, "_keep_replicated_for", lambda lv: 2)
     monkeypatch.setattr(sr, "_retention_schedule_for", lambda lv: [])
-    monkeypatch.setattr(sr, "_successor_is_chained_to", lambda a, b: True)
-    monkeypatch.setattr(sr, "_has_dependent_clone", lambda sid: False)
+    # The target copies exist, are chained and have no clone (one peer call).
+    monkeypatch.setattr(sr, "_copy_state", lambda lv, target, successor: sr._CopyState(
+        exists=True, chained=True, has_dependent_clone=False))
     monkeypatch.setattr(sr.replication_recovery_points, "group_recovery_point_ids",
                         lambda gids, db=None: set())
 

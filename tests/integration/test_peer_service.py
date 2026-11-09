@@ -19,9 +19,12 @@ from simplyblock_core.controllers.replication_policy_controller import (
 )
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.cluster import Cluster
+from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.replication import ReplicationPolicy
+from simplyblock_core.models.snapshot import SnapShot
+from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.peer import service
 from simplyblock_core.peer.client import (
     LocalPeerClient,
@@ -30,7 +33,12 @@ from simplyblock_core.peer.client import (
     PeerUnreachableError,
     peer_for_target,
 )
-from simplyblock_core.peer.protocol import PEER_API_VERSION, PeerInfo
+from simplyblock_core.peer.protocol import (
+    PEER_API_VERSION,
+    ChainCheck,
+    DescribeRequest,
+    PeerInfo,
+)
 
 SOURCE_CLUSTER_ID = "0b6f4a8e-1c2d-4e3f-9a0b-1c2d3e4f5a01"
 PEER_CLUSTER_ID = "0b6f4a8e-1c2d-4e3f-9a0b-1c2d3e4f5a02"
@@ -275,3 +283,126 @@ class TestRunnerPeerChoice:
 
         assert not isinstance(client, LocalPeerClient)
         assert client.cluster_id == PEER_CLUSTER_ID
+
+
+def _copy(db, uuid, cluster_id=SOURCE_CLUSTER_ID, prev=""):
+    snapshot = SnapShot()
+    snapshot.uuid = uuid
+    snapshot.cluster_id = cluster_id
+    snapshot.prev_snap_uuid = prev
+    snapshot.snap_bdev = f"LVS/{uuid}"
+    snapshot.write_to_db(db.kv_store)
+    return snapshot
+
+
+def _node(db, node_id, status=StorageNode.STATUS_ONLINE):
+    node = StorageNode()
+    node.uuid = node_id
+    node.cluster_id = SOURCE_CLUSTER_ID
+    node.status = status
+    node.write_to_db(db.kv_store)
+    return node
+
+
+class TestDescribe:
+
+    def test_reports_the_online_members_leading_the_landing_volumes_lvstore(self, db, source_cluster):
+        _pool(db, SOURCE_CLUSTER_ID)
+        landing = _lvol(db, "REP_snap-1")
+        landing.node_id, landing.nodes, landing.lvs_name = "N1", ["N1", "N2", "N3"], "LVS_1"
+        landing.write_to_db(db.kv_store)
+        _node(db, "N1")
+        _node(db, "N2")
+        _node(db, "N3", status=StorageNode.STATUS_OFFLINE)
+
+        # SPDK's leadership flag is an RPC to the node: N2 and the offline N3 claim it.
+        with patch.object(lvol_controller, "is_node_leader",
+                          side_effect=lambda node, lvs: node.get_id() in ("N2", "N3")):
+            answer = service.describe(SOURCE_CLUSTER_ID, DescribeRequest(landing_lvol_id=LANDING_ID))
+
+        assert answer.landing_leaders == ["N2"]
+
+    def test_a_landing_volume_that_is_gone_has_no_leaders(self, db, source_cluster):
+        answer = service.describe(SOURCE_CLUSTER_ID, DescribeRequest(landing_lvol_id=LANDING_ID))
+
+        assert answer.landing_leaders is None
+
+    def test_reports_whether_copies_exist_and_have_dependent_clones(self, db, source_cluster):
+        _copy(db, "T1")
+        _copy(db, "T2")
+        _copy(db, "T9", cluster_id=PEER_CLUSTER_ID)
+        clone = LVol()
+        clone.uuid = "0b6f4a8e-1c2d-4e3f-9a0b-1c2d3e4f5a07"
+        clone.lvol_name = "failed-over"
+        clone.cloned_from_snap = "T1"
+        clone.write_to_db(db.kv_store)
+
+        answer = service.describe(SOURCE_CLUSTER_ID, DescribeRequest(snapshot_ids=["T1", "T2", "T9", "T0"]))
+
+        states = {s.snapshot_id: (s.exists, s.has_dependent_clone) for s in answer.snapshots}
+        assert states == {"T1": (True, True), "T2": (True, False),
+                          "T9": (False, False), "T0": (False, False)}
+
+    def test_a_chain_link_in_the_database_counts_without_asking_spdk(self, db, source_cluster):
+        _copy(db, "T1")
+        _copy(db, "T2", prev="T1")
+
+        answer = service.describe(SOURCE_CLUSTER_ID, DescribeRequest(
+            chain_checks=[ChainCheck(successor_id="T2", predecessor_id="T1")]))
+
+        assert answer.chains[0].chained
+
+    def test_a_missing_successor_is_not_chained(self, db, source_cluster):
+        _copy(db, "T1")
+
+        answer = service.describe(SOURCE_CLUSTER_ID, DescribeRequest(
+            chain_checks=[ChainCheck(successor_id="T2", predecessor_id="T1")]))
+
+        assert not answer.chains[0].chained
+
+    def test_the_local_client_reports_an_unknown_cluster_as_not_found(self, db):
+        with pytest.raises(PeerNotFoundError):
+            LocalPeerClient(PEER_CLUSTER_ID).describe(DescribeRequest())
+
+
+def _transfer(db, task_id, target_node_id=None, status=JobSchedule.STATUS_RUNNING):
+    task = JobSchedule()
+    task.uuid = task_id
+    task.cluster_id = SOURCE_CLUSTER_ID
+    task.function_name = JobSchedule.FN_SNAPSHOT_REPLICATION
+    task.status = status
+    task.function_params = {"remote_lvol_id": LANDING_ID}
+    if target_node_id:
+        task.function_params["target_node_id"] = target_node_id
+    task.write_to_db(db.kv_store)
+    return task
+
+
+class TestHubSessionSharing:
+    """The hub session to a target member is shared by every transfer sent to
+    it; the runner tells from its own task records, not the target's volumes."""
+
+    def test_another_running_transfer_to_the_member_keeps_the_session(self, db, source_cluster):
+        from simplyblock_core.services import snapshot_replication as sr
+
+        mine = _transfer(db, "0b6f4a8e-1c2d-4e3f-9a0b-1c2d3e4f5a10", "N1")
+        _transfer(db, "0b6f4a8e-1c2d-4e3f-9a0b-1c2d3e4f5a11", "N1")
+
+        assert sr._other_active_transfers_to_node(mine, "N1")
+
+    def test_transfers_to_other_members_do_not(self, db, source_cluster):
+        from simplyblock_core.services import snapshot_replication as sr
+
+        mine = _transfer(db, "0b6f4a8e-1c2d-4e3f-9a0b-1c2d3e4f5a10", "N1")
+        _transfer(db, "0b6f4a8e-1c2d-4e3f-9a0b-1c2d3e4f5a11", "N2")
+        _transfer(db, "0b6f4a8e-1c2d-4e3f-9a0b-1c2d3e4f5a12", "N1", status=JobSchedule.STATUS_DONE)
+
+        assert not sr._other_active_transfers_to_node(mine, "N1")
+
+    def test_a_running_transfer_naming_no_member_keeps_the_session(self, db, source_cluster):
+        from simplyblock_core.services import snapshot_replication as sr
+
+        mine = _transfer(db, "0b6f4a8e-1c2d-4e3f-9a0b-1c2d3e4f5a10", "N1")
+        _transfer(db, "0b6f4a8e-1c2d-4e3f-9a0b-1c2d3e4f5a11")
+
+        assert sr._other_active_transfers_to_node(mine, "N1")

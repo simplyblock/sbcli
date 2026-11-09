@@ -15,14 +15,14 @@ from typing import Any, Protocol
 from urllib.parse import quote
 
 import requests
-from pydantic import SecretStr, ValidationError
+from pydantic import BaseModel, SecretStr, ValidationError
 from requests.adapters import HTTPAdapter
 from urllib3 import Retry
 
 from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.models.replication import ReplicationTarget
 from simplyblock_core.peer import service
-from simplyblock_core.peer.protocol import PeerInfo
+from simplyblock_core.peer.protocol import DescribeRequest, DescribeResponse, PeerInfo
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +77,15 @@ class PeerClient(Protocol):
             PeerError: the target's control plane cannot be reached or understood.
         """
 
+    def describe(self, request: DescribeRequest) -> DescribeResponse:
+        """Read-only answers about the target side: lvstore leadership of a landing
+        volume, whether copies exist or have dependent clones, chain links.
+
+        Raises:
+            PeerNotFoundError: the cluster is unknown.
+            PeerError: the target's control plane cannot be reached or understood.
+        """
+
 
 class LocalPeerClient:
     """A target cluster managed by this same control plane: calls the service directly."""
@@ -112,6 +121,17 @@ class LocalPeerClient:
             raise PeerNotFoundError(str(e)) from e
         except PreconditionError as e:
             raise PeerRefusedError(str(e)) from e
+
+    def describe(self, request: DescribeRequest) -> DescribeResponse:
+        """Read-only answers about the target side (see ``PeerClient.describe``).
+
+        Raises:
+            PeerNotFoundError: this control plane does not manage the cluster.
+        """
+        try:
+            return service.describe(self._cluster_id, request)
+        except KeyError as e:
+            raise PeerNotFoundError(str(e)) from e
 
 
 # Process-local on purpose: each process writes the bundles it uses into its own
@@ -179,8 +199,8 @@ class HttpPeerClient:
     def cluster_id(self) -> str:
         return self._cluster_id
 
-    def _request(self, method: str, path: str) -> Any:
-        """Send one call to the peer and return its JSON body.
+    def _request(self, method: str, path: str, body: BaseModel | None = None) -> Any:
+        """Send one call to the peer, with *body* as its JSON, and return its JSON body.
 
         Raises:
             PeerUnreachableError: no answer (connection refused, timeout) or a 5xx
@@ -195,6 +215,7 @@ class HttpPeerClient:
         try:
             response = self._session.request(
                 method, url, timeout=self._timeout,
+                json=body.model_dump(mode="json") if body is not None else None,
                 # Unwrapped here, at the send, and nowhere earlier.
                 headers={"Authorization": f"Bearer {self._secret.get_secret_value()}"})
         except (requests.ConnectionError, requests.Timeout) as e:
@@ -249,6 +270,18 @@ class HttpPeerClient:
             PeerError: as for every peer call (see ``_request``).
         """
         self._request("DELETE", f"landing-volumes/{quote(lvol_id, safe='')}")
+
+    def describe(self, request: DescribeRequest) -> DescribeResponse:
+        """Read-only answers about the target side (see ``PeerClient.describe``).
+
+        Raises:
+            PeerError: as for every peer call (see ``_request``), and
+                PeerProtocolError when the answer is not a DescribeResponse.
+        """
+        try:
+            return DescribeResponse.model_validate(self._request("POST", "describe", request))
+        except ValidationError as e:
+            raise PeerProtocolError(f"Unexpected describe response from {self._base}: {e}") from e
 
 
 def peer_for_target(target: ReplicationTarget) -> PeerClient:

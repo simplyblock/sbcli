@@ -19,7 +19,7 @@ from fastapi import APIRouter, HTTPException, Response
 
 from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.peer import service
-from simplyblock_core.peer.protocol import PeerInfo
+from simplyblock_core.peer.protocol import DescribeRequest, DescribeResponse, PeerInfo
 
 from ._dependencies import Cluster
 
@@ -43,3 +43,11 @@ def discard_landing(cluster: Cluster, lvol_id: UUID) -> Response:
     except PreconditionError as e:
         raise HTTPException(status_code=409, detail=str(e))
     return Response(status_code=204)
+
+
+@api.post('/describe', name='peer:describe')
+def describe(cluster: Cluster, request: DescribeRequest) -> DescribeResponse:
+    """Read-only answers about this cluster's side of a replication: who leads a
+    landing volume's lvstore, whether copies exist or have dependent clones, and
+    whether copies are chained. POST only because the question has a body."""
+    return service.describe(cluster.get_id(), request)

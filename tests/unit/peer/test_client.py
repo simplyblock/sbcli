@@ -26,7 +26,7 @@ from simplyblock_core.peer.client import (
     PeerUnreachableError,
     peer_for_target,
 )
-from simplyblock_core.peer.protocol import PEER_API_VERSION
+from simplyblock_core.peer.protocol import PEER_API_VERSION, ChainCheck, DescribeRequest
 
 CLUSTER_ID = "6f9ad3a2-5b0e-4d55-9a84-0d3c3b1f2e10"
 SECRET = "peer-plaintext"
@@ -220,3 +220,32 @@ class TestDiscardLanding:
 
         with pytest.raises(PeerRefusedError, match="not a landing volume"):
             _client().discard_landing(self.LVOL_ID)
+
+
+class TestDescribe:
+
+    def test_posts_the_question_and_reads_the_answer(self, session_request):
+        session_request.return_value = _response(body={
+            "landing_leaders": ["TS"],
+            "snapshots": [{"snapshot_id": "T1", "exists": True, "has_dependent_clone": True}],
+            "chains": [{"successor_id": "T2", "predecessor_id": "T1", "chained": True}]})
+
+        answer = _client().describe(DescribeRequest(
+            landing_lvol_id="R", snapshot_ids=["T1"],
+            chain_checks=[ChainCheck(successor_id="T2", predecessor_id="T1")]))
+
+        method, url = session_request.call_args.args
+        assert method == "POST"
+        assert url == f"https://cp-b.example:8443/api/v2/_peer/clusters/{CLUSTER_ID}/describe"
+        assert session_request.call_args.kwargs["json"] == {
+            "landing_lvol_id": "R", "snapshot_ids": ["T1"],
+            "chain_checks": [{"successor_id": "T2", "predecessor_id": "T1"}]}
+        assert answer.landing_leaders == ["TS"]
+        assert answer.snapshots[0].has_dependent_clone
+        assert answer.chains[0].chained
+
+    def test_an_answer_of_the_wrong_shape_is_a_protocol_error(self, session_request):
+        session_request.return_value = _response(body={"snapshots": [{"exists": "maybe"}]})
+
+        with pytest.raises(PeerProtocolError, match="describe"):
+            _client().describe(DescribeRequest(snapshot_ids=["T1"]))

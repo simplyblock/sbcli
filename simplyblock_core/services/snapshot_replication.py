@@ -1,6 +1,8 @@
+import contextlib
 import logging
 import time
 import uuid
+from typing import NamedTuple
 
 from simplyblock_core import (
     constants,
@@ -24,6 +26,7 @@ from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.peer.client import LocalPeerClient, PeerClient, peer_for_target
+from simplyblock_core.peer.protocol import ChainCheck, DescribeRequest
 from simplyblock_core.rpc_client import RPCException
 
 logger = utils.get_logger(__name__)
@@ -1447,12 +1450,16 @@ def _transfer_source_node(task, snapshot):
     return node
 
 
-def _target_leadership_moved(task):
+def _target_leadership_moved(task, snapshot):
     """Why the target's leadership is no longer where this transfer went, or "".
 
     Compares the member the transfer was sent to with what the target lvstore
-    reports now: no leader, several, or a different one all mean the receive
-    side moved and the transfer has to be redone on the new leader.
+    reports now, asked through the destination's peer client: no leader,
+    several, or a different one all mean the receive side moved and the
+    transfer has to be redone on the new leader.
+
+    Raises:
+        PeerError: the destination cannot answer.
     """
     target_id = task.function_params.get("target_node_id")
     remote_id = task.function_params.get("remote_lvol_id")
@@ -1462,8 +1469,9 @@ def _target_leadership_moved(task):
         remote_lv = db.get_lvol_by_id(remote_id)
     except KeyError:
         return ""
-    leaders = [n.get_id() for n in _leaders_of(remote_lv)]
-    if leaders == [target_id]:
+    leaders = _landing_peer(snapshot, remote_lv).describe(
+        DescribeRequest(landing_lvol_id=remote_id)).landing_leaders
+    if leaders is None or leaders == [target_id]:
         return ""
     return (f"target leadership of {remote_lv.lvs_name} moved from {target_id} to "
             f"{', '.join(leaders) or 'no leader'}")
@@ -1516,87 +1524,76 @@ def _require_lvs_leader(node, lvs_name, what):
 def _other_active_transfers_to_node(current_task, target_node_id):
     """True when another RUNNING snapshot-replication task is transferring into
     *target_node_id* — its writes ride the same shared hub session, so the hub
-    must not be detached under it."""
+    must not be detached under it.
+
+    Compares the member each task sent its transfer to (``target_node_id``, set
+    before the task runs), which is the member owning the hub session. That is
+    this cluster's own task record: no read of the target's volumes, which a
+    split control plane does not have. A running task that names no target
+    member keeps the session up, since it may be using it.
+    """
     for t in db.get_job_tasks(current_task.cluster_id):
         if (t.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION
                 and t.get_id() != current_task.get_id()
-                and t.status == JobSchedule.STATUS_RUNNING):
-            rid = t.function_params.get("remote_lvol_id")
-            if not rid:
-                continue
-            try:
-                if db.get_lvol_by_id(rid).node_id == target_node_id:
-                    return True
-            except KeyError:
-                continue
-    return False
-
-
-def _has_dependent_clone(snapshot_uuid):
-    """True when any live volume is cloned from *snapshot_uuid*.
-
-    A failed-over volume is a clone of the last replicated target snapshot, so
-    that snapshot must outlive it. Uses the mini index (same source the snapshot
-    delete path consults) and ignores volumes that are themselves going away.
-    """
-    for lvol in db.get_mini_lvols():
-        if lvol.cloned_from_snap != snapshot_uuid:
-            continue
-        if lvol.status == LVol.STATUS_IN_DELETION:
-            continue
-        return True
-    return False
-
-
-def _successor_is_chained_to(successor, predecessor_target_uuid):
-    """True when *successor*'s remote copy is chained onto *predecessor_target_uuid*.
-
-    Retention deletes a predecessor expecting SPDK to swap-merge its segments
-    into the successor that is CHAINED to it. If the chain link was never
-    established, that delete does not merge — it drops the segments, and the
-    target is left holding the newest delta over holes (all-zeros DR fail-over,
-    labs 2026-08-10..17). Keeping N snapshots only widens the race; it never
-    establishes the precondition, so verify it explicitly before pruning.
-
-    The DB link is authoritative when present: ``prev_snap_uuid`` is only
-    written after bdev_lvol_add_clone and bdev_lvol_convert both succeeded, on
-    the primary and on an online secondary (every failure returns before the
-    record is written). The converse does not hold — the link write is
-    best-effort — so when the link is absent we ask SPDK on the target node,
-    which is the real authority, rather than blocking the prune forever.
-    """
-    successor_target_uuid = successor.target_replicated_snap_uuid
-    if not successor_target_uuid:
-        return False
-    try:
-        successor_copy = db.get_snapshot_by_id(successor_target_uuid)
-    except KeyError:
-        return False
-
-    if successor_copy.prev_snap_uuid == predecessor_target_uuid:
-        return True
-
-    # No DB link. Ask the target node whether the blob is actually chained, so a
-    # missing link (best-effort write, or a snapshot replicated before chaining
-    # was implemented) cannot make the pair unprunable for ever.
-    try:
-        predecessor_copy = db.get_snapshot_by_id(predecessor_target_uuid)
-        remote_snode = db.get_storage_node_by_id(successor_copy.lvol.node_id)
-        if remote_snode.status != StorageNode.STATUS_ONLINE:
-            return False
-        bdev = remote_snode.rpc_client().bdev_get(successor_copy.snap_bdev)
-        if bdev:
-            driver = (bdev.get("driver_specific") or {}).get("lvol") or {}
-            if driver.get("clone") and driver.get("base_snapshot") in (
-                    predecessor_copy.snap_bdev, predecessor_copy.snap_uuid):
-                logger.info("Snapshot %s is chained onto %s in SPDK but the DB link is "
-                            "missing; pruning on the SPDK verdict",
-                            successor_copy.get_id(), predecessor_target_uuid)
+                and t.status == JobSchedule.STATUS_RUNNING
+                and t.function_params.get("remote_lvol_id")):
+            sent_to = t.function_params.get("target_node_id")
+            if not sent_to or sent_to == target_node_id:
                 return True
-    except Exception as e:
-        logger.warning("Could not verify the chain of %s onto %s: %s",
-                       successor_target_uuid, predecessor_target_uuid, e)
     return False
+
+
+class _CopyState(NamedTuple):
+    """A replicated copy on the target, as retention needs to know it."""
+
+    exists: bool
+    #: The successor's copy is chained onto this one, so deleting this one
+    #: swap-merges its segments instead of dropping them.
+    chained: bool
+    #: A live volume (e.g. a failed-over one) is cloned from this copy.
+    has_dependent_clone: bool
+
+
+def _destination_cluster(source_lvol, target_uuid):
+    """The cluster holding *source_lvol*'s replicated copies.
+
+    Read off the replication node the volume is configured with; failing that,
+    off the copy's record. Both reads go away once the source records the
+    destination cluster itself (prepare_landing, step 2 of the split).
+
+    Raises:
+        KeyError: neither the node nor the copy is known here.
+    """
+    with contextlib.suppress(KeyError):
+        return db.get_storage_node_by_id(source_lvol.replication_node_id).cluster_id
+    return db.get_snapshot_by_id(target_uuid).cluster_id
+
+
+def _copy_state(source_lvol, target_uuid, successor) -> _CopyState:
+    """What the target says about the copy *target_uuid* before retention deletes it.
+
+    One peer call answers three questions. Retention deletes a predecessor
+    expecting SPDK to swap-merge its segments into the successor CHAINED to it;
+    without the link the delete drops them, and the target is left holding the
+    newest delta over holes (all-zeros DR fail-over, labs 2026-08-10..17). And
+    a copy a live volume is cloned from must outlive that volume.
+
+    Raises:
+        PeerError: the destination cannot answer.
+    """
+    try:
+        cluster_id = _destination_cluster(source_lvol, target_uuid)
+    except KeyError:
+        return _CopyState(exists=False, chained=False, has_dependent_clone=False)
+    successor_target = successor.target_replicated_snap_uuid
+    answer = _peer_for(source_lvol, cluster_id).describe(DescribeRequest(
+        snapshot_ids=[target_uuid],
+        chain_checks=([ChainCheck(successor_id=successor_target, predecessor_id=target_uuid)]
+                      if successor_target else [])))
+    copy = answer.snapshots[0]
+    return _CopyState(exists=copy.exists,
+                      chained=bool(answer.chains) and answer.chains[0].chained,
+                      has_dependent_clone=copy.has_dependent_clone)
 
 
 _KEEP_REPLICATED_INTERNAL = 2
@@ -1766,12 +1763,10 @@ def _prune_internal_snapshots(source_lvol, after_cutover=False):
                         "consistency group's newest replicated generation", snap.get_id())
             continue
         target_uuid = snap.target_replicated_snap_uuid
-        try:
-            db.get_snapshot_by_id(target_uuid)
-        except KeyError:
+        copy = _copy_state(source_lvol, target_uuid, replicated_internal[index + 1])
+        if not copy.exists:
             target_uuid = ""  # already gone — fall through to source cleanup
-        if target_uuid and not _successor_is_chained_to(
-                replicated_internal[index + 1], target_uuid):
+        if target_uuid and not copy.chained:
             # The successor does not (yet) sit on top of this snapshot. Deleting
             # it now would drop its segments rather than swap-merge them, which
             # is exactly how a fail-over clone ends up reading zeros. Leave both
@@ -1782,7 +1777,7 @@ def _prune_internal_snapshots(source_lvol, after_cutover=False):
                            snap.get_id(), replicated_internal[index + 1].get_id(),
                            target_uuid)
             continue
-        if target_uuid and _has_dependent_clone(target_uuid):
+        if target_uuid and copy.has_dependent_clone:
             # Never prune a target snapshot a volume is cloned from. The delete
             # reaches SPDK as bdev_lvol_delete(sync=False) and frees the blocks
             # there and then, so no downstream DB-level guard can save the clone:
@@ -2742,7 +2737,7 @@ def task_runner(task: JobSchedule):
             task.write_to_db()
             return True
         if status == "Failed":
-            moved = _target_leadership_moved(task)
+            moved = _target_leadership_moved(task, snapshot)
             if moved:
                 # Not the transfer's fault: the target's leadership moved
                 # (primary -> secondary, secondary -> tertiary) under it.

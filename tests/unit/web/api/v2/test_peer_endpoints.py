@@ -8,7 +8,12 @@ from fastapi.testclient import TestClient
 
 import simplyblock_web.api.v2 as v2
 import simplyblock_web.api.v2.peer as peer_module
-from simplyblock_core.peer.protocol import PEER_API_VERSION, PeerInfo
+from simplyblock_core.peer.protocol import (
+    PEER_API_VERSION,
+    DescribeRequest,
+    DescribeResponse,
+    PeerInfo,
+)
 from simplyblock_core.peer.service import NotALandingVolumeError
 from tests.unit.web.api.v2._factories import CLUSTER_ID
 
@@ -86,3 +91,26 @@ class TestDiscardLanding:
 
         assert response.status_code == 422
         peer_service.discard_landing.assert_not_called()
+
+
+DESCRIBE_URL = f'/api/v2/_peer/clusters/{CLUSTER_ID}/describe'
+
+
+class TestDescribe:
+
+    def test_answers_through_the_service(self, client, db, cluster, peer_service):
+        peer_service.describe.return_value = DescribeResponse(landing_leaders=['TS'])
+
+        response = client.post(DESCRIBE_URL, json={'landing_lvol_id': 'R'})
+
+        assert response.status_code == 200
+        assert response.json()['landing_leaders'] == ['TS']
+        cluster_id, request = peer_service.describe.call_args.args
+        assert cluster_id == CLUSTER_ID
+        assert request == DescribeRequest(landing_lvol_id='R')
+
+    def test_a_malformed_question_is_rejected(self, client, db, cluster, peer_service):
+        response = client.post(DESCRIBE_URL, json={'chain_checks': [{'successor_id': 'T2'}]})
+
+        assert response.status_code == 422
+        peer_service.describe.assert_not_called()

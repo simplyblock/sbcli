@@ -15,6 +15,7 @@ import pytest
 from simplyblock_core import constants
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.peer.protocol import DescribeResponse
 from simplyblock_core.services import snapshot_replication as sr
 
 ONLINE = StorageNode.STATUS_ONLINE
@@ -212,6 +213,15 @@ def test_a_recently_settled_leader_needs_no_second_wait(monkeypatch):
     assert len(slept) == 1
 
 
+def _target_reports_leaders(*leaders):
+    """The destination answering ``describe`` with *leaders* as the landing
+    volume's lvstore leaders: the runner asks the destination's peer client,
+    not the target's nodes (control-plane split)."""
+    peer = MagicMock()
+    peer.describe.return_value = DescribeResponse(landing_leaders=list(leaders))
+    return patch.object(sr, "_landing_peer", return_value=peer)
+
+
 def test_failed_transfer_after_target_leadership_moved_restarts_on_the_new_leader():
     task = _task(source_node_id="P", target_node_id="TP", remote_lvol_id="R", offset=8192)
     src = _node("P")
@@ -219,7 +229,7 @@ def test_failed_transfer_after_target_leadership_moved_restarts_on_the_new_leade
                                                              "offset": 8192}
     db = _DB([src, _node("S"), _node("T")] + [_node(i) for i in ("TP", "TS", "TT")],
              lvols={"R": _remote()})
-    with patch(IS_LEADER, side_effect=lambda node, lvs: node.get_id() == "TS"):
+    with _target_reports_leaders("TS"):
         assert _running(task, db) is False
     assert task.status == JobSchedule.STATUS_SUSPENDED
     assert task.retry == 0
@@ -233,7 +243,7 @@ def test_failed_transfer_with_unchanged_leader_is_an_ordinary_retry():
     src.rpc_client().bdev_lvol_transfer_stat.return_value = {"transfer_state": "Failed",
                                                              "offset": 0}
     db = _DB([src] + [_node(i) for i in ("TP", "TS", "TT")], lvols={"R": _remote()})
-    with patch(IS_LEADER, side_effect=lambda node, lvs: node.get_id() == "TP"):
+    with _target_reports_leaders("TP"):
         _running(task, db)
     assert task.retry == 1
     assert "transfer failed at offset 0" in task.function_result
