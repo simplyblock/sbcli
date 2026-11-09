@@ -23,7 +23,7 @@ import contextlib
 import time
 import uuid as uuid_lib
 from datetime import datetime
-from typing import NoReturn
+from typing import Any, NoReturn
 
 from simplyblock_core import constants, db_controller, utils, xfer_timing
 from simplyblock_core.models.job_schedule import JobSchedule
@@ -142,27 +142,30 @@ def _throttle_cap(task):
     return max(cap, constants.REPL_CUTOVER_THROTTLE_MIN_MBPS)
 
 
-def _throttle_source(task, lvol):
-    """Cap the source volume's write bandwidth for the rest of the endgame.
+def _apply_source_cap(task, lvol, cap, why):
+    """Cap the source volume's writes at *cap* MB/s unless they already are
+    at or under it; returns the task.
 
-    See REPL_CUTOVER_THROTTLE_AFTER_ROUND. The volume's own QoS values are
-    kept on the task (throttle_restore) and put back by
-    _restore_source_throttle. Once per endgame: a refusal (pool-level QoS,
-    an RPC failure) is recorded and not retried every round.
+    The volume's own QoS values are kept on the task the first time
+    (throttle_restore) and put back by _restore_source_throttle; the cap in
+    force is throttle_mbps. A cap is only ever tightened here.
     """
     params = task.function_params or {}
-    if "throttle_restore" in params or params.get("throttle_tried"):
-        return task
-    cap = _throttle_cap(task)
     if cap <= 0 or not hasattr(lvol, "w_mbytes_per_sec"):
         return task
-    try:
-        restore = [int(getattr(lvol, n, 0) or 0) for n in
-                   ("rw_ios_per_sec", "rw_mbytes_per_sec", "r_mbytes_per_sec", "w_mbytes_per_sec")]
-    except (TypeError, ValueError):
-        return _record(task, throttle_tried=True)     # no usable QoS record
-    if 0 < restore[3] <= cap:
-        return _record(task, throttle_tried=True)     # already slower than the cap
+    applied = params.get("throttle_mbps")
+    restore = params.get("throttle_restore")
+    if restore is not None and applied and applied <= cap:
+        return task
+    if restore is None:
+        try:
+            restore = [int(getattr(lvol, n, 0) or 0) for n in
+                       ("rw_ios_per_sec", "rw_mbytes_per_sec", "r_mbytes_per_sec",
+                        "w_mbytes_per_sec")]
+        except (TypeError, ValueError):
+            return task                                   # no usable QoS record
+        if 0 < restore[3] <= cap:
+            return task                                   # already slower than the cap
     from simplyblock_core.controllers import lvol_controller
     try:
         ret = lvol_controller.set_lvol(lvol.get_id(), lvol.rw_ios_per_sec,
@@ -170,15 +173,31 @@ def _throttle_source(task, lvol):
     except Exception as e:                                # noqa: BLE001
         ret = str(e)
     if ret is not True:
-        logger.warning("cutover for lvol %s: source writes not throttled (%s); the "
-                       "rounds converge at the application's write rate",
-                       lvol.get_id(), ret or "QoS refused")
-        return _record(task, throttle_tried=True)
-    logger.info("cutover for lvol %s: source writes capped at %d MB/s until the "
-                "endgame ends (was %s)", lvol.get_id(), cap, restore)
+        logger.warning("cutover for lvol %s: source writes not capped at %d MB/s "
+                       "(%s): %s", lvol.get_id(), cap, why, ret or "QoS refused")
+        return task
+    logger.info("cutover for lvol %s: source writes capped at %d MB/s (%s; own QoS %s)",
+                lvol.get_id(), cap, why, restore)
     xfer_timing.stamp("source_throttled", lvol=lvol.get_id(), mbps=cap,
-                      round=params.get("shrink_round", 0))
-    return _record(task, throttle_restore=restore, throttle_tried=True)
+                      why=why.replace(" ", "_"), round=params.get("shrink_round", 0))
+    return _record(task, throttle_restore=restore, throttle_mbps=cap)
+
+
+def _throttle_source(task, lvol):
+    """Cap the source volume's write bandwidth for the rest of the endgame.
+
+    See REPL_CUTOVER_THROTTLE_AFTER_ROUND. Once per endgame: a refusal
+    (pool-level QoS, an RPC failure) is recorded and not retried every round.
+    A tighter catch-up cap (REPL_CATCHUP_*) stays in force.
+    """
+    params = task.function_params or {}
+    if params.get("throttle_tried"):
+        return task
+    cap = _throttle_cap(task)
+    if cap <= 0:
+        return task
+    task = _apply_source_cap(task, lvol, cap, "endgame")
+    return _record(task, throttle_tried=True)
 
 
 def _restore_source_throttle(task):
@@ -187,7 +206,7 @@ def _restore_source_throttle(task):
     params = task.function_params or {}
     restore = params.get("throttle_restore")
     if restore is None:
-        drop_params(task, "throttle_tried")
+        drop_params(task, "throttle_tried", "throttle_mbps")
         return
     lvol_id = params.get("lvol_id")
     from simplyblock_core.controllers import lvol_controller
@@ -204,7 +223,7 @@ def _restore_source_throttle(task):
     else:
         logger.error("cutover for lvol %s: could not restore the source QoS %s: %s; "
                      "restore it by hand (sbctl volume update)", lvol_id, restore, ret)
-    drop_params(task, "throttle_restore", "throttle_tried")
+    drop_params(task, "throttle_restore", "throttle_tried", "throttle_mbps")
 
 
 def _record_cutover_done(task):
@@ -688,16 +707,20 @@ def task_runner(task: JobSchedule, tasks):
             task = _bound_catchup_after_failed_endgame(task, lag)
             xfer_timing.stamp("await_catchup", lvol=lvol_id, ms=lag * 1000.0)
             # Not a failure: no retry burned, and the deadline is pushed out
-            # because catching up is legitimate progress, not a stall.
-            _record(task, shrink_deadline=(
+            # because catching up is legitimate progress, not a stall. A
+            # catch-up that persistently makes none caps the source's writes.
+            _track_catchup(task, lvol, lag, backlog, shrink_deadline=(
                 int(time.time()) + constants.REPL_CUTOVER_SHRINK_TIMEOUT_SEC))
             raise TaskDefer(
                 "waiting for replication to catch up before the endgame "
                 "(lag %.0fs > %ds)" % (lag, constants.REPL_CUTOVER_ENDGAME_LAG_SEC))
 
         # Caught up (or no measurement): take the lvstore for the endgame.
-        if "catchup_since" in params:
-            drop_params(task, "catchup_since")
+        if "catchup_since" in params or "catchup_win" in params:
+            # (the catch-up cap itself stays: see REPL_CATCHUP_STRIKES)
+            task = drop_params(task, "catchup_since", "catchup_win", "catchup_prev",
+                               "catchup_strikes") or task
+            params = task.function_params
         task = _acquire_lvs_claim(task, lvol, tasks)
         params = task.function_params
         xfer_timing.stamp("endgame_entered", lvol=lvol_id, ms=(lag or 0) * 1000.0)
@@ -1687,6 +1710,97 @@ def _bound_catchup_after_failed_endgame(task, lag):
     raise TaskRetry(f"replication did not catch up again within "
                     f"{constants.REPL_CUTOVER_SHRINK_TIMEOUT_SEC}s after a failed "
                     f"endgame (lag {lag:.0f}s)")
+
+
+def _improved(before, after):
+    return after < before * (1.0 - constants.REPL_CATCHUP_PROGRESS_FRACTION)
+
+
+def _catchup_window_update(params, lag, backlog, now):
+    """The catch-up tracking params after one sample (pure).
+
+    catchup_win holds the window in progress: its start and the lowest lag
+    and byte backlog seen in it. Lag saw-tooths with every replicated
+    snapshot, so its low point is what says whether the target gets closer;
+    the backlog (None while more than one snapshot is outstanding) is the
+    same in bytes. A closed window is compared with the one before it
+    (catchup_prev): progress resets catchup_strikes, none adds one.
+    """
+    win = params.get("catchup_win")
+    if not win:
+        return {"catchup_win": {"start": now, "lag": lag, "backlog": backlog}}
+    win = dict(win)
+    win["lag"] = min(float(win["lag"]), lag)
+    if backlog is not None:
+        win["backlog"] = backlog if win.get("backlog") is None else min(win["backlog"], backlog)
+    if now - float(win["start"]) < constants.REPL_CATCHUP_WINDOW_SEC:
+        return {"catchup_win": win}
+    upd: dict[str, Any] = {"catchup_win": {"start": now, "lag": lag, "backlog": backlog},
+           "catchup_prev": {"lag": win["lag"], "backlog": win.get("backlog")}}
+    prev = params.get("catchup_prev")
+    if prev is None:
+        return upd                                        # the first window: a baseline
+    progress = _improved(float(prev["lag"]), win["lag"]) or (
+        prev.get("backlog") is not None and win.get("backlog") is not None
+        and _improved(float(prev["backlog"]), win["backlog"]))
+    upd["catchup_strikes"] = 0 if progress else int(params.get("catchup_strikes") or 0) + 1
+    return upd
+
+
+def _source_write_mbps(lvol):
+    """The source volume's recent write rate in MB/s from its io stats, or None."""
+    try:
+        stats = db.get_lvol_stats(lvol, limit=6)
+    except Exception as e:                                # noqa: BLE001
+        logger.debug("no io stats for %s: %s", lvol.get_id(), e)
+        return None
+    rates = [int(getattr(st, "write_bytes_ps", 0) or 0) for st in stats or []]
+    rates = [r for r in rates if r > 0]
+    if not rates:
+        return None
+    return sum(rates) / len(rates) / 1e6
+
+
+def _next_catchup_cap(params, lvol):
+    """Half the measured write rate the first time, half the last cap after."""
+    current = params.get("catchup_cap_mbps")
+    if current:
+        cap = int(current) // 2
+    else:
+        rate = _source_write_mbps(lvol)
+        cap = (int(rate * constants.REPL_CATCHUP_THROTTLE_FACTOR) if rate
+               else constants.REPL_CATCHUP_THROTTLE_START_MBPS)
+    return max(cap, constants.REPL_CUTOVER_THROTTLE_MIN_MBPS)
+
+
+def _track_catchup(task, lvol, lag, backlog, **extra):
+    """Sample the catch-up wait and cap the source when it persistently makes
+    no progress (REPL_CATCHUP_*); returns the task.
+
+    Nothing here looks at how many volumes share the source or the target:
+    a target that cannot absorb what the source writes shows as a lag and a
+    backlog that stop shrinking, whatever the reason. The cap only tightens,
+    and it is re-applied after a failed endgame restored the volume's own QoS.
+    """
+    params = task.function_params or {}
+    upd = _catchup_window_update(params, lag, backlog, time.time())
+    upd.update(extra)
+    if int(upd.get("catchup_strikes") or 0) >= constants.REPL_CATCHUP_STRIKES:
+        cap = _next_catchup_cap(params, lvol)
+        logger.warning("cutover for lvol %s: replication has not caught up for %d "
+                       "windows of %ds (lag %.0fs, backlog %s); capping source "
+                       "writes at %d MB/s", lvol.get_id(), upd["catchup_strikes"],
+                       constants.REPL_CATCHUP_WINDOW_SEC, lag,
+                       "unknown" if backlog is None else "%d MiB" % (backlog >> 20), cap)
+        xfer_timing.stamp("catchup_stalled", lvol=lvol.get_id(), mbps=cap,
+                          ms=lag * 1000.0)
+        upd["catchup_cap_mbps"] = cap
+        upd["catchup_strikes"] = 0
+    task = _record(task, **upd)
+    cap = (task.function_params or {}).get("catchup_cap_mbps")
+    if cap:
+        task = _apply_source_cap(task, lvol, int(cap), "replication not catching up")
+    return task
 
 
 def _cleanup_unfinished_cutover(task):

@@ -584,6 +584,27 @@ REPL_CUTOVER_THROTTLE_W_MBPS = 8
 # Each failed or abandoned attempt of the same cutover halves the cap (8, 4,
 # 2, 1 MB/s), never below this.
 REPL_CUTOVER_THROTTLE_MIN_MBPS = 1
+# --- catch-up throttle ------------------------------------------------------
+# A volume whose replication persistently cannot catch up never reaches the
+# endgame: the target cannot absorb what the source writes (bf17, 2026-11-08:
+# the last volume of eight waited for hours behind seven already migrated
+# onto the same saturated target). Whatever the cause, it is detected from
+# the volume's own replication alone: the catch-up wait is cut into windows
+# of this length, and a window in which neither the lowest lag nor the
+# lowest byte backlog improved on the previous window's by
+# REPL_CATCHUP_PROGRESS_FRACTION is a window without progress. The first
+# window is a baseline.
+REPL_CATCHUP_WINDOW_SEC = 300
+REPL_CATCHUP_PROGRESS_FRACTION = 0.1
+# After this many windows in a row without progress the source volume's
+# writes are capped: first at REPL_CATCHUP_THROTTLE_FACTOR of its measured
+# write rate (or REPL_CATCHUP_THROTTLE_START_MBPS when there is no measurement),
+# then halved after every further run of windows without progress, never below
+# REPL_CUTOVER_THROTTLE_MIN_MBPS. The cap stays until the cutover ends (done,
+# failed for good or canceled): a failed endgame does not lift it.
+REPL_CATCHUP_STRIKES = 2
+REPL_CATCHUP_THROTTLE_FACTOR = 0.5
+REPL_CATCHUP_THROTTLE_START_MBPS = 64
 # How long after its freeze_started_at stamp a cutover counts as freezing (and
 # so is spared by a plan cancel or a policy detach). A freeze is bounded by the
 # final-step limit plus fence/restore RPCs; a stamp older than this is a pass

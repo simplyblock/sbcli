@@ -439,7 +439,7 @@ def run_cutover(src_node, tgt_node, lvol, tgt_lvol_composite, tgt_map_id,
     partial_base = (_final_delta_base(lvol, delta_base, src_exec, operation)
                     if constants.REPL_FINAL_STEP_DELTA else 0)
     batch = _FINAL_STEP_DELTA_BATCH if partial_base else _FINAL_STEP_BATCH
-    applied = {}
+    applied: dict = {}
     logger.info(
         f"[IO-FREEZE] bdev_lvol_transfer_final_step starting: lvol={lvol.uuid} "
         f"src={src_lvol_composite} tgt_snap={tgt_snap_composite} "
