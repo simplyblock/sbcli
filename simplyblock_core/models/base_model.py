@@ -571,17 +571,23 @@ class BaseModel:
         except indices.UniqueIndexViolation:
             # An invariant breach, not a write failure: the pre-check that
             # produces the clean "name already exists" error either did not run
-            # or the data is already inconsistent. It propagates (to a 500 and
-            # the cluster's error log) rather than being swallowed like a
-            # transport error — and rather than taking the process down.
+            # or the data is already inconsistent.
             from simplyblock_core import utils
             utils.get_logger(__name__).exception(
                 "Unique index violation writing %s", self.get_db_id())
             raise
         except Exception:
+            # Propagate, like read_from_db / remove / write_replacing. This used
+            # to exit(1), which in the threaded web API raised SystemExit out of
+            # the event loop: the loop died, the half-shut-down process kept
+            # its listen socket open, and the replica accepted connections it
+            # never served until restarted by hand. A failed write is the
+            # caller's error to handle (a 500 in the API, a retried pass in a
+            # service), not a reason to kill the process.
             from simplyblock_core import utils
-            utils.get_logger(__name__).exception("Error writing to FDB")
-            exit(1)
+            utils.get_logger(__name__).exception(
+                "Error writing %s to FDB", self.get_db_id())
+            raise
 
     def _watch_keys(self):
         """``(rollup_key, version_key)`` for a watched class, else ``(None, None)``."""
