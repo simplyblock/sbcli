@@ -695,6 +695,10 @@ class CLIWrapperBase:
         return cluster_ops.set_shared_placement(
             args.cluster_id, enable=enable, force=force)
 
+    def cluster__set_jc_compression(self, sub_command, args):
+        messages = cluster_ops.set_jc_compression(args.cluster_id, enable=not args.disable)
+        return "\n".join(messages) if messages else True
+
     def cluster__change_name(self, sub_command, args):
         cluster_id = args.cluster_id
         cluster_name = args.name
@@ -1431,6 +1435,7 @@ class CLIWrapperBase:
         is_single_node = args.is_single_node
         client_data_nic = args.client_data_nic
         enable_failure_domain = getattr(args, 'enable_failure_domain', False)
+        jc_compression_enabled = not args.disable_jc_compression
 
         max_fault_tolerance = min(distr_npcs, 2) if distr_npcs >= 1 else 1
 
@@ -1447,6 +1452,7 @@ class CLIWrapperBase:
             nvmf_base_port=args.nvmf_base_port, rpc_base_port=args.rpc_base_port, snode_api_port=args.snode_api_port,
             hashicorp_vault_settings=HashicorpVaultSettings({"base_url": args.hashicorp_vault_url}) if args.hashicorp_vault_url else None,
             enable_failure_domain=enable_failure_domain,
+            jc_compression_enabled=jc_compression_enabled,
         )
 
     def cluster_create(self, args):
@@ -1484,6 +1490,7 @@ class CLIWrapperBase:
         fabric = args.fabric
         client_data_nic = args.client_data_nic
         enable_failure_domain = getattr(args, 'enable_failure_domain', False)
+        jc_compression_enabled = not args.disable_jc_compression
         # Private (developer-mode-only) arg: absent unless sbctl was run with --dev.
         enable_hang_device = getattr(args, "enable_hang_device", False)
 
@@ -1508,6 +1515,7 @@ class CLIWrapperBase:
             hashicorp_vault_settings=HashicorpVaultSettings({"base_url": args.hashicorp_vault_url}) if args.hashicorp_vault_url else None,
             enable_failure_domain=enable_failure_domain,
             enable_hang_device=enable_hang_device,
+            jc_compression_enabled=jc_compression_enabled,
             max_subsys=args.max_subsys or 0,
             hugepages_mem=utils.parse_size(args.hugepages_mem) if args.hugepages_mem else 0,
             spdk_vcpu_count=args.vcpu_count or 0,

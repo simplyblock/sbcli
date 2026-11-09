@@ -390,6 +390,7 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             self.init_cluster__set(subparser)
         self.init_cluster__set_shared_placement(subparser)
+        self.init_cluster__set_jc_compression(subparser)
         self.init_cluster__event_alerts(subparser)
         self.init_cluster__switch_write_protection(subparser)
         self.init_cluster__change_name(subparser)
@@ -444,6 +445,8 @@ class CLIWrapper(CLIWrapperBase):
             subcommand.add_argument('--disable-monitoring', help='Disable monitoring stack, false by default. Default: `false`.', dest='disable_monitoring', action='store_true')
         subcommand.add_argument('--strict-node-anti-affinity', help='Enable strict node anti affinity for storage nodes. Never more than one chunk is placed on a node. This requires a minimum of _data-chunks-in-stripe + parity-chunks-in-stripe + 1_ nodes in the cluster.', dest='strict_node_anti_affinity', action='store_true')
         subcommand.add_argument('--enable-failure-domain', help='Enable failure-domain anti-affinity. Each storage node must then be added with a --failure-domain tag (rack/cabinet/DC); data, journal and secondary/tertiary copies are spread across distinct failure domains (best-effort). Deploy-time only: a cluster cannot be upgraded into this feature, it must be redeployed.', dest='enable_failure_domain', action='store_true')
+        if self.developer_mode:
+            subcommand.add_argument('--disable-jc-compression', help='Disable JC (journal) compression. Enabled by default; can be changed later with `cluster set-jc-compression`.', dest='disable_jc_compression', action='store_true')
         subcommand.add_argument('--name', '-n', help='Assigns a name to the newly created cluster.', type=str, dest='name')
         subcommand.add_argument('--qpair-count', help='The NVMe/TCP transport qpair count per logical volume. Default: `32`.', type=range_type(0, 128), default=32, dest='qpair_count')
         subcommand.add_argument('--client-qpair-count', help='The default NVMe/TCP transport qpair count per logical volume for client. Default: `3`.', type=range_type(0, 128), default=3, dest='client_qpair_count')
@@ -484,6 +487,8 @@ class CLIWrapper(CLIWrapperBase):
             subcommand.add_argument('--inflight-io-threshold', help='The number of inflight IOs allowed before the IO queuing starts. Default: `4`.', type=int, default=4, dest='inflight_io_threshold')
         subcommand.add_argument('--strict-node-anti-affinity', help='Enable strict node anti affinity for storage nodes. Never more than one chunk is placed on a node. This requires a minimum of _data-chunks-in-stripe + parity-chunks-in-stripe + 1_ nodes in the cluster."', dest='strict_node_anti_affinity', action='store_true')
         subcommand.add_argument('--enable-failure-domain', help='Enable failure-domain anti-affinity. Each storage node must then be added with a --failure-domain tag (rack/cabinet/DC); data, journal and secondary/tertiary copies are spread across distinct failure domains (best-effort). Deploy-time only: a cluster cannot be upgraded into this feature, it must be redeployed.', dest='enable_failure_domain', action='store_true')
+        if self.developer_mode:
+            subcommand.add_argument('--disable-jc-compression', help='Disable JC (journal) compression. Enabled by default; can be changed later with `cluster set-jc-compression`.', dest='disable_jc_compression', action='store_true')
         subcommand.add_argument('--name', '-n', help='Assigns a name to the newly created cluster.', type=str, dest='name')
         subcommand.add_argument('--client-data-nic', help='Network interface name from client to use for logical volume connection.', type=str, dest='client_data_nic')
         subcommand.add_argument('--use-backup', help='The path to JSON file with S3/MinIO backup configuration.', type=str, dest='use_backup')
@@ -624,6 +629,11 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('cluster_id', help='The cluster id.', type=str).completer = self._completer_get_cluster_list
         subcommand.add_argument('--disable', help='Reverse transition (per-chunk -> per-page). Debug only; only safe on a balanced or empty bdev. Requires --force.', dest='disable', action='store_true')
         subcommand.add_argument('--force', help='Bypass the rebalancing / non-online-node guards. Required when --disable is passed.', dest='force', action='store_true')
+
+    def init_cluster__set_jc_compression(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'set-jc-compression', 'Enable or disable JC (journal) compression on the cluster.')
+        subcommand.add_argument('cluster_id', help='The cluster id.', type=str).completer = self._completer_get_cluster_list
+        subcommand.add_argument('--disable', help='Disable JC compression (default action is to enable it).', dest='disable', action='store_true')
 
     def init_cluster__event_alerts(self, subparser):
         subcommand = self.add_sub_command(subparser, 'event-alerts', 'Provisions the Grafana alert rules read from the cluster event log.')
@@ -1439,6 +1449,7 @@ class CLIWrapper(CLIWrapperBase):
                         args.max_queue_size = 128
                         args.inflight_io_threshold = 4
                         args.disable_monitoring = False
+                        args.disable_jc_compression = None
                     ret = self.cluster__create(sub_command, args)
                 elif sub_command in ['add']:
                     if not self.developer_mode:
@@ -1447,6 +1458,7 @@ class CLIWrapper(CLIWrapperBase):
                         args.distr_chunk_bs = 4096
                         args.max_queue_size = 128
                         args.inflight_io_threshold = 4
+                        args.disable_jc_compression = None
                     ret = self.cluster__add(sub_command, args)
                 elif sub_command in ['op-stop']:
                     ret = self.cluster__op_stop(sub_command, args)
@@ -1510,6 +1522,8 @@ class CLIWrapper(CLIWrapperBase):
                         ret = self.cluster__set(sub_command, args)
                 elif sub_command in ['set-shared-placement']:
                     ret = self.cluster__set_shared_placement(sub_command, args)
+                elif sub_command in ['set-jc-compression']:
+                    ret = self.cluster__set_jc_compression(sub_command, args)
                 elif sub_command in ['event-alerts']:
                     ret = self.cluster__event_alerts(sub_command, args)
                 elif sub_command in ['switch-write-protection']:

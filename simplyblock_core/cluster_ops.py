@@ -39,6 +39,7 @@ from simplyblock_core.models.stats import LVolStatObject, ClusterStatObject, Nod
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.prom_client import PromClient
+from simplyblock_core.rpc_client import RPCException
 from simplyblock_core.release_upgrades import jc_compression_upgrade
 from simplyblock_core.utils import pull_docker_image_with_retry
 from simplyblock_core.settings import Settings
@@ -292,6 +293,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    hashicorp_vault_settings : t.Optional[HashicorpVaultSettings] = None,
                    enable_failure_domain=False,
                    enable_hang_device=False,
+                   jc_compression_enabled=True,
                    max_subsys=0, hugepages_mem=0, spdk_vcpu_count=0,
                    cluster_vip=None,
                    ) -> str:
@@ -441,6 +443,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.inflight_io_threshold = inflight_io_threshold
     cluster.strict_node_anti_affinity = strict_node_anti_affinity
     cluster.enable_failure_domain = enable_failure_domain
+    cluster.jc_compression_enabled = jc_compression_enabled
     validate_spdk_sizing(max_subsys, hugepages_mem, spdk_vcpu_count)
     cluster.max_subsys = max_subsys or 0
     cluster.hugepages_mem = hugepages_mem or 0
@@ -551,6 +554,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
                 nvmf_base_port=4420, rpc_base_port=8080, snode_api_port=50001,
                 hashicorp_vault_settings : t.Optional[HashicorpVaultSettings] = None,
                 enable_failure_domain=False,
+                jc_compression_enabled=True,
 ) -> str:
     """Thin wrapper around _add_cluster_impl() that serializes create calls
     for the same name behind a ClusterCreateLock.
@@ -577,6 +581,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
         client_data_nic=client_data_nic, max_fault_tolerance=max_fault_tolerance, backup_config=backup_config,
         nvmf_base_port=nvmf_base_port, rpc_base_port=rpc_base_port, snode_api_port=snode_api_port,
         hashicorp_vault_settings=hashicorp_vault_settings, enable_failure_domain=enable_failure_domain,
+        jc_compression_enabled=jc_compression_enabled,
     )
     if not name:
         return _add_cluster_impl(**kwargs)
@@ -601,6 +606,7 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
                 nvmf_base_port=4420, rpc_base_port=8080, snode_api_port=50001,
                 hashicorp_vault_settings : t.Optional[HashicorpVaultSettings] = None,
                 enable_failure_domain=False,
+                jc_compression_enabled=True,
 ) -> str:
 
     clusters = db_controller.get_clusters()
@@ -647,6 +653,7 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
     cluster.secret = SecretStr(utils.generate_string(20))
     cluster.strict_node_anti_affinity = strict_node_anti_affinity
     cluster.enable_failure_domain = enable_failure_domain
+    cluster.jc_compression_enabled = jc_compression_enabled
 
     if clusters:
         cfg = db_controller.get_deploy_config()
@@ -1686,10 +1693,11 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
                 if not ret:
                     logger.error(f"Failed to set Alcemls QOS on node: {node.get_id()}")
 
-    # Start JC compression on each node
+    # Start JC compression on each node, unless disabled on the cluster
     # (release-upgrade guard: held until `cluster upgrade-complete`, remove
     # with the jc_compression_upgrade plugin)
-    if ols_status == Cluster.STATUS_UNREADY and not jc_compression_upgrade.resume_is_held(cluster):
+    if (ols_status == Cluster.STATUS_UNREADY and cluster.jc_compression_enabled
+            and not jc_compression_upgrade.resume_is_held(cluster)):
         for node in db_controller.get_storage_nodes_by_cluster_id(cl_id):
             if node.status == StorageNode.STATUS_ONLINE:
                 ret, err = node.rpc_client().jc_suspend_compression(jm_vuid=node.jm_vuid, suspend=False)
@@ -2580,6 +2588,68 @@ def change_cluster_name(cluster_id, new_name) -> None:
     cluster.write_to_db(db_controller.kv_store)
     cluster_events.cluster_name_change(cluster, new_name, old_name)
     logger.info(f"Cluster has been renamed: {old_name} -> {new_name}")
+
+
+def _jc_compression_members(cluster_id):
+    """Yield (member_node, jm_vuid) for every online member of every LVS
+    group: the primary itself plus its secondary and tertiary peers."""
+    nodes = {n.get_id(): n for n in db_controller.get_storage_nodes_by_cluster_id(cluster_id)}
+    for primary in nodes.values():
+        if not primary.lvstore or not primary.jm_vuid or primary.status == StorageNode.STATUS_REMOVED:
+            continue
+        for member_id in dict.fromkeys([primary.get_id(), primary.secondary_node_id, primary.tertiary_node_id]):
+            member = nodes.get(member_id) if member_id else None
+            if member and member.status == StorageNode.STATUS_ONLINE:
+                yield member, primary.jm_vuid
+
+
+def set_jc_compression(cluster_id, enable) -> t.List[str]:
+    """Enable or disable JC compression cluster-wide.
+
+    The flag is persisted first so that no resume path (restart, activation,
+    migration, resume task) re-starts compression concurrently with a
+    disable. Then every online LVS group member is suspended (disable) or
+    resumed (enable). Offline members need no call: SPDK starts with
+    compression suspended and the restart path honours the flag.
+    Returns one message per member."""
+    db_controller.atomic_update(
+        db_controller.get_cluster_by_id(cluster_id),
+        lambda c: setattr(c, "jc_compression_enabled", bool(enable)))
+    cluster = db_controller.get_cluster_by_id(cluster_id)
+    logger.info(f"JC compression {'enabled' if enable else 'disabled'} on cluster {cluster_id}")
+
+    if enable and jc_compression_upgrade.resume_is_held(cluster):
+        return ["JC compression resume held: cluster upgrade in progress, "
+                "it resumes on `cluster upgrade-complete`"]
+
+    messages = []
+    for member, jm_vuid in _jc_compression_members(cluster_id):
+        member_id = member.get_id()
+        if enable and tasks_controller.get_active_node_tasks(cluster_id, member_id):
+            # Data migration in flight: resume only once it completes.
+            if not tasks_controller.get_jc_comp_task(cluster_id, member_id, jm_vuid=jm_vuid):
+                tasks_controller.add_jc_comp_resume_task(cluster_id, member_id, jm_vuid=jm_vuid)
+            messages.append(f"node {member_id} JM:{jm_vuid}: node busy (data migration), resume task queued")
+            continue
+        action = "resume" if enable else "suspend"
+        try:
+            ret, err = member.rpc_client().jc_suspend_compression(jm_vuid=jm_vuid, suspend=not enable)
+        except RPCException as e:
+            logger.error(f"jc_suspend_compression on node {member_id} failed: {e}")
+            ret, err = False, None
+        if ret:
+            messages.append(f"node {member_id} JM:{jm_vuid}: compression {action}d")
+        elif err:
+            messages.append(f"node {member_id} JM:{jm_vuid}: {action} not applicable: {err}")
+        elif enable:
+            if not tasks_controller.get_jc_comp_task(cluster_id, member_id, jm_vuid=jm_vuid):
+                tasks_controller.add_jc_comp_resume_task(cluster_id, member_id, jm_vuid=jm_vuid)
+            messages.append(f"node {member_id} JM:{jm_vuid}: resume failed, resume task queued")
+        else:
+            messages.append(f"node {member_id} JM:{jm_vuid}: suspend failed, retry `cluster set-jc-compression`")
+    for message in messages:
+        logger.info(message)
+    return messages
 
 
 def get_logs(cluster_id, limit=50, **kwargs) -> t.List[dict]:
