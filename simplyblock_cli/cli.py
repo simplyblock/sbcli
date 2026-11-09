@@ -469,6 +469,10 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--strict-node-anti-affinity', help='Enable strict node anti affinity for storage nodes. Never more than one chunk is placed on a node. This requires a minimum of _data-chunks-in-stripe + parity-chunks-in-stripe + 1_ nodes in the cluster.', dest='strict_node_anti_affinity', action='store_true')
         subcommand.add_argument('--enable-failure-domain', help='Enable failure-domain anti-affinity. Each storage node must then be added with a --failure-domain tag (rack/cabinet/DC); data, journal and secondary/tertiary copies are spread across distinct failure domains (best-effort). Deploy-time only: a cluster cannot be upgraded into this feature, it must be redeployed.', dest='enable_failure_domain', action='store_true')
         subcommand.add_argument('--sync-replication', help='Enable site-level synchronous replication over exactly two sites. Each storage node must then be added with --site; every lvstore is replicated to the other site. Requires --ha-type ha. Deploy-time only: a cluster cannot be upgraded into this feature, it must be redeployed.', dest='sync_replication', action='store_true')
+        subcommand.add_argument('--stretched-control-plane', help='Run a control plane on each of the cluster\'s two sites over one FoundationDB, one of them leading (docs/stretched-control-plane.md). Requires --ha-type ha and one of: --sync-replication (any n+k over two sites); --enable-failure-domain with 1+1 (two sites) or 1+2 (three storage sites), where a node\'s failure domain is its site. Deploy-time only.', dest='stretched_control_plane', action='store_true')
+        subcommand.add_argument('--site', help='With --stretched-control-plane: the site this control plane runs in (1-63 characters from [A-Za-z0-9._-]).', type=str, dest='site')
+        subcommand.add_argument('--site-api-endpoint', help='With --stretched-control-plane: this site\'s API endpoint (https://host:port), where the other site\'s standby control plane redirects mutating calls.', type=str, dest='site_api_endpoint')
+        subcommand.add_argument('--leader-site', help='With --stretched-control-plane or --sync-replication: the site that leads (defaults to --site on a stretched control plane).', type=str, dest='leader_site')
         subcommand.add_argument('--device-mode', help='Storage-device mode for the whole cluster. \'nvme\' (default): NVMe PCIe devices auto-detected and attached via the SPDK nvme driver. \'lblk\': arbitrary Linux block devices wrapped in SPDK AIO bdevs; devices are selected at \'sn configure\' by name or serial number. Deploy-time only; inter-node fabric (nvme-tcp/rdma) is unaffected.', type=str, default='nvme', dest='device_mode', choices=['nvme','lblk',])
         subcommand.add_argument('--enable-inline-checksum', help='Enable inline CRC checksum validation on every IO for silent-data-error protection. Cannot be enabled or disabled after cluster creation. Per-device alceml mode (md-on-device vs fallback) is auto-detected at add-node.', dest='inline_checksum', action='store_true')
         subcommand.add_argument('--4k_atomic', help='Declare that devices guarantee 4K write atomicity even with a <4K logical block size (e.g. AWS NVMe is 512B but atomic at 4K). Allows fallback-mode inline checksum on such devices by skipping the data-plane 4K block-size requirement. Only meaningful with --enable-inline-checksum. Cannot be changed after cluster creation.', dest='atomic_4k', action='store_true')
@@ -516,6 +520,10 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--strict-node-anti-affinity', help='Enable strict node anti affinity for storage nodes. Never more than one chunk is placed on a node. This requires a minimum of _data-chunks-in-stripe + parity-chunks-in-stripe + 1_ nodes in the cluster."', dest='strict_node_anti_affinity', action='store_true')
         subcommand.add_argument('--enable-failure-domain', help='Enable failure-domain anti-affinity. Each storage node must then be added with a --failure-domain tag (rack/cabinet/DC); data, journal and secondary/tertiary copies are spread across distinct failure domains (best-effort). Deploy-time only: a cluster cannot be upgraded into this feature, it must be redeployed.', dest='enable_failure_domain', action='store_true')
         subcommand.add_argument('--sync-replication', help='Enable site-level synchronous replication over exactly two sites. Each storage node must then be added with --site; every lvstore is replicated to the other site. Requires --ha-type ha. Deploy-time only: a cluster cannot be upgraded into this feature, it must be redeployed.', dest='sync_replication', action='store_true')
+        subcommand.add_argument('--stretched-control-plane', help='Run a control plane on each of the cluster\'s two sites over one FoundationDB, one of them leading (docs/stretched-control-plane.md). Requires --ha-type ha and one of: --sync-replication (any n+k over two sites); --enable-failure-domain with 1+1 (two sites) or 1+2 (three storage sites), where a node\'s failure domain is its site. Deploy-time only.', dest='stretched_control_plane', action='store_true')
+        subcommand.add_argument('--site', help='With --stretched-control-plane: the site this control plane runs in (1-63 characters from [A-Za-z0-9._-]).', type=str, dest='site')
+        subcommand.add_argument('--site-api-endpoint', help='With --stretched-control-plane: this site\'s API endpoint (https://host:port), where the other site\'s standby control plane redirects mutating calls.', type=str, dest='site_api_endpoint')
+        subcommand.add_argument('--leader-site', help='With --stretched-control-plane or --sync-replication: the site that leads (defaults to --site on a stretched control plane).', type=str, dest='leader_site')
         subcommand.add_argument('--device-mode', help='Storage-device mode for the whole cluster. \'nvme\' (default): NVMe PCIe devices auto-detected and attached via the SPDK nvme driver. \'lblk\': arbitrary Linux block devices wrapped in SPDK AIO bdevs; devices are selected at \'sn configure\' by name or serial number. Deploy-time only; inter-node fabric (nvme-tcp/rdma) is unaffected.', type=str, default='nvme', dest='device_mode', choices=['nvme','lblk',])
         subcommand.add_argument('--enable-inline-checksum', help='Enable inline CRC checksum validation on every IO for silent-data-error protection. Cannot be enabled or disabled after cluster creation.', dest='inline_checksum', action='store_true')
         subcommand.add_argument('--4k_atomic', help='Declare that devices guarantee 4K write atomicity even with a <4K logical block size (e.g. AWS NVMe is 512B but atomic at 4K). Allows fallback-mode inline checksum on such devices by skipping the data-plane 4K block-size requirement. Only meaningful with --enable-inline-checksum. Cannot be changed after cluster creation.', dest='atomic_4k', action='store_true')
@@ -1056,6 +1064,9 @@ class CLIWrapper(CLIWrapperBase):
     def init_control_plane(self):
         subparser = self.add_command('control-plane', 'Control Plane Commands', aliases=['cp','mgmt',])
         self.init_control_plane__add(subparser)
+        self.init_control_plane__status(subparser)
+        self.init_control_plane__set_leader_site(subparser)
+        self.init_control_plane__takeover(subparser)
         self.init_control_plane__list(subparser)
         self.init_control_plane__remove(subparser)
 
@@ -1069,6 +1080,25 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--mgmt-ip', help='Management IP address to use for the node (e.g., 192.168.1.10).', type=str, dest='mgmt_ip')
         subcommand.add_argument('--mode', help='The environment to deploy management services. Default: `docker`.', type=str, default='docker', dest='mode', choices=['docker','kubernetes',])
         subcommand.add_argument('--alerting-config-path', help='Path to the YAML alerting configuration file. Takes precedence over --contact-point.', type=str, dest='alerting_config_path')
+        subcommand.add_argument('--site', help='Stretched control plane: the site this control plane runs in (required on a cluster created with --stretched-control-plane, refused otherwise).', type=str, dest='site')
+        subcommand.add_argument('--api-endpoint', help='Stretched control plane: this site\'s API endpoint (https://host:port), where the other site\'s standby control plane redirects mutating calls.', type=str, dest='api_endpoint')
+
+    def init_control_plane__status(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'status', 'Stretched control plane: the mode of this control plane, the lease, and the readiness of every site for a leadership move.')
+        subcommand.add_argument('cluster_id', help='The cluster id.', type=str).completer = self._completer_get_cluster_list
+        subcommand.add_argument('--json', help='Print outputs in json format.', dest='json', action='store_true')
+
+    def init_control_plane__set_leader_site(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'set-leader-site', 'Stretched control plane: the planned leadership move. Refused while a readiness gate of the site is red (FoundationDB region lag, nodes not online, the site recorded lost, a site activation, sync replication not settled, tasks running) unless --force.')
+        subcommand.add_argument('cluster_id', help='The cluster id.', type=str).completer = self._completer_get_cluster_list
+        subcommand.add_argument('site', help='The site whose control plane should lead.', type=str)
+        subcommand.add_argument('--force', help='Move even while a readiness gate is red (audited).', dest='force', action='store_true')
+
+    def init_control_plane__takeover(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'takeover', 'Stretched control plane: the unplanned leadership move after the leading site is down. Probes the site declared down and refuses while anything there answers. FoundationDB must answer on the surviving site (after the FDB recovery when the coordinator majority was lost with the leader).')
+        subcommand.add_argument('cluster_id', help='The cluster id.', type=str).completer = self._completer_get_cluster_list
+        subcommand.add_argument('--site', help='The surviving site, which takes the lead.', type=str, dest='site', required=True)
+        subcommand.add_argument('--confirm-site-down', help='The leading site confirmed down out of band (power, console, provider status).', type=str, dest='confirm_site_down', required=True)
 
     def init_control_plane__list(self, subparser):
         subcommand = self.add_sub_command(subparser, 'list', 'Lists all control plane nodes.')
@@ -1908,6 +1938,12 @@ class CLIWrapper(CLIWrapperBase):
                 sub_command = args_dict['control-plane']
                 if sub_command in ['add']:
                     ret = self.control_plane__add(sub_command, args)
+                elif sub_command in ['status']:
+                    ret = self.control_plane__status(sub_command, args)
+                elif sub_command in ['set-leader-site']:
+                    ret = self.control_plane__set_leader_site(sub_command, args)
+                elif sub_command in ['takeover']:
+                    ret = self.control_plane__takeover(sub_command, args)
                 elif sub_command in ['list']:
                     ret = self.control_plane__list(sub_command, args)
                 elif sub_command in ['remove']:

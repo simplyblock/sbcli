@@ -362,18 +362,42 @@ def _validate_sync_replication(sync_replication, ha_type, is_single_node) -> Non
         raise ValueError("sync replication cannot be used on a single-node cluster")
 
 
-def _validate_leader_site(sync_replication, leader_site) -> None:
+def _validate_leader_site(sync_replication, leader_site, stretched_control_plane=False) -> None:
     """The leader site of a stretched cluster (Cluster.leader_site) exists
-    only on a sync-replication cluster. No node exists at create, so the site
-    is not checked against node sites here (sync_replication_controller.
-    check_leader_site does that when it is moved).
+    only on a sync-replication cluster or one with a stretched control
+    plane. No node exists at create, so the site is not checked against node
+    sites here (sync_replication_controller.check_leader_site does that when
+    it is moved).
 
     Raises:
-        SyncReplicationSiteError: a leader site was given without sync replication.
+        SyncReplicationSiteError: a leader site was given without sync
+            replication or a stretched control plane.
     """
-    if leader_site and not sync_replication:
+    if leader_site and not sync_replication and not stretched_control_plane:
         raise SyncReplicationSiteError(
-            "leader_site is only allowed together with sync_replication")
+            "leader_site is only allowed together with sync_replication or stretched_control_plane")
+def _validate_stretched_control_plane_params(stretched_control_plane, sync_replication, enable_failure_domain,
+                                             distr_ndcs, distr_npcs, ha_type, is_single_node, leader_site, site):
+    """The deploy-time rules of a stretched control plane
+    (docs/stretched-control-plane.md): one of the three supported data-plane
+    schemes, and the creating control plane's site named.
+
+    Raises:
+        ValueError: the scheme is unsupported, or ``site`` is missing.
+        SyncReplicationSiteError: a leader site without a stretched cluster.
+    """
+    from simplyblock_core.controllers import control_plane_controller
+    control_plane_controller.validate_stretched_control_plane(
+        stretched_control_plane=stretched_control_plane, sync_replication=sync_replication,
+        enable_failure_domain=enable_failure_domain, distr_ndcs=distr_ndcs, distr_npcs=distr_npcs,
+        ha_type=ha_type, is_single_node=is_single_node)
+    _validate_leader_site(sync_replication, leader_site, stretched_control_plane)
+    if stretched_control_plane and not site:
+        raise ValueError("a stretched control plane needs the site of this control plane (--site)")
+    if site and not stretched_control_plane:
+        raise ValueError("--site on cluster create is only allowed with --stretched-control-plane")
+
+
 def _validate_integrity_flags(inline_checksum, atomic_4k):
     """atomic_4k only lifts the data plane's 4K gate on fallback-mode
     checksums, so without inline_checksum it is a setting that does nothing."""
@@ -400,12 +424,21 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    sync_replication=False,
                    page_copy=False,
                    md_journal=True,
+                   stretched_control_plane=False,
+                   leader_site="",
+                   site="",
+                   site_api_endpoint="",
 ) -> str:
     if (distr_ndcs, distr_npcs) not in SUPPORTED_ERASURE_CODING_SCHEMES:
         raise ValueError("Unsupported erasure coding scheme")
     _validate_integrity_flags(inline_checksum, atomic_4k)
 
     _validate_sync_replication(sync_replication, ha_type, is_single_node)
+    if stretched_control_plane and not leader_site:
+        leader_site = site  # the creating control plane leads until an operator moves it
+    _validate_stretched_control_plane_params(
+        stretched_control_plane, sync_replication, enable_failure_domain, distr_ndcs, distr_npcs,
+        ha_type, is_single_node, leader_site, site)
 
     if max_fault_tolerance > 1:
         if ha_type != "ha":
@@ -551,6 +584,10 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.strict_node_anti_affinity = strict_node_anti_affinity
     cluster.enable_failure_domain = enable_failure_domain
     cluster.sync_replication = bool(sync_replication)
+    cluster.stretched_control_plane = bool(stretched_control_plane)
+    cluster.leader_site = leader_site or ""
+    if site and site_api_endpoint:
+        cluster.site_api_endpoints[site] = site_api_endpoint
     validate_spdk_sizing(max_subsys, hugepages_mem, spdk_vcpu_count)
     cluster.max_subsys = max_subsys or 0
     cluster.hugepages_mem = hugepages_mem or 0
@@ -634,7 +671,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     for line in index_ops.build_indices(log=logger.info):
         logger.info(line)
 
-    mgmt_node_ops.add_mgmt_node(dev_ip, mode, cluster.uuid)
+    mgmt_node_ops.add_mgmt_node(dev_ip, mode, cluster.uuid, site=site)
 
     logger.info("New Cluster has been created")
     logger.info(cluster.uuid)
@@ -685,6 +722,9 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
                 spdk_proxy_service=constants.K8S_SPDK_PROXY_SERVICE,
                 spdk_proxy_tls_secret=constants.K8S_SPDK_PROXY_TLS_SECRET,
                 node_label_suffix="",
+                stretched_control_plane=False,
+                site="",
+                site_api_endpoint="",
 ) -> str:
     """Thin wrapper around _add_cluster_impl() that serializes create calls
     for the same name behind a DbLock.
@@ -722,6 +762,9 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
         spdk_proxy_service=spdk_proxy_service,
         spdk_proxy_tls_secret=spdk_proxy_tls_secret,
         node_label_suffix=node_label_suffix,
+        stretched_control_plane=stretched_control_plane,
+        site=site,
+        site_api_endpoint=site_api_endpoint,
     )
     if not name:
         return _add_cluster_impl(**kwargs)
@@ -759,6 +802,9 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
                 spdk_proxy_service=constants.K8S_SPDK_PROXY_SERVICE,
                 spdk_proxy_tls_secret=constants.K8S_SPDK_PROXY_TLS_SECRET,
                 node_label_suffix="",
+                stretched_control_plane=False,
+                site="",
+                site_api_endpoint="",
 ) -> str:
     _validate_integrity_flags(inline_checksum, atomic_4k)
 
@@ -772,7 +818,11 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
         raise ValueError("Unsupported erasure coding scheme")
 
     _validate_sync_replication(sync_replication, ha_type, is_single_node)
-    _validate_leader_site(sync_replication, leader_site)
+    if stretched_control_plane and not leader_site:
+        leader_site = site  # the creating control plane leads until an operator moves it
+    _validate_stretched_control_plane_params(
+        stretched_control_plane, sync_replication, enable_failure_domain, distr_ndcs, distr_npcs,
+        ha_type, is_single_node, leader_site, site)
 
     if max_fault_tolerance > 1:
         if ha_type != "ha":
@@ -811,6 +861,9 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
     cluster.enable_failure_domain = enable_failure_domain
     cluster.sync_replication = bool(sync_replication)
     cluster.leader_site = leader_site or ""
+    cluster.stretched_control_plane = bool(stretched_control_plane)
+    if site and site_api_endpoint:
+        cluster.site_api_endpoints[site] = site_api_endpoint
     cluster.device_mode = _validated_device_mode(device_mode)
 
     if clusters:
@@ -842,7 +895,7 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
             raise ValueError("monitoring_secret is required")
         cluster.grafana_endpoint = constants.GRAFANA_K8S_ENDPOINT
 
-        mgmt_node_ops.add_mgmt_node("0.0.0.0", "kubernetes", cluster.uuid)
+        mgmt_node_ops.add_mgmt_node("0.0.0.0", "kubernetes", cluster.uuid, site=site)
 
         if not cluster.disable_monitoring:
             _set_max_result_window(constants.OS_K8S_ENDPOINT)

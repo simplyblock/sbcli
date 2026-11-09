@@ -35,6 +35,7 @@ from .alert import api as alert_api
 from .arbitration import api as arbitration_api
 from .backup import api as backup_api
 from .consistency_group import api as consistency_group_api
+from .control_plane import api as control_plane_api
 from .group_backup import api as group_backup_api
 from .migration_plan import api as migration_plan_api
 from .qos import api as qos_api
@@ -99,9 +100,19 @@ class ClusterParams(BaseModel):
     enable_failure_domain: bool = False
     sync_replication: bool = False
     #: Stretched sync replication: the site whose operator leads the cluster
-    #: (Cluster.leader_site); only with sync_replication, "" = unset. Not
-    #: checked against node sites - no node exists yet.
+    #: (Cluster.leader_site); only with sync_replication or a stretched
+    #: control plane, "" = unset. Not checked against node sites - no node
+    #: exists yet.
     leader_site: str = ""
+    #: A control plane on each of two sites over one FoundationDB
+    #: (docs/stretched-control-plane.md). Requires one of the three
+    #: supported schemes (sync_replication; or enable_failure_domain with
+    #: 1+1 / 1+2) and ``site``, the site of the control plane creating the
+    #: cluster. ``site_api_endpoint`` is where the other site's standby
+    #: control plane redirects the mutating calls it receives.
+    stretched_control_plane: bool = False
+    site: str = ""
+    site_api_endpoint: str = ""
     # max_subsys and spdk_vcpu_count are capacity decisions with real
     # consequences if silently defaulted (max_subsys=0 means the product
     # ceiling; spdk_vcpu_count=0 means no cluster-wide core requirement at
@@ -445,6 +456,7 @@ instance_api.include_router(subsystem_api, prefix='/subsystems')
 instance_api.include_router(replication_api, prefix='/replication')
 instance_api.include_router(consistency_group_api, prefix='/consistency-groups')
 instance_api.include_router(site_api, prefix='/sites')
+instance_api.include_router(control_plane_api, prefix='/control-plane')
 instance_api.include_router(migration_plan_api, prefix='/migration-plans')
 instance_api.include_router(qos_api, prefix='/qos')
 api.include_router(instance_api)

@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 
 import argparse
+import getpass
 import json
 import re
 import sys
@@ -13,6 +14,7 @@ from simplyblock_core import cluster_ops, constants, db_controller, utils
 from simplyblock_core import mgmt_node_ops as mgmt_ops
 from simplyblock_core import storage_node_ops as storage_ops
 from simplyblock_core.controllers import (
+    control_plane_controller,
     device_controller,
     fdb_backup_controller,
     health_controller,
@@ -35,7 +37,13 @@ from simplyblock_core.controllers.backup.manifest import (
     parse_export,
     parse_group_export,
 )
-from simplyblock_core.exceptions import MigrationConflictError, PreconditionError
+from simplyblock_core.exceptions import (
+    ControlPlaneError,
+    ControlPlaneNotReadyError,
+    ControlPlaneTakeoverRefusedError,
+    MigrationConflictError,
+    PreconditionError,
+)
 from simplyblock_core.models.backup_config import BackupConfig, S3Credentials
 from simplyblock_core.models.cluster import Cluster, HashicorpVaultSettings
 from simplyblock_core.models.pool import Pool
@@ -96,6 +104,32 @@ def _format_result(data, *, json: bool) -> str:
 
 def _iso(value) -> str | None:
     return value.isoformat() if value is not None else None
+
+
+def _control_plane_status_dict(status) -> dict:
+    """``sbctl control-plane status`` as a dict (its JSON form)."""
+    lease = status.lease
+    return {
+        "cluster_id": status.cluster_id,
+        "stretched_control_plane": status.stretched,
+        "local_site": status.local_site,
+        "mode": status.mode,
+        "mode_reason": status.mode_reason,
+        "leader_site": status.leader_site,
+        "lease_holder_site": lease.holder_site if lease else "",
+        "lease_holder_host": lease.holder_host if lease else "",
+        "lease_state": lease.state if lease else "",
+        "lease_epoch": lease.epoch if lease else 0,
+        "lease_expires_at": lease.expires_at if lease else "",
+        "fdb_region_lag_seconds": status.fdb_lag_seconds,
+        "fdb_data_state": status.fdb_data_state,
+        "sites": [{
+            "site": s.site, "role": s.role, "holds_lease": s.holds_lease,
+            "mgmt_nodes_online": s.mgmt_nodes_online, "mgmt_nodes_total": s.mgmt_nodes_total,
+            "storage_nodes_online": s.storage_nodes_online, "storage_nodes_total": s.storage_nodes_total,
+            "ready": s.ready, "problems": list(s.problems),
+        } for s in status.sites],
+    }
 
 
 def _sync_status_fields(status) -> dict:
@@ -1354,10 +1388,54 @@ class CLIWrapperBase:
         mode = args.mode
         alert_config = parse_alerting_config(
             Path(args.alerting_config_path) if args.alerting_config_path else None)
-        return mgmt_ops.deploy_mgmt_node(cluster_ip, cluster_id, ifname, mgmt_ip, cluster_secret, mode, alert_config)
+        return mgmt_ops.deploy_mgmt_node(cluster_ip, cluster_id, ifname, mgmt_ip, cluster_secret, mode, alert_config,
+                                         site=getattr(args, 'site', "") or "",
+                                         site_api_endpoint=getattr(args, 'api_endpoint', "") or "")
 
     def control_plane__list(self, sub_command, args):
         return _format_result(mgmt_ops.list_mgmt_nodes(), json=args.json)
+
+    def control_plane__status(self, sub_command, args):
+        status = control_plane_controller.control_plane_status(args.cluster_id)
+        data = _control_plane_status_dict(status)
+        if args.json:
+            return _format_json(data)
+        rows = [{"key": k, "value": v} for k, v in data.items() if k != "sites"]
+        table = utils.print_table(rows)
+        site_rows = [{
+            "site": s["site"], "role": s["role"], "holds_lease": s["holds_lease"],
+            "mgmt_online": f'{s["mgmt_nodes_online"]}/{s["mgmt_nodes_total"]}',
+            "storage_online": f'{s["storage_nodes_online"]}/{s["storage_nodes_total"]}',
+            "ready": s["ready"], "problems": "; ".join(s["problems"]) or "-",
+        } for s in data["sites"]]
+        return table + "\n" + (utils.print_table(site_rows) if site_rows else "No sites")
+
+    def control_plane__set_leader_site(self, sub_command, args):
+        try:
+            readiness = control_plane_controller.move_leader_site(
+                args.cluster_id, args.site, force=bool(args.force))
+        except ControlPlaneNotReadyError as e:
+            return "Refused, site not ready (pass --force to override):\n  - " + "\n  - ".join(e.problems)
+        except ControlPlaneError as e:
+            return f"Refused: {e}"
+        note = (" (forced past: " + "; ".join(readiness.problems) + ")") if readiness.problems else ""
+        return (f"leader_site set to {args.site}{note}; the lease moves within "
+                f"{constants.CONTROL_PLANE_DRAIN_SEC + constants.CONTROL_PLANE_LEASE_RENEW_SEC}s "
+                f"(watch: sbctl control-plane status {args.cluster_id})")
+
+    def control_plane__takeover(self, sub_command, args):
+        try:
+            status = control_plane_controller.takeover(
+                args.cluster_id, args.site, args.confirm_site_down, operator=getpass.getuser())
+        except ControlPlaneTakeoverRefusedError as e:
+            return "Refused, the site declared down still answers:\n  - " + "\n  - ".join(e.alive)
+        except ControlPlaneError as e:
+            return f"Refused: {e}"
+        return (f"Takeover recorded: {args.site} leads cluster {args.cluster_id}; its control plane "
+                f"acquires the lease within {constants.CONTROL_PLANE_LEASE_RENEW_SEC}s. "
+                f"Mode here: {status.mode} ({status.mode_reason}). "
+                f"Next: fail the lost site's volumes over (sync replication: the site fence and forced "
+                f"promotes), then `sbctl control-plane status {args.cluster_id}`.")
 
     def control_plane__remove(self, sub_command, args):
         return mgmt_ops.remove_mgmt_node(args.node_id)
@@ -1966,6 +2044,10 @@ class CLIWrapperBase:
             sync_replication=getattr(args, 'sync_replication', False),
             page_copy=getattr(args, 'page_copy', False),
             md_journal=md_journal,
+            stretched_control_plane=getattr(args, 'stretched_control_plane', False),
+            leader_site=getattr(args, 'leader_site', "") or "",
+            site=getattr(args, 'site', "") or "",
+            site_api_endpoint=getattr(args, 'site_api_endpoint', "") or "",
         )
 
     def cluster_create(self, args):
@@ -2043,6 +2125,10 @@ class CLIWrapperBase:
             sync_replication=getattr(args, 'sync_replication', False),
             page_copy=getattr(args, 'page_copy', False),
             md_journal=md_journal,
+            stretched_control_plane=getattr(args, 'stretched_control_plane', False),
+            leader_site=getattr(args, 'leader_site', "") or "",
+            site=getattr(args, 'site', "") or "",
+            site_api_endpoint=getattr(args, 'site_api_endpoint', "") or "",
         )
 
     def query_yes_no(self, question, default="yes"):

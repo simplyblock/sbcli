@@ -17,6 +17,7 @@ import time
 
 from simplyblock_core import constants, db_controller, utils
 from simplyblock_core.arbitration.arbiter import Arbiter, rpc_pool, work_pool
+from simplyblock_core.controllers import control_plane_controller
 
 logger = utils.get_logger(__name__)
 
@@ -43,6 +44,7 @@ def main() -> None:
     logger.info("Two-node arbiter started")
     interval = constants.TWO_NODE_DECISION_TICK_MS / 1000.0
     while True:
+        control_plane_controller.wait_until_services_enabled("two-node-arbiter")
         try:
             arbiter.tick()
         except Exception:                           # noqa: BLE001 - next tick retries

@@ -322,6 +322,28 @@ TASK_LEASE_TTL_SEC = 180
 RESTART_CLAIM_HEARTBEAT_SEC = TASK_LEASE_HEARTBEAT_SEC
 RESTART_CLAIM_TTL_SEC = TASK_LEASE_TTL_SEC
 
+# Stretched control plane (docs/stretched-control-plane.md): a control plane
+# on each of a cluster's two sites over one FoundationDB, one of them leading.
+# The leader's lease agent renews the ControlPlaneLease every
+# CONTROL_PLANE_LEASE_RENEW_SEC with a TTL of CONTROL_PLANE_LEASE_TTL_SEC; a
+# planned move drains the holder for CONTROL_PLANE_DRAIN_SEC (its services
+# observe the drain and stop) before the lease is released. Services and the
+# API read the lease through a cache of CONTROL_PLANE_MODE_CACHE_SEC, and the
+# agent treats CONTROL_PLANE_DISCONNECT_FAILURES consecutive FoundationDB
+# failures as "disconnected" (the site lost the database's majority).
+CONTROL_PLANE_LEASE_TTL_SEC = 10
+CONTROL_PLANE_LEASE_RENEW_SEC = 3
+CONTROL_PLANE_DRAIN_SEC = 6
+CONTROL_PLANE_MODE_CACHE_SEC = 1.0
+CONTROL_PLANE_DISCONNECT_FAILURES = 3
+# The environment variable naming the site this control plane runs in; on
+# Kubernetes the operator sets it on every control-plane pod. A Docker
+# management node falls back to its MgmtNode record (by hostname).
+CONTROL_PLANE_SITE_ENV = "SB_CONTROL_PLANE_SITE"
+# The readiness gates of a planned leadership move: the target site's
+# FoundationDB region may lag the primary by at most this many seconds.
+CONTROL_PLANE_MAX_FDB_LAG_SEC = 1.0
+
 # Node-add concurrency: the cross-node mesh section of add_node is serialized
 # per cluster behind a DbLock named "cluster_add/<cluster_id>". Cluster
 # creation is serialized per name behind "cluster_create/<name>", because

@@ -99,6 +99,7 @@ from simplyblock_core import constants, utils
 from simplyblock_core import db_controller as db_mod
 from simplyblock_core.controllers import (
     cg_colocation,
+    control_plane_controller,
     migration_controller,
     migration_events,
     qos_controller,
@@ -4466,6 +4467,7 @@ def main():
     logger.info("Starting LVol Migration task runner...")
 
     while True:
+        control_plane_controller.wait_until_services_enabled("tasks-runner-lvol-migration")
         clusters = db.get_clusters()
         if not clusters:
             logger.error("No clusters found!")

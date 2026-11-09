@@ -1,6 +1,7 @@
 import datetime
 import logging
 import os
+import re
 import time
 import uuid
 from typing import Any
@@ -18,7 +19,8 @@ from simplyblock_core.models.mgmt_node import MgmtNode
 logger = logging.getLogger()
 
 
-def deploy_mgmt_node(cluster_ip, cluster_id, ifname, mgmt_ip, cluster_secret: SecretStr, mode, alert_config: dict[str, Any] | None = None):
+def deploy_mgmt_node(cluster_ip, cluster_id, ifname, mgmt_ip, cluster_secret: SecretStr, mode,
+                     alert_config: dict[str, Any] | None = None, site: str = "", site_api_endpoint: str = ""):
 
     try:
         headers = {'Authorization': f'{cluster_id} {cluster_secret.get_secret_value()}'}
@@ -113,7 +115,7 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, mgmt_ip, cluster_secret: Se
 
 
     logger.info("Adding management node object")
-    node_id = add_mgmt_node(dev_ip, mode, cluster_id)
+    node_id = add_mgmt_node(dev_ip, mode, cluster_id, site=site, site_api_endpoint=site_api_endpoint)
 
     # check if ha setting is required
     nodes = db_controller.get_mgmt_nodes()
@@ -216,11 +218,47 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, mgmt_ip, cluster_secret: Se
     return node_id
 
 
-def add_mgmt_node(mgmt_ip, mode, cluster_id=None):
+def _validate_mgmt_node_site(cluster, site: str) -> str:
+    """The site of a new management node: required on a stretched control
+    plane, refused elsewhere, and at most two control-plane sites
+    (docs/stretched-control-plane.md).
+
+    Raises:
+        ValueError: as described.
+    """
+    stretched = bool(cluster is not None and getattr(cluster, "stretched_control_plane", False))
+    if not stretched:
+        if site:
+            raise ValueError("--site is only allowed on a cluster with a stretched control plane")
+        return ""
+    if not site:
+        raise ValueError("this cluster has a stretched control plane; --site is required for a management node")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,62}", site):
+        raise ValueError(f"invalid site {site!r}: use 1-63 characters from [A-Za-z0-9._-], "
+                         f"starting with a letter or digit")
+    sites = {n.site for n in DBController().get_mgmt_nodes(cluster.get_id()) if n.site}
+    if site not in sites and len(sites) >= 2:
+        raise ValueError(f"a stretched control plane spans exactly two sites; this cluster already has "
+                         f"control planes on {sorted(sites)}")
+    return site
+
+
+def add_mgmt_node(mgmt_ip, mode, cluster_id=None, site: str = "", site_api_endpoint: str = ""):
+    """Register a management node. ``site`` is required on a cluster with a
+    stretched control plane and refused on any other
+    (docs/stretched-control-plane.md); ``site_api_endpoint`` records where
+    the other site's standby control plane redirects mutating calls.
+
+    Raises:
+        ValueError: the site is missing, not allowed, or malformed.
+    """
     db_controller = DBController()
     hostname = ""
     if mode == "docker":
         hostname = utils.get_hostname()
+
+    cluster = db_controller.get_cluster_by_id(cluster_id) if cluster_id else None
+    site = _validate_mgmt_node_site(cluster, site)
 
     for node in db_controller.get_mgmt_nodes():
         if node.mgmt_ip == mgmt_ip:
@@ -234,10 +272,16 @@ def add_mgmt_node(mgmt_ip, mode, cluster_id=None):
     node.cluster_id = cluster_id
     node.mgmt_ip = mgmt_ip
     node.mode = mode
+    node.site = site
     node.status = MgmtNode.STATUS_ONLINE
     node.create_dt = str(datetime.datetime.now())
 
     node.write_to_db(db_controller.kv_store)
+
+    if cluster is not None and site and site_api_endpoint:
+        def _record_endpoint(fresh):
+            fresh.site_api_endpoints[site] = site_api_endpoint
+        db_controller.atomic_update(cluster, _record_endpoint)
 
     mgmt_events.mgmt_add(node)
     logger.info("Done")

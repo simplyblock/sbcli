@@ -345,6 +345,24 @@ class Cluster(BaseModel):
     site_activation_site: str = ""
     site_activation_since: str = ""
     site_activation_heartbeat: str = ""
+    # Stretched control plane (docs/stretched-control-plane.md): a control
+    # plane on each of the cluster's two sites over one FoundationDB, one of
+    # them leading (ControlPlaneLease). Deploy-time only, like
+    # sync_replication. Allowed with sync_replication (any n+k, two sites),
+    # or with enable_failure_domain and 1+1 (two sites) / 1+2 (three
+    # storage sites) where the failure domain of a node is its site
+    # (site_failure_domains). leader_site is then the site that should lead
+    # the control plane as well: the lease follows it, moved by an operator.
+    stretched_control_plane: bool = False
+    # site -> failure-domain id, assigned at the first add-node of a site on
+    # a stretched cluster without sync replication; never reassigned.
+    site_failure_domains: dict = default_factory(dict)
+    # site -> the API endpoint of that site's control plane
+    # ("https://host:port"), where a standby control plane sends the
+    # mutating calls it receives. Set at create / control-plane add.
+    site_api_endpoints: dict = default_factory(dict)
+    # Lease timing of the stretched control plane; 0 = the constants.
+    control_plane_lease_ttl_sec: int = 0
     # Storage-device mode for the whole cluster. "nvme" (default): NVMe PCIe
     # controllers auto-detected and attached through the SPDK nvme bdev.
     # "lblk": arbitrary Linux block devices wrapped in SPDK AIO bdevs (one

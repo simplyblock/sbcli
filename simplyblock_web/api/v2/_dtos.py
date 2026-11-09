@@ -221,8 +221,12 @@ class ClusterDTO(BaseModel):
     lost_site: str = ""
     lost_site_state: str = ""
     # The site whose operator leads the stretched cluster ("" = unset); a
-    # follower's adoption checks the role it was handed against it.
+    # follower's adoption checks the role it was handed against it. With a
+    # stretched control plane it is also the site whose control plane leads.
     leader_site: str = ""
+    # A control plane on each of two sites over one FoundationDB
+    # (docs/stretched-control-plane.md).
+    stretched_control_plane: bool = False
     capacity: CapacityStatDTO
     snode_api_service: str
     spdk_proxy_service: str
@@ -269,6 +273,7 @@ class ClusterDTO(BaseModel):
             lost_site=model.lost_site,
             lost_site_state=model.lost_site_state,
             leader_site=model.leader_site,
+            stretched_control_plane=model.stretched_control_plane,
             capacity=CapacityStatDTO.from_model(
                 stat_obj if stat_obj else StatsObject()
             ),
@@ -378,6 +383,8 @@ class ManagementNodeDTO(BaseModel):
     status: str
     hostname: str
     ip: IPv4Address
+    #: The site of a stretched control plane ("" otherwise).
+    site: str = ""
 
     @staticmethod
     def from_model(model: MgmtNode):
@@ -386,6 +393,76 @@ class ManagementNodeDTO(BaseModel):
             status=model.status,
             hostname=model.hostname,
             ip=IPv4Address(model.mgmt_ip),
+            site=model.site,
+        )
+
+
+class ControlPlaneLeaseDTO(BaseModel):
+    holder_site: str
+    holder_host: str
+    epoch: int
+    state: str
+    expires_at: str
+    state_since: str
+    released_by: str
+
+
+class SiteReadinessDTO(BaseModel):
+    site: str
+    role: str
+    holds_lease: bool
+    mgmt_nodes_online: int
+    mgmt_nodes_total: int
+    storage_nodes_online: int
+    storage_nodes_total: int
+    fdb_lag_seconds: float | None
+    fdb_data_state: str
+    #: Every red readiness gate; empty = the site may take the lead.
+    problems: list[str]
+    failback_ready: bool
+
+    @staticmethod
+    def from_readiness(r):
+        return SiteReadinessDTO(
+            site=r.site, role=r.role, holds_lease=r.holds_lease,
+            mgmt_nodes_online=r.mgmt_nodes_online, mgmt_nodes_total=r.mgmt_nodes_total,
+            storage_nodes_online=r.storage_nodes_online, storage_nodes_total=r.storage_nodes_total,
+            fdb_lag_seconds=r.fdb_lag_seconds, fdb_data_state=r.fdb_data_state,
+            problems=list(r.problems), failback_ready=r.ready,
+        )
+
+
+class ControlPlaneStatusDTO(BaseModel):
+    cluster_id: UUID
+    stretched_control_plane: bool
+    #: The site of the control plane that answered.
+    local_site: str
+    #: single | leader | standby | draining | disconnected
+    mode: str
+    mode_reason: str
+    leader_site: str
+    lease: ControlPlaneLeaseDTO | None
+    fdb_region_lag_seconds: float | None
+    fdb_data_state: str
+    sites: list[SiteReadinessDTO]
+
+    @staticmethod
+    def from_status(s):
+        lease = s.lease
+        return ControlPlaneStatusDTO(
+            cluster_id=UUID(s.cluster_id),
+            stretched_control_plane=s.stretched,
+            local_site=s.local_site,
+            mode=s.mode,
+            mode_reason=s.mode_reason,
+            leader_site=s.leader_site,
+            lease=ControlPlaneLeaseDTO(
+                holder_site=lease.holder_site, holder_host=lease.holder_host, epoch=lease.epoch,
+                state=lease.state, expires_at=lease.expires_at, state_since=lease.state_since,
+                released_by=lease.released_by) if lease else None,
+            fdb_region_lag_seconds=s.fdb_lag_seconds,
+            fdb_data_state=s.fdb_data_state,
+            sites=[SiteReadinessDTO.from_readiness(r) for r in s.sites],
         )
 
 

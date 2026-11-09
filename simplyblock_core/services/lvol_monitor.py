@@ -4,6 +4,7 @@ from datetime import datetime
 
 from simplyblock_core import constants, db_controller, utils
 from simplyblock_core.controllers import (
+    control_plane_controller,
     health_controller,
     lvol_controller,
     lvol_events,
@@ -1010,6 +1011,7 @@ db = db_controller.DBController()
 def main():
     logger.info("Starting LVol monitor...")
     while True:
+        control_plane_controller.wait_until_services_enabled("lvol-monitor")
         try:
             db.get_clusters()
         except Exception as e:
