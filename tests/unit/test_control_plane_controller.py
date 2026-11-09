@@ -287,3 +287,30 @@ class TestFdbDatacenters:
         app = FastAPI()
         app.include_router(meta.api, prefix="/api/v2/_meta")
         assert TestClient(app).get("/api/v2/_meta/fdb-datacenters").json() == {"datacenters": ["a", "b"]}
+
+
+class TestKubernetesSiteOnline:
+    """A Kubernetes control plane's management node is unpingable (0.0.0.0);
+    the readiness gate asks its site's API endpoint instead."""
+
+    def _node(self, mode, ip, status):
+        from simplyblock_core.models.mgmt_node import MgmtNode
+        n = MgmtNode()
+        n.uuid, n.site, n.mode, n.mgmt_ip, n.status = "m1", "b", mode, ip, status
+        return n
+
+    def test_kubernetes_node_follows_its_endpoint(self, monkeypatch):
+        from simplyblock_core.models.cluster import Cluster
+        c = Cluster()
+        c.site_api_endpoints = {"b": "https://cp-b.example:5000"}
+        node = self._node("kubernetes", "0.0.0.0", "unreachable")
+        monkeypatch.setattr(cpc, "_http_answers", lambda ep, timeout=3.0: True)
+        assert cpc._mgmt_node_online(c, node)
+        monkeypatch.setattr(cpc, "_http_answers", lambda ep, timeout=3.0: False)
+        assert not cpc._mgmt_node_online(c, node)
+
+    def test_docker_node_keeps_its_status(self, monkeypatch):
+        from simplyblock_core.models.cluster import Cluster
+        monkeypatch.setattr(cpc, "_http_answers", lambda ep, timeout=3.0: True)
+        assert cpc._mgmt_node_online(Cluster(), self._node("docker", "10.0.0.5", "online"))
+        assert not cpc._mgmt_node_online(Cluster(), self._node("docker", "10.0.0.5", "unreachable"))

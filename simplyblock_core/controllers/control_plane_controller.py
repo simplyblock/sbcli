@@ -586,6 +586,18 @@ def control_plane_sites(cluster: Cluster) -> list[str]:
     return sorted({n.site for n in mgmt if n.site})
 
 
+def _mgmt_node_online(cluster: Cluster, node: MgmtNode) -> bool:
+    """Whether a site's control plane counts as online. A Kubernetes control
+    plane registers under the placeholder address 0.0.0.0, which the
+    management-node monitor cannot ping, so it reads as unreachable whatever
+    its state; it is judged by its site's API endpoint instead, the address
+    the other site redirects to, as the takeover probe judges it."""
+    if node.mode == "kubernetes" or node.mgmt_ip in ("", "0.0.0.0"):
+        endpoint = (cluster.site_api_endpoints or {}).get(node.site, "")
+        return bool(endpoint) and _http_answers(endpoint)
+    return node.status == MgmtNode.STATUS_ONLINE
+
+
 def evaluate_site(db: DBController, cluster: Cluster, site: str, *, as_leader_target: bool,
                   fdb_status: dict | None, lease: ControlPlaneLease | None,
                   running_tasks: Iterable[JobSchedule] = ()) -> SiteReadiness:
@@ -596,7 +608,7 @@ def evaluate_site(db: DBController, cluster: Cluster, site: str, *, as_leader_ta
     my_storage = [n for n in storage if n.site == site]
     r = SiteReadiness(site=site, role="control_plane" if my_mgmt else "storage")
     r.mgmt_nodes_total = len(my_mgmt)
-    r.mgmt_nodes_online = sum(1 for n in my_mgmt if n.status == MgmtNode.STATUS_ONLINE)
+    r.mgmt_nodes_online = sum(1 for n in my_mgmt if _mgmt_node_online(cluster, n))
     r.storage_nodes_total = len(my_storage)
     r.storage_nodes_online = sum(1 for n in my_storage if n.status == StorageNode.STATUS_ONLINE)
     r.holds_lease = bool(lease is not None and lease.holder_site == site
