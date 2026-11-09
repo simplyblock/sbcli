@@ -36,8 +36,9 @@ schemes, and `cluster create` refuses every other combination:
   **503** when that endpoint is not configured. The `/control-plane` routes, `/_meta` and the
   metrics are always answered locally.
 - **Disconnected.** A control plane whose FoundationDB does not answer (the site lost the
-  database's majority): every service loop pauses at the top of its cycle, the API answers 503
-  except for health and metrics, nothing is written anywhere. Its storage nodes keep serving what
+  database's majority): the API answers 503 except for health and metrics; the services fail
+  their database calls as they always did, exit, and are restarted by the orchestrator until
+  FoundationDB answers again, so nothing is written anywhere. Its storage nodes keep serving what
   the data plane allows.
 - **Lease agent.** A thread of `mgmt_node_monitor` on every management node
   (`control_plane_controller.lease_agent_forever`). Every `CONTROL_PLANE_LEASE_RENEW_SEC` (3 s) it

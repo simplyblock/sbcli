@@ -405,14 +405,20 @@ def services_enabled() -> tuple[bool, str]:
 def wait_until_services_enabled(who: str, poll: float = 3.0) -> None:
     """Block while this control plane must not run its services. Every
     service loop calls this at the top of each cycle; a leader passes
-    through at the cost of one cached lease read."""
+    through at the cost of one cached lease read.
+
+    A FoundationDB error propagates, as the services' own database calls
+    do: the process exits and the orchestrator restarts it with a fresh
+    client, which on a site that lost the database's majority means it keeps
+    restarting - and never acts - until FoundationDB answers again."""
     paused_for = ""
     while True:
-        enabled, reason = services_enabled()
-        if enabled:
+        verdict = current_mode()
+        if verdict.mode in ("single", "leader"):
             if paused_for:
-                logger.info(f"{who}: control plane leads again ({reason}); resuming")
+                logger.info(f"{who}: control plane leads again ({verdict.reason}); resuming")
             return
+        reason = f"{verdict.mode}: {verdict.reason}"
         if reason != paused_for:
             logger.info(f"{who}: paused, this control plane does not lead ({reason})")
             paused_for = reason

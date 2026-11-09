@@ -162,7 +162,7 @@ class TestAddClusterDuplicateName:
              patch("simplyblock_core.cluster_ops._create_update_user"):
             new_id = _add_cluster("first-cluster")
 
-        mock_add_mgmt.assert_called_once_with("0.0.0.0", "kubernetes", new_id)
+        mock_add_mgmt.assert_called_once_with("0.0.0.0", "kubernetes", new_id, site="")
 
         stored = db.get_cluster_by_id(new_id)
         assert stored.mode == "kubernetes"

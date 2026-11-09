@@ -257,8 +257,17 @@ def add_mgmt_node(mgmt_ip, mode, cluster_id=None, site: str = "", site_api_endpo
     if mode == "docker":
         hostname = utils.get_hostname()
 
-    cluster = db_controller.get_cluster_by_id(cluster_id) if cluster_id else None
-    site = _validate_mgmt_node_site(cluster, site)
+    # The cluster record may not be stored yet when the creating control
+    # plane registers itself (cluster create writes it afterwards); the site
+    # is then taken as given and the cluster's own validation has run.
+    cluster = None
+    if cluster_id:
+        try:
+            cluster = db_controller.get_cluster_by_id(cluster_id)
+        except KeyError:
+            cluster = None
+    if cluster is not None:
+        site = _validate_mgmt_node_site(cluster, site)
 
     for node in db_controller.get_mgmt_nodes():
         if node.mgmt_ip == mgmt_ip:

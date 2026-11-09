@@ -1167,8 +1167,8 @@ def check_leader_site(cluster, site: str) -> None:
     cluster does not have, SyncLeaderSiteRefusedError for the lost site."""
     if not cluster.sync_replication and not cluster.stretched_control_plane:
         raise SyncReplicationUnsupportedError(
-            f"cluster {cluster.get_id()} is neither a sync-replication cluster nor one with a "
-            f"stretched control plane; it has no leader site")
+            f"cluster {cluster.get_id()} is not a sync-replication cluster (nor one with a "
+            f"stretched control plane); it has no leader site")
     if not site:
         raise SyncReplicationSiteError("leader_site must not be empty")
     db = DBController()
