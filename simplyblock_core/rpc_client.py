@@ -18,8 +18,12 @@ from urllib3 import Retry
 
 from simplyblock_core import constants, utils
 from simplyblock_core.settings import Settings
+from simplyblock_core.utils import peer_address
 from simplyblock_core.utils.helpers import single_or_none
 from simplyblock_core.utils.secrets import redact_rpc_params, unwrap_secrets_for_send
+
+# The other site's SPDK proxies are named by that site's DNS (utils/peer_address.py).
+peer_address.install()
 
 logger = utils.get_logger()
 

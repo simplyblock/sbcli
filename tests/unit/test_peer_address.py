@@ -65,3 +65,16 @@ def test_records_map_the_api_name_to_mgmt_ip(monkeypatch):
     monkeypatch.setattr("simplyblock_core.db_controller.DBController", lambda: db)
     assert peer_address._from_records("ip-2.sb-node-api.simplyblock.svc") == "192.168.17.29"
     assert peer_address._from_records("other.svc") is None
+
+
+def test_records_map_the_spdk_proxy_name_too(monkeypatch):
+    from simplyblock_core.models.storage_node import StorageNode
+    node = StorageNode()
+    node.uuid, node.status, node.mgmt_ip = "n1", StorageNode.STATUS_ONLINE, "192.168.17.29"
+    node.hostname = "ip-192-168-17-29"
+    node.api_endpoint = "ip-192-168-17-29.sb-node-api.simplyblock.svc:5000"
+    db = MagicMock()
+    db.get_storage_nodes.return_value = [node]
+    monkeypatch.setattr("simplyblock_core.db_controller.DBController", lambda: db)
+    proxy_host = node._k8s_service_host(node.spdk_proxy_service)
+    assert peer_address._from_records(proxy_host) == "192.168.17.29"

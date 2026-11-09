@@ -59,10 +59,14 @@ def _from_records(name: str) -> str | None:
         if node.status == StorageNode.STATUS_REMOVED or not node.mgmt_ip:
             continue
         candidates = {host_of(node.api_endpoint or "")}
-        try:
-            candidates.add(host_of(node._k8s_service_host(node.snode_api_service)))
-        except Exception:  # noqa: BLE001 - a record without Kubernetes names
-            pass
+        # The node agent and the SPDK RPC proxy, each under its own headless
+        # Service; both run on the worker (the proxy on the host network, the
+        # agent on its hostPort), so mgmt_ip reaches either.
+        for service in (node.snode_api_service, node.spdk_proxy_service):
+            try:
+                candidates.add(host_of(node._k8s_service_host(service)))
+            except Exception:  # noqa: BLE001 - a record without Kubernetes names
+                pass
         if name in candidates:
             return node.mgmt_ip
     return None
