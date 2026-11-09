@@ -584,6 +584,17 @@ REPL_CUTOVER_THROTTLE_W_MBPS = 8
 # Each failed or abandoned attempt of the same cutover halves the cap (8, 4,
 # 2, 1 MB/s), never below this.
 REPL_CUTOVER_THROTTLE_MIN_MBPS = 1
+# Endgame rounds send each round snapshot's dirty pages straight into the
+# cutover clone (cow_landing, like the final step) instead of replicating it
+# into a landing volume that the target then merges with its base whole
+# cluster by whole cluster (bf18, 2026-11-09: 9.2-9.8 GB, 35-44 s per round of
+# a randomly written 10 GiB volume, whatever the source cap). Needs the
+# early-prepared clone and an SPDK whose bdev_lvol_transfer takes cow_landing
+# (no completion signal into a clone, spdk #89).
+REPL_CUTOVER_DIRECT_ROUNDS = True
+# Sends of one direct round (a failed or vanished transfer is sent again)
+# before the endgame is abandoned.
+REPL_CUTOVER_DIRECT_ROUND_SUBMITS = 3
 # --- catch-up throttle ------------------------------------------------------
 # A volume whose replication persistently cannot catch up never reaches the
 # endgame: the target cannot absorb what the source writes (bf17, 2026-11-08:

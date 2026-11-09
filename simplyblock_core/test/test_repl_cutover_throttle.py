@@ -108,7 +108,7 @@ class TestThrottle:
         src = inspect.getsource(final._shrink_step)
         throttle = src.index("_throttle_source(task, lvol)")
         assert src.index("if params[\"shrink_round\"] >= constants.REPL_CUTOVER_THROTTLE_AFTER_ROUND") < throttle
-        assert throttle < src.index("_, err, task = _take_shrink_snapshot(task, lvol)")
+        assert throttle < src.index("err, task = _take_round(task, lvol)")
         # converged rounds return before it
         assert src.index("if elapsed <= constants.REPL_CUTOVER_CONVERGE_TARGET_SEC") < throttle
 

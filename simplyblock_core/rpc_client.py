@@ -2241,7 +2241,7 @@ class RPCClient:
         return self._request("bdev_lvol_set_migration_flag", lvol_name=name)
 
     def bdev_lvol_transfer(self, name, offset, batch_size, bdev_name, operation="migrate", lvol_id=0,
-                           allow_partial=False, priority_class=0, partial_base=0):
+                           allow_partial=False, priority_class=0, partial_base=0, dest_clone=False):
         """
         Start an async blob transfer from *name* (source composite bdev) to the
         NVMe-oF bdev *bdev_name* attached on the caller's node.
@@ -2267,6 +2267,14 @@ class RPCClient:
         fresh empty volume would silently drop every cluster the delta does not
         cover.
 
+        *dest_clone*: the destination is a clone of the snapshot whose copy
+        the delta applies on (the cutover clone): partial clusters are CoW'd
+        there (cow_landing), no merge follows, and no completion signal is
+        written into it. Never dropped on a retry: an SPDK without it answers
+        with a decode error (strict decoding), which the caller reads as "not
+        supported" -- sending into the clone without it would write that
+        signal as data at offset 0 of the clone.
+
         *priority_class* is the IO class the transfer reads its source in,
         without changing the source's own class (0 = the source's own). An SPDK
         older than the parameter refuses the whole request, so it is retried
@@ -2285,6 +2293,8 @@ class RPCClient:
         # disabled in 52e75afb2 while the fork's destination side corrupted
         # partial transfers), so it is retried without the delta, then without
         # the class: each step back sends more, never less.
+        if dest_clone:
+            params["dest_clone"] = True
         attempts = []
         if allow_partial and partial_base:
             attempts.append(dict(params, allow_partial=True, partial_base=int(partial_base),

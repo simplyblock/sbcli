@@ -139,7 +139,7 @@ class TestConvergence(unittest.TestCase):
         import inspect
         src = inspect.getsource(runner.task_runner)
         entry = src.index("_acquire_lvs_claim")
-        self.assertLess(entry, src.index("_take_shrink_snapshot"),
+        self.assertLess(entry, src.index("_take_round"),
                         "the lvstore is taken before the first round, not after")
         self.assertNotIn("ready_for_exclusive", inspect.getsource(runner),
                          "open rounds are gone")
