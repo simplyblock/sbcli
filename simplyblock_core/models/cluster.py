@@ -181,6 +181,13 @@ class Cluster(BaseModel):
     node_label_suffix: str = ""
     disable_monitoring: bool = False
     strict_node_anti_affinity: bool = False
+    # Cluster-create-time, immutable declaration that every data device is
+    # protected below simplyblock (hardware RAID LUN, md or dm RAID). Lowers
+    # the data-device floor from n+2k to n+k (simplyblock_core.floors) and
+    # lets the data plane place several chunks of a stripe on one device when
+    # no other device is writable (allow_device_colocation on the distribs,
+    # affinity_floor "relaxed" on migrations).
+    raid_devices: bool = False
     tls: bool = False
     tls_config: dict = default_factory(dict)
     is_re_balancing: bool = False

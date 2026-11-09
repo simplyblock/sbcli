@@ -13,6 +13,9 @@ EVENT_STATUS_CHANGE = "STATUS_CHANGE"
 EVENT_OBJ_CREATED = "OBJ_CREATED"
 EVENT_OBJ_DELETED = "OBJ_DELETED"
 EVENT_CAPACITY = "CAPACITY"
+# The cluster's online resources are below an erasure-coding floor
+# (simplyblock_core.floors); the message names the floor.
+EVENT_FLOOR = "FLOOR"
 EVENT_LIMIT_REACHED = "LIMIT_REACHED"
 #: A distrib reported an IO it could not serve from the chunks it can reach.
 EVENT_DISTR_IO_ERROR = "DISTR_IO_ERROR"

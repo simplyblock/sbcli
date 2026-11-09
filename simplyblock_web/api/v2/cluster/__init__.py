@@ -85,6 +85,9 @@ class ClusterParams(BaseModel):
     inflight_io_threshold: int = 4
     enable_node_affinity: bool = False
     strict_node_anti_affinity: bool = False
+    # Every data device is protected below simplyblock (hardware RAID LUN, md
+    # or dm RAID): data-device floor n+k instead of n+2k. Immutable.
+    raid_devices: bool = False
     is_single_node: bool = False
     fabric: str = "tcp"
     cr_name: str = ""

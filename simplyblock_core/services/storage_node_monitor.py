@@ -9,12 +9,14 @@ from simplyblock_core import (
     cluster_ops,
     constants,
     db_controller,
+    floors,
     storage_network,
     storage_node_ops,
     utils,
 )
 from simplyblock_core.controllers import (
     activation_gate,
+    cluster_events,
     device_controller,
     health_controller,
     port_release_budget,
@@ -632,9 +634,53 @@ def _count_status(cluster, snodes, jm_repl_by_node, dp_quorum_by_node, cluster_t
                                    online_nodes, online_devices, jm_replication_tasks)
 
 
+# cluster id -> the floor violations last reported for it (the event and the
+# warning are emitted when the set changes, not on every 3s tick).
+_floor_violations_reported: dict = {}
+
+
+def _apply_floors(cluster, snodes, status):
+    """DEGRADED, naming the floor, while the ONLINE resources are below a
+    floor (simplyblock_core.floors) and the existing rules did not already
+    SUSPEND the cluster. The suspension rules are untouched: an outage may
+    take a running cluster below the floors, nothing is suspended for that
+    alone -- the data plane keeps serving and migrating and the rebalance
+    restores the protection. The floor is recorded as a cluster event and a
+    warning whenever the set of violated floors changes."""
+    violations = floors.evaluate(cluster, snodes)
+    key = cluster.get_id()
+    previous = _floor_violations_reported.get(key)
+    if violations != previous:
+        if violations:
+            logger.warning("Cluster %s below resource floor: %s", key, "; ".join(violations))
+            try:
+                cluster_events.cluster_floor_violation(cluster, violations)
+            except Exception as e:  # noqa: BLE001 - the status verdict must not fail on an event
+                logger.debug("floor event not recorded: %s", e)
+        elif previous:
+            logger.info("Cluster %s back at or above every resource floor", key)
+            try:
+                cluster_events.cluster_floor_restored(cluster)
+            except Exception as e:  # noqa: BLE001
+                logger.debug("floor event not recorded: %s", e)
+        _floor_violations_reported[key] = violations
+    if violations and status != Cluster.STATUS_SUSPENDED:
+        return Cluster.STATUS_DEGRADED
+    return status
+
+
 def _status_verdict(cluster, snodes, affected_physical_nodes, online_nodes,
                     online_devices, jm_replication_tasks):
-    """The cluster status for one set of affected hosts."""
+    """The cluster status for one set of affected hosts: the suspension /
+    degradation rules (``_status_verdict_rules``), then the floors."""
+    status = _status_verdict_rules(cluster, snodes, affected_physical_nodes, online_nodes,
+                                   online_devices, jm_replication_tasks)
+    return _apply_floors(cluster, snodes, status)
+
+
+def _status_verdict_rules(cluster, snodes, affected_physical_nodes, online_nodes,
+                          online_devices, jm_replication_tasks):
+    """The suspension / degradation rules for one set of affected hosts."""
     affected_nodes = len(affected_physical_nodes)
     # ndcs n = 2
     # npcs k = 1

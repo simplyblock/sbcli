@@ -1032,9 +1032,18 @@ commands:
             private: true
           - name: "--strict-node-anti-affinity"
             help: >
-              Enable strict node anti affinity for storage nodes. Never more than one chunk is placed on a node. This
-              requires a minimum of _data-chunks-in-stripe + parity-chunks-in-stripe + 1_ nodes in the cluster.
+              Enable strict node anti affinity for storage nodes. Never more than one chunk is placed on a node. The
+              cluster needs the same node floor as every cluster (_data-chunks-per-stripe + 2 x parity-chunks-per-stripe_
+              nodes); the flag only affects status reporting.
             dest: strict_node_anti_affinity
+            type: bool
+            action: store_true
+          - name: "--raid-devices"
+            help: >
+              Declare that every data device is protected below simplyblock (hardware RAID LUN, md or dm RAID). Lowers
+              the data-device floor from n+2k to n+k and allows a stripe to place several chunks on one device when no
+              other device is writable. Cannot be changed after cluster creation.
+            dest: raid_devices
             type: bool
             action: store_true
           - name: "--enable-failure-domain"
@@ -1300,9 +1309,18 @@ commands:
             private: true
           - name: "--strict-node-anti-affinity"
             help: >
-              Enable strict node anti affinity for storage nodes. Never more than one chunk is placed on a node.
-              This requires a minimum of _data-chunks-in-stripe + parity-chunks-in-stripe + 1_ nodes in the cluster."
+              Enable strict node anti affinity for storage nodes. Never more than one chunk is placed on a node. The
+              cluster needs the same node floor as every cluster (_data-chunks-per-stripe + 2 x parity-chunks-per-stripe_
+              nodes); the flag only affects status reporting.
             dest: strict_node_anti_affinity
+            type: bool
+            action: store_true
+          - name: "--raid-devices"
+            help: >
+              Declare that every data device is protected below simplyblock (hardware RAID LUN, md or dm RAID). Lowers
+              the data-device floor from n+2k to n+k and allows a stripe to place several chunks on one device when no
+              other device is writable. Cannot be changed after cluster creation.
+            dest: raid_devices
             type: bool
             action: store_true
           - name: "--enable-failure-domain"

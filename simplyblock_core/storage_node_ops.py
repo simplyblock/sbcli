@@ -36,6 +36,7 @@ from simplyblock_core import (
     cluster_ops,
     constants,
     distr_controller,
+    floors,
     jm_raid,
     scripts,
     storage_network,
@@ -10278,29 +10279,6 @@ def _check_ftt_allows_node_removal(node_id, db_controller):
         if node.status not in [StorageNode.STATUS_IN_CREATION, StorageNode.STATUS_REMOVED]
     )
 
-    # Block suspend/shutdown during rebalancing based on node headroom.
-    # A cluster needs ndcs+npcs nodes minimum. During rebalancing:
-    #   - With exactly ndcs+npcs nodes: no shutdowns allowed (no headroom)
-    #   - With ndcs+npcs+1 nodes: one shutdown allowed (one spare)
-    #   - With ndcs+npcs+2+ nodes: two shutdowns allowed, etc.
-    # The number of allowed shutdowns during rebalancing is:
-    #   total_active_nodes - (ndcs + npcs)
-    # This must be greater than the number of already-not-online nodes.
-    if cluster.is_re_balancing:
-        not_online_already = sum(
-            1 for node in snodes
-            if node.get_id() != node_id
-            and node.status != StorageNode.STATUS_ONLINE
-            and node.status not in [StorageNode.STATUS_IN_CREATION, StorageNode.STATUS_REMOVED]
-        )
-        headroom = total_active_nodes - (ndcs + npcs)
-        if headroom <= not_online_already:
-            return False, (
-                f"Cluster is rebalancing with {total_active_nodes} active nodes "
-                f"({not_online_already} already not online, "
-                f"need >{ndcs + npcs} for ndcs={ndcs}, npcs={npcs}). "
-                f"Wait for rebalancing to complete before removing a node."
-            )
 
     # Count nodes that are not online (excluding the node being removed,
     # and excluding nodes in creation or already removed).
@@ -10476,6 +10454,21 @@ def _check_ftt_allows_node_removal(node_id, db_controller):
                     f"(status: {not_online_node.status})"
                 )
 
+    # Resource floors (simplyblock_core.floors): the cluster AFTER losing
+    # this node -- its online nodes, their data devices and, when used, its
+    # failure domains -- must stay at or above every floor. This replaces
+    # the former "rebalancing headroom" formula (active nodes - (ndcs+npcs)):
+    # the node floor is n+2k whether or not a rebalance is running. Judged
+    # last: the FTT / pair / domain refusals above name the concrete node
+    # the operator has to wait for, which is the more actionable reason.
+    floor_violations = floors.evaluate(cluster, snodes, exclude_node_id=node_id)
+    if floor_violations:
+        return False, (
+            f"removing node {node_id} would take the cluster below the resource floors "
+            f"for the {ndcs}+{npcs} scheme ({total_active_nodes} active nodes): "
+            + "; ".join(floor_violations)
+            + ". Bring the other nodes online or add resources first."
+        )
     return True, ""
 
 
@@ -10639,6 +10632,27 @@ def check_node_shutdown_preconditions(node_id, force=False, current_restart_task
                       f"claim is released or expires")
             logger.error(reason)
             return False, reason
+
+    # Resource floors (simplyblock_core.floors): a planned shutdown is refused
+    # when the cluster without this node would be below a floor (nodes, data
+    # devices per node and cluster-wide, failure domains). force keeps
+    # overriding, as it does for every guard below.
+    if snode.status == StorageNode.STATUS_ONLINE:
+        try:
+            _floor_cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+        except KeyError:
+            _floor_cluster = None
+        if _floor_cluster is not None:
+            _floor_violations = floors.evaluate(
+                _floor_cluster, db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id),
+                exclude_node_id=node_id)
+            if _floor_violations:
+                reason = (f"shutting down node {node_id} would take the cluster below the "
+                          f"resource floors: " + "; ".join(_floor_violations))
+                if force is False:
+                    logger.error(reason)
+                    return False, reason
+                logger.warning("%s — proceeding with force", reason)
 
     # Guard: no concurrent shutdown + restart (design: mutual exclusion)
     for peer in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):

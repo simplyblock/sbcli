@@ -1937,6 +1937,7 @@ class CLIWrapperBase:
         max_queue_size = args.max_queue_size
         inflight_io_threshold = args.inflight_io_threshold
         strict_node_anti_affinity = args.strict_node_anti_affinity
+        raid_devices = getattr(args, 'raid_devices', False)
         is_single_node = args.is_single_node
         client_data_nic = args.client_data_nic
         enable_failure_domain = getattr(args, 'enable_failure_domain', False)
@@ -1966,6 +1967,7 @@ class CLIWrapperBase:
             sync_replication=getattr(args, 'sync_replication', False),
             page_copy=getattr(args, 'page_copy', False),
             md_journal=md_journal,
+            raid_devices=raid_devices,
         )
 
     def cluster_create(self, args):
@@ -1995,6 +1997,7 @@ class CLIWrapperBase:
         inflight_io_threshold = args.inflight_io_threshold
         disable_monitoring = args.disable_monitoring
         strict_node_anti_affinity = args.strict_node_anti_affinity
+        raid_devices = getattr(args, 'raid_devices', False)
         name = args.name
         tls_secret = args.tls_secret
         ingress_host_source = args.ingress_host_source
@@ -2043,6 +2046,7 @@ class CLIWrapperBase:
             sync_replication=getattr(args, 'sync_replication', False),
             page_copy=getattr(args, 'page_copy', False),
             md_journal=md_journal,
+            raid_devices=raid_devices,
         )
 
     def query_yes_no(self, question, default="yes"):

@@ -26,6 +26,7 @@ from pydantic import SecretStr
 import docker
 from simplyblock_core import (
     constants,
+    floors,
     index_ops,
     jm_raid,
     mgmt_node_ops,
@@ -47,6 +48,9 @@ from simplyblock_core.controllers import (
 from simplyblock_core.controllers.backup import device as backup_device
 from simplyblock_core.controllers.cluster_expansion.planner import (
     RemoteTripletPlacementError,
+)
+from simplyblock_core.controllers.cluster_expansion.planner import (
+    fd_activation_min_domains as fd_planner_min_domains,
 )
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.exceptions import (
@@ -400,6 +404,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    sync_replication=False,
                    page_copy=False,
                    md_journal=True,
+                   raid_devices=False,
 ) -> str:
     if (distr_ndcs, distr_npcs) not in SUPPORTED_ERASURE_CODING_SCHEMES:
         raise ValueError("Unsupported erasure coding scheme")
@@ -564,6 +569,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.atomic_4k = bool(atomic_4k)
     cluster.page_copy = bool(page_copy)
     cluster.md_journal = bool(md_journal)
+    cluster.raid_devices = bool(raid_devices)
     cluster.client_data_nic = client_data_nic or ""
     cluster.max_fault_tolerance = max_fault_tolerance
     cluster.nvmf_base_port = nvmf_base_port
@@ -681,6 +687,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
                 leader_site="",
                 page_copy=False,
                 md_journal=True,
+                raid_devices=False,
                 snode_api_service=constants.K8S_SNODE_API_SERVICE,
                 spdk_proxy_service=constants.K8S_SPDK_PROXY_SERVICE,
                 spdk_proxy_tls_secret=constants.K8S_SPDK_PROXY_TLS_SECRET,
@@ -718,6 +725,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
         leader_site=leader_site,
         page_copy=page_copy,
         md_journal=md_journal,
+        raid_devices=raid_devices,
         snode_api_service=snode_api_service,
         spdk_proxy_service=spdk_proxy_service,
         spdk_proxy_tls_secret=spdk_proxy_tls_secret,
@@ -755,6 +763,7 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
                 leader_site="",
                 page_copy=False,
                 md_journal=True,
+                raid_devices=False,
                 snode_api_service=constants.K8S_SNODE_API_SERVICE,
                 spdk_proxy_service=constants.K8S_SPDK_PROXY_SERVICE,
                 spdk_proxy_tls_secret=constants.K8S_SPDK_PROXY_TLS_SECRET,
@@ -899,6 +908,7 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
     cluster.atomic_4k = bool(atomic_4k)
     cluster.page_copy = bool(page_copy)
     cluster.md_journal = bool(md_journal)
+    cluster.raid_devices = bool(raid_devices)
     cluster.client_data_nic = client_data_nic or ""
     cluster.max_fault_tolerance = max_fault_tolerance
     cluster.nvmf_base_port = nvmf_base_port
@@ -1392,10 +1402,21 @@ def _record_activation_topology(cluster, single_node, fresh) -> None:
 
 
 def activation_minimum_devices(cluster, single_node_cluster) -> int:
-    """ndcs+npcs devices are needed for placement; the +1 spare is rebuild
-    headroom that a single-node cluster (no data redundancy to rebuild onto
-    a spare) does not require."""
+    """The RE-activation device gate (recovery of an existing layout): ndcs+npcs
+    devices are needed for placement; the +1 spare is rebuild headroom that a
+    single-node cluster (no data redundancy to rebuild onto a spare) does not
+    require. A FRESH activation is judged by the full floors instead
+    (``activation_floor_violations``); a re-activation deliberately keeps
+    this weaker gate so a drifted cluster can still be recovered."""
     return cluster.distr_ndcs + cluster.distr_npcs + (0 if single_node_cluster else 1)
+
+
+def activation_floor_violations(cluster, snodes, online_nodes) -> builtins.list[str]:
+    """The floors (simplyblock_core.floors) a fresh activation would violate
+    with ``online_nodes`` online: node count, one data device per node, the
+    cluster-wide data-device count and, with failure domains, the domain
+    count. Journal devices never count (they sit in ``jm_device``)."""
+    return floors.evaluate(cluster, snodes, online_nodes=online_nodes)
 
 
 #: Sites of a sync-replication cluster: one simplyblock cluster spans exactly two.
@@ -1630,10 +1651,23 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False, site_activ
         logger.warning("Single-node cluster: activating as non-HA "
                        "(no secondary nodes, single journal) regardless of ha_type")
 
-    minimum_devices = activation_minimum_devices(cluster, single_node_cluster)
-    if dev_count < minimum_devices:
-        _revert()
-        raise ValueError(f"Failed to activate cluster, No enough online device.. Minimum is {minimum_devices}")
+    if is_fresh_activation:
+        # Fresh activation refuses below any floor (simplyblock_core.floors).
+        # A node without a data device is refused here too: downstream,
+        # _prepare_cluster_devices_jm_on_dev accepts an empty device list.
+        floor_violations = activation_floor_violations(cluster, snodes, online_nodes)
+        if floor_violations:
+            _revert()
+            raise ValueError("Failed to activate cluster, below the resource floors for "
+                             f"the {cluster.distr_ndcs}+{cluster.distr_npcs} scheme: "
+                             + "; ".join(floor_violations))
+    else:
+        # Re-activation (recovery): the weaker device gate of before, so a
+        # drifted or partially-online cluster can still be brought back.
+        minimum_devices = activation_minimum_devices(cluster, single_node_cluster)
+        if dev_count < minimum_devices:
+            _revert()
+            raise ValueError(f"Failed to activate cluster, No enough online device.. Minimum is {minimum_devices}")
 
     # Sync replication: the configured two-site layout is enforced on every
     # activation (force included) -- a third site or an unsited node is never
@@ -1679,7 +1713,7 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False, site_activ
     fd_desired_layout: dict[str, tuple[str, str]] = {}
     if cluster.enable_failure_domain:
         distinct_domains = {node.failure_domain for node in online_nodes if node.failure_domain >= 0}
-        min_domains = cluster.distr_npcs + 2
+        min_domains = fd_planner_min_domains(cluster.distr_npcs, cluster.distr_ndcs)
         if len(distinct_domains) < min_domains:
             logger.warning(
                 "Failure-domain feature is enabled but only %d distinct failure "
@@ -1736,7 +1770,7 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False, site_activ
                 # stranding another node's secondary/tertiary with none at all.
                 # This also subsumes the plain "at least two domains" floor.
                 domain_count_violation = fd_planner.fd_activation_domain_count_violation(
-                    cluster.distr_npcs, len(fd_host_counts))
+                    cluster.distr_npcs, len(fd_host_counts), ndcs=cluster.distr_ndcs)
                 if domain_count_violation:
                     _fd_fail(_on_site(domain_count_violation))
                 if len(set(fd_host_counts.values())) != 1:

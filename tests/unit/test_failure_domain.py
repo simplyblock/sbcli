@@ -616,6 +616,10 @@ class TestFDAwareClusterStatus(unittest.TestCase):
         self.snm = snm
         self._patches = [
             patch.object(snm, "is_new_migrated_node", return_value=False),
+            # These 2-domain layouts test the FD suspend contract; they sit
+            # below the n+k failure-domain floor, which adds DEGRADED on its
+            # own (covered in test_cluster_floors).
+            patch.object(snm.floors, "evaluate", return_value=[]),
         ]
         for p in self._patches:
             p.start()
