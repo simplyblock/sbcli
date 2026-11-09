@@ -4,7 +4,8 @@
 and deletion lagged; every kept snapshot is one more copy generation behind
 every rewritten page. A volume with REPL_MAX_DELETION_BACKLOG snapshots waiting
 to be deleted takes no new internal snapshot, and an endgame holds at most
-REPL_CUTOVER_MAX_SHRINK_ROUNDS (4) rounds.
+REPL_CUTOVER_MAX_SHRINK_ROUNDS rounds. Both limits were raised to 32 on
+2026-11-04 (bed bf12: 4 rounds froze every volume unconverged under heavy IO).
 """
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -28,7 +29,7 @@ LVOL = SimpleNamespace(get_id=lambda: "LV1", do_replicate=True, replication_inte
 
 @pytest.fixture
 def snaps(monkeypatch):
-    st = {"snaps": []}
+    st: dict = {"snaps": []}
     monkeypatch.setattr(sm.db, "get_snapshots_by_lvol_id", lambda lid: st["snaps"])
     monkeypatch.setattr(sr, "_keep_replicated_for", lambda lvol: 2)
     return st
@@ -67,13 +68,13 @@ def _run(backlog):
 
 
 def test_a_deletion_backlog_at_the_limit_holds_the_next_snapshot():
-    assert constants.REPL_MAX_DELETION_BACKLOG == 3
-    _run(3).assert_not_called()
+    assert constants.REPL_MAX_DELETION_BACKLOG == 32
+    _run(32).assert_not_called()
 
 
 def test_below_the_limit_the_cadence_continues():
-    _run(2).assert_called_once()
+    _run(31).assert_called_once()
 
 
-def test_an_endgame_holds_at_most_four_rounds():
-    assert constants.REPL_CUTOVER_MAX_SHRINK_ROUNDS == 4
+def test_an_endgame_holds_at_most_32_rounds():
+    assert constants.REPL_CUTOVER_MAX_SHRINK_ROUNDS == 32
