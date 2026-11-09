@@ -9,6 +9,7 @@ import hashlib
 import logging
 import os
 import tempfile
+import threading
 from typing import Any, Protocol
 from urllib.parse import quote
 
@@ -76,19 +77,30 @@ class LocalPeerClient:
             raise PeerNotFoundError(str(e)) from e
 
 
+_ca_dir: str | None = None
+_ca_dir_lock = threading.Lock()
+
+
 def _ca_bundle_path(ca_cert: str) -> str:
     """A file holding *ca_cert*, for ``requests``' ``verify=``, which takes a path.
 
-    Named by the bundle's hash, so every process that needs the same bundle
-    writes identical content to the same name. A per-process cache of a public
-    value: nothing depends on processes agreeing about it.
+    The file decides which certificates the peer connection trusts, so it lives
+    in a directory this process created with ``mkdtemp`` (mode 0700): a shared,
+    predictable name in the temp directory could be planted by another user
+    before this process writes it. Named by the bundle's hash, so clients of
+    the same bundle in this process share one file.
     """
+    global _ca_dir
+    with _ca_dir_lock:
+        if _ca_dir is None:
+            _ca_dir = tempfile.mkdtemp(prefix="sb-peer-ca-")
+        directory = _ca_dir
     digest = hashlib.sha256(ca_cert.encode()).hexdigest()
-    path = os.path.join(tempfile.gettempdir(), f"sb-peer-ca-{digest}.pem")
+    path = os.path.join(directory, f"{digest}.pem")
     if not os.path.exists(path):
         # Write under a unique name and rename, so a concurrent reader never
         # sees a half-written bundle.
-        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), suffix=".pem")
+        fd, tmp = tempfile.mkstemp(dir=directory, suffix=".pem")
         with os.fdopen(fd, "w") as f:
             f.write(ca_cert)
         os.replace(tmp, path)

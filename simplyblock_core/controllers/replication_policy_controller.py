@@ -156,6 +156,14 @@ def add_policy(cluster_id, policy_name, target, interval_min=1, mode=None, keep_
     if tgt.cluster_id != cluster_id:
         raise ReplicationConfigError(
             f"Replication target {target} belongs to cluster {tgt.cluster_id}")
+    if tgt.has_peer():
+        # Every replication path starts from a policy, and those paths still
+        # read and write the target cluster's records in this control plane's
+        # database, where a peer's cluster has none. Refused here, up front,
+        # until the replication steps go through the peer client.
+        raise ReplicationConfigError(
+            f"Replication target {tgt.target_name} is on a peer control plane "
+            f"({tgt.peer_endpoint}); replication to a peer control plane is not supported yet")
 
     for existing in db.get_replication_policies(cluster_id):
         if existing.policy_name == policy_name:

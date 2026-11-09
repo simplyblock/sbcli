@@ -6,6 +6,8 @@ real FDB in tests/integration/test_peer_service.py.
 """
 import logging
 import os
+import stat
+import tempfile
 from unittest.mock import MagicMock, patch
 from uuid import UUID
 
@@ -144,6 +146,17 @@ class TestTls:
 
         assert first == second
         assert os.path.exists(first)
+
+    def test_the_bundle_lives_in_a_private_directory(self):
+        """Another user must not be able to plant the bundle before it is written."""
+        pem = "-----BEGIN CERTIFICATE-----\nunit-test-private\n-----END CERTIFICATE-----\n"
+
+        path = _client(ca_cert=pem)._session.verify
+
+        directory = os.path.dirname(path)
+        assert directory != tempfile.gettempdir()
+        if os.name == "posix":
+            assert stat.S_IMODE(os.stat(directory).st_mode) == 0o700
 
     def test_no_bundle_keeps_the_system_trust_store(self):
         assert _client()._session.verify is True

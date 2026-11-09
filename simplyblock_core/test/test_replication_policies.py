@@ -271,6 +271,18 @@ def test_several_policies_per_target(monkeypatch):
     assert cadences == {"fast": 1, "hourly": 60}
 
 
+def test_policy_on_a_peer_target_is_refused(monkeypatch):
+    """A target on another control plane takes no policy until replication
+    runs through the peer client: nothing would find its cluster here."""
+    db = _install(monkeypatch, _FakeDB(clusters=("CL_SRC", "CL_TGT")))
+    target_id = rpc.add_target("CL_SRC", "site-b", "CL_TGT")
+    db.get_replication_target_by_id(target_id).peer_endpoint = "https://cp-b.example:8443"
+
+    with pytest.raises(rpc.ReplicationConfigError, match="peer control plane"):
+        rpc.add_policy("CL_SRC", "fast", target_id)
+    assert db.get_replication_policies("CL_SRC") == []
+
+
 def test_policy_can_reference_target_by_name(monkeypatch):
     _install(monkeypatch, _FakeDB())
     rpc.add_target("CL_SRC", "site-a", "CL_TGT")
