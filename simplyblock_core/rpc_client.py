@@ -2079,8 +2079,27 @@ class RPCClient:
         return self._request("bdev_lvol_remove_from_group",
                               bdev_group_id=group_id, lvol_vbdev_list=lvol_name_list)
 
-    def alceml_set_qos_weights(self, qos_weights):
+    def distrib_set_qos_weights(self, qos_weights):
+        """distrib's per-class shares (one table per process: every distrib of
+        the node). Set together with alceml's by
+        qos_controller.set_node_qos_weights."""
         return self._request("bdev_distrib_set_qos_weights", qos_weights=qos_weights)
+
+    def alceml_set_qos_weights(self, qos_weights):
+        """alceml's per-class shares (one table per process: every alceml of
+        the node), or ``RPC_UNSUPPORTED`` on a build without the RPC.
+
+        This wrapper used to send bdev_distrib_set_qos_weights, so alceml kept
+        its built-in {75, 25, 0, ...}: a class with weight 0 -- replication
+        among them -- only got the minimum budget per round on a busy device
+        (bf17, 2026-11-08).
+        """
+        try:
+            return self._request("alceml_set_qos_weights", qos_weights=qos_weights)
+        except RPCRemoteError as e:
+            if e.code == RPC_METHOD_NOT_FOUND:
+                return RPC_UNSUPPORTED
+            raise
 
     def jm_get_events(self):
         """Fetch every event the JM currently holds.
@@ -2410,7 +2429,7 @@ class RPCClient:
         }
         if applied is not None:
             applied.update(partial=False, cow_landing=False)
-        extra = {}
+        extra: dict = {}
         if cow_landing or partial_base:
             extra["cow_landing"] = True
         if partial_base:

@@ -5014,8 +5014,8 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
 
         # set qos values: always, the replication service class needs its share
         # even without user classes (see qos_controller.get_qos_weights_list)
-        logger.info("Setting Alcemls QOS weights")
-        ret = rpc_client.alceml_set_qos_weights(qos_controller.get_qos_weights_list(cluster_id))
+        logger.info("Setting distrib and alceml QOS weights")
+        ret = qos_controller.set_node_qos_weights(rpc_client, qos_controller.get_qos_weights_list(cluster_id))
         if not ret:
             logger.error("Failed to set Alcemls QOS")
             # fatal only where user classes depend on it, as before
@@ -9767,8 +9767,8 @@ def _restart_storage_node_impl(
 
     # set qos values: always, the replication service class needs its share
     # even without user classes (see qos_controller.get_qos_weights_list)
-    logger.info("Setting Alcemls QOS weights")
-    ret = rpc_client.alceml_set_qos_weights(qos_controller.get_qos_weights_list(snode.cluster_id))
+    logger.info("Setting distrib and alceml QOS weights")
+    ret = qos_controller.set_node_qos_weights(rpc_client, qos_controller.get_qos_weights_list(snode.cluster_id))
     if not ret:
         logger.error("Failed to set Alcemls QOS")
         # fatal only where user classes depend on it, as before
