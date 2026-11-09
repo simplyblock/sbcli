@@ -32,6 +32,7 @@ import itertools
 import pytest
 
 from simplyblock_core.db_controller import DBController
+from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
@@ -49,6 +50,11 @@ def db():
     db = DBController()
     if db.kv_store is None:
         pytest.skip("FoundationDB is not available")
+    # Retention asks the destination through its peer client, which answers
+    # only for a cluster its control plane manages.
+    cluster = Cluster()
+    cluster.uuid = CLUSTER_ID
+    cluster.write_to_db(db.kv_store)
     return db
 
 

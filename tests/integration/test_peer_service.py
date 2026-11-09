@@ -291,6 +291,7 @@ def _copy(db, uuid, cluster_id=SOURCE_CLUSTER_ID, prev=""):
     snapshot.cluster_id = cluster_id
     snapshot.prev_snap_uuid = prev
     snapshot.snap_bdev = f"LVS/{uuid}"
+    snapshot.lvol = LVol()
     snapshot.write_to_db(db.kv_store)
     return snapshot
 
