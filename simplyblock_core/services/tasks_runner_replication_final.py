@@ -120,9 +120,18 @@ def _record(task, **params):
 
 
 def _release_lvs_claim(task):
-    """Let other volumes on this LVS replicate again."""
-    _restore_source_throttle(task)
-    drop_params(task, "cutover_lvs", "cutover_group")
+    """Let other volumes on this LVS replicate again.
+
+    The source write cap stays: a failed or abandoned attempt keeps the
+    volume capped through the back-off and the prune gate, and the next
+    endgame tightens it (_throttle_cap halves per attempt). Lifting it here
+    let the volume write at full speed between attempts, so the next endgame
+    opened with a backlog of minutes (bf18, 2026-11-09: first rounds of
+    699-786 s at a 2-4 MB/s cap). The cap is lifted when the cutover is done
+    (_record_cutover_done) or the task ends without one
+    (_cleanup_unfinished_cutover).
+    """
+    drop_params(task, "cutover_lvs", "cutover_group", "throttle_tried")
 
 
 def _throttle_cap(task):

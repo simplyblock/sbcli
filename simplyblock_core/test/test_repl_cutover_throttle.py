@@ -74,16 +74,28 @@ class TestThrottle:
             final._throttle_source(task, _lvol(w=5))
         set_lvol.assert_not_called()
 
-    def test_releasing_the_claim_restores_the_qos(self):
-        task = _task(throttle_restore=[100, 200, 0, 50], cutover_lvs="LVS_1")
+    def test_releasing_the_claim_keeps_the_cap(self):
+        # bf18: lifting it let the volume write at full speed between attempts
+        task = _task(throttle_restore=[100, 200, 0, 50], throttle_mbps=8,
+                     throttle_tried=True, cutover_lvs="LVS_1")
         dropped = []
-        with patch("simplyblock_core.controllers.lvol_controller.set_lvol",
-                   return_value=True) as set_lvol, \
-                patch.object(final, "drop_params",
+        with patch("simplyblock_core.controllers.lvol_controller.set_lvol") as set_lvol,                 patch.object(final, "drop_params",
                              side_effect=lambda t, *n: dropped.extend(n)):
             final._release_lvs_claim(task)
-        set_lvol.assert_called_once_with("LV1", 100, 200, 0, 50)
-        assert "throttle_restore" in dropped and "cutover_lvs" in dropped
+        set_lvol.assert_not_called()
+        assert "throttle_restore" not in dropped and "throttle_mbps" not in dropped
+        assert "cutover_lvs" in dropped
+        # the next endgame applies its (tighter) cap again
+        assert "throttle_tried" in dropped
+
+    def test_the_next_attempt_tightens_the_kept_cap(self):
+        task = _task(throttle_restore=[1, 2, 3, 0], throttle_mbps=8)
+        task.retry = 1
+        with patch.object(final, "_record", side_effect=_record_inline),                 patch("simplyblock_core.controllers.lvol_controller.set_lvol",
+                      return_value=True) as set_lvol,                 patch.object(constants, "REPL_CUTOVER_THROTTLE_W_MBPS", 8):
+            task = final._throttle_source(task, _lvol(w=8))
+        set_lvol.assert_called_once_with("LV1", 0, 0, 0, 4)
+        assert task.function_params["throttle_restore"] == [1, 2, 3, 0]
 
     def test_a_source_deleted_with_its_cutover_needs_no_restore(self):
         task = _task(throttle_restore=[0, 0, 0, 0])
@@ -100,10 +112,10 @@ class TestThrottle:
         # converged rounds return before it
         assert src.index("if elapsed <= constants.REPL_CUTOVER_CONVERGE_TARGET_SEC") < throttle
 
-    def test_every_endgame_exit_lifts_the_cap(self):
+    def test_only_the_end_of_the_cutover_lifts_the_cap(self):
         for fn in (final._record_cutover_done, final._cleanup_unfinished_cutover):
             assert "_restore_source_throttle(task)" in inspect.getsource(fn), fn.__name__
-        assert "_restore_source_throttle(task)" in inspect.getsource(final._release_lvs_claim)
+        assert "_restore_source_throttle(task)" not in inspect.getsource(final._release_lvs_claim)
         assert "_release_lvs_claim(task)" in inspect.getsource(final._abandon_endgame)
 
 
