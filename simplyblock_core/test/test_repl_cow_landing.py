@@ -197,7 +197,7 @@ class _C(RPCClient):
 
 
 def _transfer(c, **kw):
-    applied = {}
+    applied: dict = {}
     ret = c.bdev_lvol_transfer(name="LVS/SNAP_2", offset=0, batch_size=256, bdev_name="hub0",
                                operation="replicate", lvol_id=7, allow_partial=True,
                                partial_base=42, priority_class=7, applied=applied, **kw)
@@ -222,7 +222,7 @@ def test_cow_landing_is_not_sent_unless_asked():
 
 def test_cow_landing_is_never_sent_without_a_delta():
     c = _C()
-    applied = {}
+    applied: dict = {}
     c.bdev_lvol_transfer(name="LVS/SNAP_2", offset=0, batch_size=16, bdev_name="hub0",
                          operation="replicate", lvol_id=7, cow_landing=True, applied=applied)
     assert all("cow_landing" not in s for s in c.sent)

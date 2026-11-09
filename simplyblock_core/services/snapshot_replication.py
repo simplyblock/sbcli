@@ -1032,7 +1032,7 @@ def process_snap_replicate_start(task, snapshot):
     task.function_params["xfer_landing_submitted"] = remote_lv.get_id()
     task.function_params.pop("cow_landing", None)
     task.write_to_db()
-    applied = {}
+    applied: dict = {}
     snode.rpc_client().bdev_lvol_transfer(
         name=snapshot.snap_bdev,
         offset=offset,
