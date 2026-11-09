@@ -282,6 +282,8 @@ class TestPrepareLanding:
         answer = service.prepare_landing(TGT, _request())
 
         assert (answer.state, answer.lvol_id, answer.adopted) == ("ready", left.get_id(), True)
+        # where it is, so later steps never read the destination's records
+        assert (answer.node_id, answer.pool_id, answer.lvs_name) == (left.node_id, "POOL_TGT", "LVS_1")
         add_lvol_ha.assert_not_called()
 
     def test_waits_for_a_leftover_still_deleting(self, db, target, add_lvol_ha, delete_lvol):

@@ -238,8 +238,7 @@ def prepare_landing(cluster_id: str, request: LandingRequest) -> LandingResponse
         # left by an attempt that died before the source stored its id (case 6,
         # run 20260824_144226), or pre-staged for a cutover round.
         if existing.status == LVol.STATUS_ONLINE and existing.size == request.size:
-            return LandingResponse(state="ready", lvol_id=existing.get_id(), adopted=True,
-                                   lvs_name=existing.lvs_name)
+            return _ready(existing, adopted=True)
         if existing.status == LVol.STATUS_IN_DELETION:
             return LandingResponse(state="retry",
                                    reason=f"stale landing volume {request.landing_name} still deleting")
@@ -269,7 +268,19 @@ def prepare_landing(cluster_id: str, request: LandingRequest) -> LandingResponse
         lvol_priority_class=landing_class)
     if not lvol_id:
         raise LandingVolumeError(f"Error creating remote lvol: {err}")
-    return LandingResponse(state="ready", lvol_id=lvol_id, lvs_name=node.lvstore)
+    try:
+        return _ready(db.get_lvol_by_id(lvol_id))
+    except KeyError:
+        # created but not readable back yet: the id is what matters
+        return LandingResponse(state="ready", lvol_id=lvol_id, lvs_name=node.lvstore,
+                               node_id=node.get_id(), pool_id=pool_uuid)
+
+
+def _ready(landing, adopted=False):
+    """The answer for a landing volume that can receive."""
+    return LandingResponse(state="ready", lvol_id=landing.get_id(), adopted=adopted,
+                           lvs_name=landing.lvs_name, top_bdev=landing.top_bdev,
+                           node_id=landing.node_id, pool_id=landing.pool_uuid)
 
 
 def _named_landing(db, pools, name):

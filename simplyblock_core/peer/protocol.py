@@ -118,6 +118,11 @@ class LandingResponse(BaseModel):
     adopted: bool = False
     counterpart_snapshot_id: str = ""
     lvs_name: str = ""
+    #: Where the landing volume is (ready, exists): what later steps and their
+    #: logs name it by, without reading the destination's records.
+    top_bdev: str = ""
+    node_id: str = ""
+    pool_id: str = ""
     reason: str = ""
 
 

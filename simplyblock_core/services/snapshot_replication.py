@@ -66,17 +66,51 @@ def _peer_for(source_lvol, cluster_id) -> PeerClient:
     return LocalPeerClient(cluster_id)
 
 
-def _landing_peer(snapshot, landing_lv) -> PeerClient:
-    """The peer client for the cluster holding *landing_lv*, *snapshot*'s landing volume.
+class _Landing(NamedTuple):
+    """A transfer's landing volume, as this cluster knows it: what the
+    destination's prepare_landing answered, kept on the task, so no later step
+    reads the destination's records."""
 
-    The cluster is read off the landing volume's node while both clusters share
-    this database. Once ``prepare_landing`` moves behind the peer client, the
-    task records the destination cluster and this read goes away.
+    lvol_id: str
+    top_bdev: str
+    node_id: str
+    pool_uuid: str
+    lvs_name: str
+    #: the destination cluster
+    cluster_id: str
+
+    def get_id(self):
+        return self.lvol_id
+
+
+def _landing_of(task):
+    """The landing volume of *task* (see _Landing).
+
+    A task from before the record reads it off the shared database.
+
+    Raises:
+        KeyError: such a task names a landing volume or node unknown here.
+    """
+    landing_id = task.function_params["remote_lvol_id"]
+    known = task.function_params.get("landing") or {}
+    if known.get("lvol_id") == landing_id:
+        return _Landing(**known)
+    lvol = db.get_lvol_by_id(landing_id)
+    return _Landing(lvol_id=landing_id, top_bdev=getattr(lvol, "top_bdev", ""),
+                    node_id=lvol.node_id, pool_uuid=getattr(lvol, "pool_uuid", ""),
+                    lvs_name=getattr(lvol, "lvs_name", ""),
+                    cluster_id=db.get_storage_node_by_id(lvol.node_id).cluster_id)
+
+
+def _landing_peer(snapshot, landing) -> PeerClient:
+    """The peer client for the cluster holding *landing*, *snapshot*'s landing
+    volume (a _Landing; or an LVol record, whose node names the cluster).
 
     Raises:
         KeyError: the landing volume's node, or the policy's target, is unknown.
     """
-    cluster_id = db.get_storage_node_by_id(landing_lv.node_id).cluster_id
+    cluster_id = (getattr(landing, "cluster_id", "")
+                  or db.get_storage_node_by_id(landing.node_id).cluster_id)
     return _peer_for(snapshot.lvol, cluster_id)
 
 
@@ -921,11 +955,15 @@ def process_snap_replicate_start(task, snapshot):
                               lvol=snapshot.lvol.get_id())
             _t_landing = None          # nothing was created: no create time to report
         task.function_params["remote_lvol_id"] = landing.lvol_id
+        task.function_params["landing"] = {
+            "lvol_id": landing.lvol_id, "top_bdev": landing.top_bdev, "node_id": landing.node_id,
+            "pool_uuid": landing.pool_id, "lvs_name": landing.lvs_name,
+            "cluster_id": destination_cluster_id}
         # The destination the later steps reach through _task_peer.
         task.function_params["destination_cluster_id"] = destination_cluster_id
         task.write_to_db()
 
-    remote_lv = db.get_lvol_by_id(task.function_params["remote_lvol_id"])
+    remote_lv = _landing_of(task)
     # One call to the destination (ensure_hub) gets it ready to receive: its
     # settled leader (never a tertiary), the receiving hub, the landing
     # volume's map id, and the checks that the volume is not a snapshot yet and
@@ -1278,7 +1316,7 @@ def _target_leadership_moved(task, snapshot):
     if not target_id or not remote_id:
         return ""
     try:
-        remote_lv = db.get_lvol_by_id(remote_id)
+        remote_lv = _landing_of(task)
     except KeyError:
         return ""
     leaders = _landing_peer(snapshot, remote_lv).describe(
@@ -1357,15 +1395,14 @@ class _CopyState(NamedTuple):
 def _destination_cluster(source_lvol, target_uuid):
     """The cluster holding *source_lvol*'s replicated copies.
 
-    Read off the replication node the volume is configured with; failing that,
-    off the copy's record. Both reads go away once the source records the
-    destination cluster itself (prepare_landing, step 2 of the split).
+    The volume's policy target (a peer's cluster is known only there), else the
+    replication node it is configured with; failing both, the copy's record.
 
     Raises:
         KeyError: neither the node nor the copy is known here.
     """
     with contextlib.suppress(KeyError):
-        return db.get_storage_node_by_id(source_lvol.replication_node_id).cluster_id
+        return _destination_cluster_of(source_lvol)
     return db.get_snapshot_by_id(target_uuid).cluster_id
 
 
@@ -2053,8 +2090,7 @@ def _task_peer(task, snapshot):
             lvol = db.get_lvol_by_id(task.function_params["dest_lvol_id"])
     cluster_id = task.function_params.get("destination_cluster_id")
     if not cluster_id:
-        landing = db.get_lvol_by_id(task.function_params["remote_lvol_id"])
-        cluster_id = db.get_storage_node_by_id(landing.node_id).cluster_id
+        cluster_id = _landing_of(task).cluster_id
     return _peer_for(lvol, cluster_id)
 
 
@@ -2110,7 +2146,7 @@ def process_snap_replicate_finish(task, snapshot):
             task.function_params["pending_why"] = "waiting for the previous snapshot's copy"
             return FINISH_PENDING
         _discard_landing_for_retry(
-            task, snapshot, db.get_lvol_by_id(landing_id),
+            task, snapshot, _landing_of(task),
             f"the copy {task.function_params.get('chain_deferred_to')} this delta builds on "
             f"will not be made; discarded, retrying")
         return FINISH_ABANDONED
@@ -2161,7 +2197,7 @@ def process_snap_replicate_finish(task, snapshot):
         task.function_params["pending_why"] = answer.reason
         return FINISH_PENDING
     if answer.state == "restart":
-        _discard_landing_for_retry(task, snapshot, db.get_lvol_by_id(landing_id),
+        _discard_landing_for_retry(task, snapshot, _landing_of(task),
                                    f"{answer.reason}; discarded, retrying")
         return FINISH_ABANDONED
     if answer.state == "gone":
@@ -2260,7 +2296,7 @@ def task_runner(task: JobSchedule):
         if not remote_lv_id:
             return True
         try:
-            remote_lv = db.get_lvol_by_id(remote_lv_id)
+            remote_lv = _landing_of(task)
         except KeyError:
             return True
         # abort path: close the transfer session here too (last user only),

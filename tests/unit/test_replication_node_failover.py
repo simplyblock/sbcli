@@ -327,3 +327,17 @@ def test_a_leaderless_target_is_waited_out_never_recovered_by_replication():
     assert task.status == JobSchedule.STATUS_SUSPENDED
     assert "target leadership not established" in task.function_result
 
+
+
+def test_the_landing_volume_comes_from_the_task_not_the_destination():
+    """prepare_landing's answer is kept on the task: later steps name the
+    landing volume and reach its cluster without reading the destination's
+    records, which a split control plane does not have."""
+    task = _task(remote_lvol_id="R", landing={
+        "lvol_id": "R", "top_bdev": "LVS_9/REP_s", "node_id": "TP", "pool_uuid": "P",
+        "lvs_name": "LVS_9", "cluster_id": "CL2"})
+    db = MagicMock()
+    with patch.object(sr, "db", db):
+        landing = sr._landing_of(task)
+    assert (landing.get_id(), landing.top_bdev, landing.cluster_id) == ("R", "LVS_9/REP_s", "CL2")
+    db.get_lvol_by_id.assert_not_called()
