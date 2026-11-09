@@ -200,8 +200,7 @@ def install_sbcli(ips):
         "sudo dnf install git python3.11 python3.11-pip nvme-cli fio iptables -y",
         # sbctl loads libfdb_c at import (the lock store selects the API version),
         # so the client library must be there before the first sbctl call.
-        "rpm -q foundationdb-clients || sudo dnf install -y https://github.com/apple/foundationdb/"
-        "releases/download/7.3.3/foundationdb-clients-7.3.3-1.el7.x86_64.rpm",
+        "rpm -q foundationdb-clients || sudo dnf install -y https://github.com/apple/foundationdb/releases/download/7.3.3/foundationdb-clients-7.3.3-1.el7.x86_64.rpm",  # noqa: E501
         "sudo python3.11 -m pip install --upgrade pip setuptools wheel",
         "sudo python3.11 -m pip install ruamel.yaml",
         f"sudo python3.11 -m pip install git+https://github.com/simplyblock/sbcli@{BRANCH} --upgrade --force --ignore-installed requests",  # noqa: E501
