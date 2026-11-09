@@ -511,6 +511,31 @@ def _fdb_status(db: DBController) -> dict | None:
         return None
 
 
+def fdb_datacenters(status: dict | None) -> list[str]:
+    """The data centers (``dcid`` localities) with processes in the database,
+    sorted, from a status document; empty without one. A stretched control
+    plane's operator reads this (``GET /_meta/fdb-datacenters``) to learn that
+    the other site's region has joined before it configures the second
+    region (docs/stretched-control-plane.md)."""
+    if not isinstance(status, dict):
+        return []
+    processes = status.get("cluster", {}).get("processes", {})
+    if not isinstance(processes, dict):
+        return []
+    found: set[str] = set()
+    for proc in processes.values():
+        locality = proc.get("locality", {}) if isinstance(proc, dict) else {}
+        dcid = locality.get("dcid") if isinstance(locality, dict) else None
+        if dcid:
+            found.add(str(dcid))
+    return sorted(found)
+
+
+def current_fdb_datacenters() -> list[str]:
+    """``fdb_datacenters`` of the live database."""
+    return fdb_datacenters(_fdb_status(DBController()))
+
+
 def fdb_region_lag(status: dict | None) -> tuple[float | None, str]:
     """The remote region's lag behind the primary in seconds and the data
     distribution state name, from a status document; (None, "") when the

@@ -262,3 +262,28 @@ class TestProbeSite:
         monkeypatch.setattr(cpc, "DBController", lambda: None)
         monkeypatch.setattr(cpc.utils, "ping_host", lambda ip: ip == "10.0.0.5")
         assert cpc.probe_site(cluster, "a") == ["management node h1 (10.0.0.5) answers ping"]
+
+
+class TestFdbDatacenters:
+    def test_lists_the_data_centers_with_processes(self):
+        status = {"cluster": {"processes": {
+            "p1": {"locality": {"dcid": "b", "zoneid": "h4"}},
+            "p2": {"locality": {"dcid": "a", "zoneid": "h1"}},
+            "p3": {"locality": {"zoneid": "h2"}},
+            "p4": {"locality": {"dcid": "a", "zoneid": "h3"}},
+        }}}
+        assert cpc.fdb_datacenters(status) == ["a", "b"]
+
+    def test_no_document_means_none(self):
+        assert cpc.fdb_datacenters(None) == []
+        assert cpc.fdb_datacenters({"cluster": {}}) == []
+
+    def test_the_meta_route_serves_them(self, monkeypatch):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        import simplyblock_web.api.v2.meta as meta
+        monkeypatch.setattr(cpc, "current_fdb_datacenters", lambda: ["a", "b"])
+        app = FastAPI()
+        app.include_router(meta.api, prefix="/api/v2/_meta")
+        assert TestClient(app).get("/api/v2/_meta/fdb-datacenters").json() == {"datacenters": ["a", "b"]}
