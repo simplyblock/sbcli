@@ -720,6 +720,22 @@ def move_leader_site(cluster_id: str, site: str, *, force: bool = False) -> Site
     return readiness
 
 
+def _http_answers(endpoint: str, *, timeout: float = 3.0) -> bool:
+    """Whether anything answers HTTP at ``endpoint`` (the health route is
+    served by every control plane whatever its mode); a refused or timed-out
+    connection is "no", any HTTP status is "yes"."""
+    import urllib.error
+    import urllib.request
+    url = endpoint.rstrip("/") + "/api/v2/_meta/health"
+    try:
+        urllib.request.urlopen(url, timeout=timeout).close()  # noqa: S310 - the site's own API endpoint
+        return True
+    except urllib.error.HTTPError:
+        return True
+    except Exception:  # noqa: BLE001 - not answering is the expected outcome
+        return False
+
+
 def probe_site(cluster: Cluster, site: str, *, timeout: float = 3.0) -> list[str]:
     """What still answers on ``site``: every management node that answers a
     ping, every storage node whose host answers a ping or whose node API
@@ -728,8 +744,20 @@ def probe_site(cluster: Cluster, site: str, *, timeout: float = 3.0) -> list[str
     db = DBController()
     mgmt, storage = _cluster_sites(db, cluster)
     alive: list[str] = []
+    endpoint = (cluster.site_api_endpoints or {}).get(site, "")
+    endpoint_probed = False
     for m in mgmt:
-        if m.site == site and m.mgmt_ip and utils.ping_host(m.mgmt_ip):
+        if m.site != site:
+            continue
+        if m.mode == "kubernetes" or not m.mgmt_ip or m.mgmt_ip == "0.0.0.0":
+            # A Kubernetes control plane registers under a placeholder
+            # address; what answers for the site is its API endpoint.
+            if endpoint and not endpoint_probed:
+                endpoint_probed = True
+                if _http_answers(endpoint, timeout=timeout):
+                    alive.append(f"management API of site {site} ({endpoint}) answers")
+            continue
+        if utils.ping_host(m.mgmt_ip):
             alive.append(f"management node {m.hostname or m.get_id()[:8]} ({m.mgmt_ip}) answers ping")
     for sn in storage:
         if sn.site != site:

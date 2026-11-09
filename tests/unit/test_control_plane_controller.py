@@ -218,3 +218,47 @@ class TestModeWithoutDatabase:
         process knows, so every service runs as it always did."""
         cpc.reset_identity_cache()
         assert cpc.current_mode().mode == "single"
+
+
+class TestProbeSite:
+    """``takeover`` probes the confirmed-down site. A Kubernetes control plane
+    registers under the placeholder address 0.0.0.0, which answers a local
+    ping; its API endpoint is what is probed instead."""
+
+    def _k8s_site(self, monkeypatch, endpoint_answers):
+        from simplyblock_core.models.cluster import Cluster
+        from simplyblock_core.models.mgmt_node import MgmtNode
+        cluster = Cluster()
+        cluster.uuid = "c1"
+        cluster.site_api_endpoints = {"a": "http://cp-a.example:5000"}
+        m = MgmtNode()
+        m.uuid, m.site, m.mode, m.mgmt_ip = "m1", "a", "kubernetes", "0.0.0.0"
+        monkeypatch.setattr(cpc, "_cluster_sites", lambda db, c: ([m], []))
+        monkeypatch.setattr(cpc, "DBController", lambda: None)
+        pings = []
+        monkeypatch.setattr(cpc.utils, "ping_host", lambda ip: pings.append(ip) or True)
+        monkeypatch.setattr(cpc, "_http_answers", lambda ep, timeout: endpoint_answers)
+        return cluster, pings
+
+    def test_a_kubernetes_control_plane_is_probed_through_its_endpoint(self, monkeypatch):
+        cluster, pings = self._k8s_site(monkeypatch, True)
+        alive = cpc.probe_site(cluster, "a")
+        assert pings == []
+        assert alive and "cp-a.example" in alive[0]
+
+    def test_a_dead_endpoint_means_nothing_answers(self, monkeypatch):
+        cluster, pings = self._k8s_site(monkeypatch, False)
+        assert cpc.probe_site(cluster, "a") == []
+        assert pings == []
+
+    def test_a_docker_control_plane_is_still_pinged(self, monkeypatch):
+        from simplyblock_core.models.cluster import Cluster
+        from simplyblock_core.models.mgmt_node import MgmtNode
+        cluster = Cluster()
+        cluster.uuid = "c1"
+        m = MgmtNode()
+        m.uuid, m.site, m.mode, m.mgmt_ip, m.hostname = "m1", "a", "docker", "10.0.0.5", "h1"
+        monkeypatch.setattr(cpc, "_cluster_sites", lambda db, c: ([m], []))
+        monkeypatch.setattr(cpc, "DBController", lambda: None)
+        monkeypatch.setattr(cpc.utils, "ping_host", lambda ip: ip == "10.0.0.5")
+        assert cpc.probe_site(cluster, "a") == ["management node h1 (10.0.0.5) answers ping"]
