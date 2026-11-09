@@ -25,6 +25,7 @@ from simplyblock_core.peer import service
 from simplyblock_core.peer.protocol import (
     ChainRequest,
     ChainResponse,
+    DeleteSnapshotResponse,
     DescribeRequest,
     DescribeResponse,
     EnsureHubRequest,
@@ -135,6 +136,15 @@ class PeerClient(Protocol):
             PeerError: the target's control plane cannot be reached or understood.
         """
 
+    def delete_snapshot(self, snapshot_id: str) -> DeleteSnapshotResponse:
+        """Delete a replicated copy (retention); one already gone counts as deleted.
+
+        Raises:
+            PeerNotFoundError: the cluster is unknown, or the snapshot is on another cluster.
+            PeerRefusedError: the snapshot is not a replicated copy.
+            PeerError: the target's control plane cannot be reached or understood.
+        """
+
 
 class LocalPeerClient:
     """A target cluster managed by this same control plane: calls the service directly."""
@@ -228,6 +238,20 @@ class LocalPeerClient:
             return service.finish(self._cluster_id, request)
         except KeyError as e:
             raise PeerNotFoundError(str(e)) from e
+
+    def delete_snapshot(self, snapshot_id: str) -> DeleteSnapshotResponse:
+        """Delete a replicated copy (see ``PeerClient.delete_snapshot``).
+
+        Raises:
+            PeerNotFoundError: the cluster is unknown, or the snapshot is on another cluster.
+            PeerRefusedError: the snapshot is not a replicated copy.
+        """
+        try:
+            return service.delete_snapshot(self._cluster_id, snapshot_id)
+        except KeyError as e:
+            raise PeerNotFoundError(str(e)) from e
+        except PreconditionError as e:
+            raise PeerRefusedError(str(e)) from e
 
 
 # Process-local on purpose: each process writes the bundles it uses into its own
@@ -437,6 +461,19 @@ class HttpPeerClient:
             return FinishResponse.model_validate(self._request("POST", "finish", request))
         except ValidationError as e:
             raise PeerProtocolError(f"Unexpected finish response from {self._base}: {e}") from e
+
+    def delete_snapshot(self, snapshot_id: str) -> DeleteSnapshotResponse:
+        """Delete a replicated copy (see ``PeerClient.delete_snapshot``).
+
+        Raises:
+            PeerError: as for every peer call (see ``_request``), and
+                PeerProtocolError when the answer is not a DeleteSnapshotResponse.
+        """
+        path = f"snapshots/{quote(snapshot_id, safe='')}"
+        try:
+            return DeleteSnapshotResponse.model_validate(self._request("DELETE", path))
+        except ValidationError as e:
+            raise PeerProtocolError(f"Unexpected delete response from {self._base}: {e}") from e
 
 
 def peer_for_target(target: ReplicationTarget) -> PeerClient:

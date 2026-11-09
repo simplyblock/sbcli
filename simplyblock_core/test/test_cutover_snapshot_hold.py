@@ -80,6 +80,8 @@ def harness(monkeypatch):
         return True
 
     monkeypatch.setattr(sr.snapshot_controller, "delete", delete)
+    # the copies are deleted on the destination, through its peer client
+    monkeypatch.setattr(sr, "_delete_copy", lambda lvol, uuid: delete(uuid))
     return SimpleNamespace(lvol=lvol, db=db, deleted=deleted)
 
 

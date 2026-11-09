@@ -11,7 +11,7 @@ from uuid import UUID
 import pytest
 from pydantic import SecretStr
 
-from simplyblock_core.controllers import lvol_controller
+from simplyblock_core.controllers import lvol_controller, snapshot_controller
 from simplyblock_core.controllers import replication_policy_controller as rpc
 from simplyblock_core.controllers.replication_policy_controller import (
     PeerConnection,
@@ -407,3 +407,46 @@ class TestHubSessionSharing:
         _transfer(db, "0b6f4a8e-1c2d-4e3f-9a0b-1c2d3e4f5a11")
 
         assert sr._other_active_transfers_to_node(mine, "N1")
+
+
+class TestDeleteSnapshot:
+
+    def test_deletes_a_replicated_copy(self, db, source_cluster):
+        copy = _copy(db, "T1")
+        copy.source_replicated_snap_uuid = "S1"
+        copy.write_to_db(db.kv_store)
+
+        with patch.object(snapshot_controller, "delete", return_value=True) as delete:
+            answer = service.delete_snapshot(SOURCE_CLUSTER_ID, "T1")
+
+        assert answer.deleted
+        delete.assert_called_once_with("T1")
+
+    def test_a_copy_already_gone_counts_as_deleted(self, db, source_cluster):
+        with patch.object(snapshot_controller, "delete") as delete:
+            assert service.delete_snapshot(SOURCE_CLUSTER_ID, "T1").deleted
+        delete.assert_not_called()
+
+    def test_a_copy_a_live_volume_is_cloned_from_stays(self, db, source_cluster):
+        copy = _copy(db, "T1")
+        copy.source_replicated_snap_uuid = "S1"
+        copy.write_to_db(db.kv_store)
+        clone = LVol()
+        clone.uuid = "0b6f4a8e-1c2d-4e3f-9a0b-1c2d3e4f5a08"
+        clone.lvol_name = "failed-over"
+        clone.cloned_from_snap = "T1"
+        clone.write_to_db(db.kv_store)
+
+        with patch.object(snapshot_controller, "delete") as delete:
+            answer = service.delete_snapshot(SOURCE_CLUSTER_ID, "T1")
+
+        assert not answer.deleted and "cloned" in answer.reason
+        delete.assert_not_called()
+
+    def test_refuses_a_snapshot_replication_did_not_make(self, db, source_cluster):
+        _copy(db, "U1")
+
+        with patch.object(snapshot_controller, "delete") as delete, \
+                pytest.raises(PeerRefusedError):
+            LocalPeerClient(SOURCE_CLUSTER_ID).delete_snapshot("U1")
+        delete.assert_not_called()

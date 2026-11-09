@@ -1369,6 +1369,34 @@ def _destination_cluster(source_lvol, target_uuid):
     return db.get_snapshot_by_id(target_uuid).cluster_id
 
 
+def _copy_peer(source_lvol, target_uuid):
+    """The peer client of the cluster holding *source_lvol*'s copies, or None
+    when neither its replication node nor the copy is known here."""
+    try:
+        return _peer_for(source_lvol, _destination_cluster(source_lvol, target_uuid))
+    except KeyError:
+        return None
+
+
+def _delete_copy(source_lvol, target_uuid):
+    """Delete the copy *target_uuid* on the destination; whether it is gone.
+
+    Raises:
+        PeerError: the destination cannot answer.
+    """
+    peer = _copy_peer(source_lvol, target_uuid)
+    if peer is None:
+        return True                     # unknown here: nothing to delete
+    try:
+        answer = peer.delete_snapshot(target_uuid)
+    except PeerRefusedError as e:
+        logger.warning("Copy %s stays: the destination refused to delete it: %s", target_uuid, e)
+        return False
+    if not answer.deleted:
+        logger.warning("Copy %s stays: %s", target_uuid, answer.reason)
+    return answer.deleted
+
+
 def _copy_state(source_lvol, target_uuid, successor) -> _CopyState:
     """What the target says about the copy *target_uuid* before retention deletes it.
 
@@ -1381,12 +1409,11 @@ def _copy_state(source_lvol, target_uuid, successor) -> _CopyState:
     Raises:
         PeerError: the destination cannot answer.
     """
-    try:
-        cluster_id = _destination_cluster(source_lvol, target_uuid)
-    except KeyError:
+    peer = _copy_peer(source_lvol, target_uuid)
+    if peer is None:
         return _CopyState(exists=False, chained=False, has_dependent_clone=False)
     successor_target = successor.target_replicated_snap_uuid
-    answer = _peer_for(source_lvol, cluster_id).describe(DescribeRequest(
+    answer = peer.describe(DescribeRequest(
         snapshot_ids=[target_uuid],
         chain_checks=([ChainCheck(successor_id=successor_target, predecessor_id=target_uuid)]
                       if successor_target else [])))
@@ -1590,7 +1617,7 @@ def _prune_internal_snapshots(source_lvol, after_cutover=False):
             continue
         if target_uuid:
             logger.info("Pruning replicated internal snapshot on target: %s", target_uuid)
-            if not snapshot_controller.delete(target_uuid):
+            if not _delete_copy(source_lvol, target_uuid):
                 logger.warning("Failed to delete target internal snapshot %s, will retry", target_uuid)
                 continue
         logger.info("Pruning internal snapshot on source: %s", snap.get_id())

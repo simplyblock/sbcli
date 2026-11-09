@@ -22,6 +22,7 @@ from simplyblock_core.peer import service
 from simplyblock_core.peer.protocol import (
     ChainRequest,
     ChainResponse,
+    DeleteSnapshotResponse,
     DescribeRequest,
     DescribeResponse,
     EnsureHubRequest,
@@ -102,3 +103,14 @@ def finish(cluster: Cluster, request: FinishRequest) -> FinishResponse:
     """Make a landing volume the copy of its source snapshot after the transfer:
     chain, merge and convert it, record the copy and retire the landing volume."""
     return service.finish(cluster.get_id(), request)
+
+
+@api.delete('/snapshots/{snapshot_id}', name='peer:snapshots:delete')
+def delete_snapshot(cluster: Cluster, snapshot_id: UUID) -> DeleteSnapshotResponse:
+    """Delete a replicated copy (retention); one already gone counts as deleted."""
+    try:
+        return service.delete_snapshot(cluster.get_id(), str(snapshot_id))
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except PreconditionError as e:
+        raise HTTPException(status_code=409, detail=str(e))

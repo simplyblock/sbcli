@@ -11,13 +11,18 @@ import simplyblock_web.api.v2.peer as peer_module
 from simplyblock_core.peer.protocol import (
     PEER_API_VERSION,
     ChainResponse,
+    DeleteSnapshotResponse,
     DescribeRequest,
     DescribeResponse,
     EnsureHubResponse,
     LandingResponse,
     PeerInfo,
 )
-from simplyblock_core.peer.service import LandingVolumeError, NotALandingVolumeError
+from simplyblock_core.peer.service import (
+    LandingVolumeError,
+    NotALandingVolumeError,
+    NotAReplicatedCopyError,
+)
 from tests.unit.web.api.v2._factories import CLUSTER_ID
 
 INFO_URL = f'/api/v2/_peer/clusters/{CLUSTER_ID}/info'
@@ -197,3 +202,22 @@ class TestChain:
                                                 'predecessor_id': 'C1'})
 
         assert response.status_code == 404
+
+
+SNAPSHOT_URL = f'/api/v2/_peer/clusters/{CLUSTER_ID}/snapshots/{LVOL_ID}'
+
+
+class TestDeleteSnapshot:
+
+    def test_answers_through_the_service(self, client, db, cluster, peer_service):
+        peer_service.delete_snapshot.return_value = DeleteSnapshotResponse(deleted=True)
+
+        response = client.delete(SNAPSHOT_URL)
+
+        assert response.status_code == 200 and response.json()['deleted'] is True
+        peer_service.delete_snapshot.assert_called_once_with(CLUSTER_ID, LVOL_ID)
+
+    def test_a_snapshot_that_is_not_a_copy_is_409(self, client, db, cluster, peer_service):
+        peer_service.delete_snapshot.side_effect = NotAReplicatedCopyError('not a copy')
+
+        assert client.delete(SNAPSHOT_URL).status_code == 409

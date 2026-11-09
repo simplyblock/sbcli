@@ -17,6 +17,7 @@ PEER_API_VERSION = 1
 #: step before relying on it during a rolling upgrade of the two sites.
 CAPABILITIES: frozenset[str] = frozenset({
     "info", "discard_landing", "describe", "prepare_landing", "ensure_hub", "chain", "finish",
+    "delete_snapshot",
 })
 
 #: Name prefix of a replication landing volume (``REP_<snapshot name>``). It is
@@ -241,3 +242,10 @@ class FinishResponse(BaseModel):
     merged: bool = False
     copy_id: str = ""
     record: dict = Field(default_factory=dict)
+
+
+class DeleteSnapshotResponse(BaseModel):
+    #: False when the copy stays: a live volume is cloned from it, or the delete
+    #: itself was refused (``reason``); retention tries again on a later pass.
+    deleted: bool
+    reason: str = ""

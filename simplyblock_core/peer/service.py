@@ -25,6 +25,7 @@ from simplyblock_core.peer.protocol import (
     ChainRequest,
     ChainResponse,
     ChainState,
+    DeleteSnapshotResponse,
     DescribeRequest,
     DescribeResponse,
     EnsureHubRequest,
@@ -1010,3 +1011,41 @@ def _lacks_bdev(node, bdev_name):
     except RPCException as e:
         logger.warning("Could not probe %s on %s: %s", bdev_name, node.get_id(), e)
         return False
+
+
+class NotAReplicatedCopyError(PreconditionError):
+    """The snapshot a peer asked to delete is not a replicated copy."""
+
+
+def delete_snapshot(cluster_id: str, snapshot_id: str) -> DeleteSnapshotResponse:
+    """Delete the replicated copy *snapshot_id* on *cluster_id* (retention).
+
+    Idempotent: a copy that is already gone counts as deleted. A copy a live
+    volume is cloned from (a failed-over volume) stays: its delete reaches SPDK
+    as bdev_lvol_delete(sync=False) and frees the blocks there and then, so no
+    later guard could save the clone.
+
+    Raises:
+        KeyError: this control plane does not manage *cluster_id*, or the
+            snapshot is on another cluster.
+        NotAReplicatedCopyError: the snapshot is not a replicated copy. The
+            peer API never deletes a snapshot replication did not make.
+    """
+    from simplyblock_core.controllers import snapshot_controller
+
+    db = DBController()
+    db.get_cluster_by_id(cluster_id)
+    try:
+        snapshot = db.get_snapshot_by_id(snapshot_id)
+    except KeyError:
+        return DeleteSnapshotResponse(deleted=True, reason=f"snapshot {snapshot_id} is already gone")
+    if snapshot.cluster_id not in (cluster_id, ""):
+        raise KeyError(f"Snapshot {snapshot_id} is not on cluster {cluster_id}")
+    if not (snapshot.source_replicated_snap_uuid or snapshot.target_replicated_snap_uuid):
+        raise NotAReplicatedCopyError(f"Snapshot {snapshot_id} is not a replicated copy")
+    if _has_dependent_clone(db, snapshot_id):
+        return DeleteSnapshotResponse(deleted=False,
+                                      reason=f"a live volume is cloned from {snapshot_id}")
+    if not snapshot_controller.delete(snapshot_id):
+        return DeleteSnapshotResponse(deleted=False, reason=f"the delete of {snapshot_id} failed")
+    return DeleteSnapshotResponse(deleted=True)

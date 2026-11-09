@@ -260,6 +260,8 @@ def test_retention_keeps_the_groups_newest_complete_generation(monkeypatch):
         exists=True, chained=True, has_dependent_clone=False))
     deleted: list[str] = []
     monkeypatch.setattr(sr.snapshot_controller, "delete", _recorder(deleted))
+    # the copies are deleted on the destination, through its peer client
+    monkeypatch.setattr(sr, "_delete_copy", lambda lvol, uuid: _recorder(deleted)(uuid))
     sr._prune_internal_snapshots(m1)
     assert "S15_M1" not in deleted and "T15_M1" not in deleted, deleted
     assert "S16_M1" in deleted and "T16_M1" in deleted, "an ordinary superseded pair still goes"
