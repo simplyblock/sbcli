@@ -65,7 +65,7 @@ SBCTL = "sudo /usr/local/bin/sbctl -d"
 
 
 def log(msg):
-    print(f"[{datetime.datetime.utcnow().strftime('%H:%M:%S')}] {msg}", flush=True)
+    print(f"[{datetime.datetime.now(datetime.UTC).strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
 # --- image -------------------------------------------------------------------
@@ -198,8 +198,8 @@ def install_sbcli(ips):
         "sudo dnf install git python3-pip nvme-cli fio iptables -y",
         "sudo /usr/bin/python3 -m pip install --upgrade pip setuptools wheel",
         "sudo /usr/bin/python3 -m pip install ruamel.yaml",
-        (f"sudo pip install git+https://github.com/simplyblock/sbcli@{BRANCH}"
-         " --upgrade --force --ignore-installed requests"),
+        f"sudo pip install git+https://github.com/simplyblock/sbcli@{BRANCH}"
+        " --upgrade --force --ignore-installed requests",
     ]
     with ThreadPoolExecutor(max_workers=len(ips)) as ex:
         for t in [ex.submit(ssh_exec, ip, cmds, False, True, 1800) for ip in ips]:
@@ -253,22 +253,20 @@ def deploy():
 
     a, b = meta["mgmt"]["A"], meta["mgmt"]["B"]
     log("phase 2a: cluster create on site A")
-    ssh_exec(a["ip"], [
-        f"{sbctl_img} cluster create --ifname {IFACE} --ha-type ha"
-        f" --data-chunks-per-stripe 1 --parity-chunks-per-stripe 1 --max-subsys {MAX_SUBSYS}"
-        f" --sync-replication --stretched-control-plane --site A"
-        f" --site-api-endpoint http://{a['priv']} --leader-site A"
-    ], check=True, timeout=2400)
+    create = (f"{sbctl_img} cluster create --ifname {IFACE} --ha-type ha"
+              f" --data-chunks-per-stripe 1 --parity-chunks-per-stripe 1 --max-subsys {MAX_SUBSYS}"
+              f" --sync-replication --stretched-control-plane --site A"
+              f" --site-api-endpoint http://{a['priv']} --leader-site A")
+    ssh_exec(a["ip"], [create], check=True, timeout=2400)
     cluster_id = uuid_in(out_of(a["ip"], f"{SBCTL} cluster list")[1])
     secret = out_of(a["ip"], f"{SBCTL} cluster get-secret {cluster_id}")[1].strip().splitlines()[-1].strip()
     meta.update(cluster_id=cluster_id, secret=secret)
     META_PATH.write_text(json.dumps(meta, indent=2))
 
     log("phase 2b: control-plane add on site B")
-    ssh_exec(b["ip"], [
-        f"{sbctl_img} control-plane add {a['priv']} {cluster_id} {secret} --ifname {IFACE} --mode docker"
-        f" --site B --api-endpoint http://{b['priv']}"
-    ], check=True, timeout=2400)
+    add_cp = (f"{sbctl_img} control-plane add {a['priv']} {cluster_id} {secret} --ifname {IFACE} --mode docker"
+              f" --site B --api-endpoint http://{b['priv']}")
+    ssh_exec(b["ip"], [add_cp], check=True, timeout=2400)
     time.sleep(20)
     log("phase 2c: one service instance per manager")
     scale_services_per_manager(a["ip"])
@@ -315,7 +313,7 @@ def deploy():
     log("phase 5: activate")
     ssh_exec(a["ip"], [f"{SBCTL} cluster activate {cluster_id}"], check=True, timeout=3600)
     ssh_exec(a["ip"], [f"{SBCTL} pool add pool01 {cluster_id}"], check=True)
-    meta["deployed_at"] = datetime.datetime.utcnow().isoformat()
+    meta["deployed_at"] = datetime.datetime.now(datetime.UTC).isoformat()
     META_PATH.write_text(json.dumps(meta, indent=2))
     log("=== deploy DONE ===")
     return meta
@@ -342,6 +340,19 @@ def cp_status(ip, cluster_id):
     if start < 0:
         raise RuntimeError(f"no status json from {ip}: rc={rc} {out[-300:]} {err[-300:]}")
     return json.loads(out[start:])
+
+
+def leader_status(ip, cid, holder=None, min_epoch=0, mode="leader"):
+    """The control-plane status of ``ip`` when it reports ``mode`` (and the
+    lease holder / epoch asked for), else None; for wait_until."""
+    s = cp_status(ip, cid)
+    if s.get("mode") != mode:
+        return None
+    if holder and s.get("lease_holder_site") != holder:
+        return None
+    if min_epoch and (s.get("lease_epoch") or 0) < min_epoch:
+        return None
+    return s
 
 
 def wait_until(pred, timeout, every=3):
@@ -387,7 +398,7 @@ def run_tests(meta):
     hn_a, hn_b = hn_a.strip(), hn_b.strip()
 
     # T1: A leads, B stands by
-    st_a = wait_until(lambda: (lambda s: s if s["mode"] == "leader" else None)(cp_status(a["ip"], cid)), 120)
+    st_a = wait_until(lambda: leader_status(a["ip"], cid), 120)
     res.record("T1a site A is the leader", bool(st_a), json.dumps(st_a)[:400] if st_a else "no leader status")
     st_b = cp_status(b["ip"], cid)
     res.record("T1b site B stands by", st_b.get("mode") == "standby" and st_b.get("lease_holder_site") == "A",
@@ -415,16 +426,14 @@ def run_tests(meta):
     # T4: planned move A -> B and back
     rc, out, err = out_of(a["ip"], f"{SBCTL} control-plane set-leader-site {cid} B")
     res.record("T4a set-leader-site B accepted", rc == 0 and "Refused" not in out, (out + err)[-300:])
-    moved = wait_until(lambda: (lambda s: s if s["mode"] == "leader" and s["lease_holder_site"] == "B" else None)(
-        cp_status(b["ip"], cid)), 90)
+    moved = wait_until(lambda: leader_status(b["ip"], cid, holder="B"), 90)
     res.record("T4b lease moved to B within 90s", bool(moved), json.dumps(moved)[:300] if moved else "not moved")
     st_a = cp_status(a["ip"], cid)
     res.record("T4c A stands by after the move", st_a.get("mode") == "standby", f"mode={st_a.get('mode')}")
     logs_b = service_task_logs(a["ip"], "app_StorageNodeMonitor", hn_b) or service_task_logs(a["ip"], "StorageNodeMonitor", hn_b)
     res.record("T4d B's services resumed", "leads again" in logs_b or "Looping for cluster" in logs_b, logs_b[-300:])
     rc, out, err = out_of(a["ip"], f"{SBCTL} control-plane set-leader-site {cid} A")
-    back = wait_until(lambda: (lambda s: s if s["mode"] == "leader" and s["lease_holder_site"] == "A" else None)(
-        cp_status(a["ip"], cid)), 90)
+    back = wait_until(lambda: leader_status(a["ip"], cid, holder="A"), 90)
     res.record("T4e lease moved back to A", bool(back), (out + err)[-200:])
 
     # T5: takeover - refused while A answers, accepted once A is unreachable
@@ -437,16 +446,15 @@ def run_tests(meta):
         rc, out, err = out_of(b["ip"], f"{SBCTL} control-plane takeover {cid} --site B --confirm-site-down A", timeout=900)
         res.record("T5b takeover accepted once site A is unreachable", rc == 0 and "Takeover recorded" in out,
                    (out + err)[-300:])
-        taken = wait_until(lambda: (lambda s: s if s["mode"] == "leader" and s["lease_holder_site"] == "B"
-                                    and s["lease_epoch"] >= 3 else None)(cp_status(b["ip"], cid)), 60)
+        taken = wait_until(lambda: leader_status(b["ip"], cid, holder="B", min_epoch=3), 60)
         res.record("T5c B leads after the takeover with a new epoch", bool(taken),
                    json.dumps(taken)[:300] if taken else "not leading")
     finally:
         block_site_from(site_a_hosts, b["priv"], False)
-    st_a = wait_until(lambda: (lambda s: s if s["mode"] == "standby" else None)(cp_status(a["ip"], cid)), 60)
+    st_a = wait_until(lambda: leader_status(a["ip"], cid, mode="standby"), 60)
     res.record("T5d A returns as standby (its lease is stale)", bool(st_a), json.dumps(st_a)[:200] if st_a else "")
     rc, out, err = out_of(a["ip"], f"{SBCTL} control-plane set-leader-site {cid} A")
-    back = wait_until(lambda: (lambda s: s if s["mode"] == "leader" else None)(cp_status(a["ip"], cid)), 90)
+    back = wait_until(lambda: leader_status(a["ip"], cid), 90)
     res.record("T5e lease moved back to A after the takeover", bool(back), (out + err)[-200:])
 
     # T6: a red gate refuses the planned move
