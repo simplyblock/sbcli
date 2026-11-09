@@ -210,6 +210,28 @@ def ssh_exec(ip, cmds, get_output=False, check=False, timeout=900, quiet=False):
     return results
 
 
+SECRET_FILE = "/home/ec2-user/.sb_cluster_secret"
+
+
+def put_secret(ip, secret):
+    """Store the cluster secret on ``ip`` for the commands that need it,
+    through stdin rather than a command line, so it is never echoed."""
+    ssh = paramiko.SSHClient()
+    if KNOWN_HOSTS.exists():
+        ssh.load_host_keys(str(KNOWN_HOSTS))
+    ssh.set_missing_host_key_policy(paramiko.RejectPolicy())
+    ssh.connect(ip, username=USER, key_filename=KEY_PATH, allow_agent=False,
+                look_for_keys=False, timeout=60, banner_timeout=60)
+    try:
+        stdin, stdout, _ = ssh.exec_command(f"umask 077 && cat > {SECRET_FILE}", timeout=60)
+        stdin.write(secret + "\n")
+        stdin.channel.shutdown_write()
+        if stdout.channel.recv_exit_status() != 0:
+            raise RuntimeError(f"storing the cluster secret on {ip} failed")
+    finally:
+        ssh.close()
+
+
 def out_of(ip, cmd, timeout=600):
     rc, out, err = ssh_exec(ip, [cmd], get_output=True, timeout=timeout, quiet=True)[0]
     return rc, out, err
@@ -341,11 +363,13 @@ def deploy():
     cluster_id = uuid_in(out_of(a["ip"], f"{SBCTL} cluster list")[1])
     secret = out_of(a["ip"], f"{SBCTL} cluster get-secret {cluster_id}")[1].strip().splitlines()[-1].strip()
     remember_secret(secret)
-    meta.update(cluster_id=cluster_id, secret=secret)
+    for ip in (a["ip"], b["ip"]):
+        put_secret(ip, secret)
+    meta.update(cluster_id=cluster_id)
     META_PATH.write_text(json.dumps(meta, indent=2))
 
     log("phase 2b: control-plane add on site B")
-    add_cp = (f"{sbctl_img} control-plane add {a['priv']} {cluster_id} {secret} --ifname {IFACE} --mode docker"
+    add_cp = (f"{sbctl_img} control-plane add {a['priv']} {cluster_id} \"$(cat {SECRET_FILE})\" --ifname {IFACE} --mode docker"
               f" --site B --api-endpoint http://{b['priv']}")
     ssh_exec(b["ip"], [add_cp], check=True, timeout=2400)
     time.sleep(20)
@@ -501,7 +525,8 @@ def run_tests(meta):
         "    def redirect_request(self, *a, **k):",
         "        return None",
         "op = urllib.request.build_opener(NoRedirect)",
-        f"H = {{'Authorization': 'Bearer {meta['secret']}', 'Content-Type': 'application/json'}}",
+        "import os",
+        "H = {'Authorization': 'Bearer ' + os.environ['SB_SECRET'].strip(), 'Content-Type': 'application/json'}",
         "def call(method, path, body=None):",
         "    req = urllib.request.Request('http://127.0.0.1:5000' + path, data=body, method=method, headers=H)",
         "    try:",
@@ -513,7 +538,8 @@ def run_tests(meta):
         f"                  'cp': call('GET', '/api/v2/clusters/{cid}/control-plane/')}}))",
     ])
     probe = ("cid=$(sudo docker ps -q -f name=app_WebAppAPI | head -1); "
-             "sudo docker exec -i $cid python3 - <<'PYPROBE'\n" + probe_py + "\nPYPROBE")
+             f"sudo docker exec -e SB_SECRET=\"$(cat {SECRET_FILE})\" -i $cid python3 - <<'PYPROBE'\n"
+             + probe_py + "\nPYPROBE")
     rc, out, err = out_of(b["ip"], probe)
     try:
         probe_result = json.loads(out.strip().splitlines()[-1])
@@ -625,9 +651,14 @@ def main():
     args = ap.parse_args()
     meta = json.loads(META_PATH.read_text()) if META_PATH.exists() else None
     if meta:
-        remember_secret(meta.get("secret"))
         if meta.get("instance_ids"):
             pin_all_host_keys(meta)
+        if meta.get("cluster_id"):
+            a = meta["mgmt"]["A"]
+            secret = out_of(a["ip"], f"{SBCTL} cluster get-secret {meta['cluster_id']}")[1].strip().splitlines()[-1].strip()
+            remember_secret(secret)
+            for ip in (a["ip"], meta["mgmt"]["B"]["ip"]):
+                put_secret(ip, secret)
     results = None
     try:
         if args.phase in ("deploy", "all"):
