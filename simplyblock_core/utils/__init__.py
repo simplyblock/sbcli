@@ -1962,7 +1962,8 @@ def filter_eligible_block_devices(devices, include_names=None, exclude_names=Non
     """Eligibility filter for the lblk cluster mode (pure — unit-testable).
 
     ``devices`` is the list produced by node_utils.get_block_devices_info().
-    Both whole disks and partitions are eligible storage units. Common
+    Whole disks, software-RAID arrays, multipath maps, and partitions are
+    eligible storage units. Common
     requirements: not a special device (LBLK_EXCLUDED_NAME_PREFIXES), no
     mountpoint anywhere in the subtree (a partition must be unmounted — not
     busy — to be used), no holders (LVM/md/dm-crypt), does not back the root
@@ -1993,8 +1994,8 @@ def filter_eligible_block_devices(devices, include_names=None, exclude_names=Non
     include_serials = set(include_serials or [])
 
     def _ineligible_reason(dev):
-        if dev.get("type") not in ("disk", "part"):
-            return "not a disk or partition"
+        if dev.get("type") != "part" and not node_utils.is_storage_unit_type(dev.get("type", "")):
+            return "not a disk, partition, RAID array, or multipath map"
         if dev["name"].startswith(constants.LBLK_EXCLUDED_NAME_PREFIXES):
             return "special device type"
         unsafe_reason = _unsafe_live_device_reason(dev)
@@ -2004,7 +2005,7 @@ def filter_eligible_block_devices(devices, include_names=None, exclude_names=Non
             return "read-only"
         if not dev.get("size"):
             return "zero size"
-        if dev.get("type") == "disk" and dev.get("has_partitions") and not force_format:
+        if dev.get("type") != "part" and dev.get("has_partitions") and not force_format:
             return "partitioned (pass --force to format at add-node)"
         return None
 
@@ -2039,11 +2040,22 @@ def filter_eligible_block_devices(devices, include_names=None, exclude_names=Non
                 f"no eligible block device found for serial(s): {sorted(missing_serials)}")
         selected = [by_serial[s] for s in sorted(include_serials)]
     else:
-        # Auto-selection takes whole disks only: silently absorbing idle
+        # Auto-selection takes whole units only: silently absorbing idle
         # partitions of otherwise-used disks would be a data-loss trap.
-        selected = [d for d in eligible
-                    if not (device_selectors(d) & exclude_names)
-                    and d.get("type") == "disk"]
+        units = [d for d in eligible
+                 if not (device_selectors(d) & exclude_names)
+                 and d.get("type") != "part"]
+        # Plain disks ahead of RAID arrays and multipath maps. A host that
+        # offers both was set up for something a selection cannot read, and
+        # the disks are the pick that touches nothing another system may be
+        # using; a host that offers only arrays or maps has them taken.
+        plain = [d for d in units if d.get("type") == "disk"]
+        if plain and len(plain) < len(units):
+            logger.info("taking the plain disks %s ahead of the arrays and maps %s; name the "
+                        "latter with --blk-names to take them",
+                        [d["name"] for d in plain],
+                        [d["name"] for d in units if d.get("type") != "disk"])
+        selected = plain or units
 
     serials = [d["serial"] for d in selected]
     dupes = {s for s in serials if serials.count(s) > 1}
@@ -2054,7 +2066,7 @@ def filter_eligible_block_devices(devices, include_names=None, exclude_names=Non
 
     # A whole disk selected for format and one of its own partitions selected
     # as a unit cannot coexist — the disk wipe would destroy the partition.
-    selected_disk_names = {d["name"] for d in selected if d.get("type") == "disk"}
+    selected_disk_names = {d["name"] for d in selected if d.get("type") != "part"}
     conflicting = sorted(d["name"] for d in selected
                          if d.get("type") == "part"
                          and d.get("parent_name") in selected_disk_names)
@@ -2071,7 +2083,7 @@ def _journal_split_disks(devices):
     node_utils.partition_disk_for_journal."""
     found = {}
     for dev in devices:
-        if dev.get("type") == "disk" and dev.get("has_partitions"):
+        if dev.get("type") != "part" and dev.get("has_partitions"):
             pair = node_utils.journal_split_partitions(dev["name"], devices)
             if pair:
                 found[dev["name"]] = pair
