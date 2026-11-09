@@ -29,6 +29,7 @@ from simplyblock_core.controllers.host_auth import (
 from simplyblock_core.db_controller import DBController, SubsystemCapacityError
 from simplyblock_core.exceptions import (
     PreconditionError,
+    SubsystemMoveInProgressError,
     SyncLeadershipMovingError,
     SyncReplicationSiteError,
     SyncReplicationUnsupportedError,
@@ -3947,6 +3948,16 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, 
         host_entry = HostConnectAuth.resolve(lvol, host_nqn, db_controller)
     except ValueError as e:
         return False, str(e)
+    # A subsystem a consistency-group move holds is losing or gaining this
+    # volume's namespace on every node. A host that connected now would hold a
+    # path the move does not know about: never suspended, so its I/O fails in
+    # the window, and still pointing at the source after the commit. The
+    # move's window is bounded, so the connect is refused and retried rather
+    # than answered with the source. Same guard as the attach in add_lvol.
+    if lvol.nqn in _moving_nqns_on_node(lvol.node_id):
+        raise SubsystemMoveInProgressError(
+            f"volume {uuid} is in subsystem {lvol.nqn}, which a consistency-group "
+            f"subsystem move holds; connect again after the move completes")
     if site is not None and lvol.sync_never_connected:
         _mark_connected(db_controller, lvol)
 

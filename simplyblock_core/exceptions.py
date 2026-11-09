@@ -11,6 +11,12 @@ class MigrationConflictError(Exception):
     """Raised when a conflicting active migration already exists."""
 
 
+class SubsystemMoveInProgressError(Exception):
+    """Raised when a host asks to connect a volume whose subsystem a
+    consistency-group subsystem move holds. Transient: the move's suspend
+    window is bounded, so the caller retries after it."""
+
+
 class SyncReplicationUnsupportedError(PreconditionError):
     """The operation is not supported on a sync-replication cluster (a
     limitation of its first version: it would publish paths without the
