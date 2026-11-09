@@ -343,6 +343,16 @@ def evict_cached_session(host, port) -> None:
     _session_pool.evict(host, port)
 
 
+
+def _add_affinity_floor(params: dict, affinity_floor) -> None:
+    """Add the placement anti-affinity floor ("device" or "relaxed", see
+    simplyblock_core.floors.migration_affinity_floor) to a migration start,
+    but only while constants.DISTR_AFFINITY_FLOOR_RPC is on: an older data
+    plane rejects an RPC with a parameter it does not know."""
+    if affinity_floor and constants.DISTR_AFFINITY_FLOOR_RPC:
+        params["affinity_floor"] = affinity_floor
+
+
 class RPCClient:
 
     # ref: https://spdk.io/doc/jsonrpc.html
@@ -1001,8 +1011,14 @@ class RPCClient:
                             distrib_cpu_mask="", ha_is_non_leader=True, jm_vuid=0, write_protection=False,
                             full_page_unmap=True, shared_placement=False,
                             write_protection_v2=False, page_copy=False,
-                            synchronous_replication_mode=None, jm_n_local=None):
+                            synchronous_replication_mode=None, jm_n_local=None,
+                            allow_device_colocation: bool | None = None):
         """"
+            // Optional (cluster.raid_devices): several chunks of a stripe may share one
+            //  device when no other device is writable. Sent only while
+            //  constants.DISTR_AFFINITY_FLOOR_RPC is on (older data planes reject it).
+          "allow_device_colocation": true
+
             // Optional, sync replication only: 0 disabled, 1 full. Not sent when None.
           "synchronous_replication_mode": 1
 
@@ -1064,6 +1080,8 @@ class RPCClient:
             params["jm_n_local"] = jm_n_local
         if page_copy:
             params["page_copy"] = True
+        if allow_device_colocation is not None and constants.DISTR_AFFINITY_FLOOR_RPC:
+            params["allow_device_colocation"] = bool(allow_device_colocation)
         return self._request("bdev_distrib_create", **params)
 
     def distr_shared_placement(self, name=None, enable=True):
@@ -1597,7 +1615,7 @@ class RPCClient:
         return self._request("distr_migration_status", name=name)
 
     def distr_migration_failure_start(self, name, storage_ID, qos_high_priority=False, job_size=constants.MIG_JOB_SIZE, jobs=constants.MIG_PARALLEL_JOBS,
-                                      relaxed_mode=False):
+                                      relaxed_mode=False, affinity_floor: str | None = None):
         params = {
             "name": name,
             "storage_ID": storage_ID,
@@ -1610,10 +1628,11 @@ class RPCClient:
             params["jobs"] = jobs
         if relaxed_mode:
             params["relaxed_mode"] = True
+        _add_affinity_floor(params, affinity_floor)
         return self._request("distr_migration_failure_start", **params)
 
     def distr_migration_expansion_start(self, name, qos_high_priority=False, job_size=constants.MIG_JOB_SIZE, jobs=constants.MIG_PARALLEL_JOBS,
-                                        relaxed_mode=False, keep_placed=False):
+                                        relaxed_mode=False, keep_placed=False, affinity_floor: str | None = None):
         params = {
             "name": name,
         }
@@ -1625,6 +1644,7 @@ class RPCClient:
             params["jobs"] = jobs
         if relaxed_mode:
             params["relaxed_mode"] = True
+        _add_affinity_floor(params, affinity_floor)
         # Page copy distribs only (older data planes reject the parameter): a balancing migration keeps
         # columns that page copies placed on another online device with anti-affinity kept.
         if keep_placed:

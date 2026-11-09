@@ -19237,6 +19237,12 @@ def create_lvstore(snode: StorageNode, ndcs, npcs, distr_bs, distr_chunk_bs, pag
         # creation, persisted per stack entry for the same reason.
         if cluster.page_copy:
             distrib_params["page_copy"] = True
+        # raid_devices: every data device is protected below simplyblock, so
+        # the distrib may put several chunks of a stripe on one device when no
+        # other device is writable. Persisted like the flags above; the RPC
+        # sends it only while constants.DISTR_AFFINITY_FLOOR_RPC is on.
+        if getattr(cluster, "raid_devices", False) is True:
+            distrib_params["allow_device_colocation"] = True
         # Failure-domain placement is activated implicitly via the per-node
         # failure_domain id (>= 0) in the distrib cluster map sent by
         # distr_send_cluster_map / distr_add_nodes (see get_distr_cluster_map);

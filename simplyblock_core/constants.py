@@ -1040,6 +1040,11 @@ QOS_REPLICATION_WIRE_CLASS = QOS_REPLICATION_CLASS_ID + 1
 qos_class_replication_weight_percent = 10
 
 MIG_PARALLEL_JOBS = 64
+# Send the placement anti-affinity floor to the data plane (affinity_floor on
+# distr_migration_*_start, allow_device_colocation on bdev_distrib_create).
+# Flip to True once the ultra feat/affinity-floor data plane is deployed;
+# older data planes reject unknown RPC parameters.
+DISTR_AFFINITY_FLOOR_RPC = False
 MIG_JOB_SIZE = 64
 
 # Sync-replication resync (tasks_runner_sync_resync): the shared task driver
