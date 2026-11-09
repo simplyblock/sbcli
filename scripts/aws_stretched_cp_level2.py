@@ -194,11 +194,13 @@ def terminate(meta):
 # --- deployment --------------------------------------------------------------
 
 def install_sbcli(ips):
+    # RHEL 9's default python is 3.9; sbcli needs >= 3.11 (as
+    # setup_repl_test_2clusters.py installs it).
     cmds = [
-        "sudo dnf install git python3-pip nvme-cli fio iptables -y",
-        "sudo /usr/bin/python3 -m pip install --upgrade pip setuptools wheel",
-        "sudo /usr/bin/python3 -m pip install ruamel.yaml",
-        f"sudo pip install git+https://github.com/simplyblock/sbcli@{BRANCH}"
+        "sudo dnf install git python3.11 python3.11-pip nvme-cli fio iptables -y",
+        "sudo python3.11 -m pip install --upgrade pip setuptools wheel",
+        "sudo python3.11 -m pip install ruamel.yaml",
+        f"sudo python3.11 -m pip install git+https://github.com/simplyblock/sbcli@{BRANCH}"
         " --upgrade --force --ignore-installed requests",
     ]
     with ThreadPoolExecutor(max_workers=len(ips)) as ex:
@@ -524,7 +526,15 @@ def main():
     results = None
     try:
         if args.phase in ("deploy", "all"):
-            meta = deploy()
+            if META_PATH.exists():
+                META_PATH.unlink()  # a stale file must not be mistaken for this run's instances
+            try:
+                meta = deploy()
+            finally:
+                # deploy() writes the metadata as soon as the instances exist, so a
+                # failure after that still knows what to terminate.
+                if meta is None and META_PATH.exists():
+                    meta = json.loads(META_PATH.read_text())
         if args.phase in ("test", "all"):
             results = run_tests(meta)
             log(f"=== tests: {results.summary()} ===")
