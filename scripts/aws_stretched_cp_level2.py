@@ -26,6 +26,7 @@ Env overrides: SB_CP_IMAGE, SB_BRANCH, SB_KEEP=1 (all: skip the teardown),
 SB_SN_TYPE, SB_MGMT_TYPE, SB_REPORT_DIR.
 """
 import argparse
+import base64
 import datetime
 import json
 import os
@@ -65,7 +66,23 @@ SBCTL = "sudo /usr/local/bin/sbctl -d"
 
 
 def log(msg):
-    print(f"[{datetime.datetime.now(datetime.UTC).strftime('%H:%M:%S')}] {msg}", flush=True)
+    print(f"[{datetime.datetime.now(datetime.UTC).strftime('%H:%M:%S')}] {redact(str(msg))}", flush=True)
+
+
+# Secrets the run learns (the cluster secret); every logged command and error
+# message has them masked.
+_SECRETS: set[str] = set()
+
+
+def remember_secret(value):
+    if value:
+        _SECRETS.add(str(value))
+
+
+def redact(text):
+    for secret in _SECRETS:
+        text = text.replace(secret, "***")
+    return text
 
 
 # --- image -------------------------------------------------------------------
@@ -109,9 +126,65 @@ def resolve_cp_image(wait_minutes=30):
 
 # --- ssh ---------------------------------------------------------------------
 
+# Host keys are learned out of band, from each instance's EC2 console output
+# (cloud-init prints them between the SSH HOST KEY KEYS markers), and every
+# connection verifies against them: an unknown key is refused.
+KNOWN_HOSTS = HERE / "stretch_l2_known_hosts"
+_HOST_KEY_MARKERS = ("-----BEGIN SSH HOST KEY KEYS-----", "-----END SSH HOST KEY KEYS-----")
+
+
+def _console_host_keys(instance_id):
+    """The host keys cloud-init printed to the instance's console, as
+    (type, key) pairs; empty until the console output carries them."""
+    out = boto3.client("ec2", region_name=REGION).get_console_output(
+        InstanceId=instance_id, Latest=True).get("Output", "") or ""
+    begin, end = out.rfind(_HOST_KEY_MARKERS[0]), out.rfind(_HOST_KEY_MARKERS[1])
+    if begin < 0 or end < begin:
+        return []
+    keys = []
+    for line in out[begin + len(_HOST_KEY_MARKERS[0]):end].splitlines():
+        parts = line.split()
+        if len(parts) < 2 or not parts[0].startswith(("ssh-", "ecdsa-")):
+            continue
+        try:
+            keys.append((parts[0], paramiko.PKey.from_type_string(parts[0], base64.b64decode(parts[1]))))
+        except Exception as e:  # noqa: BLE001 - a key type paramiko lacks is skipped
+            log(f"[{instance_id}] host key {parts[0]} not usable: {e}")
+    return keys
+
+
+def learn_host_keys(instance_id, ip, timeout=900):
+    """Pin ``ip``'s host keys from its console output, waiting for cloud-init
+    to print them. A host already pinned is left alone (a reboot keeps its
+    keys)."""
+    known = paramiko.HostKeys(str(KNOWN_HOSTS)) if KNOWN_HOSTS.exists() else paramiko.HostKeys()
+    if known.lookup(ip):
+        return
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        keys = _console_host_keys(instance_id)
+        if keys:
+            for ktype, key in keys:
+                known.add(ip, ktype, key)
+            known.save(str(KNOWN_HOSTS))
+            log(f"[{ip}] pinned {len(keys)} host key(s) from the console of {instance_id}")
+            return
+        time.sleep(15)
+    raise TimeoutError(f"no SSH host keys in the console output of {instance_id} ({ip}) after {timeout}s")
+
+
+def pin_all_host_keys(meta):
+    hosts = [(meta["mgmt"][s]["id"], meta["mgmt"][s]["ip"]) for s in SITES]
+    hosts += [(n["id"], n["ip"]) for s in SITES for n in meta["sn"][s]]
+    with ThreadPoolExecutor(max_workers=len(hosts)) as pool:
+        list(pool.map(lambda h: learn_host_keys(*h), hosts))
+
+
 def ssh_exec(ip, cmds, get_output=False, check=False, timeout=900, quiet=False):
     ssh = paramiko.SSHClient()
-    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    if KNOWN_HOSTS.exists():
+        ssh.load_host_keys(str(KNOWN_HOSTS))
+    ssh.set_missing_host_key_policy(paramiko.RejectPolicy())
     ssh.connect(ip, username=USER, key_filename=KEY_PATH, allow_agent=False,
                 look_for_keys=False, timeout=60, banner_timeout=60)
     results = []
@@ -131,7 +204,7 @@ def ssh_exec(ip, cmds, get_output=False, check=False, timeout=900, quiet=False):
                 for line in (err.strip().splitlines() or [])[-12:]:
                     print(f"    err: {line}")
             if rc != 0 and check:
-                raise RuntimeError(f"command failed on {ip} (rc={rc}): {cmd}\n{out[-2000:]}\n{err[-2000:]}")
+                raise RuntimeError(redact(f"command failed on {ip} (rc={rc}): {cmd}\n{out[-2000:]}\n{err[-2000:]}"))
     finally:
         ssh.close()
     return results
@@ -234,6 +307,8 @@ def scale_services_per_manager(mgmt_ip):
 
 
 def deploy():
+    if KNOWN_HOSTS.exists():
+        KNOWN_HOSTS.unlink()
     cp_image = resolve_cp_image()
     sbctl_img = f"sudo SIMPLY_BLOCK_DOCKER_IMAGE={cp_image} /usr/local/bin/sbctl -d"
     log(f"=== level-2 stretched control plane: branch={BRANCH} image={cp_image} ===")
@@ -250,6 +325,7 @@ def deploy():
     log(f"instances: {json.dumps(meta, indent=2)}")
 
     all_ips = [meta["mgmt"][s]["ip"] for s in SITES] + [n["ip"] for s in SITES for n in meta["sn"][s]]
+    pin_all_host_keys(meta)
     for ip in all_ips:
         wait_for_ssh(ip)
     log("phase 1: install sbcli everywhere")
@@ -264,6 +340,7 @@ def deploy():
     ssh_exec(a["ip"], [create], check=True, timeout=2400)
     cluster_id = uuid_in(out_of(a["ip"], f"{SBCTL} cluster list")[1])
     secret = out_of(a["ip"], f"{SBCTL} cluster get-secret {cluster_id}")[1].strip().splitlines()[-1].strip()
+    remember_secret(secret)
     meta.update(cluster_id=cluster_id, secret=secret)
     META_PATH.write_text(json.dumps(meta, indent=2))
 
@@ -547,6 +624,10 @@ def main():
     ap.add_argument("phase", choices=["deploy", "test", "collect", "teardown", "all"])
     args = ap.parse_args()
     meta = json.loads(META_PATH.read_text()) if META_PATH.exists() else None
+    if meta:
+        remember_secret(meta.get("secret"))
+        if meta.get("instance_ids"):
+            pin_all_host_keys(meta)
     results = None
     try:
         if args.phase in ("deploy", "all"):
