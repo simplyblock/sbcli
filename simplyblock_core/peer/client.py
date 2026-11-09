@@ -22,7 +22,13 @@ from urllib3 import Retry
 from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.models.replication import ReplicationTarget
 from simplyblock_core.peer import service
-from simplyblock_core.peer.protocol import DescribeRequest, DescribeResponse, PeerInfo
+from simplyblock_core.peer.protocol import (
+    DescribeRequest,
+    DescribeResponse,
+    LandingRequest,
+    LandingResponse,
+    PeerInfo,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +92,16 @@ class PeerClient(Protocol):
             PeerError: the target's control plane cannot be reached or understood.
         """
 
+    def prepare_landing(self, request: LandingRequest) -> LandingResponse:
+        """Make a replicated snapshot's landing volume ready on the target: adopt
+        one a previous request made, report a copy of the same data, or create it.
+
+        Raises:
+            PeerNotFoundError: the cluster is unknown, or the node hint is not on it.
+            PeerRefusedError: no member or pool can take the volume, or the create failed.
+            PeerError: the target's control plane cannot be reached or understood.
+        """
+
 
 class LocalPeerClient:
     """A target cluster managed by this same control plane: calls the service directly."""
@@ -132,6 +148,20 @@ class LocalPeerClient:
             return service.describe(self._cluster_id, request)
         except KeyError as e:
             raise PeerNotFoundError(str(e)) from e
+
+    def prepare_landing(self, request: LandingRequest) -> LandingResponse:
+        """Make the landing volume ready (see ``PeerClient.prepare_landing``).
+
+        Raises:
+            PeerNotFoundError: the cluster is unknown, or the node hint is not on it.
+            PeerRefusedError: no member or pool can take the volume, or the create failed.
+        """
+        try:
+            return service.prepare_landing(self._cluster_id, request)
+        except KeyError as e:
+            raise PeerNotFoundError(str(e)) from e
+        except PreconditionError as e:
+            raise PeerRefusedError(str(e)) from e
 
 
 # Process-local on purpose: each process writes the bundles it uses into its own
@@ -282,6 +312,21 @@ class HttpPeerClient:
             return DescribeResponse.model_validate(self._request("POST", "describe", request))
         except ValidationError as e:
             raise PeerProtocolError(f"Unexpected describe response from {self._base}: {e}") from e
+
+    def prepare_landing(self, request: LandingRequest) -> LandingResponse:
+        """Make the landing volume ready (see ``PeerClient.prepare_landing``).
+
+        Not retried by the transport: a lost answer is resent by the runner's
+        next pass with the same request, which adopts what the first one made.
+
+        Raises:
+            PeerError: as for every peer call (see ``_request``), and
+                PeerProtocolError when the answer is not a LandingResponse.
+        """
+        try:
+            return LandingResponse.model_validate(self._request("POST", "landing-volumes", request))
+        except ValidationError as e:
+            raise PeerProtocolError(f"Unexpected landing response from {self._base}: {e}") from e
 
 
 def peer_for_target(target: ReplicationTarget) -> PeerClient:

@@ -26,7 +26,12 @@ from simplyblock_core.peer.client import (
     PeerUnreachableError,
     peer_for_target,
 )
-from simplyblock_core.peer.protocol import PEER_API_VERSION, ChainCheck, DescribeRequest
+from simplyblock_core.peer.protocol import (
+    PEER_API_VERSION,
+    ChainCheck,
+    DescribeRequest,
+    LandingRequest,
+)
 
 CLUSTER_ID = "6f9ad3a2-5b0e-4d55-9a84-0d3c3b1f2e10"
 SECRET = "peer-plaintext"
@@ -249,3 +254,28 @@ class TestDescribe:
 
         with pytest.raises(PeerProtocolError, match="describe"):
             _client().describe(DescribeRequest(snapshot_ids=["T1"]))
+
+
+class TestPrepareLanding:
+
+    REQUEST = LandingRequest(source_cluster_id="SRC", snapshot_id="S1", landing_name="REP_s1",
+                             size=1 << 30, ha_type="ha", node_hint="N1", pool_hints=["P1"])
+
+    def test_posts_the_request_and_reads_the_answer(self, session_request):
+        session_request.return_value = _response(body={"state": "ready", "lvol_id": "L1",
+                                                       "adopted": True})
+
+        answer = _client().prepare_landing(self.REQUEST)
+
+        method, url = session_request.call_args.args
+        assert method == "POST"
+        assert url == f"https://cp-b.example:8443/api/v2/_peer/clusters/{CLUSTER_ID}/landing-volumes"
+        assert session_request.call_args.kwargs["json"]["landing_name"] == "REP_s1"
+        assert (answer.state, answer.lvol_id, answer.adopted) == ("ready", "L1", True)
+
+    def test_a_refused_create_carries_its_cause(self, session_request):
+        session_request.return_value = _response(status=409,
+                                                 body={"detail": "Storage node is not online"})
+
+        with pytest.raises(PeerRefusedError, match="Storage node is not online"):
+            _client().prepare_landing(self.REQUEST)

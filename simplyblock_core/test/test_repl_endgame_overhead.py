@@ -15,6 +15,7 @@ from unittest.mock import MagicMock, patch
 
 from simplyblock_core import constants
 from simplyblock_core.models.job_schedule import JobSchedule
+from simplyblock_core.peer.protocol import LandingResponse
 from simplyblock_core.services import snapshot_replication as sr
 from simplyblock_core.services import tasks_runner_replication_final as final
 from simplyblock_core.services.task_runner_base import TaskDefer, TaskRetry
@@ -245,17 +246,20 @@ class TestLandingPrestage(unittest.TestCase):
         self.snap.get_id.return_value = "S1"
         self.snap.cluster_id = "CL"
         self.snap.lvol.get_id.return_value = "LV1"
+        self.snap.size = 1 << 30
+        self.snap.lvol.ha_type = "ha"
+        self.snap.lvol.max_namespace_per_subsys = 1
         self.remote_lv = MagicMock()
         self.remote_lv.node_id = "T1"
         self.remote_lv.pool_uuid = "P1"
-        self.db = patch.object(sr, "db").start()
-        self.db.get_lvol_by_name.side_effect = KeyError("none")
-        self.create = patch.object(sr, "_create_landing_volume",
-                                   return_value=("LAND2", None)).start()
-        # The spare is discarded through the peer client of the landing
-        # volume's cluster (control-plane split), so assert at that seam.
+        # The spare is made and discarded through the peer client of the
+        # landing volume's cluster (control-plane split): assert at that seam.
+        # What the destination does with the request is in
+        # tests/integration/test_landing_preparation.py.
         self.peer = MagicMock()
+        self.peer.prepare_landing.return_value = LandingResponse(state="ready", lvol_id="LAND2")
         patch.object(sr, "_landing_peer", return_value=self.peer).start()
+        self.create = self.peer.prepare_landing
         self.delete = self.peer.discard_landing
         self.addCleanup(patch.stopall)
 
@@ -265,10 +269,12 @@ class TestLandingPrestage(unittest.TestCase):
     def test_the_next_rounds_landing_volume_is_created_under_its_name(self):
         self._names("repl_commit_next", "repl_commit_next")
         self.assertEqual(sr._prestage_next_landing(self.snap, self.remote_lv), "LAND2")
-        name, snap, _node, pool = self.create.call_args[0]
-        self.assertEqual(name, "REP_repl_commit_next")
-        self.assertIs(snap, self.snap)
-        self.assertEqual(pool, "P1")
+        (request,), _ = self.create.call_args
+        self.assertEqual(request.landing_name, "REP_repl_commit_next")
+        self.assertEqual((request.node_hint, request.pool_hints), ("T1", ["P1"]))
+        # never adopts or clears a volume already wearing the name
+        self.assertTrue(request.create_only)
+        self.assertEqual(request.data_uuid, "")
         self.delete.assert_not_called()
 
     def test_nothing_is_staged_outside_a_converging_cutover(self):
@@ -278,10 +284,9 @@ class TestLandingPrestage(unittest.TestCase):
 
     def test_an_already_staged_volume_is_not_created_twice(self):
         self._names("repl_commit_next")
-        self.db.get_lvol_by_name.side_effect = None
-        self.db.get_lvol_by_name.return_value = MagicMock()
+        self.create.return_value = LandingResponse(state="exists", lvol_id="LAND1")
         self.assertIsNone(sr._prestage_next_landing(self.snap, self.remote_lv))
-        self.create.assert_not_called()
+        self.delete.assert_not_called()
 
     def test_a_volume_staged_after_the_rounds_ended_is_deleted(self):
         self._names("repl_commit_next", "")

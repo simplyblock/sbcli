@@ -608,24 +608,27 @@ def test_interrupted_landing_volume_is_adopted_or_cleared():
     """Case 6, run 20260824_144226: a node outage mid-create left a REP_*
     landing volume whose id was never stored on the task; every retry then
     died on "LVol name must be unique" and three volumes' chains stalled for
-    the rest of the run. Before creating the landing volume, the runner must
-    look for a record already wearing the derived name and adopt it (online),
-    wait for it (in_deletion), or clear it (half-created)."""
+    the rest of the run. Before creating the landing volume, the destination
+    must look for a record already wearing the derived name and adopt it
+    (online), wait for it (in_deletion), or clear it (half-created).
+
+    The destination does this in peer.service.prepare_landing (control-plane
+    split); its behaviour is tested in
+    tests/integration/test_landing_preparation.py. This keeps the order."""
     import inspect
 
+    from simplyblock_core.peer import service
     from simplyblock_core.services import snapshot_replication as sr
-    src = inspect.getsource(sr.process_snap_replicate_start)
-    probe = src.index('rep_name = f"REP_{snapshot.snap_name}"')
-    create = src.index("_create_landing_volume(")
-    assert "lvol_controller.add_lvol_ha" in inspect.getsource(sr._create_landing_volume)
+    src = inspect.getsource(service.prepare_landing)
+    probe = src.index("_named_landing(")
+    create = src.index("lvol_controller.add_lvol_ha(")
     assert probe < create, "the adopt/clear probe must run before the create"
-    adopt = src.index("Adopting landing volume")
-    assert probe < adopt < create
-    # A half-created one is cleared through the destination's peer client
-    # (control-plane split), which deletes it with force_delete=True.
-    for handled in ("STATUS_ONLINE", "STATUS_IN_DELETION", "discard_landing("):
-        assert src.index(handled, probe) < create, \
+    for handled in ("STATUS_ONLINE", "STATUS_IN_DELETION", "delete_lvol(existing, force_delete=True)"):
+        assert probe < src.index(handled) < create, \
             f"collision handling must cover {handled} before creating"
+    runner = inspect.getsource(sr.process_snap_replicate_start)
+    assert 'landing_name=f"REP_{snapshot.snap_name}"' in runner, \
+        "the landing volume is named after the snapshot, which makes the probe find it"
 
 
 def test_failover_guard_matches_nqn_and_nsid_not_nqn_alone():

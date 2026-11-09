@@ -312,18 +312,9 @@ class TestRelocatedChainIsLinkedNotReshipped(unittest.TestCase):
                                cluster_id=cluster, get_id=lambda: sid,
                                lvol=SimpleNamespace(lvs_name=lvs, node_id=node))
 
-    def test_counterpart_on_the_destination_lvstore(self):
-        mine = self._snap("s-b", "d-1", "LVS_10", cluster="c-b")
-        other_lvs = self._snap("s-a2", "d-1", "LVS_7")
-        same_lvs = self._snap("s-a1", "d-1", "LVS_1")
-        deleting = self._snap("s-a3", "d-1", "LVS_1", status="in_deletion")
-        db = MagicMock()
-        db.get_snapshots.return_value = [other_lvs, deleting, same_lvs]
-        remote = SimpleNamespace(cluster_id="c-a", lvstore="LVS_1")
-        with patch.object(snapshot_replication, "db", db):
-            self.assertIs(snapshot_replication._counterpart_on_destination(mine, remote), same_lvs)
-            remote.lvstore = "LVS_9"
-            self.assertIsNone(snapshot_replication._counterpart_on_destination(mine, remote))
+    # The counterpart search itself runs on the destination now (prepare_landing):
+    # tests/integration/test_landing_preparation.py::TestPrepareLanding::
+    # test_links_a_copy_of_the_same_data_on_the_lvstore.
 
     def test_replication_node_follows_the_chain(self):
         base = self._snap("s-b1", "d-1", "LVS_10", cluster="c-b")

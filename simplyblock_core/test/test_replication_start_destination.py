@@ -130,20 +130,11 @@ def test_the_requested_pool_receives_the_copies(db):
     lvol = _lvol(pool_uuid="P_TGT_B")
     db(lvol)
 
-    assert sr._destination_pool_uuid(_node("N_TGT", TGT), lvol=lvol, source_cluster_id=SRC) == "P_TGT_B"
+    # Where the copies land: tests/integration/test_landing_preparation.py.
     fake = lvol_controller.DBController()
     _, pool = lvol_controller.resolve_replication_destination(
         fake, lvol, _node("N_TGT", TGT), _node("N_SRC", SRC))
     assert pool == "P_TGT_B"
-
-
-def test_a_requested_pool_of_another_cluster_is_not_used(db):
-    """A replication that later lands elsewhere (a fail-back) does not carry
-    the forward move's pool into a cluster it does not belong to."""
-    lvol = _lvol(pool_uuid="P_TGT_B")
-    db(lvol)
-
-    assert sr._destination_pool_uuid(_node("N_OTHER", OTHER), lvol=lvol, source_cluster_id=SRC) == "P_OTHER"
 
 
 def test_a_policy_overrides_a_pool_named_before_it(db):

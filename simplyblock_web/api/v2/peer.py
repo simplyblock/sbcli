@@ -19,7 +19,13 @@ from fastapi import APIRouter, HTTPException, Response
 
 from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.peer import service
-from simplyblock_core.peer.protocol import DescribeRequest, DescribeResponse, PeerInfo
+from simplyblock_core.peer.protocol import (
+    DescribeRequest,
+    DescribeResponse,
+    LandingRequest,
+    LandingResponse,
+    PeerInfo,
+)
 
 from ._dependencies import Cluster
 
@@ -51,3 +57,15 @@ def describe(cluster: Cluster, request: DescribeRequest) -> DescribeResponse:
     landing volume's lvstore, whether copies exist or have dependent clones, and
     whether copies are chained. POST only because the question has a body."""
     return service.describe(cluster.get_id(), request)
+
+
+@api.post('/landing-volumes', name='peer:landing-volumes:prepare')
+def prepare_landing(cluster: Cluster, request: LandingRequest) -> LandingResponse:
+    """Make a replicated snapshot's landing volume ready: adopt one a previous
+    request made, report a copy of the same data, or create it."""
+    try:
+        return service.prepare_landing(cluster.get_id(), request)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except PreconditionError as e:
+        raise HTTPException(status_code=409, detail=str(e))

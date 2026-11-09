@@ -12,9 +12,10 @@ from simplyblock_core.peer.protocol import (
     PEER_API_VERSION,
     DescribeRequest,
     DescribeResponse,
+    LandingResponse,
     PeerInfo,
 )
-from simplyblock_core.peer.service import NotALandingVolumeError
+from simplyblock_core.peer.service import LandingVolumeError, NotALandingVolumeError
 from tests.unit.web.api.v2._factories import CLUSTER_ID
 
 INFO_URL = f'/api/v2/_peer/clusters/{CLUSTER_ID}/info'
@@ -114,3 +115,37 @@ class TestDescribe:
 
         assert response.status_code == 422
         peer_service.describe.assert_not_called()
+
+
+LANDING_URL = f'/api/v2/_peer/clusters/{CLUSTER_ID}/landing-volumes'
+LANDING_BODY = {'source_cluster_id': 'SRC', 'snapshot_id': 'S1', 'landing_name': 'REP_s1',
+                'size': 1 << 30, 'ha_type': 'ha'}
+
+
+class TestPrepareLanding:
+
+    def test_answers_through_the_service(self, client, db, cluster, peer_service):
+        peer_service.prepare_landing.return_value = LandingResponse(state='ready', lvol_id='L1')
+
+        response = client.post(LANDING_URL, json=LANDING_BODY)
+
+        assert response.status_code == 200
+        assert response.json()['lvol_id'] == 'L1'
+        cluster_id, request = peer_service.prepare_landing.call_args.args
+        assert cluster_id == CLUSTER_ID and request.landing_name == 'REP_s1'
+
+    def test_a_refused_create_is_409(self, client, db, cluster, peer_service):
+        peer_service.prepare_landing.side_effect = LandingVolumeError('no pool')
+
+        assert client.post(LANDING_URL, json=LANDING_BODY).status_code == 409
+
+    def test_a_node_of_another_cluster_is_404(self, client, db, cluster, peer_service):
+        peer_service.prepare_landing.side_effect = KeyError('not on cluster')
+
+        assert client.post(LANDING_URL, json=LANDING_BODY).status_code == 404
+
+    def test_only_landing_names_are_accepted(self, client, db, cluster, peer_service):
+        response = client.post(LANDING_URL, json={**LANDING_BODY, 'landing_name': 'pvc-data'})
+
+        assert response.status_code == 422
+        peer_service.prepare_landing.assert_not_called()
