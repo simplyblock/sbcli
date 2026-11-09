@@ -338,7 +338,7 @@ class TestPlumbing:
             e.code = -32602
             e.args = ("spdk_json_decode_object failed",)
             raise e
-        c._request = req
+        c._request = req  # type: ignore[method-assign]
         with pytest.raises(RPCRemoteError):
             c.bdev_lvol_transfer("S", 0, 256, "hub", operation="replicate", lvol_id=7,
                                  allow_partial=True, partial_base=5, priority_class=7,

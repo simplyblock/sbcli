@@ -42,7 +42,7 @@ def _record_inline(task, **params):
 
 def _run(samples, start=1000.0, step=10.0):
     """Feed (lag, backlog) samples into _catchup_window_update; the params."""
-    params = {}
+    params: dict = {}
     now = start
     for lag, backlog in samples:
         params.update(final._catchup_window_update(params, lag, backlog, now))

@@ -25,7 +25,7 @@ def _client(responses):
         if isinstance(r, Exception):
             raise r
         return r
-    client._request = _request
+    client._request = _request  # type: ignore[method-assign]
     return client, sent
 
 
@@ -39,7 +39,7 @@ def test_final_step_without_base_sends_the_plain_request():
 
 def test_final_step_delta_always_lands_copy_on_write():
     client, sent = _client([{"transfer_state": "Done"}])
-    applied = {}
+    applied: dict = {}
     client.bdev_lvol_transfer_final_step("lvs/L", 7, "tlvs/S", 2, "hub", "replicate",
                                          partial_base=0x100000031, applied=applied)
     params = sent[0][1]
@@ -52,7 +52,7 @@ def test_final_step_delta_always_lands_copy_on_write():
 def test_final_step_delta_falls_back_to_whole_clusters_on_an_old_spdk():
     err = rpc_module.RPCRemoteError("spdk_json_decode_object failed", -32602)
     client, sent = _client([err, {"transfer_state": "Done"}])
-    applied = {}
+    applied: dict = {}
     ret = client.bdev_lvol_transfer_final_step("lvs/L", 7, "tlvs/S", 2, "hub", "replicate",
                                                partial_base=5, applied=applied)
     assert ret == {"transfer_state": "Done"}
@@ -170,7 +170,7 @@ def test_backlog_gate_closed_without_a_complete_count(monkeypatch):
 
 def test_final_step_without_delta_still_lands_on_the_clone():
     client, sent = _client([{"transfer_state": "Done"}])
-    applied = {}
+    applied: dict = {}
     client.bdev_lvol_transfer_final_step("lvs/L", 7, "tlvs/S", 2, "hub", "replicate",
                                          cow_landing=True, applied=applied)
     params = sent[0][1]
@@ -233,7 +233,7 @@ def test_a_retry_waits_until_the_old_chain_is_pruned_to_one(monkeypatch):
     snaps = [_osnap("S1", 1), _osnap("S2", 2), _osnap("S3", 3)]
     monkeypatch.setattr(runner.db, "get_snapshots_by_node_id", lambda nid: snaps)
     kicked = []
-    monkeypatch.setattr(sr, "prune_async", lambda lv, keep=None: kicked.append(keep) or True)
+    monkeypatch.setattr(sr, "prune_async", lambda lv, keep=None: kicked.append(keep) or True  # type: ignore[func-returns-value])
     task = SimpleNamespace(function_params={"prune_gate_since": 10.0})
     with pytest.raises(runner.TaskDefer):
         runner._prune_gate(task, _lvol())
