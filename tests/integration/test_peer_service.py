@@ -11,6 +11,7 @@ from uuid import UUID
 import pytest
 from pydantic import SecretStr
 
+from simplyblock_core.controllers import lvol_controller
 from simplyblock_core.controllers import replication_policy_controller as rpc
 from simplyblock_core.controllers.replication_policy_controller import (
     PeerConnection,
@@ -18,10 +19,14 @@ from simplyblock_core.controllers.replication_policy_controller import (
 )
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.cluster import Cluster
+from simplyblock_core.models.lvol_model import LVol
+from simplyblock_core.models.pool import Pool
+from simplyblock_core.models.replication import ReplicationPolicy
 from simplyblock_core.peer import service
 from simplyblock_core.peer.client import (
     LocalPeerClient,
     PeerNotFoundError,
+    PeerRefusedError,
     PeerUnreachableError,
     peer_for_target,
 )
@@ -162,3 +167,111 @@ def test_a_local_target_still_needs_the_target_cluster_here(db, source_cluster):
         rpc.add_target(SOURCE_CLUSTER_ID, "site-b", PEER_CLUSTER_ID)
 
     assert DBController().get_replication_targets(SOURCE_CLUSTER_ID) == []
+
+
+SOURCE_POOL_ID = "0b6f4a8e-1c2d-4e3f-9a0b-1c2d3e4f5a04"
+LANDING_ID = "0b6f4a8e-1c2d-4e3f-9a0b-1c2d3e4f5a05"
+
+
+def _pool(db, cluster_id):
+    pool = Pool()
+    pool.uuid = SOURCE_POOL_ID
+    pool.cluster_id = cluster_id
+    pool.write_to_db(db.kv_store)
+    return pool
+
+
+def _lvol(db, name):
+    lvol = LVol()
+    lvol.uuid = LANDING_ID
+    lvol.lvol_name = name
+    lvol.pool_uuid = SOURCE_POOL_ID
+    lvol.write_to_db(db.kv_store)
+    return lvol
+
+
+@pytest.fixture
+def delete_lvol():
+    """The delete itself talks to storage nodes, which this tier never runs."""
+    with patch.object(lvol_controller, "delete_lvol") as delete:
+        yield delete
+
+
+class TestDiscardLanding:
+
+    def test_deletes_a_landing_volume(self, db, source_cluster, delete_lvol):
+        _pool(db, SOURCE_CLUSTER_ID)
+        _lvol(db, "REP_snap-1")
+
+        service.discard_landing(SOURCE_CLUSTER_ID, LANDING_ID)
+
+        (deleted,), kwargs = delete_lvol.call_args
+        assert deleted.get_id() == LANDING_ID
+        assert kwargs == {"force_delete": True}
+
+    def test_a_volume_already_gone_is_success(self, db, source_cluster, delete_lvol):
+        service.discard_landing(SOURCE_CLUSTER_ID, LANDING_ID)
+
+        delete_lvol.assert_not_called()
+
+    def test_refuses_a_volume_that_is_not_a_landing_volume(self, db, source_cluster, delete_lvol):
+        _pool(db, SOURCE_CLUSTER_ID)
+        _lvol(db, "pvc-data")
+
+        with pytest.raises(service.NotALandingVolumeError):
+            service.discard_landing(SOURCE_CLUSTER_ID, LANDING_ID)
+
+        delete_lvol.assert_not_called()
+
+    def test_a_volume_of_another_cluster_is_not_found(self, db, source_cluster, delete_lvol):
+        _pool(db, PEER_CLUSTER_ID)
+        _lvol(db, "REP_snap-1")
+
+        with pytest.raises(KeyError):
+            service.discard_landing(SOURCE_CLUSTER_ID, LANDING_ID)
+
+        delete_lvol.assert_not_called()
+
+    def test_the_local_client_reports_a_refusal_as_refused(self, db, source_cluster, delete_lvol):
+        _pool(db, SOURCE_CLUSTER_ID)
+        _lvol(db, "pvc-data")
+
+        with pytest.raises(PeerRefusedError):
+            LocalPeerClient(SOURCE_CLUSTER_ID).discard_landing(LANDING_ID)
+
+    def test_the_local_client_reports_an_unknown_cluster_as_not_found(self, db, delete_lvol):
+        with pytest.raises(PeerNotFoundError):
+            LocalPeerClient(PEER_CLUSTER_ID).discard_landing(LANDING_ID)
+
+
+class TestRunnerPeerChoice:
+    """The replication runner reaches a destination through the client its
+    volume's policy target calls for: HTTP for a peer, in-process otherwise."""
+
+    def test_a_volume_without_a_policy_stays_in_process(self, db, source_cluster):
+        from simplyblock_core.services import snapshot_replication as sr
+
+        client = sr._peer_for(LVol(), PEER_CLUSTER_ID)
+
+        assert isinstance(client, LocalPeerClient)
+        assert client.cluster_id == PEER_CLUSTER_ID
+
+    def test_a_policy_on_a_peer_target_goes_over_http(self, db, source_cluster, peer_answers):
+        from simplyblock_core.services import snapshot_replication as sr
+
+        target_id = rpc.add_target(SOURCE_CLUSTER_ID, "site-b", PEER_CLUSTER_ID, peer=PEER)
+        # add_policy refuses a peer target until every step goes through the
+        # peer client, so the policy record is written directly here.
+        policy = ReplicationPolicy()
+        policy.uuid = "0b6f4a8e-1c2d-4e3f-9a0b-1c2d3e4f5a06"
+        policy.cluster_id = SOURCE_CLUSTER_ID
+        policy.policy_name = "every-5m"
+        policy.target_id = target_id
+        policy.write_to_db(db.kv_store)
+        source_lvol = LVol()
+        source_lvol.replication_policy_id = policy.get_id()
+
+        client = sr._peer_for(source_lvol, PEER_CLUSTER_ID)
+
+        assert not isinstance(client, LocalPeerClient)
+        assert client.cluster_id == PEER_CLUSTER_ID

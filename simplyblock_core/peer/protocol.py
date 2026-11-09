@@ -15,7 +15,12 @@ PEER_API_VERSION = 1
 
 #: Peer endpoints this control plane serves, named so a caller can check for a
 #: step before relying on it during a rolling upgrade of the two sites.
-CAPABILITIES: frozenset[str] = frozenset({"info"})
+CAPABILITIES: frozenset[str] = frozenset({"info", "discard_landing"})
+
+#: Name prefix of a replication landing volume (``REP_<snapshot name>``). It is
+#: the only mark a landing volume carries in the database, and the peer API acts
+#: only on volumes that carry it.
+LANDING_PREFIX = "REP_"
 
 
 class PeerInfo(BaseModel):

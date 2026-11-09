@@ -19,6 +19,7 @@ from pydantic import SecretStr, ValidationError
 from requests.adapters import HTTPAdapter
 from urllib3 import Retry
 
+from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.models.replication import ReplicationTarget
 from simplyblock_core.peer import service
 from simplyblock_core.peer.protocol import PeerInfo
@@ -45,6 +46,10 @@ class PeerNotFoundError(PeerError):
     """The peer does not manage the addressed cluster, or the addressed object (HTTP 404)."""
 
 
+class PeerRefusedError(PeerError):
+    """The peer refused the step on its side: a precondition does not hold (HTTP 409)."""
+
+
 class PeerProtocolError(PeerError):
     """The peer answered with a status or body this control plane does not understand."""
 
@@ -61,6 +66,15 @@ class PeerClient(Protocol):
 
         Raises:
             PeerError: the target's control plane cannot answer for the cluster.
+        """
+
+    def discard_landing(self, lvol_id: str) -> None:
+        """Delete the replication landing volume *lvol_id*; one already gone is success.
+
+        Raises:
+            PeerNotFoundError: the cluster is unknown, or the volume is on another cluster.
+            PeerRefusedError: the volume is not a landing volume, or the delete is refused.
+            PeerError: the target's control plane cannot be reached or understood.
         """
 
 
@@ -84,6 +98,20 @@ class LocalPeerClient:
             return service.info(self._cluster_id)
         except KeyError as e:
             raise PeerNotFoundError(str(e)) from e
+
+    def discard_landing(self, lvol_id: str) -> None:
+        """Delete the replication landing volume *lvol_id*; one already gone is success.
+
+        Raises:
+            PeerNotFoundError: the cluster is unknown, or the volume is on another cluster.
+            PeerRefusedError: the volume is not a landing volume, or the delete is refused.
+        """
+        try:
+            service.discard_landing(self._cluster_id, lvol_id)
+        except KeyError as e:
+            raise PeerNotFoundError(str(e)) from e
+        except PreconditionError as e:
+            raise PeerRefusedError(str(e)) from e
 
 
 # Process-local on purpose: each process writes the bundles it uses into its own
@@ -138,10 +166,11 @@ class HttpPeerClient:
         if ca_cert:
             self._session.verify = _ca_bundle_path(ca_cert)
         # Retries cover a peer that is restarting or briefly overloaded. Only
-        # idempotent methods are retried; each write endpoint carries its own
-        # idempotency key, so the caller decides when to send it again.
+        # idempotent methods are retried (a DELETE of something already gone
+        # succeeds); each other write endpoint carries its own idempotency key,
+        # so the caller decides when to send it again.
         retry = Retry(total=retries, connect=retries, read=retries, backoff_factor=0.5,
-                      status_forcelist=(502, 503, 504), allowed_methods=frozenset({"GET"}),
+                      status_forcelist=(502, 503, 504), allowed_methods=frozenset({"GET", "DELETE"}),
                       raise_on_status=False)
         self._session.mount("http://", HTTPAdapter(max_retries=retry))
         self._session.mount("https://", HTTPAdapter(max_retries=retry))
@@ -158,6 +187,7 @@ class HttpPeerClient:
                 after the retries.
             PeerAuthError: the peer refused the credential (401/403).
             PeerNotFoundError: the peer does not know the cluster or object (404).
+            PeerRefusedError: the peer refused the step (409).
             PeerProtocolError: any other status, or a body that is not JSON.
         """
         url = f"{self._base}/{path}"
@@ -178,10 +208,14 @@ class HttpPeerClient:
             raise PeerAuthError(f"{method} {url}: refused with {status}")
         if status == 404:
             raise PeerNotFoundError(f"{method} {url}: {self._detail(response)}")
+        if status == 409:
+            raise PeerRefusedError(f"{method} {url}: {self._detail(response)}")
         if status >= 500:
             raise PeerUnreachableError(f"{method} {url}: {status} {self._detail(response)}")
         if not 200 <= status < 300:
             raise PeerProtocolError(f"{method} {url}: {status} {self._detail(response)}")
+        if status == 204:
+            return None
         try:
             return response.json()
         except ValueError as e:
@@ -207,6 +241,14 @@ class HttpPeerClient:
             return PeerInfo.model_validate(self._request("GET", "info"))
         except ValidationError as e:
             raise PeerProtocolError(f"Unexpected info response from {self._base}: {e}") from e
+
+    def discard_landing(self, lvol_id: str) -> None:
+        """Delete the replication landing volume *lvol_id*; one already gone is success.
+
+        Raises:
+            PeerError: as for every peer call (see ``_request``).
+        """
+        self._request("DELETE", f"landing-volumes/{quote(lvol_id, safe='')}")
 
 
 def peer_for_target(target: ReplicationTarget) -> PeerClient:

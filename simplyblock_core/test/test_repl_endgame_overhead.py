@@ -252,7 +252,11 @@ class TestLandingPrestage(unittest.TestCase):
         self.db.get_lvol_by_name.side_effect = KeyError("none")
         self.create = patch.object(sr, "_create_landing_volume",
                                    return_value=("LAND2", None)).start()
-        self.delete = patch.object(sr.lvol_controller, "delete_lvol").start()
+        # The spare is discarded through the peer client of the landing
+        # volume's cluster (control-plane split), so assert at that seam.
+        self.peer = MagicMock()
+        patch.object(sr, "_landing_peer", return_value=self.peer).start()
+        self.delete = self.peer.discard_landing
         self.addCleanup(patch.stopall)
 
     def _names(self, *names):
@@ -282,7 +286,7 @@ class TestLandingPrestage(unittest.TestCase):
     def test_a_volume_staged_after_the_rounds_ended_is_deleted(self):
         self._names("repl_commit_next", "")
         self.assertIsNone(sr._prestage_next_landing(self.snap, self.remote_lv))
-        self.delete.assert_called_once()
+        self.delete.assert_called_once_with("LAND2")
 
     def test_a_failure_never_breaks_the_transfer(self):
         self._names("repl_commit_next")

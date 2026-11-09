@@ -621,7 +621,9 @@ def test_interrupted_landing_volume_is_adopted_or_cleared():
     assert probe < create, "the adopt/clear probe must run before the create"
     adopt = src.index("Adopting landing volume")
     assert probe < adopt < create
-    for handled in ("STATUS_ONLINE", "STATUS_IN_DELETION", "force_delete=True"):
+    # A half-created one is cleared through the destination's peer client
+    # (control-plane split), which deletes it with force_delete=True.
+    for handled in ("STATUS_ONLINE", "STATUS_IN_DELETION", "discard_landing("):
         assert src.index(handled, probe) < create, \
             f"collision handling must cover {handled} before creating"
 

@@ -22,6 +22,7 @@ from simplyblock_core.peer.client import (
     PeerAuthError,
     PeerNotFoundError,
     PeerProtocolError,
+    PeerRefusedError,
     PeerUnreachableError,
     peer_for_target,
 )
@@ -187,3 +188,35 @@ class TestPeerForTarget:
 
         assert isinstance(client, HttpPeerClient)
         assert client.cluster_id == CLUSTER_ID
+
+
+class TestDiscardLanding:
+
+    LVOL_ID = "0b6f4a8e-1c2d-4e3f-9a0b-1c2d3e4f5a99"
+
+    def test_deletes_the_landing_volume_under_the_cluster(self, session_request):
+        session_request.return_value = _response(status=204)
+
+        assert _client().discard_landing(self.LVOL_ID) is None
+
+        method, url = session_request.call_args.args
+        assert method == "DELETE"
+        assert url == (f"https://cp-b.example:8443/api/v2/_peer/clusters/{CLUSTER_ID}"
+                       f"/landing-volumes/{self.LVOL_ID}")
+
+    def test_an_empty_answer_is_not_read_as_json(self, session_request):
+        session_request.return_value = _response(status=204, json_error=True)
+
+        _client().discard_landing(self.LVOL_ID)
+
+    def test_a_volume_on_another_cluster_is_not_found(self, session_request):
+        session_request.return_value = _response(status=404, body={"detail": "not on cluster"})
+
+        with pytest.raises(PeerNotFoundError, match="not on cluster"):
+            _client().discard_landing(self.LVOL_ID)
+
+    def test_a_refusal_is_its_own_error(self, session_request):
+        session_request.return_value = _response(status=409, body={"detail": "not a landing volume"})
+
+        with pytest.raises(PeerRefusedError, match="not a landing volume"):
+            _client().discard_landing(self.LVOL_ID)

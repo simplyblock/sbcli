@@ -23,12 +23,46 @@ from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.peer.client import LocalPeerClient, PeerClient, peer_for_target
 from simplyblock_core.rpc_client import RPCException
 
 logger = utils.get_logger(__name__)
 utils.init_sentry_sdk(__name__)
 # get DB controller
 db = db_controller.DBController()
+
+
+def _peer_for(source_lvol, cluster_id) -> PeerClient:
+    """The peer client for *cluster_id*, the destination of *source_lvol*'s replication.
+
+    The volume's policy target names a peer control plane when the destination
+    is on one. A target in this control plane, or a volume replicated without a
+    policy (cluster-level replication), gets the in-process client: same code,
+    no HTTP.
+
+    Raises:
+        KeyError: the volume's policy names a target that no longer exists.
+    """
+    policy = db.get_replication_policy_for_lvol(source_lvol)
+    if policy is not None:
+        target = db.get_replication_target_by_id(policy.target_id)
+        if target.target_cluster_id == cluster_id:
+            return peer_for_target(target)
+    return LocalPeerClient(cluster_id)
+
+
+def _landing_peer(snapshot, landing_lv) -> PeerClient:
+    """The peer client for the cluster holding *landing_lv*, *snapshot*'s landing volume.
+
+    The cluster is read off the landing volume's node while both clusters share
+    this database. Once ``prepare_landing`` moves behind the peer client, the
+    task records the destination cluster and this read goes away.
+
+    Raises:
+        KeyError: the landing volume's node, or the policy's target, is unknown.
+    """
+    cluster_id = db.get_storage_node_by_id(landing_lv.node_id).cluster_id
+    return _peer_for(snapshot.lvol, cluster_id)
 
 
 def _set_transfer_class(node_ids, bdev, wire_class, what):
@@ -678,7 +712,7 @@ def _prestage_next_landing(snapshot, remote_lv):
         if _endgame_next_snap_name(lvol_id, snapshot.cluster_id) != next_name:
             logger.info("Pre-staged landing volume %s is no longer needed; deleting it",
                         rep_name)
-            lvol_controller.delete_lvol(db.get_lvol_by_id(lv_id), force_delete=True)
+            _landing_peer(snapshot, remote_lv).discard_landing(lv_id)
             return None
         return lv_id
     except Exception as e:                                # noqa: BLE001
@@ -916,7 +950,7 @@ def process_snap_replicate_start(task, snapshot):
                                f"{existing.get_id()} ({rep_name}, status "
                                f"{existing.status}) from an interrupted attempt")
                 try:
-                    lvol_controller.delete_lvol(existing, force_delete=True)
+                    _landing_peer(snapshot, existing).discard_landing(existing.get_id())
                 except Exception as e:
                     logger.error(f"Failed to clear stale landing volume {rep_name}: {e}")
                 _suspend_for_retry(task, f"cleared stale landing volume {rep_name}, retrying")
@@ -1034,7 +1068,7 @@ def process_snap_replicate_start(task, snapshot):
                      "refusing to transfer into it, discarding it and starting over",
                      task.uuid, remote_lv.top_bdev, ", ".join(converted_on))
         try:
-            lvol_controller.delete_lvol(remote_lv, force_delete=True)
+            _landing_peer(snapshot, remote_lv).discard_landing(remote_lv.get_id())
         except Exception as e:                            # noqa: BLE001
             logger.error("Failed to discard landing volume %s: %s", remote_lv.get_id(), e)
         for key in ("remote_lvol_id", "converted_nodes", "offset", "transfer_done"):
@@ -2149,10 +2183,10 @@ def _record_chained(task, node):
         task.write_to_db()
 
 
-def _discard_landing_for_retry(task, remote_lv, msg):
+def _discard_landing_for_retry(task, snapshot, remote_lv, msg):
     """Delete the landing volume and send the snapshot again from the start."""
     try:
-        lvol_controller.delete_lvol(remote_lv, force_delete=True)
+        _landing_peer(snapshot, remote_lv).discard_landing(remote_lv.get_id())
     except Exception as e:                                # noqa: BLE001
         logger.error("Failed to discard landing volume %s: %s", remote_lv.get_id(), e)
     for key in ("remote_lvol_id", "converted_nodes", "offset", "transfer_done",
@@ -2341,7 +2375,7 @@ def process_snap_replicate_finish(task, snapshot):
         return FINISH_PENDING
     if gate == "restart":
         _discard_landing_for_retry(
-            task, remote_lv, f"the copy {task.function_params.get('chain_deferred_to')} this "
+            task, snapshot, remote_lv, f"the copy {task.function_params.get('chain_deferred_to')} this "
                              f"delta builds on will not be made; discarded, retrying")
         return FINISH_ABANDONED
     target_prev_snap, _prev_snap_for_db, ok = _resolve_chain_target(
@@ -2399,7 +2433,7 @@ def process_snap_replicate_finish(task, snapshot):
     if remote_snode.get_id() not in converted:
         merge = _merge_landing(task, remote_lv, remote_snode)
         if merge == "restart":
-            _discard_landing_for_retry(task, remote_lv, f"landing volume {remote_lv.top_bdev} "
+            _discard_landing_for_retry(task, snapshot, remote_lv, f"landing volume {remote_lv.top_bdev} "
                                                         f"lost the record of its delta; discarded, retrying")
             return FINISH_ABANDONED
         if merge == "retry":
@@ -2656,7 +2690,7 @@ def task_runner(task: JobSchedule):
         except Exception as e:
             logger.warning("Abort-path hub detach failed (non-fatal): %s", e)
         try:
-            lvol_controller.delete_lvol(remote_lv, force_delete=True)
+            _landing_peer(snapshot, remote_lv).discard_landing(remote_lv.get_id())
         except Exception as e:
             logger.warning("Abort-path cleanup of %s failed (non-fatal): %s",
                            remote_lv_id, e)
