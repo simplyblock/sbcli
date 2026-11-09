@@ -71,8 +71,16 @@ other, coordinators 3 at the leader site and 2 at the other, or 3 + 3 + 3 with a
 coordinator site. Every FDB process, control plane and storage node must reach every FDB process
 by IP (no NAT between the sites). `DBController` sets a transaction timeout
 (`KVD_DB_TIMEOUT_MS`), which is what turns a lost majority into a paused service instead of a hung
-one. The Kubernetes side (one `FoundationDBCluster` per cluster rendered from one shared document,
-bootstrap-then-join, a shared TLS CA) is the simplyblock operator's part of this feature.
+one. The Kubernetes side is the simplyblock operator's part of this feature
+(simplyblock-operator `docs/designs/design-stretched-control-plane.md`,
+`ControlPlane.spec.source.local.stretch`): each site's `FoundationDBCluster` is one region of the
+shared database (`dataCenter` = site, the Join site seeded with the Bootstrap site's connection
+string), every control-plane pod gets `SB_CONTROL_PLANE_SITE`, and the second site registers its
+control plane with `POST /api/v2/management-nodes?cluster_id=<id>` (`{site, api_endpoint}`) instead
+of `control-plane add`. That route is served by every control plane whatever its mode, so the
+joining site registers against its own, standby, API. Kubernetes control planes all register under
+the placeholder address `0.0.0.0`; two registrations are told apart by their site, and the
+takeover probe asks such a site's recorded API endpoint rather than pinging the address.
 
 ## 4. Moving the lead
 
@@ -104,7 +112,8 @@ For the leading site being down. The command:
 1. refuses unless the cluster is stretched, the survivor has a control plane, and
    `--confirm-site-down` names the site that leads;
 2. probes the confirmed site (ping of every management node and storage node host, the node API
-   of every storage node) and **refuses while anything answers** (`detail.alive` in the API): a
+   of every storage node; a Kubernetes control plane through its recorded API endpoint instead of
+   a ping) and **refuses while anything answers** (`detail.alive` in the API): a
    takeover while the old leader is alive would drive the same storage nodes from two control
    planes;
 3. sets `leader_site` to the survivor and releases the lease on the holder's behalf with a new
