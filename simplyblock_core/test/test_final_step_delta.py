@@ -233,7 +233,11 @@ def test_a_retry_waits_until_the_old_chain_is_pruned_to_one(monkeypatch):
     snaps = [_osnap("S1", 1), _osnap("S2", 2), _osnap("S3", 3)]
     monkeypatch.setattr(runner.db, "get_snapshots_by_node_id", lambda nid: snaps)
     kicked = []
-    monkeypatch.setattr(sr, "prune_async", lambda lv, keep=None: kicked.append(keep) or True  # type: ignore[func-returns-value])
+    def _prune(lv, keep=None):
+        kicked.append(keep)
+        return True
+
+    monkeypatch.setattr(sr, "prune_async", _prune)
     task = SimpleNamespace(function_params={"prune_gate_since": 10.0})
     with pytest.raises(runner.TaskDefer):
         runner._prune_gate(task, _lvol())
