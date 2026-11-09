@@ -527,6 +527,17 @@ def task_runner(task: JobSchedule, tasks):
     # recover and the control plane time to reflect a down state in DB.
     if int(time.time()) < params.get("cutover_retry_after", 0):
         raise TaskDefer("waiting after connectivity failure")
+    # The clone of a failed final step is deleted before anything else: a new
+    # one is built under the same bdev name, and must not find the old one.
+    if params.get("discard_tgt_lvol_id") or params.get("discard_replication_id"):
+        task = _discard_failed_cutover(task)
+        params = task.function_params
+
+    # An endgame abandoned because its delta would not fit the final step
+    # (_abandon_endgame) waits out its back-off on the ordinary cadence.
+    if int(time.time()) < params.get("endgame_retry_after", 0):
+        raise TaskDefer("endgame backing off: the delta did not converge enough "
+                        "to freeze; retrying later")
 
     if src_node is None:
         raise TaskRetry("source node not found for cutover")
@@ -538,6 +549,18 @@ def task_runner(task: JobSchedule, tasks):
     if "start_time" not in params:
         task = _record(task, start_time=int(time.time()))
         params = task.function_params
+
+    # A clone prepared under a claim that a failed attempt released is stale:
+    # the source has taken cadence snapshots since, so the delta a freeze
+    # would copy no longer starts at the clone's base. Rebuild it after a
+    # fresh endgame. (Also what an attempt that failed before this rule, e.g.
+    # bf12's 2026-11-03 tasks, carries.)
+    if not params.get("cutover_lvs") and "tgt_lvol_composite" in params:
+        logger.warning("cutover for lvol %s: prepared clone %s is stale after a "
+                       "failed attempt; discarding it and returning to "
+                       "replicating", lvol_id, params.get("tgt_lvol_id"))
+        _abandon_prepared_cutover(task)
+        raise TaskDefer("discarding a stale cutover clone; the endgame starts over")
 
     # ---- WAIT FOR THE VOLUME TO CATCH UP -------------------------------- #
     # The iterative snapshots ARE the endgame. Until then the volume just
@@ -563,6 +586,7 @@ def task_runner(task: JobSchedule, tasks):
             raise TaskDefer("waiting for the initial copy to replicate before "
                             "the endgame")
         if lag is not None and lag > constants.REPL_CUTOVER_ENDGAME_LAG_SEC:
+            task = _bound_catchup_after_failed_endgame(task, lag)
             xfer_timing.stamp("await_catchup", lvol=lvol_id, ms=lag * 1000.0)
             # Not a failure: no retry burned, and the deadline is pushed out
             # because catching up is legitimate progress, not a stall.
@@ -573,6 +597,8 @@ def task_runner(task: JobSchedule, tasks):
                 "(lag %.0fs > %ds)" % (lag, constants.REPL_CUTOVER_ENDGAME_LAG_SEC))
 
         # Caught up (or no measurement): take the lvstore for the endgame.
+        if "catchup_since" in params:
+            drop_params(task, "catchup_since")
         task = _acquire_lvs_claim(task, lvol, tasks)
         params = task.function_params
         xfer_timing.stamp("endgame_entered", lvol=lvol_id, ms=(lag or 0) * 1000.0)
@@ -588,14 +614,35 @@ def task_runner(task: JobSchedule, tasks):
             raise TaskRetry(snap_err)
         params = task.function_params
 
+    # ---- EARLY PREPARE (REPL_CUTOVER_EARLY_PREPARE) ---------------------- #
+    # The clone and the replication record exist from the start of the
+    # endgame, so the operator's preconnect runs while the rounds converge
+    # instead of after them.
+    if (constants.REPL_CUTOVER_EARLY_PREPARE and params.get("cutover_lvs")
+            and "tgt_lvol_composite" not in params):
+        task = _prepare_early(task, lvol, src_node, tgt_node)
+        params = task.function_params
+
     # ---- SHRINK PHASE --------------------------------------------------- #
     # Skip shrink entirely once the cutover clone is prepared: tgt_lvol_composite
     # being set means shrink already completed on a prior pass and the clone was
     # created from the resulting snapshot. Every retry after a failed run_cutover
     # should jump straight to run_cutover without redoing any shrink rounds.
-    if "tgt_lvol_composite" not in params:
+    # An early-prepared clone exists before the rounds: shrink_converged says
+    # when they are over.
+    early = bool(params.get("early_prepared"))
+    if "tgt_lvol_composite" not in params or (early and not params.get("shrink_converged")):
         if "shrink_snap_id" in params and params.get("shrink_round", 0) > 0:
             _shrink_step(task, lvol)
+            task = _record(task, **({"shrink_converged": True} if early else {}))
+            params = task.function_params
+        # The rounds are over: the landing volume pre-staged for the next
+        # one is not going to be used. (An early-prepared cutover keeps
+        # converging while it waits for the preconnect, so it keeps it until
+        # the gate below.)
+        if not early:
+            task = _discard_spare_landing(task)
+            params = task.function_params
 
     # ---- CUTOVER PHASE (immediately after the last shrink round) -------- #
     # The freeze runs under the claim. A volume whose very first round was
@@ -611,7 +658,12 @@ def task_runner(task: JobSchedule, tasks):
         task = prepared
         params = task.function_params
 
-    _await_cutover_proceed(task, params)
+    if params.get("early_prepared"):
+        _await_proceed_converging(task, lvol, params)
+    else:
+        _await_cutover_proceed(task, params)
+    task = _discard_spare_landing(task)
+    params = task.function_params
 
     # Who freezes and who receives is resolved right before the freeze, on
     # every attempt: a member lost since the last pass is skipped, and one lost
@@ -625,6 +677,20 @@ def task_runner(task: JobSchedule, tasks):
     if tgt_exec is None:
         _record(task, last_error=f"no target member to receive on: {why}")
         raise TaskDefer(f"waiting for a settled target LVS leader ({why})")
+
+    if params.get("early_prepared"):
+        # The clone sits on the copy that was newest when it was built; the
+        # final step re-chains it onto the copy of the last round, which is
+        # what the source volume's delta is taken against.
+        task = _rebase_on_last_round(task)
+        params = task.function_params
+
+    # Marks the freeze as running: a plan cancel or a policy detach leaves a
+    # freezing cutover alone (tasks_controller.cutover_is_freezing). Written
+    # BEFORE the fence, and through the cancellation probe: a task canceled
+    # in the meantime aborts here, with nothing fenced.
+    task = _record(task, freeze_started_at=time.time())
+    params = task.function_params
 
     try:
         with xfer_timing.phase("run_cutover", lvol=lvol_id):
@@ -646,9 +712,108 @@ def task_runner(task: JobSchedule, tasks):
         _cutover_failed(task, str(e))
 
     if not ok:
-        _cutover_failed(task, err)
+        # run_cutover restored the source paths: nothing moved and the source
+        # still serves. Recoverable -- go back to converging.
+        _final_step_failed(task, err)
 
+    if params.get("early_prepared"):
+        _record_clone_base(params)
     _record_cutover_done(task)
+
+
+def _prepare_early(task, lvol, src_node, tgt_node):
+    """Build the cutover clone as the endgame starts (REPL_CUTOVER_EARLY_PREPARE).
+
+    The clone and the LVolReplication record are what the operator's
+    preconnect keys on; building them after the last round put the whole
+    preconnect (21-101 s on bed bf12, 2026-11-03) between that round and the
+    freeze, and every second of it into the frozen final step. Built here, the
+    preconnect runs alongside the rounds. Without a replicated copy to build
+    on yet, the clone is built after the rounds as before.
+    """
+    try:
+        with xfer_timing.phase("prepare_cutover_early", lvol=lvol.get_id()):
+            prepared = _prepare_cutover(task, lvol, src_node, tgt_node)
+    except TaskRetry as e:
+        logger.info("cutover for lvol %s: no early clone (%s); building it after "
+                    "the rounds", lvol.get_id(), e)
+        return task
+    if prepared is None:
+        raise TaskAbort("canceled while preparing cutover")
+    return _record(prepared, early_prepared=True)
+
+
+def _last_round_copy(params):
+    """(copy id, copy bdev) of the last round's snapshot on the target, or
+    (None, why)."""
+    snap_id = params.get("shrink_snap_id")
+    if not snap_id:
+        return None, "no shrink round on record"
+    try:
+        copy_id = db.get_snapshot_by_id(snap_id).target_replicated_snap_uuid
+    except KeyError:
+        return None, f"shrink snapshot {snap_id} disappeared"
+    if not copy_id:
+        return None, f"shrink round {params.get('shrink_round')} is not replicated yet"
+    try:
+        return copy_id, db.get_snapshot_by_id(copy_id).snap_bdev
+    except KeyError:
+        return None, f"copy {copy_id} of shrink snapshot {snap_id} disappeared"
+
+
+def _rebase_on_last_round(task):
+    """Point the final step at the last round's copy; defer until it exists.
+
+    The final step copies what was written since the source's newest snapshot,
+    the last shrink snapshot, so the target must sit on that snapshot's copy
+    -- never on an older one, whose missing rounds would read as holes.
+    """
+    copy_id, bdev = _last_round_copy(task.function_params)
+    if copy_id is None:
+        raise TaskDefer(f"waiting for the last round's copy: {bdev}")
+    if task.function_params.get("tgt_snap_composite") == bdev:
+        return task
+    return _record(task, tgt_snap_composite=bdev, tgt_snap_id=copy_id)
+
+
+def _record_clone_base(params):
+    """The target volume now reads through the last round's copy: say so on
+    its record (cloned_from_snap keeps that copy from being pruned under it)."""
+    tgt_lvol_id = params.get("tgt_lvol_id")
+    copy_id = params.get("tgt_snap_id")
+    if not (tgt_lvol_id and copy_id):
+        return
+    try:
+        copy = db.get_snapshot_by_id(copy_id)
+
+        def _apply(lv):
+            lv.cloned_from_snap = copy.get_id()
+            lv.snapshot_name = copy.snap_bdev
+        db.atomic_update(db.get_lvol_by_id(tgt_lvol_id), _apply)
+    except Exception as e:                                # noqa: BLE001
+        logger.error("Could not record %s as the base of cutover volume %s: %s",
+                     copy_id, tgt_lvol_id, e)
+
+
+def _await_proceed_converging(task, lvol, params):
+    """_await_cutover_proceed for an early-prepared clone: keep converging.
+
+    Waiting idle for the operator's signal lets the delta grow for as long as
+    the preconnect takes. With the clone already built, the final step can
+    sit on any later round's copy, so while the signal is outstanding another
+    round runs each pass and the freeze starts from the freshest one.
+    """
+    try:
+        _await_cutover_proceed(task, params)
+    except TaskDefer:
+        if _shrink_round_done(params.get("shrink_snap_id")):
+            _, err, task = _take_shrink_snapshot(task, lvol)
+            if err:
+                logger.warning("cutover for lvol %s: no round while waiting for "
+                               "the preconnect: %s", lvol.get_id(), err)
+            else:
+                drop_params(task, "shrink_converged")
+        raise
 
 
 def _cutover_source(lvol):
@@ -764,13 +929,62 @@ def _take_shrink_snapshot(task, lvol):
     with xfer_timing.phase("take_shrink_snapshot", lvol=lvol.get_id(),
                            round=params.get("shrink_round", 0) + 1):
         new_snap, err = replication_delta.add_snapshot(
-            lvol, f"repl_commit_{uuid_lib.uuid4()}",
+            lvol, params.get("next_shrink_snap_name") or _new_shrink_snap_name(),
             snap_type=SnapShot.TYPE_INTERNAL)
     if err:
         return None, f"shrink round {params.get('shrink_round', 0) + 1} snapshot failed: {err}"
+    # Name the NEXT round's snapshot now: the replication runner creates that
+    # round's landing volume (REP_<name>) while this round transfers
+    # (snapshot_replication._prestage_next_landing), so the next round adopts
+    # it instead of creating one on its critical path.
     task = _record(task, shrink_round=params.get("shrink_round", 0) + 1,
-                   shrink_snap_id=new_snap, shrink_started_at=time.time())
+                   shrink_snap_id=new_snap, shrink_started_at=time.time(),
+                   next_shrink_snap_name=_new_shrink_snap_name())
     return new_snap, None, task
+
+
+def _new_shrink_snap_name():
+    return f"repl_commit_{uuid_lib.uuid4()}"
+
+
+def _discard_spare_landing(task):
+    """Delete the landing volume pre-staged for a round that will not run.
+
+    The convergence names its next snapshot ahead of time and the replication
+    runner creates that round's landing volume early; once the rounds are
+    over, that volume is unused. The name is dropped from the task FIRST, so a
+    pre-stage racing with this sees it gone and deletes its own volume.
+    Best effort: a landing volume that survives this is an internal volume
+    without a transfer, which nothing else reclaims, so say so loudly.
+    """
+    try:
+        # The caller's copy may predate the rounds _shrink_step just ran.
+        name = (db.get_task_by_id(task.uuid).function_params or {}).get(
+            "next_shrink_snap_name")
+    except Exception:                                     # noqa: BLE001
+        name = (task.function_params or {}).get("next_shrink_snap_name")
+    if not name:
+        return task
+    task = drop_params(task, "next_shrink_snap_name") or task
+    rep_name = f"REP_{name}"
+    try:
+        spare = db.get_lvol_by_name(rep_name)
+    except KeyError:
+        return task
+    except Exception as e:                                # noqa: BLE001
+        logger.error("Could not look up the spare landing volume %s: %s", rep_name, e)
+        return task
+    if spare.status == LVol.STATUS_IN_DELETION:
+        return task
+    try:
+        from simplyblock_core.controllers import lvol_controller
+        logger.info("cutover for lvol %s: deleting the unused pre-staged landing "
+                    "volume %s", task.function_params.get("lvol_id"), rep_name)
+        lvol_controller.delete_lvol(spare, force_delete=True)
+    except Exception as e:                                # noqa: BLE001
+        logger.error("Could not delete the unused pre-staged landing volume %s "
+                     "(%s): %s", rep_name, spare.get_id(), e)
+    return task
 
 
 def _shrink_round_done(snap_id):
@@ -834,15 +1048,22 @@ def _shrink_step(task, lvol):
 
     while True:
         if int(time.time()) > deadline:
-            # Deadline expired: stop adding rounds and fall through to cutover
-            # rather than failing and burning a retry.  The freeze that follows
-            # is slightly larger than if we had converged, but proceeding is
-            # always better than another 900-second wait.
-            logger.warning(
-                "cutover convergence: lvol=%s shrink deadline expired after %d "
-                "rounds; proceeding to cutover", lvol.get_id(),
-                params.get("shrink_round", 0))
-            return
+            # Deadline expired: stop adding rounds. Freeze only if the final
+            # step can finish inside SPDK's limit; a freeze that cannot only
+            # darkens the volume for 12s and then fails (bf12 2026-11-03).
+            estimate = _final_delta_estimate(params)
+            if estimate <= constants.REPL_CUTOVER_FREEZE_MAX_ROUND_SEC:
+                logger.warning(
+                    "cutover convergence: lvol=%s shrink deadline expired after "
+                    "%d rounds (last round %.2fs); proceeding to cutover",
+                    lvol.get_id(), params.get("shrink_round", 0), estimate)
+                return
+            _abandon_endgame(task, lvol, (
+                f"shrink deadline expired after {params.get('shrink_round', 0)} "
+                f"rounds; last round {estimate:.2f}s exceeds the "
+                f"{constants.REPL_CUTOVER_FREEZE_MAX_ROUND_SEC:.1f}s a "
+                f"{constants.REPL_CUTOVER_FINAL_STEP_LIMIT_SEC}s final step can "
+                f"safely copy"))
 
         snap_id = params["shrink_snap_id"]
         done = _shrink_round_done(snap_id)
@@ -896,15 +1117,29 @@ def _shrink_step(task, lvol):
 
         if params["shrink_round"] >= constants.REPL_CUTOVER_MAX_SHRINK_ROUNDS:
             # Written faster than it replicates. Freezing now is still the best
-            # move -- the freeze at least stops the writes -- but say so.
+            # move IF the final step can copy the residual inside SPDK's
+            # limit -- the freeze at least stops the writes -- but say so.
+            if elapsed <= constants.REPL_CUTOVER_FREEZE_MAX_ROUND_SEC:
+                logger.warning(
+                    "cutover convergence: lvol=%s did not converge in %d rounds "
+                    "(last round %.2fs > %.2fs target); freezing, the round fits "
+                    "the %.1fs safe final-step window",
+                    lvol.get_id(), params["shrink_round"], elapsed,
+                    constants.REPL_CUTOVER_CONVERGE_TARGET_SEC,
+                    constants.REPL_CUTOVER_FREEZE_MAX_ROUND_SEC)
+                set_result(task, f"not converged after {params['shrink_round']} "
+                                 f"rounds (last {elapsed:.2f}s)")
+                return
+            # A residual that takes longer than this to copy fails the final
+            # step at SPDK's terminate timeout, after the source was fenced.
+            # Keep converging; shrink_deadline bounds it.
             logger.warning(
                 "cutover convergence: lvol=%s did not converge in %d rounds "
-                "(last round %.2fs > %.2fs target); freezing anyway",
-                lvol.get_id(), params["shrink_round"], elapsed,
-                constants.REPL_CUTOVER_CONVERGE_TARGET_SEC)
-            set_result(task, f"not converged after {params['shrink_round']} "
-                             f"rounds (last {elapsed:.2f}s)")
-            return
+                "(last round %.2fs > %.1fs safe for the %ds final step); not "
+                "freezing, taking another round", lvol.get_id(),
+                params["shrink_round"], elapsed,
+                constants.REPL_CUTOVER_FREEZE_MAX_ROUND_SEC,
+                constants.REPL_CUTOVER_FINAL_STEP_LIMIT_SEC)
 
         # IMMEDIATELY take the next snapshot. This is the whole mechanism: the
         # next round carries only what was written while this one transferred,
@@ -925,6 +1160,268 @@ def _shrink_step(task, lvol):
         if time.time() >= budget_end:
             raise TaskDefer(f"shrink round {params['shrink_round'] - 1} done "
                             f"({elapsed:.2f}s); continuing next pass")
+
+
+def _final_delta_estimate(params):
+    """How long the frozen final step would take to copy, as best known now.
+
+    The last completed round's duration -- or the age of the round still in
+    flight, when that is already longer. A task with no measurement at all is
+    NOT assumed fast (inf), for the same reason an unstamped round is not.
+    """
+    times = params.get("shrink_round_times") or []
+    estimate = float(times[-1]) if times else float("inf")
+    started = params.get("shrink_started_at")
+    done_at = params.get("shrink_round_done_at")
+    if started is not None and (done_at is None or done_at < started):
+        in_flight = time.time() - float(started)
+        estimate = in_flight if not times else max(estimate, in_flight)
+    return estimate
+
+
+# What one endgame accumulates. Dropping them returns the task to "replicating":
+# the next endgame takes a fresh first round (task_runner) under a new claim.
+_ENDGAME_ROUND_PARAMS = ("shrink_snap_id", "shrink_round", "shrink_round_times",
+                         "shrink_started_at", "shrink_round_done_at")
+
+
+def _abandon_endgame(task, lvol, reason) -> NoReturn:
+    """Give the endgame up without freezing, and retry it later.
+
+    Reached when the shrink deadline expires and no round was short enough
+    for the final step to finish inside SPDK's limit. Freezing then fails
+    with certainty, after fencing the source; waiting does not. So: release
+    the lvstore (other volumes replicate again), let this volume fall back to
+    its ordinary cadence, and come back after REPL_CUTOVER_ENDGAME_BACKOFF_SEC
+    -- write load is often bursty, and the next endgame is gated on catching
+    up again. It burns one attempt, so a volume that never converges ends in
+    the task's terminal failure rather than looping forever.
+    """
+    now = int(time.time())
+    retry_at = now + constants.REPL_CUTOVER_ENDGAME_BACKOFF_SEC
+    task = _record(task, last_error=reason, endgame_retry_after=retry_at,
+                   shrink_deadline=retry_at + constants.REPL_CUTOVER_SHRINK_TIMEOUT_SEC)
+    logger.warning("cutover attempt %d/%d for lvol %s abandoned before the freeze: "
+                   "%s; endgame retried in %ds", task.retry + 1, task.max_retry,
+                   lvol.get_id(), reason, constants.REPL_CUTOVER_ENDGAME_BACKOFF_SEC)
+    xfer_timing.stamp("endgame_abandoned", lvol=lvol.get_id(),
+                      round=task.function_params.get("shrink_round"))
+    task = _discard_spare_landing(task) or task
+    drop_params(task, *_ENDGAME_ROUND_PARAMS)
+    _release_lvs_claim(task)
+    raise TaskRetry(reason)
+
+
+# What _prepare_cutover establishes for ONE freeze. Its clone is chained on the
+# snapshot that was last replicated when it was built, so after a failed final
+# step none of it can be reused: the source keeps writing and taking cadence
+# snapshots, and a retry from the old base would copy a delta that no longer
+# starts where the clone does.
+_PREPARED_CUTOVER_PARAMS = ("tgt_lvol_composite", "tgt_lvol_id", "tgt_map_id",
+                            "tgt_snap_composite", "replication_id",
+                            "failback_source_lvol_id",
+                            "failback_prior_replication_id",
+                            "cutover_proceed_timeout", "freeze_started_at",
+                            # early-prepare mode: the next attempt re-prepares
+                            "early_prepared", "shrink_converged")
+
+
+def _revert_cutover_relationship(replication_id):
+    """Return the relationship of a cutover that did not happen from
+    cutover_pending to replicating; idempotent.
+
+    Left at cutover_pending it hands the client the target paths, reads as a
+    cutover still pending to the operator, and makes detach_policy /
+    stop_member_replication refuse the volume ("has a cutover in flight"):
+    bf12 2026-11-03, 15h+ with nothing able to release it. Only a pending
+    record is touched, never one that completed.
+
+    Returns False when the record cut over (or failed over) after all: the
+    caller must then leave its clone alone, it serves IO.
+    """
+    if not replication_id:
+        return True
+    try:
+        rep = db.get_lvol_replication_by_id(replication_id)
+    except KeyError:
+        return True
+    if rep.state in (LVolReplication.STATE_CUTOVER_DONE,
+                     LVolReplication.STATE_FAILED_OVER):
+        return False
+    if rep.state != LVolReplication.STATE_CUTOVER_PENDING:
+        return True
+    try:
+        rep.state = LVolReplication.STATE_REPLICATING
+        rep.cutover_proceed = False
+        # The record was created for THIS cutover's clone, which is being
+        # discarded: leaving it named would make get_relationship report a
+        # deleted volume as the target (and the operator connect to it).
+        rep.target_lvol = None  # type: ignore[assignment]
+        rep.target_nqn = ""
+        rep.target_ns_id = 0
+        rep.write_to_db(db.kv_store)
+        logger.info("cutover relationship %s back to replicating: the cutover "
+                    "did not happen", replication_id)
+    except Exception as e:                              # noqa: BLE001
+        logger.warning("Could not revert cutover relationship %s: %s",
+                       replication_id, e)
+    return True
+
+
+def _final_step_failed(task, err) -> NoReturn:
+    """A final step that failed after the source paths were restored.
+
+    Nothing moved: the source is authoritative and serving again (bf12
+    2026-11-03: fio saw no error). That is recoverable, so the volume goes
+    back to replicating and the endgame runs again later -- converging afresh
+    and building a new clone. The attempt counts against the task's budget
+    (TaskRetry); when the budget is spent the driver ends the task and
+    :func:`_cleanup_unfinished_cutover` releases what it held.
+
+    Before this the prepared clone was kept, so the retry went straight to a
+    second freeze from a stale base, or -- under heavy IO -- never re-entered
+    the endgame at all, leaving the volume cutover_pending for 15h+.
+    """
+    params = task.function_params
+    task = _abandon_prepared_cutover(task)
+    logger.warning("cutover for lvol %s: final step failed with the source "
+                   "restored; discarding the cutover clone %s and returning to "
+                   "replicating, the endgame is retried", params.get("lvol_id"),
+                   params.get("tgt_lvol_id"))
+    _cutover_failed(task, err)
+
+
+def _abandon_prepared_cutover(task):
+    """Drop the prepared clone and the endgame's round state; mark the clone
+    and relationship for :func:`_discard_failed_cutover`.
+
+    The relationship goes back to replicating at once; the clone is deleted
+    on a later pass, once SPDK has certainly ended any final step into it.
+    Dropping shrink_snap_id also ends the endgame's retention hold
+    (snapshot_replication._cutover_holds_retention), which otherwise held
+    every snapshot of the volume for as long as the task lived.
+    """
+    params = task.function_params
+    now = int(time.time())
+    # Recorded before anything is released, so a crash in between still
+    # finds the clone and relationship to discard on the next pass.
+    task = _record(
+        task,
+        discard_tgt_lvol_id=params.get("tgt_lvol_id", ""),
+        discard_replication_id=params.get("replication_id", ""),
+        # SPDK ends a final step at its terminate timeout; only then is it
+        # certain nothing still writes into the clone.
+        discard_after=now + constants.REPL_CUTOVER_FINAL_STEP_LIMIT_SEC,
+        shrink_deadline=now + constants.REPL_CUTOVER_SHRINK_TIMEOUT_SEC)
+    task = _discard_spare_landing(task) or task
+    task = drop_params(task, *(_PREPARED_CUTOVER_PARAMS + _ENDGAME_ROUND_PARAMS)) or task
+    _revert_cutover_relationship(task.function_params.get("discard_replication_id"))
+    return task
+
+
+def _delete_cutover_clone(clone_id):
+    """Start deleting the clone; True once it is gone, False while it is not."""
+    from simplyblock_core.controllers import lvol_controller
+    try:
+        clone = db.get_lvol_by_id(clone_id)
+    except KeyError:
+        return True
+    if clone.status == LVol.STATUS_DELETED:
+        return True
+    if clone.status != LVol.STATUS_IN_DELETION:
+        lvol_controller.delete_lvol(clone)
+    return False
+
+
+def _discard_failed_cutover(task):
+    """Finish discarding the clone and relationship of a failed final step.
+
+    Defers until the clone is gone: the next clone takes the same bdev name,
+    and the idempotent create would adopt the old one, chained on the old
+    base. A clone that cannot be deleted ends the task rather than parking it
+    forever.
+    """
+    params = task.function_params
+    _revert_cutover_relationship(params.get("discard_replication_id"))
+    clone_id = params.get("discard_tgt_lvol_id")
+    if clone_id:
+        now = time.time()
+        discard_after = params.get("discard_after", 0)
+        if now < discard_after:
+            raise TaskDefer("waiting for SPDK to end the failed final step "
+                            "before discarding its clone")
+        try:
+            gone = _delete_cutover_clone(clone_id)
+        except Exception as e:                          # noqa: BLE001
+            gone = False
+            task = _record(task, last_error=(
+                f"could not delete the failed cutover's clone {clone_id}: {e}"))
+        if not gone:
+            if now - discard_after > constants.REPL_CUTOVER_SHRINK_TIMEOUT_SEC:
+                raise TaskAbort(
+                    f"the failed cutover's clone {clone_id} was not deleted "
+                    f"within {constants.REPL_CUTOVER_SHRINK_TIMEOUT_SEC}s; the "
+                    f"volume stays on the source")
+            raise TaskDefer(f"waiting for the failed cutover's clone "
+                            f"{clone_id[:8]} to be deleted")
+    updated = drop_params(task, "discard_tgt_lvol_id", "discard_replication_id",
+                          "discard_after")
+    if updated is None:
+        raise TaskAbort("task canceled or finished underneath the cutover")
+    return updated
+
+
+def _bound_catchup_after_failed_endgame(task, lag):
+    """Bound the catch-up wait of a volume whose endgame already ran once.
+
+    The first catch-up may take as long as the initial copy does. Once an
+    endgame has run and failed or backed off, a volume that cannot get its
+    lag under REPL_CUTOVER_ENDGAME_LAG_SEC again -- written about as fast as
+    its cadence replicates -- would otherwise wait here forever, holding its
+    node's migration turn. Each REPL_CUTOVER_SHRINK_TIMEOUT_SEC of that burns
+    an attempt, so it ends in the task's terminal failure instead.
+    """
+    params = task.function_params
+    if not params.get("endgame_started_at"):
+        return task
+    now = int(time.time())
+    since = params.get("catchup_since")
+    if not since:
+        return _record(task, catchup_since=now)
+    if now - since <= constants.REPL_CUTOVER_SHRINK_TIMEOUT_SEC:
+        return task
+    drop_params(task, "catchup_since")
+    raise TaskRetry(f"replication did not catch up again within "
+                    f"{constants.REPL_CUTOVER_SHRINK_TIMEOUT_SEC}s after a failed "
+                    f"endgame (lag {lag:.0f}s)")
+
+
+def _cleanup_unfinished_cutover(task):
+    """RunnerSpec.on_finish: a cutover that ended without moving the volume
+    (gave up, aborted, canceled) releases its target clone and relationship.
+
+    The plan reads the task's terminal failure as a failed volume and the
+    node's migration turn passes on (migration_turn); what is left here is the
+    relationship, which otherwise stays cutover_pending forever, and the
+    suspended clone on the target.
+    """
+    params = task.function_params or {}
+    if params.get("end_time") or task.function_result == "cutover done":
+        return
+    if not _revert_cutover_relationship(params.get("discard_replication_id")
+                                        or params.get("replication_id")):
+        # The relationship says it cut over: the clone serves IO.
+        return
+    clone_id = params.get("discard_tgt_lvol_id") or params.get("tgt_lvol_id")
+    if not clone_id:
+        return
+    try:
+        _delete_cutover_clone(clone_id)
+        logger.info("cutover task %s ended without a cutover; deleting its "
+                    "clone %s", task.uuid, clone_id)
+    except Exception as e:                              # noqa: BLE001
+        logger.error("cutover task %s ended without a cutover and its clone %s "
+                     "could not be deleted: %s", task.uuid, clone_id, e)
 
 
 def _prepare_cutover(task, lvol, src_node, tgt_node):
@@ -1048,6 +1545,7 @@ SPEC = RunnerSpec(
     # driver has already read them.
     wants_cycle_tasks=True,
     dynamic_interval=_poll_interval,
+    on_finish=_cleanup_unfinished_cutover,
 )
 
 

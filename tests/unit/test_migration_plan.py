@@ -255,6 +255,25 @@ def test_volume_states_follow_the_cutover_task():
     assert s(_task("t", canceled=True))[0] == MigrationPlan.VOL_CANCELED
 
 
+def test_a_failed_final_step_is_not_left_cutting_over():
+    """bf12 2026-11-03: after a failed final step the volume sat in
+    cutover_pending for 15h+. The runner now drops the prepared clone and
+    goes back to replicating while it retries, and a spent attempt budget
+    ends the task -- which the plan reports as a terminal failure, freeing
+    the other volumes of the plan."""
+    s = mpc._volume_state
+    retrying = _task("t", JobSchedule.STATUS_SUSPENDED, "transfer_state='Failed'",
+                     discard_tgt_lvol_id="CLONE1", discard_replication_id="REP1")
+    assert s(retrying)[0] == MigrationPlan.VOL_REPLICATING
+    gave_up = _task("t", JobSchedule.STATUS_DONE,
+                    "max retry reached (8) after: transfer_state='Failed'",
+                    last_error="bdev_lvol_transfer_final_step: transfer_state='Failed'")
+    state, error = s(gave_up)
+    assert state == MigrationPlan.VOL_FAILED
+    assert state in MigrationPlan.VOL_TERMINAL
+    assert "Failed" in error
+
+
 def _plan_with(vols):
     plan = MigrationPlan()
     plan.uuid = "P"
@@ -303,19 +322,39 @@ def test_plan_outcome_once_every_volume_is_terminal(db):
     assert plan.status == MigrationPlan.STATUS_PARTIAL and plan.finished_at
 
 
-def test_cancel_spares_cutovers_that_prepared_their_clone(db, monkeypatch):
-    monkeypatch.setattr(JobSchedule, "write_to_db", lambda self, kv=None: None)
-    db.tasks = {"ta": _task("ta"), "tb": _task("tb", tgt_lvol_composite="x")}
+def _cancel_through_the_row(monkeypatch):
+    """tasks_controller cancels with a CAS on the row; apply it in place."""
+    def _cancel_atomically(task, mutate):
+        return task if mutate(task) is not False else None
+    monkeypatch.setattr(mpc.tasks_controller, "_cancel_atomically", _cancel_atomically)
+
+
+def test_cancel_spares_only_a_freezing_cutover(db, monkeypatch):
+    """A prepared clone waiting for its freeze -- or one whose final step
+    failed (bf12 2026-11-03) -- is canceled; only a cutover inside its IO
+    freeze, or one that already moved the volume, is left to finish."""
+    import time as _time
+    _cancel_through_the_row(monkeypatch)
+    db.tasks = {"ta": _task("ta"),
+                "tb": _task("tb", tgt_lvol_composite="x"),
+                "tc": _task("tc", tgt_lvol_composite="x",
+                            freeze_started_at=_time.time()),
+                "td": _task("td", tgt_lvol_composite="x", end_time=1)}
     plan = _plan_with([
         {"lvol_id": "a", "state": "replicating", "task_id": "ta", "error": ""},
         {"lvol_id": "b", "state": "cutting_over", "task_id": "tb", "error": ""},
+        {"lvol_id": "c", "state": "cutting_over", "task_id": "tc", "error": ""},
+        {"lvol_id": "d", "state": "cutting_over", "task_id": "td", "error": ""},
     ])
     monkeypatch.setattr(mpc, "get_plan", lambda pid, d=None: plan)
+    monkeypatch.setattr(MigrationPlan, "write_to_db", lambda self, kv=None: None)
 
     mpc.cancel_plan("P")
 
     assert db.tasks["ta"].canceled is True
-    assert not db.tasks["tb"].canceled
+    assert db.tasks["tb"].canceled is True
+    assert not db.tasks["tc"].canceled
+    assert not db.tasks["td"].canceled
     assert plan.status == MigrationPlan.STATUS_RUNNING
 
 

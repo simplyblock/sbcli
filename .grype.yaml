@@ -22,30 +22,31 @@ ignore:
       name: python
       type: binary
 
-  # tarfile extraction filter bypass: when extracting a link on a system
-  # without link support, tarfile falls back to extracting the member and runs
-  # the extraction filter twice, ignoring one of the results, so a member the
-  # filter should skip can still be written (arbitrary file write).
-  # Fixed in 3.15.0 only; there is no 3.14.x release carrying it, so
-  # `only-fixed` does not filter it out.
-  # The control plane only *creates* tarballs (`tarfile.open(..., "w:gz")` in
-  # scripts/collect_logs.py) and never extracts an archive, so the affected
-  # extraction path is not reachable.
-  - vulnerability: CVE-2026-87910
+  # Chunked/Content-Length response parsing mishandles non-hex or negative
+  # integers, letting HTTP response framing be misinterpreted
+  # (python/cpython#150751). Fixed in 3.16.0 only; there is no 3.14.x release
+  # carrying it, so `only-fixed` does not filter it out.
+  # The control plane never parses an HTTP response through stdlib
+  # http.client or urllib.request: rpc_client.py imports http.client only
+  # for the RemoteDisconnected exception class, and every actual RPC/HTTP
+  # call goes through requests, which parses chunked/length framing via
+  # urllib3, not this code path.
+  - vulnerability: CVE-2026-103995
     package:
       name: python
       type: binary
 
-  # tempfile.TemporaryDirectory cleanup race: an attacker who can modify the
-  # tree while it is being removed can swap a directory for a symlink, so the
-  # cleanup deletes files (or resets permissions/flags) outside the directory.
-  # Fixed in 3.15.0rc3 only (python/cpython#157579); there is no 3.14.x
-  # release carrying it, so `only-fixed` does not filter it out.
-  # We do use TemporaryDirectory (utils/__init__.py, scripts/collect_logs.py),
-  # but only for directories we create ourselves with mkdtemp's 0700 mode, and
-  # nothing else writes into them, so there is no attacker able to modify the
-  # tree during cleanup.
-  - vulnerability: CVE-2026-12345
+  # socket.getaddrinfo() silently truncates a host/port value containing a
+  # null byte instead of rejecting it (python/cpython#160898). Fixed in
+  # 3.16.0 only; there is no 3.14.x release carrying it, so `only-fixed`
+  # does not filter it out.
+  # utils.resolve_address() and tasks_runner_node_add's connectivity probe
+  # do pass a caller-supplied node address into getaddrinfo/create_connection
+  # (storage node add/restart), so this path is reachable -- but only from
+  # an already-authenticated management-plane caller naming a node address
+  # directly, so a truncated host at worst misdirects a connection to an
+  # address that same caller chose, not a path an untrusted party can reach.
+  - vulnerability: CVE-2026-116566
     package:
       name: python
       type: binary

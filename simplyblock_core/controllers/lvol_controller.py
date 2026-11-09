@@ -1418,6 +1418,9 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
             lvol.lvol_uuid = lvol_bdev['uuid']
             lvol.blobid = lvol_bdev['driver_specific']['lvol']['blobid']
 
+            secondary_nodes = _replicas_after_leader_failover(
+                lvol, host_node, primary_node, actual_leader, secondary_nodes)
+
             # Step 3: Execute registration on non-leaders that passed pre-check.
             # The Step-1 verdict is reused while fresh: re-sweeping the data-plane
             # quorum seconds after the pre-check re-verifies unchanged state and
@@ -1774,6 +1777,50 @@ def _mark_in_deletion(db_controller, lvol, snode):
     return fresh
 
 
+def _replicas_after_leader_failover(lvol, host_node, planned_leader, actual_leader,
+                                    replicas):
+    """The registration targets once the create has landed on ``actual_leader``.
+
+    ``replicas`` was planned against ``planned_leader``. When the create failed
+    there and execute_on_leader_with_failover retried it on a new leader, that
+    new leader is in the plan as a replica. Registering on it again fails with
+    "File exists", and the replica rollback then deleted the blob by name: the
+    only copy of the volume. Run bf12 2026-11-04 23:19, LVS_22/LVOL_1744: the
+    record survived without a blob, the sync-op repair failed on ENOENT
+    forever, and every restart of the old leader aborted on the missing bdev.
+
+    The new leader is dropped. The planned leader is now a replica that just
+    failed an operation, so its registration goes to the durable sync-op task
+    rather than being attempted inline.
+    """
+    if actual_leader is None or planned_leader is None \
+            or actual_leader.get_id() == planned_leader.get_id():
+        return replicas
+    logger.warning(
+        "lvol %s was created on %s after leadership moved from %s; "
+        "registering the replicas against the new leader",
+        lvol.get_id(), actual_leader.get_id()[:8], planned_leader.get_id()[:8])
+    tasks_controller.add_lvol_sync_op_task(
+        host_node.cluster_id, planned_leader.get_id(), lvol.get_id(),
+        "register", secondary_index=_lvol_secondary_index(lvol, planned_leader))
+    return [n for n in replicas if n.get_id() != actual_leader.get_id()]
+
+
+def _replica_rollback_would_hit_leader(lvol, rpc_client):
+    """Whether the node behind ``rpc_client`` leads ``lvol``'s lvstore.
+
+    A replica rollback deletes by bdev NAME. On the leader that name is the
+    volume's real blob, never a leftover of the failed registration, so the
+    rollback must not run there. An unanswered query counts as not the leader,
+    the behaviour this guard replaces.
+    """
+    try:
+        lvs = rpc_client.get_lvstore(lvol.lvs_name)
+    except Exception:                       # noqa: BLE001 - best effort
+        return False
+    return isinstance(lvs, dict) and lvs.get("lvs leadership") is True
+
+
 def _fail_after_bdev(lvol, rpc_client, msg, is_primary=True):
     """Rollback an in-progress add_lvol_on_node after _create_bdev_stack has
     already produced a bdev/blob. Without this, a post-bdev-stack failure (a
@@ -1802,7 +1849,16 @@ def _fail_after_bdev(lvol, rpc_client, msg, is_primary=True):
     front makes that unrepresentable: from here on the record is only ever
     removed by the monitor's delete state machine, which has to confirm the
     teardown first.
+
+    A replica rollback on the node that leads the lvstore is refused: there
+    the bdev name is the volume's real blob (see _replicas_after_leader_failover).
     """
+    if not is_primary and _replica_rollback_would_hit_leader(lvol, rpc_client):
+        logger.error(
+            "rollback: not tearing down %s for lvol %s: the node leads %s, so "
+            "the bdev is the volume's own blob, not a leftover of this "
+            "registration (%s)", lvol.top_bdev, lvol.get_id(), lvol.lvs_name, msg)
+        return False, msg
     db_controller = DBController()
     try:
         lvol.status = LVol.STATUS_IN_DELETION

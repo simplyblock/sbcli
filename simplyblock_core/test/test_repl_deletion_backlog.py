@@ -4,8 +4,7 @@
 and deletion lagged; every kept snapshot is one more copy generation behind
 every rewritten page. A volume with REPL_MAX_DELETION_BACKLOG snapshots waiting
 to be deleted takes no new internal snapshot, and an endgame holds at most
-REPL_CUTOVER_MAX_SHRINK_ROUNDS rounds. Both limits were raised to 32 on
-2026-11-04 (bed bf12: 4 rounds froze every volume unconverged under heavy IO).
+REPL_CUTOVER_MAX_SHRINK_ROUNDS rounds; the backlog limit follows that bound.
 """
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -68,13 +67,14 @@ def _run(backlog):
 
 
 def test_a_deletion_backlog_at_the_limit_holds_the_next_snapshot():
-    assert constants.REPL_MAX_DELETION_BACKLOG == 32
-    _run(32).assert_not_called()
+    limit = constants.REPL_MAX_DELETION_BACKLOG
+    assert limit == constants.REPL_CUTOVER_MAX_SHRINK_ROUNDS
+    _run(limit).assert_not_called()
 
 
 def test_below_the_limit_the_cadence_continues():
-    _run(31).assert_called_once()
+    _run(constants.REPL_MAX_DELETION_BACKLOG - 1).assert_called_once()
 
 
-def test_an_endgame_holds_at_most_32_rounds():
-    assert constants.REPL_CUTOVER_MAX_SHRINK_ROUNDS == 32
+def test_an_endgame_holds_at_most_12_rounds():
+    assert constants.REPL_CUTOVER_MAX_SHRINK_ROUNDS == 12

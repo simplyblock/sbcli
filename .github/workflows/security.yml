@@ -240,8 +240,21 @@ jobs:
         if: steps.grype-branch.outcome == 'failure' || steps.trivy-branch.outcome == 'failure'
         run: exit 1
 
-      - name: Notify Slack on scan failure
-        if: failure()
+      # Scoped to the two gating-scan steps specifically (not bare failure()):
+      # a bare failure() also fires when an earlier infra step (image pull,
+      # registry login, tag resolution) fails before any scan ran, and
+      # gating-summary -- the only source of the Findings field below --
+      # never ran either in that case, posting a "vulnerabilities found"
+      # alert with an empty Findings field for a problem that has nothing to
+      # do with vulnerabilities.
+      #
+      # always() is required here: neither branch of this condition calls a
+      # status-check function, so GitHub Actions implicitly ANDs it with
+      # success() -- and by this point "Fail if a gating scan found
+      # vulnerabilities" has already failed the job, so without always() this
+      # step (and the one below) would always be skipped, silently.
+      - name: Notify Slack on gating scan failure
+        if: always() && (steps.grype-branch.outcome == 'failure' || steps.trivy-branch.outcome == 'failure')
         uses: slackapi/slack-github-action@v2
         with:
           webhook: ${{ secrets.SLACK_CONTROL_PLANE_WEBHOOK }}
@@ -262,8 +275,34 @@ jobs:
               ]
             }
 
+      # Catches everything else that fails the job -- a flaky image pull,
+      # registry login, or tag resolution -- so it still gets surfaced, but
+      # as an infra failure rather than a false CVE alert.
+      - name: Notify Slack on workflow failure
+        if: failure() && steps.grype-branch.outcome != 'failure' && steps.trivy-branch.outcome != 'failure'
+        uses: slackapi/slack-github-action@v2
+        with:
+          webhook: ${{ secrets.SLACK_CONTROL_PLANE_WEBHOOK }}
+          webhook-type: incoming-webhook
+          payload: |
+            {
+              "text": ":warning: *Security scan workflow failed* (not a vulnerability finding) in `${{ github.repository }}`",
+              "attachments": [
+                {
+                  "color": "warning",
+                  "fields": [
+                    { "title": "Branch",   "value": "${{ matrix.branch }}", "short": true },
+                    { "title": "Workflow", "value": "<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View run>", "short": false }
+                  ]
+                }
+              ]
+            }
+
+      # always() is required: this condition has no status-check function, so
+      # it would otherwise implicitly AND with success() -- and a run that
+      # fails the gate is exactly when the pending list is worth having.
       - name: Notify Slack on pending-release CVEs
-        if: steps.diff.outputs.has_pending == 'true'
+        if: always() && steps.diff.outputs.has_pending == 'true'
         uses: slackapi/slack-github-action@v2
         with:
           webhook: ${{ secrets.SLACK_CONTROL_PLANE_WEBHOOK }}

@@ -4,6 +4,9 @@ metadata:
   name: {{ CORE_JOBNAME }}
   namespace: {{ NAMESPACE }}
 spec:
+  # A refusal is final: retried in place it only crash-loops until the
+  # agent's wait times out, with the reason in a dead pod's log.
+  backoffLimit: 0
   template:
     spec:
       restartPolicy: OnFailure
@@ -36,11 +39,14 @@ spec:
               MARKER="/var/simplyblock/.cpu_topology_applied"
 
               # Resource names — one MCP/MC/KC shared across all storage nodes in the cluster.
-              # The MCP nodeSelector grows as new nodes are added (In operator).
-              MCP_NAME="storage-{{ CLUSTER_ID }}"
-              MC_NAME="storage-mc-{{ CLUSTER_ID }}"
-              KC_NAME="storage-kubelet-{{ CLUSTER_ID }}"
-              KC_LABEL="storage-cpumanager-{{ CLUSTER_ID }}"
+              # The MCP nodeSelector grows as new nodes are added (In operator). The agent
+              # hands the names over from storage_mco_names, which its convergence gate
+              # reads them back from too.
+              MCP_NAME="{{ STORAGE_MCO.pool }}"
+              MC_NAME="{{ STORAGE_MCO.machine_config }}"
+              KC_NAME="{{ STORAGE_MCO.kubelet_config }}"
+              KC_LABEL="{{ STORAGE_MCO.kubelet_label }}"
+              MASTER_KC_NAME="{{ STORAGE_MCO.master_kubelet_config }}"
               HOSTNAME="{{ HOSTNAME }}"
 
               # ---- Order --------------------------------------------------
@@ -149,10 +155,91 @@ spec:
               KCEOF
               fi
 
+              # ---- Master nodes ---------------------------------------------
+              # MCO keeps a node carrying the master pool's label in the master pool
+              # even when a custom pool selects it, and ignores the custom pool
+              # ("defaulting to master", MCCPoolAlert). On a compact cluster every
+              # storage node is a master. Such a node gets the settings through the
+              # master pool instead, and joins no storage pool. Every master then gets
+              # the settings and reboots into them, one at a time. The master pool's
+              # maxUnavailable is never touched, because it keeps etcd quorum. A failed
+              # lookup stops the job rather than treat a master as a worker.
+              #
+              # The settings come from a KubeletConfig of their own that selects the
+              # master pool by the label it always carries. MCO's KubeletConfig
+              # controller evaluates a KubeletConfig when it is created or its spec
+              # changes, never when a pool's labels change, so giving the master pool
+              # the storage KubeletConfig's selector label afterwards renders nothing
+              # there. Only one cluster's settings can apply to the masters: a previous
+              # simplyblock cluster's master KubeletConfig, which a teardown leaves
+              # behind, is deleted, and MCO removes its generated config with it.
+              IS_MASTER=$(kubectl get nodes -l node-role.kubernetes.io/master \
+                --field-selector "metadata.name=$HOSTNAME" -o name)
+              RENDER_POOL="$MCP_NAME"
+              RENDER_MC="$MC_NAME"
+              RENDER_KC="$KC_NAME"
+              KEEP_POOL="$MCP_NAME"
+              if [ -n "$IS_MASTER" ]; then
+                RENDER_POOL="master"
+                # The storage MachineConfig selects the storage pool only.
+                RENDER_MC=""
+                RENDER_KC="$MASTER_KC_NAME"
+                KEEP_POOL=""
+                for OLD in $(kubectl get kubeletconfig -o name | sed 's#.*/##' \
+                    | grep '{{ STORAGE_MCO.master_kubelet_config_pattern }}' | grep -vx "$RENDER_KC" || true); do
+                  echo "[INFO] KubeletConfig $OLD is from a previous simplyblock cluster; deleting it"
+                  kubectl delete kubeletconfig "$OLD"
+                done
+                # This KubeletConfig owns reservedSystemCPUs on the masters; the
+                # core-isolation job's master KubeletConfig sets only the static CPU
+                # manager and must never set it. The reserved set is one for every
+                # master, so a master whose own differs stops rather than run the
+                # control plane and SPDK on another host's layout. Two masters' jobs
+                # can both find none: the second create fails, and that job compares
+                # with the one the first created.
+                cat <<KCEOF > /tmp/mcp-master-kc.yaml
+              apiVersion: machineconfiguration.openshift.io/v1
+              kind: KubeletConfig
+              metadata:
+                name: $RENDER_KC
+              spec:
+                machineConfigPoolSelector:
+                  matchLabels:
+                    pools.operator.machineconfiguration.openshift.io/master: ""
+                kubeletConfig:
+                  cpuManagerPolicy: static
+                  cpuManagerReconcilePeriod: 5s
+                  topologyManagerPolicy: single-numa-node
+                  reservedSystemCPUs: {{ RESERVED_SYSTEM_CPUS }}
+              KCEOF
+                while :; do
+                  if APPLIED_RESERVED=$(kubectl get kubeletconfig "$RENDER_KC" \
+                      -o jsonpath='{.spec.kubeletConfig.reservedSystemCPUs}' 2>/dev/null); then
+                    if [ "$APPLIED_RESERVED" != "{{ RESERVED_SYSTEM_CPUS }}" ]; then
+                      echo "[ERROR] $HOSTNAME is a master and reserves CPUs {{ RESERVED_SYSTEM_CPUS }}, but KubeletConfig $RENDER_KC reserves $APPLIED_RESERVED on every master"
+                      exit 1
+                    fi
+                    echo "[INFO] KubeletConfig $RENDER_KC already gives MCP master the kubelet settings"
+                    break
+                  fi
+                  if CREATE_OUT=$(kubectl create -f /tmp/mcp-master-kc.yaml 2>&1); then
+                    echo "[INFO] $HOSTNAME is a master: KubeletConfig $RENDER_KC gives MCP master the kubelet settings, and every master reboots into them, one at a time"
+                    break
+                  fi
+                  case "$CREATE_OUT" in
+                    *AlreadyExists*) echo "[INFO] Another master created KubeletConfig $RENDER_KC a moment ago" ;;
+                    *) echo "[ERROR] Creating KubeletConfig $RENDER_KC failed: $CREATE_OUT"; exit 1 ;;
+                  esac
+                done
+              fi
+
               # ---- Wait for the complete render -----------------------------
               # The render controller names the generated kubelet config
               # 99-<pool>-generated-kubelet, with a numeric suffix when another
-              # KubeletConfig already selects the pool, so the prefix is matched.
+              # KubeletConfig already selects the pool, so the prefix is matched, and
+              # the config must be owned by the pool's KubeletConfig: the name carries no
+              # owner, and after a rerun a previous cluster's config can hold the
+              # very name this one's takes.
               # The pool's target render is complete once its sources carry it and
               # the MachineConfig. A render that does not complete in time is not
               # waited on forever: a merely slow one still gets the host, at the
@@ -160,26 +247,30 @@ spec:
               # rejected never completes, and joining would put the host on a
               # render without the kubelet settings, to fail much later at the
               # NUMA readiness check, so that stops the job with the reason.
-              KC_GENERATED="99-${MCP_NAME}-generated-kubelet"
+              KC_GENERATED="99-${RENDER_POOL}-generated-kubelet"
               RENDER_WAIT=0
               while [ $RENDER_WAIT -lt 60 ]; do
-                SOURCES=$(kubectl get machineconfigpool "$MCP_NAME" \
+                SOURCES=$(kubectl get machineconfigpool "$RENDER_POOL" \
                   -o jsonpath='{range .spec.configuration.source[*]}{.name}{"\n"}{end}' 2>/dev/null || true)
-                if echo "$SOURCES" | grep -q "^${KC_GENERATED}" && echo "$SOURCES" | grep -qx "$MC_NAME"; then
-                  echo "[INFO] MCP $MCP_NAME has rendered $MC_NAME and $KC_GENERATED"
+                OWNED=$(kubectl get machineconfig --no-headers \
+                  -o 'custom-columns=NAME:.metadata.name,OWNERS:.metadata.ownerReferences[*].name' 2>/dev/null \
+                  | awk -v kc="$RENDER_KC" '{n = split($2, owner, ","); for (i = 1; i <= n; i++) if (owner[i] == kc) print $1}' || true)
+                GENERATED=$(echo "$SOURCES" | grep "^${KC_GENERATED}" | grep -xF "$OWNED" | head -n 1 || true)
+                if [ -n "$GENERATED" ] && { [ -z "$RENDER_MC" ] || echo "$SOURCES" | grep -qx "$RENDER_MC"; }; then
+                  echo "[INFO] MCP $RENDER_POOL has rendered $GENERATED${RENDER_MC:+ and $RENDER_MC}"
                   break
                 fi
                 RENDER_WAIT=$((RENDER_WAIT + 1))
-                echo "[INFO] Waiting for MCP $MCP_NAME to render $MC_NAME and $KC_GENERATED ($RENDER_WAIT/60)..."
+                echo "[INFO] Waiting for MCP $RENDER_POOL to render $KC_GENERATED${RENDER_MC:+ and $RENDER_MC} ($RENDER_WAIT/60)..."
                 sleep 5
               done
               if [ $RENDER_WAIT -ge 60 ]; then
-                echo "[WARN] MCP $MCP_NAME did not render $MC_NAME and $KC_GENERATED in 5 minutes"
+                echo "[WARN] MCP $RENDER_POOL did not render $KC_GENERATED${RENDER_MC:+ and $RENDER_MC} in 5 minutes"
                 echo "[WARN] KubeletConfig $KC_NAME conditions: $(kubectl get kubeletconfig "$KC_NAME" -o jsonpath='{.status.conditions}' 2>&1 || true)"
-                echo "[WARN] MCP $MCP_NAME conditions: $(kubectl get machineconfigpool "$MCP_NAME" -o jsonpath='{.status.conditions}' 2>&1 || true)"
+                echo "[WARN] MCP $RENDER_POOL conditions: $(kubectl get machineconfigpool "$RENDER_POOL" -o jsonpath='{.status.conditions}' 2>&1 || true)"
                 if kubectl get kubeletconfig "$KC_NAME" -o jsonpath='{.status.conditions[?(@.type=="Failure")].status}' 2>/dev/null | grep -q True \
-                   || kubectl get machineconfigpool "$MCP_NAME" -o jsonpath='{.status.conditions[?(@.type=="RenderDegraded")].status}' 2>/dev/null | grep -q True; then
-                  echo "[ERROR] MCO rejected the kubelet config of MCP $MCP_NAME; not joining $HOSTNAME to an incomplete render"
+                   || kubectl get machineconfigpool "$RENDER_POOL" -o jsonpath='{.status.conditions[?(@.type=="RenderDegraded")].status}' 2>/dev/null | grep -q True; then
+                  echo "[ERROR] MCO rejected the kubelet config of MCP $RENDER_POOL; not joining $HOSTNAME to an incomplete render"
                   exit 1
                 fi
                 echo "[WARN] Joining $HOSTNAME anyway"
@@ -192,33 +283,36 @@ spec:
               # the slot fails the test op and appends instead. A transient API
               # error, here as at the pool lookup, is retried rather than left to
               # abort the job and restart the whole flow.
-              JOIN_RETRY=0
-              while :; do
-                if EXISTING=$(pool_hosts "$MCP_NAME"); then
-                  if echo "$EXISTING" | grep -qx "$HOSTNAME"; then
-                    echo "[INFO] $HOSTNAME already in MCP nodeSelector, skipping patch"
-                    break
+              # A master joins none: MCO would ignore it there.
+              if [ -z "$IS_MASTER" ]; then
+                JOIN_RETRY=0
+                while :; do
+                  if EXISTING=$(pool_hosts "$MCP_NAME"); then
+                    if echo "$EXISTING" | grep -qx "$HOSTNAME"; then
+                      echo "[INFO] $HOSTNAME already in MCP nodeSelector, skipping patch"
+                      break
+                    fi
+                    if echo "$EXISTING" | grep -qx "$PENDING_HOST" && kubectl patch machineconfigpool "$MCP_NAME" --type=json \
+                        -p "[{\"op\": \"test\", \"path\": \"/spec/nodeSelector/matchExpressions/0/values/0\", \"value\": \"$PENDING_HOST\"},
+                             {\"op\": \"replace\", \"path\": \"/spec/nodeSelector/matchExpressions/0/values/0\", \"value\": \"$HOSTNAME\"}]"; then
+                      echo "[INFO] Added $HOSTNAME to MCP $MCP_NAME in place of $PENDING_HOST"
+                      break
+                    fi
+                    if kubectl patch machineconfigpool "$MCP_NAME" --type=json \
+                        -p "[{\"op\": \"add\", \"path\": \"/spec/nodeSelector/matchExpressions/0/values/-\", \"value\": \"$HOSTNAME\"}]"; then
+                      echo "[INFO] Added $HOSTNAME to MCP $MCP_NAME"
+                      break
+                    fi
                   fi
-                  if echo "$EXISTING" | grep -qx "$PENDING_HOST" && kubectl patch machineconfigpool "$MCP_NAME" --type=json \
-                      -p "[{\"op\": \"test\", \"path\": \"/spec/nodeSelector/matchExpressions/0/values/0\", \"value\": \"$PENDING_HOST\"},
-                           {\"op\": \"replace\", \"path\": \"/spec/nodeSelector/matchExpressions/0/values/0\", \"value\": \"$HOSTNAME\"}]"; then
-                    echo "[INFO] Added $HOSTNAME to MCP $MCP_NAME in place of $PENDING_HOST"
-                    break
+                  JOIN_RETRY=$((JOIN_RETRY + 1))
+                  if [ $JOIN_RETRY -ge 15 ]; then
+                    echo "[ERROR] Could not join $HOSTNAME to MCP $MCP_NAME"
+                    exit 1
                   fi
-                  if kubectl patch machineconfigpool "$MCP_NAME" --type=json \
-                      -p "[{\"op\": \"add\", \"path\": \"/spec/nodeSelector/matchExpressions/0/values/-\", \"value\": \"$HOSTNAME\"}]"; then
-                    echo "[INFO] Added $HOSTNAME to MCP $MCP_NAME"
-                    break
-                  fi
-                fi
-                JOIN_RETRY=$((JOIN_RETRY + 1))
-                if [ $JOIN_RETRY -ge 15 ]; then
-                  echo "[ERROR] Could not join $HOSTNAME to MCP $MCP_NAME"
-                  exit 1
-                fi
-                echo "[WARN] Joining $HOSTNAME to MCP $MCP_NAME failed, retry $JOIN_RETRY/15 in 2s..."
-                sleep 2
-              done
+                  echo "[WARN] Joining $HOSTNAME to MCP $MCP_NAME failed, retry $JOIN_RETRY/15 in 2s..."
+                  sleep 2
+                done
+              fi
 
               # ---- Enforce single storage-pool membership -------------------
               # A node belongs to exactly ONE storage MCP. A previous cluster
@@ -231,8 +325,10 @@ spec:
               # the worker pool and never eats an extra reboot. We only edit
               # nodeSelectors (never delete the old pool or its render), so the
               # node just moves between identical-content renders — no reboot —
-              # and the stale pool harmlessly shrinks toward empty.
-              for OTHER in $(kubectl get mcp -o name | sed 's#.*/##' | grep '^storage-' | grep -v "^${MCP_NAME}$"); do
+              # and the stale pool harmlessly shrinks toward empty. A master keeps no
+              # storage pool, the cluster's own included: an earlier attempt may have
+              # listed it there, where MCO ignores it and raises MCCPoolAlert.
+              for OTHER in $(kubectl get mcp -o name | sed 's#.*/##' | grep '^storage-' | grep -v "^${KEEP_POOL}$"); do
                 RETRY=0
                 # Retry: sibling node-add jobs may patch the same stale pool
                 # concurrently; each job loops until ITS hostname is gone, which
@@ -269,6 +365,23 @@ spec:
               # NUMA-plugin readiness. SPDK start is gated separately by the agent
               # (it waits for the MCO reboot to actually land), so correctness no
               # longer depends on this marker being in sync.
+              #
+              # A master has no reboot due when it already runs the master pool's
+              # target render: the first master's add rolls every master into the
+              # settings, and a later master's own job has no marker. Its current
+              # config carries the target's content hash and MCO is done with it.
+              # A worker keeps the first-time wait.
+              if [ ! -f "$MARKER" ] && [ -n "$IS_MASTER" ]; then
+                TARGET=$(kubectl get machineconfigpool master -o jsonpath='{.spec.configuration.name}' 2>/dev/null || true)
+                CURRENT=$(kubectl get node "$HOSTNAME" \
+                  -o jsonpath='{.metadata.annotations.machineconfiguration\.openshift\.io/currentConfig}' 2>/dev/null || true)
+                STATE=$(kubectl get node "$HOSTNAME" \
+                  -o jsonpath='{.metadata.annotations.machineconfiguration\.openshift\.io/state}' 2>/dev/null || true)
+                if [ -n "$TARGET" ] && [ -n "$CURRENT" ] && [ "${CURRENT##*-}" = "${TARGET##*-}" ] && [ "$STATE" = "Done" ]; then
+                  echo "[INFO] $HOSTNAME already runs $TARGET; no reboot is due"
+                  touch "$MARKER"
+                fi
+              fi
               if [ -f "$MARKER" ]; then
                   echo "[INFO] Node already configured. Waiting for numa-align/numa-{{ NSOCKET }} to be allocatable..."
                   RETRIES=0
