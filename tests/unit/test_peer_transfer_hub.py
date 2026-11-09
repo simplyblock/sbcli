@@ -7,7 +7,7 @@ primary of, where its regular transfer hub lives. Hub blobs are in-memory, so
 a non-primary member can create one.
 """
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.storage_node import StorageNode
@@ -100,53 +100,10 @@ def _task():
     return t
 
 
-def _snapshot():
-    lvol = SimpleNamespace(node_id="P", nodes=["P"], lvs_name="LVS_1", get_id=lambda: "lvol-1")
-    return SimpleNamespace(lvol=lvol, snap_bdev="LVS_1/SNAP_1", get_id=lambda: "snap-1",
-                           status="in_replication")
-
-
-def _start_with_leader(leader_id):
-    tp = _member("TP", "LVS_T1", sec="TS", ter="TT")
-    nodes = {"TP": tp, "TS": _member("TS", "LVS_T2"), "TT": _member("TT", "LVS_T3")}
-    remote = SimpleNamespace(node_id="TP", nodes=["TP", "TS", "TT"], lvs_name="LVS_T1",
-                             cluster_id="CL2", top_bdev="LVS_T1/REP_1")
-    db = MagicMock()
-    db.get_lvol_by_id.return_value = remote
-    db.get_storage_node_by_id.side_effect = lambda nid: nodes[nid]
-    src = MagicMock()
-    task = _task()
-    with patch.object(sr, "db", db), \
-            patch.object(sr, "_lvs_transfer_hold", return_value=None), \
-            patch.object(sr, "_select_source_node", return_value=(src, "primary P")), \
-            patch.object(sr, "_unreplicated_local_ancestor", return_value=("ok", None, "")), \
-            patch.object(sr, "_stable_target_leader", return_value=(nodes[leader_id], "")), \
-            patch("simplyblock_core.services.replication_final_step.ensure_hub_attached",
-                  return_value=(None, None, "stop here")) as hub:
-        sr.process_snap_replicate_start(task, _snapshot())
-    return task, hub, nodes
-
-
-def test_a_secondary_leader_receives_through_its_hub_on_the_target_lvstore():
-    task, hub, nodes = _start_with_leader("TS")
-    hub.assert_called_once()
-    _, tgt, lvs_primary = hub.call_args.args
-    assert tgt is nodes["TS"] and lvs_primary is nodes["TP"]
-
-
-def test_the_primary_still_receives_through_its_own_hub():
-    task, hub, nodes = _start_with_leader("TP")
-    _, tgt, lvs_primary = hub.call_args.args
-    assert tgt is nodes["TP"] and lvs_primary is nodes["TP"]
-
-
-def test_a_tertiary_leader_still_waits():
-    """SPDK never demuxes hub IO on a tertiary (node_role check in
-    vbdev_lvol_submit_request); until the fork allows it, the start waits."""
-    task, hub, _ = _start_with_leader("TT")
-    hub.assert_not_called()
-    assert task.retry == 0
-    assert "tertiary" in task.function_result
+# Which member receives, through which hub (a secondary leader through its hub
+# on the target lvstore, the primary through its own, a tertiary not at all)
+# is decided on the destination (peer.service.ensure_hub): see
+# tests/integration/test_landing_preparation.py::TestEnsureHub.
 
 
 def test_detach_closes_the_controller_that_was_attached():

@@ -30,6 +30,7 @@ from simplyblock_core.peer.protocol import (
     PEER_API_VERSION,
     ChainCheck,
     DescribeRequest,
+    EnsureHubRequest,
     LandingRequest,
 )
 
@@ -279,3 +280,26 @@ class TestPrepareLanding:
 
         with pytest.raises(PeerRefusedError, match="Storage node is not online"):
             _client().prepare_landing(self.REQUEST)
+
+
+class TestEnsureHub:
+
+    def test_asks_for_the_landing_volume_and_reads_the_address(self, session_request):
+        session_request.return_value = _response(body={
+            "state": "ready", "leader_node_id": "TS", "map_id": 7,
+            "hub": {"bdev_name": "b", "remote_bdev_name": "rb", "nqn": "nqn:h", "port": 4430,
+                    "paths": [{"ip": "10.0.0.2", "trtype": "TCP"}]}})
+
+        answer = _client().ensure_hub(EnsureHubRequest(landing_lvol_id="R1"))
+
+        method, url = session_request.call_args.args
+        assert method == "POST"
+        assert url == (f"https://cp-b.example:8443/api/v2/_peer/clusters/{CLUSTER_ID}"
+                       f"/landing-volumes/R1/hub")
+        assert (answer.state, answer.map_id, answer.hub.paths[0].ip) == ("ready", 7, "10.0.0.2")
+
+    def test_an_unknown_landing_volume_is_not_found(self, session_request):
+        session_request.return_value = _response(status=404, body={"detail": "LVol R1 not found"})
+
+        with pytest.raises(PeerNotFoundError):
+            _client().ensure_hub(EnsureHubRequest(landing_lvol_id="R1"))

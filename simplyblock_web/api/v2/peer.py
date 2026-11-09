@@ -22,6 +22,8 @@ from simplyblock_core.peer import service
 from simplyblock_core.peer.protocol import (
     DescribeRequest,
     DescribeResponse,
+    EnsureHubRequest,
+    EnsureHubResponse,
     LandingRequest,
     LandingResponse,
     PeerInfo,
@@ -69,3 +71,13 @@ def prepare_landing(cluster: Cluster, request: LandingRequest) -> LandingRespons
         raise HTTPException(status_code=404, detail=str(e))
     except PreconditionError as e:
         raise HTTPException(status_code=409, detail=str(e))
+
+
+@api.post('/landing-volumes/{lvol_id}/hub', name='peer:landing-volumes:hub')
+def ensure_hub(cluster: Cluster, lvol_id: UUID) -> EnsureHubResponse:
+    """Get this cluster ready to receive a transfer into a landing volume: its
+    settled leader, the receiving hub's attach address and the volume's map id."""
+    try:
+        return service.ensure_hub(cluster.get_id(), EnsureHubRequest(landing_lvol_id=str(lvol_id)))
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))

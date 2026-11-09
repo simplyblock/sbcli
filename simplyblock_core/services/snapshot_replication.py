@@ -24,6 +24,7 @@ from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.peer import service as peer_service
 from simplyblock_core.peer.client import (
     LocalPeerClient,
     PeerClient,
@@ -31,7 +32,12 @@ from simplyblock_core.peer.client import (
     PeerRefusedError,
     peer_for_target,
 )
-from simplyblock_core.peer.protocol import ChainCheck, DescribeRequest, LandingRequest
+from simplyblock_core.peer.protocol import (
+    ChainCheck,
+    DescribeRequest,
+    EnsureHubRequest,
+    LandingRequest,
+)
 from simplyblock_core.rpc_client import RPCException
 
 logger = utils.get_logger(__name__)
@@ -930,95 +936,34 @@ def process_snap_replicate_start(task, snapshot):
         task.write_to_db()
 
     remote_lv = db.get_lvol_by_id(task.function_params["remote_lvol_id"])
-    # Send to the member of the target lvstore that leads it NOW, once that
-    # leadership is settled -- the hub only accepts receive IO on the leader,
-    # leadership does not return to the recorded node on its own after an
-    # outage, and a move in progress must not get the transfer (see
-    # _stable_target_leader). Checked before every transfer, so a move in the
-    # idle window between two runs is followed too.
-    # Replication only ever connects to an EXISTING, settled leader; it never
-    # claims, grants or forces leadership on the target (bf8 2026-11-02: a
-    # recovery run from here, during a forced shutdown of the target primary,
-    # left LVS_10 with two leaders and corrupted metadata). A leaderless
-    # target is waited out: the transfer stays suspended and the RPO grows.
-    remote_lv_node, lead_why = _stable_target_leader(remote_lv)
-    if remote_lv_node is None:
+    # One call to the destination (ensure_hub) gets it ready to receive: its
+    # settled leader (never a tertiary), the receiving hub, the landing
+    # volume's map id, and the checks that the volume is not a snapshot yet and
+    # the leader still leads. A leaderless target is waited out, not failed:
+    # the transfer stays suspended and the RPO grows.
+    hub = _landing_peer(snapshot, remote_lv).ensure_hub(
+        EnsureHubRequest(landing_lvol_id=task.function_params["remote_lvol_id"]))
+    if hub.state == "unsettled":
         # Waiting, not failing: the target's leadership is not this transfer's
         # fault, and counting it let a leaderless window kill the task.
-        _suspend_for_retry(task, f"target leadership not established "
-                                 f"({lead_why}), retrying",
+        _suspend_for_retry(task, f"{hub.reason}, retrying",
                            backoff=True, count=_switches_exhausted(task))
         return
-    # Who may receive. The transfer goes through a hub, and SPDK demuxes hub IO
-    # by map id in the HUB's own lvstore (vbdev_hublvol_submit_request): the
-    # primary receives through its own transfer hub, an acting SECONDARY
-    # through its per-lvstore hub on the target lvstore
-    # (replication_final_step.receiving_hub). A TERTIARY never demuxes hub IO
-    # (the node_role check in vbdev_lvol_submit_request), so while one leads,
-    # the start waits -- not the transfer's fault, not counted.
-    try:
-        lvs_primary = db.get_storage_node_by_id(remote_lv.node_id)
-    except KeyError:
-        _suspend_for_retry(task, f"target lvstore primary {remote_lv.node_id} unknown, "
-                                 f"retrying", backoff=True)
+    _note_switch(task, "target_node_id", hub.leader_node_id, "target leader")
+    if hub.state == "failed":
+        logger.error(hub.reason)
+        _suspend_for_retry(task, f"{hub.reason}, retrying", backoff=hub.backoff)
         return
-    if remote_lv_node.get_id() not in (lvs_primary.get_id(), lvs_primary.secondary_node_id):
-        _suspend_for_retry(task, f"target lvstore {remote_lv.lvs_name} is led by its "
-                                 f"tertiary {remote_lv_node.get_id()}, which cannot "
-                                 f"receive a transfer; waiting for the primary or "
-                                 f"secondary", backoff=True, count=_switches_exhausted(task))
-        return
-    _note_switch(task, "target_node_id", remote_lv_node.get_id(), "target leader")
-
-    # 2 attach the TARGET NODE'S TRANSFER HUBLVOL on the source. Transfers must
-    # go over a hublvol: the fork demuxes each write by the map id carried in
-    # the top 16 bits of the LBA (lvol_map.lvol[offset >> 48]) and that demux
-    # only exists on a hublvol namespace. The receiving volume's own namespace
-    # is not a valid transfer gateway. This mirrors the (working) migration
-    # runner, which has always sent bulk transfers hub+map_id.
-    from simplyblock_core.services.replication_final_step import ensure_hub_attached
-    xfer_timing.gap("landing_volume_create", _t_landing,
-                    snap=snapshot.get_id(), lvol=snapshot.lvol.get_id())
-    with xfer_timing.phase("hub_attach", snap=snapshot.get_id(),
-                           lvol=snapshot.lvol.get_id(),
-                           tgt=remote_lv_node.get_id()):
-        _hub_ctrl, hub_bdev, hub_err = ensure_hub_attached(
-            snode.rpc_client(), remote_lv_node, lvs_primary)
-    if not hub_err:
-        task.function_params["hub_ctrl"] = _hub_ctrl
-    if hub_err:
-        logger.error(f"Transfer hub attach failed: {hub_err}")
-        _suspend_for_retry(task, f"transfer hub attach failed: {hub_err}, retrying",
-                           backoff=True)
-        return
-
-    # The receiving volume's map id rides in every write's LBA (see above); the
-    # hub uses it to route the data into the receiving volume. Without it the
-    # transfer cannot land.
-    ret = remote_lv_node.rpc_client().bdev_get(remote_lv.top_bdev)
-    try:
-        remote_map_id = ret["driver_specific"]["lvol"]["map_id"]
-    except (TypeError, KeyError):
-        remote_map_id = None
-    if not remote_map_id:
-        logger.error(f"map_id of receiving lvol {remote_lv.top_bdev} not found on "
-                     f"{remote_lv.node_id}; not starting a transfer that cannot land")
-        _suspend_for_retry(task, "receiving lvol map_id unavailable, retrying")
-        return
-
-    # Never transfer into a snapshot. The landing volume is written ONLY
-    # before it is converted; after the convert it is part of the target's
-    # snapshot chain, and a write into it fails -- on 2026-09-29 every such
-    # write made the target LVS drop its leadership and fence its ports
-    # (14 times in 11 minutes). A landing volume that is already a snapshot on
-    # any member here, without this task knowing its transfer completed (that
-    # case resumes the finish, see _resume_finish), holds data of unknown
-    # completeness: discard it and start over on a fresh one.
-    converted_on = _landing_volume_snapshot_members(remote_lv)
-    if converted_on:
+    if hub.state == "converted":
+        # Never transfer into a snapshot. The landing volume is written ONLY
+        # before it is converted; after the convert it is part of the target's
+        # snapshot chain. One that is already a snapshot here, without this task
+        # knowing its transfer completed (that case resumes the finish, see
+        # _resume_finish), holds data of unknown completeness: discard it and
+        # start over on a fresh one.
         logger.error("Replication task %s: landing volume %s is already a snapshot on %s; "
                      "refusing to transfer into it, discarding it and starting over",
-                     task.uuid, remote_lv.top_bdev, ", ".join(converted_on))
+                     task.uuid, remote_lv.top_bdev, ", ".join(hub.converted_on))
         try:
             _landing_peer(snapshot, remote_lv).discard_landing(remote_lv.get_id())
         except Exception as e:                            # noqa: BLE001
@@ -1026,21 +971,38 @@ def process_snap_replicate_start(task, snapshot):
         for key in ("remote_lvol_id", "converted_nodes", "offset", "transfer_done"):
             task.function_params.pop(key, None)
         _suspend_for_retry(task, f"landing volume {remote_lv.top_bdev} was already a snapshot "
-                                 f"on {', '.join(converted_on)}; discarded, retrying",
+                                 f"on {', '.join(hub.converted_on)}; discarded, retrying",
                            backoff=True)
         return
-
-    # NOTE deliberately NO bdev_lvol_set_migration_flag here: the flag drives the
-    # distrib-level special_io machinery of INTRA-cluster migration; it has no
-    # place in a cross-cluster receive (the source cluster's map/COW context does
-    # not exist on the target cluster).
-    # The hub rejects receive IO on a non-leader ("receive io for hublvol in
-    # nonleader mode"); do not start a transfer that cannot land.
-    if not _require_lvs_leader(remote_lv_node, remote_lv.lvs_name, "transfer receive"):
-        _suspend_for_retry(task, f"target node {remote_lv_node.get_id()} not LVS "
-                                 f"leader of {remote_lv.lvs_name}, retrying",
-                           backoff=True, count=False)
+    if hub.state == "not_leader":
+        _suspend_for_retry(task, f"{hub.reason}, retrying", backoff=True, count=False)
         return
+
+    # 2 attach the target's receiving hub on the source. Transfers must go
+    # over a hublvol: the fork demuxes each write by the map id carried in the
+    # top 16 bits of the LBA (lvol_map.lvol[offset >> 48]) and that demux only
+    # exists on a hublvol namespace. The receiving volume's own namespace is not
+    # a valid transfer gateway. This mirrors the (working) migration runner,
+    # which has always sent bulk transfers hub+map_id.
+    # NOTE deliberately NO bdev_lvol_set_migration_flag: the flag drives the
+    # distrib-level special_io machinery of INTRA-cluster migration; it has no
+    # place in a cross-cluster receive.
+    from simplyblock_core.services.replication_final_step import attach_hub_address
+    xfer_timing.gap("landing_volume_create", _t_landing,
+                    snap=snapshot.get_id(), lvol=snapshot.lvol.get_id())
+    with xfer_timing.phase("hub_attach", snap=snapshot.get_id(),
+                           lvol=snapshot.lvol.get_id(), tgt=hub.leader_node_id):
+        _hub_ctrl, hub_bdev, hub_err = attach_hub_address(snode.rpc_client(), hub.hub)
+    if hub_err:
+        logger.error(f"Transfer hub attach failed: {hub_err}")
+        _suspend_for_retry(task, f"transfer hub attach failed: {hub_err}, retrying",
+                           backoff=True)
+        return
+    task.function_params["hub_ctrl"] = _hub_ctrl
+    remote_map_id = hub.map_id
+    # The delta decision below still reads the target's records directly; it
+    # moves behind the peer client with the chain step.
+    remote_lv_node = db.get_storage_node_by_id(hub.leader_node_id)
 
     allow_partial, partial_base = _partial_transfer_decision(
         task, snapshot, replicate_to_source, remote_lv, remote_lv_node, snode.get_id())
@@ -1130,30 +1092,9 @@ def process_snap_replicate_start(task, snapshot):
 
 
 def _landing_volume_snapshot_members(remote_lv):
-    """Ids of the online target members on which *remote_lv* is a snapshot.
-
-    Reads SPDK's own view (bdev driver_specific.lvol.snapshot) on every online
-    member of the target lvstore: the control plane's record cannot say
-    whether an earlier attempt converted the volume on some members only. A
-    member that cannot be asked is skipped; the transfer's own leader probe
-    decides about it.
-    """
-    members = []
-    for node_id in (getattr(remote_lv, "nodes", None) or [remote_lv.node_id]):
-        try:
-            node = db.get_storage_node_by_id(node_id)
-        except KeyError:
-            continue
-        if node.status != StorageNode.STATUS_ONLINE:
-            continue
-        try:
-            ret = node.rpc_client().bdev_get(remote_lv.top_bdev)
-            if ret and ret.get("driver_specific", {}).get("lvol", {}).get("snapshot"):
-                members.append(node.get_id())
-        except Exception as e:                            # noqa: BLE001
-            logger.warning("Could not read landing volume %s on %s: %s",
-                           remote_lv.top_bdev, node.get_id(), e)
-    return members
+    """Ids of the online target members on which *remote_lv* is a snapshot
+    (peer.service.converted_members)."""
+    return peer_service.converted_members(db, remote_lv)
 
 
 def _receiving_leader_node(remote_lv):
@@ -1273,64 +1214,19 @@ def _select_source_node(snapshot, exclude=()):
 
 
 def _leaders_of(lvol_like):
-    """Ids of the online members of *lvol_like*'s lvstore reporting leadership."""
-    from simplyblock_core.controllers import lvol_controller
-    leaders = []
-    for node_id in _source_members(lvol_like):
-        try:
-            node = db.get_storage_node_by_id(node_id)
-        except KeyError:
-            continue
-        if node.status != StorageNode.STATUS_ONLINE:
-            continue
-        try:
-            if lvol_controller.is_node_leader(node, lvol_like.lvs_name):
-                leaders.append(node)
-        except Exception as e:                            # noqa: BLE001
-            logger.warning("Leadership probe failed on %s: %s", node.get_id(), e)
-    return leaders
+    """The online members of *lvol_like*'s lvstore reporting leadership."""
+    return peer_service.lvs_leaders(db, lvol_like)
 
 
-# (cluster id, lvstore) -> (leader id, time it was last confirmed settled)
-_SETTLED_LEADER: dict = {}
+_SETTLED_LEADER = peer_service._SETTLED_LEADER   # the settle cache lives with the settle
+
 
 
 def _stable_target_leader(remote_lv):
     """The member that leads the TARGET lvstore once leadership is settled; or
-    (None, why).
-
-    Leadership is "re-established" when exactly one online member reports it,
-    and the same member again REPL_LEADER_SETTLE_SEC later. A move in progress
-    shows the old member, then none or two, then the new one; a transfer or
-    convert sent in that window lands on a member that is about to stop being
-    the leader (the hub refuses receive IO in non-leader mode, a convert on a
-    non-leader silently persists nothing). The probe is SPDK's own "lvs
-    leadership" -- the very flag the hub and convert check -- so a member it
-    does not show as leader cannot take the transfer, whatever else is known.
-    """
-    first = _leaders_of(remote_lv)
-    key = (getattr(remote_lv, "cluster_id", ""), remote_lv.lvs_name)
-    if len(first) != 1:
-        _SETTLED_LEADER.pop(key, None)
-        return None, (f"{len(first)} members of {remote_lv.lvs_name} report leadership"
-                      + (f" ({', '.join(n.get_id()[:8] for n in first)})" if first else ""))
-    # The runner is single-threaded and sends many volumes' snapshots into one
-    # lvstore: settling every one of them would add the settle time per
-    # transfer. A leader confirmed settled moments ago and seen alone again
-    # now is still settled.
-    cached = _SETTLED_LEADER.get(key)
-    if (cached and cached[0] == first[0].get_id()
-            and time.time() - cached[1] < constants.REPL_LEADER_SETTLED_FOR_SEC):
-        return first[0], ""
-    time.sleep(constants.REPL_LEADER_SETTLE_SEC)
-    second = _leaders_of(remote_lv)
-    if len(second) != 1 or second[0].get_id() != first[0].get_id():
-        _SETTLED_LEADER.pop(key, None)
-        return None, (f"leadership of {remote_lv.lvs_name} is moving "
-                      f"({first[0].get_id()[:8]} -> "
-                      f"{', '.join(n.get_id()[:8] for n in second) or 'none'})")
-    _SETTLED_LEADER[key] = (second[0].get_id(), time.time())
-    return second[0], ""
+    (None, why). See peer.service.stable_leader, where the settle runs; the
+    finish path calls it here until it moves behind the peer client."""
+    return peer_service.stable_leader(db, remote_lv)
 
 
 def _attached_hub_ctrl(task, hub_node):
@@ -1434,21 +1330,9 @@ def _switches_exhausted(task):
 
 
 def _require_lvs_leader(node, lvs_name, what):
-    """True when *node* currently holds LVS leadership for *lvs_name*.
-
-    Transfers into a hub on a non-leader fail loudly, but bdev_lvol_convert on a
-    non-leader DEGRADES SILENTLY: the fork's non-leader branch marks the blob
-    CLEAN and replies success without persisting anything — the "snapshot"
-    looks converted while its metadata never reached the journal. Leadership
-    must therefore be verified BEFORE the operation; on False the caller
-    suspends and retries rather than proceeding.
-    """
-    from simplyblock_core.controllers import lvol_controller
-    if lvol_controller.is_node_leader(node, lvs_name):
-        return True
-    logger.error("Node %s is not LVS leader of %s — refusing %s (retry)",
-                 node.get_id(), lvs_name, what)
-    return False
+    """True when *node* currently holds LVS leadership for *lvs_name*
+    (peer.service.require_leader: a convert on a non-leader degrades silently)."""
+    return peer_service.require_leader(node, lvs_name, what)
 
 
 def _other_active_transfers_to_node(current_task, target_node_id):

@@ -15,7 +15,7 @@ import pytest
 from simplyblock_core import constants
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.peer.protocol import DescribeResponse
+from simplyblock_core.peer.protocol import DescribeResponse, EnsureHubResponse
 from simplyblock_core.services import snapshot_replication as sr
 
 ONLINE = StorageNode.STATUS_ONLINE
@@ -213,6 +213,15 @@ def test_a_recently_settled_leader_needs_no_second_wait(monkeypatch):
     assert len(slept) == 1
 
 
+def _target_unsettled(why):
+    """The destination answering ensure_hub that leadership of the landing
+    volume's lvstore is not settled (the settle runs on the destination)."""
+    peer = MagicMock()
+    peer.ensure_hub.return_value = EnsureHubResponse(
+        state="unsettled", reason=f"target leadership not established ({why})")
+    return patch.object(sr, "_landing_peer", return_value=peer)
+
+
 def _target_reports_leaders(*leaders):
     """The destination answering ``describe`` with *leaders* as the landing
     volume's lvstore leaders: the runner asks the destination's peer client,
@@ -274,9 +283,7 @@ def test_start_never_transfers_without_a_settled_target_leader():
             patch.object(sr, "_lvs_transfer_hold", return_value=None), \
             patch.object(sr, "_select_source_node", return_value=(src, "primary P")), \
             patch.object(sr, "_unreplicated_local_ancestor", return_value=("ok", None, "")), \
-            patch.object(sr, "_stable_target_leader",
-                         return_value=(None, "2 members of LVS_9 report leadership")), \
-            patch.object(sr, "_leaders_of", return_value=[MagicMock(), MagicMock()]), \
+            _target_unsettled("2 members of LVS_9 report leadership"), \
             patch("simplyblock_core.storage_node_ops.find_leader_with_failover") as recover:
         sr.process_snap_replicate_start(task, snap)
     recover.assert_not_called()
@@ -299,8 +306,7 @@ def test_a_leaderless_target_is_waited_out_never_recovered_by_replication():
             patch.object(sr, "_lvs_transfer_hold", return_value=None), \
             patch.object(sr, "_select_source_node", return_value=(src, "primary P")), \
             patch.object(sr, "_unreplicated_local_ancestor", return_value=("ok", None, "")), \
-            patch.object(sr, "_stable_target_leader", return_value=(None, "0 members")), \
-            patch.object(sr, "_leaders_of", return_value=[]), \
+            _target_unsettled("0 members"), \
             patch("simplyblock_core.storage_node_ops.find_leader_with_failover") as recover, \
             patch("simplyblock_core.storage_node_ops._recover_leaderless_lvs") as grant:
         sr.process_snap_replicate_start(task, _snapshot())

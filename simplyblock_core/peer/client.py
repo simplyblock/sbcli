@@ -25,6 +25,8 @@ from simplyblock_core.peer import service
 from simplyblock_core.peer.protocol import (
     DescribeRequest,
     DescribeResponse,
+    EnsureHubRequest,
+    EnsureHubResponse,
     LandingRequest,
     LandingResponse,
     PeerInfo,
@@ -102,6 +104,15 @@ class PeerClient(Protocol):
             PeerError: the target's control plane cannot be reached or understood.
         """
 
+    def ensure_hub(self, request: EnsureHubRequest) -> EnsureHubResponse:
+        """Get the target ready to receive a transfer into the landing volume: its
+        settled leader, the receiving hub's attach address and the map id.
+
+        Raises:
+            PeerNotFoundError: the cluster or the landing volume is unknown.
+            PeerError: the target's control plane cannot be reached or understood.
+        """
+
 
 class LocalPeerClient:
     """A target cluster managed by this same control plane: calls the service directly."""
@@ -162,6 +173,17 @@ class LocalPeerClient:
             raise PeerNotFoundError(str(e)) from e
         except PreconditionError as e:
             raise PeerRefusedError(str(e)) from e
+
+    def ensure_hub(self, request: EnsureHubRequest) -> EnsureHubResponse:
+        """Get the target ready to receive (see ``PeerClient.ensure_hub``).
+
+        Raises:
+            PeerNotFoundError: the cluster or the landing volume is unknown.
+        """
+        try:
+            return service.ensure_hub(self._cluster_id, request)
+        except KeyError as e:
+            raise PeerNotFoundError(str(e)) from e
 
 
 # Process-local on purpose: each process writes the bundles it uses into its own
@@ -327,6 +349,19 @@ class HttpPeerClient:
             return LandingResponse.model_validate(self._request("POST", "landing-volumes", request))
         except ValidationError as e:
             raise PeerProtocolError(f"Unexpected landing response from {self._base}: {e}") from e
+
+    def ensure_hub(self, request: EnsureHubRequest) -> EnsureHubResponse:
+        """Get the target ready to receive (see ``PeerClient.ensure_hub``).
+
+        Raises:
+            PeerError: as for every peer call (see ``_request``), and
+                PeerProtocolError when the answer is not an EnsureHubResponse.
+        """
+        path = f"landing-volumes/{quote(request.landing_lvol_id, safe='')}/hub"
+        try:
+            return EnsureHubResponse.model_validate(self._request("POST", path))
+        except ValidationError as e:
+            raise PeerProtocolError(f"Unexpected hub response from {self._base}: {e}") from e
 
 
 def peer_for_target(target: ReplicationTarget) -> PeerClient:

@@ -12,6 +12,7 @@ from simplyblock_core.peer.protocol import (
     PEER_API_VERSION,
     DescribeRequest,
     DescribeResponse,
+    EnsureHubResponse,
     LandingResponse,
     PeerInfo,
 )
@@ -149,3 +150,24 @@ class TestPrepareLanding:
 
         assert response.status_code == 422
         peer_service.prepare_landing.assert_not_called()
+
+
+HUB_URL = f'/api/v2/_peer/clusters/{CLUSTER_ID}/landing-volumes/{LVOL_ID}/hub'
+
+
+class TestEnsureHub:
+
+    def test_answers_through_the_service(self, client, db, cluster, peer_service):
+        peer_service.ensure_hub.return_value = EnsureHubResponse(state='unsettled', reason='moving')
+
+        response = client.post(HUB_URL)
+
+        assert response.status_code == 200
+        assert response.json()['state'] == 'unsettled'
+        cluster_id, request = peer_service.ensure_hub.call_args.args
+        assert (cluster_id, request.landing_lvol_id) == (CLUSTER_ID, LVOL_ID)
+
+    def test_an_unknown_landing_volume_is_404(self, client, db, cluster, peer_service):
+        peer_service.ensure_hub.side_effect = KeyError('LVol not found')
+
+        assert client.post(HUB_URL).status_code == 404

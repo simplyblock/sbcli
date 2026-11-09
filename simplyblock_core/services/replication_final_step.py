@@ -17,6 +17,7 @@ import uuid as uuid_lib
 from simplyblock_core import constants, db_controller, utils, xfer_timing
 from simplyblock_core.models.hublvol import HubLVol
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.peer.protocol import HubAddress, HubPath
 from simplyblock_core.rpc_client import RPCException
 
 logger = utils.get_logger(__name__)
@@ -258,19 +259,21 @@ def _ensure_peer_transfer_hub(node, lvs_primary):
     return hub, None
 
 
-def ensure_hub_attached(src_rpc, tgt_node, lvs_primary=None):
-    """Ensure the hub *tgt_node* receives through is NVMe-oF attached on the source.
+def prepare_receiving_hub(tgt_node, lvs_primary=None):
+    """Get the hub *tgt_node* receives through ready on the TARGET; (HubAddress, error).
 
     The hub lvol is the gateway the source pushes the transfer through. With
     *lvs_primary* naming a target lvstore *tgt_node* is not primary of (an
     acting secondary leader), the hub is *tgt_node*'s per-lvstore peer hub.
-    Returns (hub_bdev_name, remote_bdev_name, error_string|None).
+    The address is everything the source needs to attach it
+    (attach_hub_address), so the two halves can run on different control
+    planes.
     """
     if lvs_primary is not None and lvs_primary.get_id() != tgt_node.get_id():
         hub, err = _ensure_peer_transfer_hub(tgt_node, lvs_primary)
         if err:
-            return None, None, err
-        return _attach_hub(src_rpc, tgt_node, hub)
+            return None, err
+        return _hub_address(tgt_node, hub), None
     # Trusting the DB record here is what broke every fail-back into a restarted
     # node (215 attach failures, labs 2026-08-17/18): a restart wipes SPDK's
     # bdevs and subsystems while ``transfer_hublvol`` survives in the DB, so this
@@ -285,43 +288,55 @@ def ensure_hub_attached(src_rpc, tgt_node, lvs_primary=None):
         try:
             tgt_node.create_transfer_hublvol()
         except Exception as e:
-            return None, None, f"Failed to (re)create the transfer hublvol on {tgt_node.get_id()}: {e}"
+            return None, f"Failed to (re)create the transfer hublvol on {tgt_node.get_id()}: {e}"
         if not _transfer_hub_live(tgt_node):
-            return None, None, (f"Transfer hublvol still absent on {tgt_node.get_id()} "
-                                f"after recreation")
-
-    return _attach_hub(src_rpc, tgt_node, tgt_node.transfer_hublvol)
+            return None, f"Transfer hublvol still absent on {tgt_node.get_id()} after recreation"
+    return _hub_address(tgt_node, tgt_node.transfer_hublvol), None
 
 
-def _attach_hub(src_rpc, tgt_node, hub):
-    """Attach *hub* (exposed on *tgt_node*) on the source; the
+def _hub_address(tgt_node, hub):
+    """*hub*'s attach address: its names, NQN and port, and the target's data
+    NICs of the transport it runs (RDMA when active, else TCP)."""
+    trtype = "RDMA" if tgt_node.active_rdma else "TCP"
+    return HubAddress(
+        bdev_name=hub.bdev_name, remote_bdev_name=hub.get_remote_bdev_name(),
+        nqn=hub.nqn, port=hub.nvmf_port,
+        paths=[HubPath(ip=iface.ip4_address, trtype=trtype)
+               for iface in tgt_node.data_nics if iface.trtype == trtype])
+
+
+def attach_hub_address(src_rpc, address):
+    """Attach the receiving hub at *address* on the SOURCE; the
     (hub_bdev_name, remote_bdev_name, error) triple of ensure_hub_attached."""
     # Already attached (prior iteration or crash recovery).
-    if src_rpc.bdev_get(hub.get_remote_bdev_name()):
-        return hub.bdev_name, hub.get_remote_bdev_name(), None
+    if src_rpc.bdev_get(address.remote_bdev_name):
+        return address.bdev_name, address.remote_bdev_name, None
 
-    for iface in tgt_node.data_nics:
-        ip = iface.ip4_address
-        if tgt_node.active_rdma:
-            if iface.trtype != "RDMA":
-                continue
-            trtype = "RDMA"
-        else:
-            if iface.trtype != "TCP":
-                continue
-            trtype = "TCP"
-
+    for path in address.paths:
         ret = src_rpc.bdev_nvme_attach_controller(
-            hub.bdev_name, hub.nqn, ip, hub.nvmf_port, trtype)
+            address.bdev_name, address.nqn, path.ip, address.port, path.trtype)
         if not ret:
             # Detach a zombie controller from a crashed attempt and retry once.
-            if src_rpc.bdev_nvme_controller_list(hub.bdev_name):
-                src_rpc.bdev_nvme_detach_controller(hub.bdev_name)
+            if src_rpc.bdev_nvme_controller_list(address.bdev_name):
+                src_rpc.bdev_nvme_detach_controller(address.bdev_name)
                 ret = src_rpc.bdev_nvme_attach_controller(
-                    hub.bdev_name, hub.nqn, ip, hub.nvmf_port, trtype)
+                    address.bdev_name, address.nqn, path.ip, address.port, path.trtype)
             if not ret:
-                return None, None, f"Failed to attach transfer hub controller to {tgt_node.get_id()}"
-    return hub.bdev_name, hub.get_remote_bdev_name(), None
+                return None, None, f"Failed to attach transfer hub controller {address.nqn}"
+    return address.bdev_name, address.remote_bdev_name, None
+
+
+def ensure_hub_attached(src_rpc, tgt_node, lvs_primary=None):
+    """Ensure the hub *tgt_node* receives through is NVMe-oF attached on the source.
+
+    The target half (prepare_receiving_hub) and the source half
+    (attach_hub_address) in one call, for callers that reach both clusters'
+    nodes. Returns (hub_bdev_name, remote_bdev_name, error_string|None).
+    """
+    address, err = prepare_receiving_hub(tgt_node, lvs_primary)
+    if err:
+        return None, None, err
+    return attach_hub_address(src_rpc, address)
 
 
 class CutoverUnreachable(Exception):

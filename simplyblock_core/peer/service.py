@@ -7,6 +7,7 @@ control plane, so both paths run the same code.
 """
 import contextlib
 import logging
+import time
 from uuid import UUID
 
 from simplyblock_core import constants
@@ -24,6 +25,8 @@ from simplyblock_core.peer.protocol import (
     ChainState,
     DescribeRequest,
     DescribeResponse,
+    EnsureHubRequest,
+    EnsureHubResponse,
     LandingRequest,
     LandingResponse,
     PeerInfo,
@@ -128,29 +131,13 @@ def _landing_leaders(db, cluster_id, lvol_id):
     """Ids of the online members of the landing volume's lvstore reporting
     leadership (SPDK's own "lvs leadership" flag); None when the volume is gone
     or on another cluster."""
-    # Imported here for the same reason as in discard_landing.
-    from simplyblock_core.controllers import lvol_controller
-
     try:
         lvol = db.get_lvol_by_id(lvol_id)
         if db.get_pool_by_id(lvol.pool_uuid).cluster_id != cluster_id:
             return None
     except KeyError:
         return None
-    leaders = []
-    for node_id in dict.fromkeys([lvol.node_id, *(lvol.nodes or [])]):
-        if not node_id:
-            continue
-        try:
-            node = db.get_storage_node_by_id(node_id)
-        except KeyError:
-            continue
-        # is_node_leader never raises: an unreachable member is reported as
-        # not leading, which is what the caller acts on.
-        if node.status == StorageNode.STATUS_ONLINE and lvol_controller.is_node_leader(
-                node, lvol.lvs_name):
-            leaders.append(node_id)
-    return leaders
+    return [node.get_id() for node in lvs_leaders(db, lvol)]
 
 
 def _has_dependent_clone(db, snapshot_id):
@@ -360,3 +347,182 @@ def _replication_class_on(cluster_id):
     except KeyError as e:
         logger.warning("QoS lookup for cluster %s failed; landing in Default: %s", cluster_id, e)
         return False
+
+
+def lvs_leaders(db, lvol):
+    """The online members of *lvol*'s lvstore that report leadership, in role
+    order (primary, secondary, tertiary)."""
+    from simplyblock_core.controllers import lvol_controller
+
+    leaders = []
+    for node_id in dict.fromkeys([lvol.node_id, *(getattr(lvol, "nodes", None) or [])]):
+        if not node_id:
+            continue
+        try:
+            node = db.get_storage_node_by_id(node_id)
+        except KeyError:
+            continue
+        # is_node_leader never raises: an unreachable member is reported as
+        # not leading, which is what the caller acts on.
+        if node.status == StorageNode.STATUS_ONLINE and lvol_controller.is_node_leader(
+                node, lvol.lvs_name):
+            leaders.append(node)
+    return leaders
+
+
+# (cluster id, lvstore) -> (leader id, time it was last confirmed settled).
+# Process-local on purpose: an optimisation that saves the settle wait for
+# volumes sent into one lvstore in quick succession; another process simply
+# settles again.
+_SETTLED_LEADER: dict = {}
+
+
+def stable_leader(db, lvol):
+    """The member that leads *lvol*'s lvstore once leadership is settled; or
+    (None, why).
+
+    Leadership is "re-established" when exactly one online member reports it,
+    and the same member again REPL_LEADER_SETTLE_SEC later. A move in progress
+    shows the old member, then none or two, then the new one; a transfer or
+    convert sent in that window lands on a member that is about to stop being
+    the leader (the hub refuses receive IO in non-leader mode, a convert on a
+    non-leader silently persists nothing). The probe is SPDK's own "lvs
+    leadership" -- the very flag the hub and convert check -- so a member it
+    does not show as leader cannot take the transfer, whatever else is known.
+    """
+    first = lvs_leaders(db, lvol)
+    key = (getattr(lvol, "cluster_id", ""), lvol.lvs_name)
+    if len(first) != 1:
+        _SETTLED_LEADER.pop(key, None)
+        return None, (f"{len(first)} members of {lvol.lvs_name} report leadership"
+                      + (f" ({', '.join(n.get_id()[:8] for n in first)})" if first else ""))
+    # Many volumes' snapshots go into one lvstore: settling every one of them
+    # would add the settle time per transfer. A leader confirmed settled
+    # moments ago and seen alone again now is still settled.
+    cached = _SETTLED_LEADER.get(key)
+    if (cached and cached[0] == first[0].get_id()
+            and time.time() - cached[1] < constants.REPL_LEADER_SETTLED_FOR_SEC):
+        return first[0], ""
+    time.sleep(constants.REPL_LEADER_SETTLE_SEC)
+    second = lvs_leaders(db, lvol)
+    if len(second) != 1 or second[0].get_id() != first[0].get_id():
+        _SETTLED_LEADER.pop(key, None)
+        return None, (f"leadership of {lvol.lvs_name} is moving "
+                      f"({first[0].get_id()[:8]} -> "
+                      f"{', '.join(n.get_id()[:8] for n in second) or 'none'})")
+    _SETTLED_LEADER[key] = (second[0].get_id(), time.time())
+    return second[0], ""
+
+
+def converted_members(db, lvol):
+    """Ids of the online members on which the landing volume *lvol* is a snapshot.
+
+    Reads SPDK's own view (bdev driver_specific.lvol.snapshot) on every online
+    member: the control plane's record cannot say whether an earlier attempt
+    converted the volume on some members only. A member that cannot be asked
+    is skipped; the transfer's own leader probe decides about it.
+    """
+    members = []
+    for node_id in (getattr(lvol, "nodes", None) or [lvol.node_id]):
+        try:
+            node = db.get_storage_node_by_id(node_id)
+        except KeyError:
+            continue
+        if node.status != StorageNode.STATUS_ONLINE:
+            continue
+        try:
+            ret = node.rpc_client().bdev_get(lvol.top_bdev)
+            if ret and ret.get("driver_specific", {}).get("lvol", {}).get("snapshot"):
+                members.append(node.get_id())
+        except Exception as e:                            # noqa: BLE001
+            logger.warning("Could not read landing volume %s on %s: %s",
+                           lvol.top_bdev, node.get_id(), e)
+    return members
+
+
+def require_leader(node, lvs_name, what):
+    """True when *node* currently holds LVS leadership for *lvs_name*.
+
+    Transfers into a hub on a non-leader fail loudly, but bdev_lvol_convert on a
+    non-leader DEGRADES SILENTLY: the fork's non-leader branch marks the blob
+    CLEAN and replies success without persisting anything -- the "snapshot"
+    looks converted while its metadata never reached the journal. Leadership
+    must therefore be verified BEFORE the operation; on False the caller
+    suspends and retries rather than proceeding.
+    """
+    from simplyblock_core.controllers import lvol_controller
+
+    if lvol_controller.is_node_leader(node, lvs_name):
+        return True
+    logger.error("Node %s is not LVS leader of %s -- refusing %s (retry)",
+                 node.get_id(), lvs_name, what)
+    return False
+
+
+def ensure_hub(cluster_id: str, request: EnsureHubRequest) -> EnsureHubResponse:
+    """Get this cluster ready to receive a transfer into the landing volume.
+
+    Sends only to the member that leads the landing volume's lvstore once that
+    leadership is settled, never to a tertiary (SPDK demuxes hub IO only on a
+    primary or secondary: the node_role check in vbdev_lvol_submit_request).
+    Replication only ever connects to an EXISTING, settled leader; it never
+    claims, grants or forces leadership (bf8 2026-11-02: a recovery run from
+    the source, during a forced shutdown of the target primary, left LVS_10
+    with two leaders and corrupted metadata). Then the receiving hub is made
+    ready on the leader, the volume's map id read (every write's LBA carries
+    it, and the hub routes by it), and the volume checked not to be a snapshot
+    already (2026-09-29: writes into a converted landing volume made the
+    target LVS drop leadership and fence its ports, 14 times in 11 minutes).
+
+    Raises:
+        KeyError: this control plane does not manage *cluster_id*, or the
+            landing volume is unknown or on another cluster.
+    """
+    from simplyblock_core.services.replication_final_step import prepare_receiving_hub
+
+    db = DBController()
+    db.get_cluster_by_id(cluster_id)
+    lvol = db.get_lvol_by_id(request.landing_lvol_id)
+    if db.get_pool_by_id(lvol.pool_uuid).cluster_id != cluster_id:
+        raise KeyError(f"LVol {request.landing_lvol_id} is not on cluster {cluster_id}")
+
+    leader, why = stable_leader(db, lvol)
+    if leader is None:
+        return EnsureHubResponse(state="unsettled",
+                                 reason=f"target leadership not established ({why})")
+    try:
+        lvs_primary = db.get_storage_node_by_id(lvol.node_id)
+    except KeyError:
+        return EnsureHubResponse(state="failed", leader_node_id=leader.get_id(),
+                                 reason=f"target lvstore primary {lvol.node_id} unknown")
+    if leader.get_id() not in (lvs_primary.get_id(), lvs_primary.secondary_node_id):
+        return EnsureHubResponse(
+            state="unsettled",
+            reason=(f"target lvstore {lvol.lvs_name} is led by its tertiary {leader.get_id()}, "
+                    f"which cannot receive a transfer; waiting for the primary or secondary"))
+
+    hub, err = prepare_receiving_hub(leader, lvs_primary)
+    if err:
+        return EnsureHubResponse(state="failed", leader_node_id=leader.get_id(),
+                                 reason=f"transfer hub attach failed: {err}")
+    ret = leader.rpc_client().bdev_get(lvol.top_bdev)
+    try:
+        map_id = ret["driver_specific"]["lvol"]["map_id"]
+    except (TypeError, KeyError):
+        map_id = None
+    if not map_id:
+        logger.error("map_id of receiving lvol %s not found on %s; not starting a transfer "
+                     "that cannot land", lvol.top_bdev, lvol.node_id)
+        return EnsureHubResponse(state="failed", leader_node_id=leader.get_id(), backoff=False,
+                                 reason="receiving lvol map_id unavailable")
+    converted_on = converted_members(db, lvol)
+    if converted_on:
+        return EnsureHubResponse(state="converted", leader_node_id=leader.get_id(),
+                                 converted_on=converted_on)
+    # The hub rejects receive IO on a non-leader ("receive io for hublvol in
+    # nonleader mode"); do not start a transfer that cannot land.
+    if not require_leader(leader, lvol.lvs_name, "transfer receive"):
+        return EnsureHubResponse(state="not_leader", leader_node_id=leader.get_id(),
+                                 reason=f"target node {leader.get_id()} not LVS leader of "
+                                        f"{lvol.lvs_name}")
+    return EnsureHubResponse(state="ready", leader_node_id=leader.get_id(), map_id=map_id, hub=hub)

@@ -13,7 +13,7 @@ simplyblock_core/test/test_replication_destination_resolution.py,
 test_replication_failback_pool.py and test_replication_start_destination.py
 (lab 2026-08-17/18/19); they hold here for the two halves together.
 """
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -26,7 +26,12 @@ from simplyblock_core.models.replication import ReplicationPolicy, ReplicationTa
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.peer import service
-from simplyblock_core.peer.protocol import LandingRequest
+from simplyblock_core.peer.protocol import (
+    EnsureHubRequest,
+    HubAddress,
+    HubPath,
+    LandingRequest,
+)
 
 SRC = "1b6f4a8e-1c2d-4e3f-9a0b-1c2d3e4f5a01"
 TGT = "1b6f4a8e-1c2d-4e3f-9a0b-1c2d3e4f5a02"
@@ -344,3 +349,125 @@ class TestPrepareLanding:
 
         pick.assert_called_once()
         assert add_lvol_ha.call_args.args[2] == NODE
+
+
+TP, TS, TT = (f"1b6f4a8e-1c2d-4e3f-9a0b-1c2d3e4f5a7{i}" for i in (1, 2, 3))
+HUB = HubAddress(bdev_name="LVS_T1/transferhub_TS", remote_bdev_name="LVS_T1/transferhub_TSn1",
+                 nqn="nqn:transferhub:LVS_T1:TS", port=4430,
+                 paths=[HubPath(ip="10.0.0.2", trtype="TCP")])
+
+
+@pytest.fixture
+def lvstore(db):
+    """A target lvstore with primary TP, secondary TS, tertiary TT, and a
+    landing volume on it."""
+    _cluster(db, TGT)
+    _pool(db, "POOL_TGT", TGT)
+    for node_id, secondary in ((TP, TS), (TS, ""), (TT, "")):
+        node = StorageNode()
+        node.uuid = node_id
+        node.cluster_id = TGT
+        node.status = StorageNode.STATUS_ONLINE
+        node.secondary_node_id = secondary
+        node.write_to_db(db.kv_store)
+    landing = _landing(db)
+    landing.node_id, landing.nodes, landing.top_bdev = TP, [TP, TS, TT], "LVS_1/REP_snap-1"
+    landing.write_to_db(db.kv_store)
+    service._SETTLED_LEADER.clear()
+    return landing
+
+
+@pytest.fixture
+def spdk():
+    """What the members' SPDK reports about the landing volume (an RPC each)."""
+    rpc = MagicMock()
+    rpc.bdev_get.return_value = {"driver_specific": {"lvol": {"map_id": 7, "snapshot": False}}}
+    with patch.object(StorageNode, "rpc_client", return_value=rpc), \
+            patch.object(service.time, "sleep"):
+        yield rpc
+
+
+@pytest.fixture
+def receiving_hub():
+    with patch("simplyblock_core.services.replication_final_step.prepare_receiving_hub",
+               return_value=(HUB, None)) as prepare:
+        yield prepare
+
+
+def _leads(*node_ids):
+    """SPDK's "lvs leadership" flag (an RPC to the node) set on *node_ids*."""
+    return patch.object(lvol_controller, "is_node_leader",
+                        side_effect=lambda node, lvs: node.get_id() in node_ids)
+
+
+def _ensure(landing):
+    return service.ensure_hub(TGT, EnsureHubRequest(landing_lvol_id=landing.get_id()))
+
+
+class TestEnsureHub:
+
+    def test_a_secondary_leader_receives_through_its_hub_on_the_target_lvstore(
+            self, db, lvstore, spdk, receiving_hub):
+        with _leads(TS):
+            answer = _ensure(lvstore)
+
+        assert (answer.state, answer.leader_node_id, answer.map_id) == ("ready", TS, 7)
+        assert answer.hub == HUB
+        leader, lvs_primary = receiving_hub.call_args.args
+        assert (leader.get_id(), lvs_primary.get_id()) == (TS, TP)
+
+    def test_the_primary_receives_through_its_own_hub(self, db, lvstore, spdk, receiving_hub):
+        with _leads(TP):
+            answer = _ensure(lvstore)
+
+        assert answer.state == "ready"
+        leader, lvs_primary = receiving_hub.call_args.args
+        assert (leader.get_id(), lvs_primary.get_id()) == (TP, TP)
+
+    def test_a_tertiary_leader_waits(self, db, lvstore, spdk, receiving_hub):
+        """SPDK never demuxes hub IO on a tertiary (node_role check in
+        vbdev_lvol_submit_request); until the fork allows it, the start waits."""
+        with _leads(TT):
+            answer = _ensure(lvstore)
+
+        assert answer.state == "unsettled" and "tertiary" in answer.reason
+        receiving_hub.assert_not_called()
+
+    @pytest.mark.parametrize("leaders", [(), (TP, TS)])
+    def test_no_single_leader_is_waited_out_never_recovered(self, db, lvstore, spdk,
+                                                            receiving_hub, leaders):
+        """Replication only connects to an existing leader; it never claims,
+        grants or forces leadership (bf8 2026-11-02)."""
+        with _leads(*leaders), \
+                patch("simplyblock_core.storage_node_ops.find_leader_with_failover") as recover:
+            answer = _ensure(lvstore)
+
+        assert answer.state == "unsettled" and "not established" in answer.reason
+        recover.assert_not_called()
+        receiving_hub.assert_not_called()
+
+    def test_a_landing_volume_already_converted_is_reported(self, db, lvstore, spdk, receiving_hub):
+        spdk.bdev_get.return_value = {"driver_specific": {"lvol": {"map_id": 7, "snapshot": True}}}
+
+        with _leads(TP):
+            answer = _ensure(lvstore)
+
+        assert answer.state == "converted" and set(answer.converted_on) == {TP, TS, TT}
+
+    def test_a_missing_map_id_is_a_failure_retried_without_backoff(self, db, lvstore, spdk,
+                                                                    receiving_hub):
+        spdk.bdev_get.return_value = {"driver_specific": {"lvol": {}}}
+
+        with _leads(TP):
+            answer = _ensure(lvstore)
+
+        assert (answer.state, answer.backoff) == ("failed", False)
+        assert "map_id" in answer.reason
+
+    def test_a_hub_that_cannot_be_made_is_a_failure(self, db, lvstore, spdk, receiving_hub):
+        receiving_hub.return_value = (None, "Failed to create transfer hub")
+
+        with _leads(TP):
+            answer = _ensure(lvstore)
+
+        assert answer.state == "failed" and "Failed to create transfer hub" in answer.reason

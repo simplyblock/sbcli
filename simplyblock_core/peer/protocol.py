@@ -15,7 +15,7 @@ PEER_API_VERSION = 1
 
 #: Peer endpoints this control plane serves, named so a caller can check for a
 #: step before relying on it during a rolling upgrade of the two sites.
-CAPABILITIES: frozenset[str] = frozenset({"info", "discard_landing", "describe", "prepare_landing"})
+CAPABILITIES: frozenset[str] = frozenset({"info", "discard_landing", "describe", "prepare_landing", "ensure_hub"})
 
 #: Name prefix of a replication landing volume (``REP_<snapshot name>``). It is
 #: the only mark a landing volume carries in the database, and the peer API acts
@@ -116,3 +116,42 @@ class LandingResponse(BaseModel):
     counterpart_snapshot_id: str = ""
     lvs_name: str = ""
     reason: str = ""
+
+
+class HubPath(BaseModel):
+    """One address the source can attach the receiving hub over."""
+
+    ip: str
+    trtype: Literal["TCP", "RDMA"]
+
+
+class HubAddress(BaseModel):
+    """What the source needs to attach the target's receiving hub over NVMe-oF."""
+
+    bdev_name: str
+    remote_bdev_name: str
+    nqn: str
+    port: Annotated[int, Field(ge=0)]
+    paths: list[HubPath] = Field(default_factory=list)
+
+
+class EnsureHubRequest(BaseModel):
+    """Get the target ready to receive a transfer into ``landing_lvol_id``."""
+
+    landing_lvol_id: str
+
+
+class EnsureHubResponse(BaseModel):
+    #: ready: transfer into ``map_id`` through ``hub``, sent to ``leader_node_id``.
+    #: unsettled: leadership of the landing volume's lvstore is moving, or a
+    #: tertiary leads, which cannot receive; wait. not_leader: the leader lost
+    #: leadership just now; wait. converted: the landing volume is already a
+    #: snapshot on ``converted_on``; discard it and start over. failed: the
+    #: target could not get ready (``reason``; retry with ``backoff``).
+    state: Literal["ready", "unsettled", "not_leader", "converted", "failed"]
+    reason: str = ""
+    backoff: bool = True
+    leader_node_id: str = ""
+    map_id: int | None = None
+    hub: HubAddress | None = None
+    converted_on: list[str] = Field(default_factory=list)
