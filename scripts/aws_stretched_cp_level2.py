@@ -415,17 +415,39 @@ def run_tests(meta):
     res.record("T2b storage-node monitor on A runs", "Looping for cluster" in logs_a or "Creating thread" in logs_a,
                logs_a[-300:])
 
-    # T3: B's API redirects a mutation to A, serves a read, keeps control-plane routes
-    auth = f"-H 'Authorization: {cid} {meta['secret']}'"
-    rc, out, _ = out_of(b["ip"], f"curl -s -o /dev/null -w '%{{http_code}} %{{redirect_url}}' -X POST "
-                                 f"http://127.0.0.1:5000/api/v2/clusters/{cid}/storage-pools {auth} "
-                                 f"-H 'Content-Type: application/json' -d '{{\"name\":\"redir-test\"}}'")
+    # T3: B's API redirects a mutation to A, serves a read, keeps control-plane
+    # routes. The API listens on the Swarm overlay network behind HAProxy, so
+    # the probe runs inside site B's own WebAppAPI container.
+    probe_py = "\n".join([
+        "import json, urllib.request, urllib.error",
+        "class NoRedirect(urllib.request.HTTPRedirectHandler):",
+        "    def redirect_request(self, *a, **k):",
+        "        return None",
+        "op = urllib.request.build_opener(NoRedirect)",
+        f"H = {{'Authorization': '{cid} {meta['secret']}', 'Content-Type': 'application/json'}}",
+        "def call(method, path, body=None):",
+        "    req = urllib.request.Request('http://127.0.0.1:5000' + path, data=body, method=method, headers=H)",
+        "    try:",
+        "        r = op.open(req, timeout=30); return r.status, r.headers.get('Location', '')",
+        "    except urllib.error.HTTPError as e:",
+        "        return e.code, e.headers.get('Location', '')",
+        f"print(json.dumps({{'post': call('POST', '/api/v2/clusters/{cid}/storage-pools', b'{{\"name\": \"redir-test\"}}'),",
+        f"                  'get': call('GET', '/api/v2/clusters/{cid}/'),",
+        f"                  'cp': call('GET', '/api/v2/clusters/{cid}/control-plane/')}}))",
+    ])
+    probe = ("cid=$(sudo docker ps -q -f name=app_WebAppAPI | head -1); "
+             "sudo docker exec -i $cid python3 - <<'PYPROBE'\n" + probe_py + "\nPYPROBE")
+    rc, out, err = out_of(b["ip"], probe)
+    try:
+        probe_result = json.loads(out.strip().splitlines()[-1])
+    except Exception:  # noqa: BLE001 - reported as a failure below
+        probe_result = {"post": [rc, out[-200:] + err[-200:]], "get": [None, ""], "cp": [None, ""]}
+    post_code, post_loc = probe_result["post"]
     res.record("T3a standby API answers a mutation with 307 to the leader",
-               out.startswith("307") and a["priv"] in out, out)
-    rc, out, _ = out_of(b["ip"], f"curl -s -o /dev/null -w '%{{http_code}}' http://127.0.0.1:5000/api/v2/clusters/{cid}/ {auth}")
-    res.record("T3b standby API serves a read", out.strip() == "200", out)
-    rc, out, _ = out_of(b["ip"], f"curl -s -o /dev/null -w '%{{http_code}}' http://127.0.0.1:5000/api/v2/clusters/{cid}/control-plane/ {auth}")
-    res.record("T3c standby answers the control-plane route itself", out.strip() == "200", out)
+               post_code == 307 and a["priv"] in str(post_loc), f"{post_code} {post_loc}")
+    res.record("T3b standby API serves a read", probe_result["get"][0] == 200, str(probe_result["get"]))
+    res.record("T3c standby answers the control-plane route itself", probe_result["cp"][0] == 200,
+               str(probe_result["cp"]))
 
     # T4: planned move A -> B and back
     rc, out, err = out_of(a["ip"], f"{SBCTL} control-plane set-leader-site {cid} B")
@@ -466,7 +488,7 @@ def run_tests(meta):
     rc, out, _ = out_of(a["ip"], f"{SBCTL} sn list --json")
     try:
         nodes = json.loads(out[out.find("["):])
-        node_b1 = next(n for n in nodes if n.get("Mgmt IP", n.get("mgmt_ip", "")) == sn_b1["priv"])
+        node_b1 = next(n for n in nodes if n.get("Management IP", n.get("mgmt_ip", "")) == sn_b1["priv"])
         node_b1_id = node_b1.get("UUID", node_b1.get("uuid"))
     except Exception:  # noqa: BLE001 - optional test
         node_b1_id = None
