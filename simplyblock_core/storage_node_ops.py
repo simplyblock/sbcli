@@ -9121,6 +9121,32 @@ def _reconcile_discovered_devices(snode, nvme_devs):
     return new_devices
 
 
+def _rebind_nvme_devices_to_spdk(snode, snode_api, spdk_pcie_list):
+    """Bind the node's known NVMe devices back to SPDK where they are not.
+
+    SPDK drives a device only while it is bound to uio_pci_generic or
+    vfio-pci, and that binding does not survive a reboot of the host: the
+    devices come back on the kernel nvme driver. The devices to bind are the
+    ones the node was configured with (ssd_pcie), or the ones it is known to
+    own when it was configured with all of them.
+
+    Returns whether any bind was attempted, so the caller knows to re-read the
+    node's device lists.
+    """
+    if snode.ssd_pcie:
+        wanted = list(snode.ssd_pcie)
+    else:
+        wanted = [dev.pcie_address for dev in snode.nvme_devices if dev.pcie_address]
+    missing = [addr for addr in dict.fromkeys(wanted) if addr not in (spdk_pcie_list or [])]
+    for addr in missing:
+        logger.info(f"Binding NVMe device {addr} to SPDK, it is not bound (host rebooted?)")
+        try:
+            snode_api.bind_device_to_spdk(addr)
+        except Exception as e:
+            logger.warning(f"Failed to bind NVMe device {addr} to SPDK: {e}")
+    return bool(missing)
+
+
 def _restart_storage_node_impl(
         node_id, max_lvol=0, max_snap=0, max_prov=0,
         spdk_image=None, set_spdk_debug=None,
@@ -9682,6 +9708,11 @@ def _restart_storage_node_impl(
             logger.error("No eligible block devices were found!")
             return False
     else:
+        # After a host reboot the node's NVMe devices are back on the kernel
+        # nvme driver, so spdk_pcie_list (devices bound to uio/vfio) is empty
+        # and the restart would find no devices at all.
+        if _rebind_nvme_devices_to_spdk(snode, snode_api, node_info['spdk_pcie_list']):
+            node_info, _ = snode_api.info()
         if not snode.ssd_pcie:
             ssds = node_info['spdk_pcie_list']
         else:
@@ -12885,7 +12916,7 @@ def check_non_leader_for_operation(node_id, lvs_name, operation_type="create",
 
 
 def execute_on_leader_with_failover(all_nodes, lvs_name, operation_fn,
-                                    known_leader=None):
+                                    known_leader=None, recover=True):
     """Execute an operation on the current leader with failover support.
 
     1. Find leader (with failover if needed) — skipped when the caller passes
@@ -12902,6 +12933,8 @@ def execute_on_leader_with_failover(all_nodes, lvs_name, operation_fn,
         lvs_name: LVS name
         operation_fn: callable(leader_node) → result. Returns None/False on failure.
         known_leader: leader StorageNode already confirmed by the caller.
+        recover: passed to find_leader_with_failover; False never grants or
+            forces a leadership (a lookup of the existing leader only).
 
     Returns:
         (True, leader_node, result) on success
@@ -12910,7 +12943,7 @@ def execute_on_leader_with_failover(all_nodes, lvs_name, operation_fn,
     if known_leader is not None:
         leader = known_leader
     else:
-        leader, _ = find_leader_with_failover(all_nodes, lvs_name)
+        leader, _ = find_leader_with_failover(all_nodes, lvs_name, recover=recover)
     if leader is None:
         return False, None, "No leader available"
 
@@ -12924,7 +12957,7 @@ def execute_on_leader_with_failover(all_nodes, lvs_name, operation_fn,
                       leader.get_id(), e)
 
     # Operation failed — re-check leadership
-    new_leader, _ = find_leader_with_failover(all_nodes, lvs_name)
+    new_leader, _ = find_leader_with_failover(all_nodes, lvs_name, recover=recover)
     if new_leader is None:
         return False, None, "Operation failed and no leader available"
 

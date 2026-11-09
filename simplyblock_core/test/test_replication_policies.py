@@ -384,6 +384,46 @@ def test_detach_refused_while_a_cutover_is_in_flight(monkeypatch):
     assert db.get_lvol_by_id("LV1").replication_policy_id == "CL_SRC/P1", "must not be cleared"
 
 
+def test_detach_releases_a_cutover_that_is_not_freezing(monkeypatch):
+    """bf12 2026-11-03: after a failed final step the relationship stayed
+    cutover_pending and detach refused the volume for 15h+. Short of the IO
+    freeze the cutover is released: replication_stop cancels its task."""
+    import time as _time
+
+    from simplyblock_core.models.job_schedule import JobSchedule
+    from simplyblock_core.models.storage_node import StorageNode
+    lv = _lvol("LV1", policy_id="CL_SRC/P1")
+    lv.node_id = "N1"
+    rep = LVolReplication()
+    rep.source_lvol = lv
+    rep.state = LVolReplication.STATE_CUTOVER_PENDING
+    db = _FakeDB(lvols=[lv], replications=[rep])
+    _install(monkeypatch, db)
+    monkeypatch.setattr(LVol, "write_to_db", lambda self, kv=None: None)
+    node = StorageNode()
+    node.uuid = "N1"
+    node.cluster_id = "CL_SRC"
+    task = JobSchedule()
+    task.uuid = "T1"
+    task.function_name = JobSchedule.FN_REPLICATION_FINAL
+    task.status = JobSchedule.STATUS_SUSPENDED
+    task.function_params = {"lvol_id": "LV1", "tgt_lvol_composite": "x"}
+    monkeypatch.setattr(db, "get_storage_node_by_id", lambda nid: node, raising=False)
+    monkeypatch.setattr(db, "get_job_tasks", lambda cid: [task], raising=False)
+    stopped: list[str] = []
+    monkeypatch.setattr(rpc.lvol_controller, "replication_stop", _recording(stopped))
+    monkeypatch.setattr(rpc, "_purge_internal_replication_snapshots", lambda lvol_id: 0)
+
+    rpc.detach_policy("LV1")
+    assert stopped == ["LV1"]
+
+    # The same volume inside its freeze is refused.
+    lv.replication_policy_id = "CL_SRC/P1"
+    task.function_params["freeze_started_at"] = _time.time()
+    with pytest.raises(ReplicationConfigError, match="cutover in flight"):
+        rpc.detach_policy("LV1")
+
+
 def test_detach_of_a_demoted_volume_keeps_its_chain(monkeypatch):
     """Relocate, 2026-10-01: Ramen deletes the demoted side's
     VolumeReplication -> DisableVolumeReplication -> detach. The purge then

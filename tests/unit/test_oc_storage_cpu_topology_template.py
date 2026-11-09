@@ -3,6 +3,8 @@ from pathlib import Path
 
 from jinja2 import Environment, FileSystemLoader
 
+from simplyblock_core.utils import storage_mco_names
+
 TEMPLATE_DIR = Path(__file__).resolve().parents[2] / "simplyblock_web" / "templates"
 
 
@@ -21,6 +23,7 @@ def _render() -> str:
         NSOCKET=0,
         OPENSHIFT_MCP="worker",
         RESERVED_SYSTEM_CPUS="0-1",
+        STORAGE_MCO=storage_mco_names("cluster1")._asdict(),
     )
 
 

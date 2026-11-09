@@ -757,6 +757,27 @@ def _fabric_error(db_controller, host_node, ha_type, fabric):
     return None
 
 
+def _lvstore_has_existing_leader(host_node):
+    """Whether a member of ``host_node``'s lvstore leads it right now (a lookup
+    without recovery: nothing is granted or forced)."""
+    from simplyblock_core.storage_node_ops import find_leader_with_failover
+    db_controller = DBController()
+    members = [host_node]
+    for sid in role_secondary_ids(host_node):
+        try:
+            members.append(db_controller.get_storage_node_by_id(sid))
+        except KeyError:
+            continue
+    if not any(m.status == StorageNode.STATUS_ONLINE for m in members):
+        return False
+    try:
+        leader, _ = find_leader_with_failover(members, host_node.lvstore, recover=False)
+    except Exception as e:                                  # noqa: BLE001
+        logger.warning("Leader lookup for %s failed: %s", host_node.lvstore, e)
+        return False
+    return leader is not None and leader.status == StorageNode.STATUS_ONLINE
+
+
 def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=False, use_crypto=False,
                 distr_vuid=0, max_rw_iops=0, max_rw_mbytes=0, max_r_mbytes=0, max_w_mbytes=0,
                 with_snapshot=False, max_size=0, lvol_priority_class=0,
@@ -990,7 +1011,13 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
         logger.warning("Number of active cluster devices are less than 8")
         # return False, "Number of active cluster devices are less than 8"
 
-    if host_node and host_node.status != StorageNode.STATUS_ONLINE:
+    if host_node and host_node.status != StorageNode.STATUS_ONLINE and not (
+            internal and ha_type == "ha" and _lvstore_has_existing_leader(host_node)):
+        # A replication landing volume (internal) may be created while the
+        # recorded primary is down, on the member that LEADS the lvstore now
+        # (bf11 2026-11-03: every landing on the shut-down target primary's
+        # lvstore failed "Error creating remote lvol" for 42 min). Only an
+        # existing leader counts: nothing is granted for this create.
         mgs = f"Storage node is not online. ID: {host_node.get_id()} status: {host_node.status}"
         logger.error(mgs)
         return False, mgs
@@ -1313,7 +1340,13 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
                     pass
 
             # Step 1: Pre-check all non-leaders BEFORE executing on leader
-            primary_node, non_leaders = find_leader_with_failover(all_nodes, lvol.lvs_name)
+            if host_node.status == StorageNode.STATUS_ONLINE:
+                primary_node, non_leaders = find_leader_with_failover(all_nodes, lvol.lvs_name)
+            else:
+                # Landing create with the primary down (admitted above only
+                # with an existing leader): route to that leader, grant none.
+                primary_node, non_leaders = find_leader_with_failover(
+                    all_nodes, lvol.lvs_name, recover=False)
             if primary_node is None:
                 msg = "No leader available for lvol create"
                 logger.error(msg)
@@ -1366,7 +1399,8 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
                 return lvol_bdev
 
             success, actual_leader, result = execute_on_leader_with_failover(
-                all_nodes, lvol.lvs_name, _create_on_leader, known_leader=primary_node)
+                all_nodes, lvol.lvs_name, _create_on_leader, known_leader=primary_node,
+                recover=host_node.status == StorageNode.STATUS_ONLINE)
             if not success:
                 logger.error(f"Failed to create lvol on leader: {result}")
                 # If a leader attempt got far enough to create the blob, its
@@ -1383,6 +1417,9 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
             lvol_bdev = result
             lvol.lvol_uuid = lvol_bdev['uuid']
             lvol.blobid = lvol_bdev['driver_specific']['lvol']['blobid']
+
+            secondary_nodes = _replicas_after_leader_failover(
+                lvol, host_node, primary_node, actual_leader, secondary_nodes)
 
             # Step 3: Execute registration on non-leaders that passed pre-check.
             # The Step-1 verdict is reused while fresh: re-sweeping the data-plane
@@ -1740,6 +1777,50 @@ def _mark_in_deletion(db_controller, lvol, snode):
     return fresh
 
 
+def _replicas_after_leader_failover(lvol, host_node, planned_leader, actual_leader,
+                                    replicas):
+    """The registration targets once the create has landed on ``actual_leader``.
+
+    ``replicas`` was planned against ``planned_leader``. When the create failed
+    there and execute_on_leader_with_failover retried it on a new leader, that
+    new leader is in the plan as a replica. Registering on it again fails with
+    "File exists", and the replica rollback then deleted the blob by name: the
+    only copy of the volume. Run bf12 2026-11-04 23:19, LVS_22/LVOL_1744: the
+    record survived without a blob, the sync-op repair failed on ENOENT
+    forever, and every restart of the old leader aborted on the missing bdev.
+
+    The new leader is dropped. The planned leader is now a replica that just
+    failed an operation, so its registration goes to the durable sync-op task
+    rather than being attempted inline.
+    """
+    if actual_leader is None or planned_leader is None \
+            or actual_leader.get_id() == planned_leader.get_id():
+        return replicas
+    logger.warning(
+        "lvol %s was created on %s after leadership moved from %s; "
+        "registering the replicas against the new leader",
+        lvol.get_id(), actual_leader.get_id()[:8], planned_leader.get_id()[:8])
+    tasks_controller.add_lvol_sync_op_task(
+        host_node.cluster_id, planned_leader.get_id(), lvol.get_id(),
+        "register", secondary_index=_lvol_secondary_index(lvol, planned_leader))
+    return [n for n in replicas if n.get_id() != actual_leader.get_id()]
+
+
+def _replica_rollback_would_hit_leader(lvol, rpc_client):
+    """Whether the node behind ``rpc_client`` leads ``lvol``'s lvstore.
+
+    A replica rollback deletes by bdev NAME. On the leader that name is the
+    volume's real blob, never a leftover of the failed registration, so the
+    rollback must not run there. An unanswered query counts as not the leader,
+    the behaviour this guard replaces.
+    """
+    try:
+        lvs = rpc_client.get_lvstore(lvol.lvs_name)
+    except Exception:                       # noqa: BLE001 - best effort
+        return False
+    return isinstance(lvs, dict) and lvs.get("lvs leadership") is True
+
+
 def _fail_after_bdev(lvol, rpc_client, msg, is_primary=True):
     """Rollback an in-progress add_lvol_on_node after _create_bdev_stack has
     already produced a bdev/blob. Without this, a post-bdev-stack failure (a
@@ -1768,7 +1849,16 @@ def _fail_after_bdev(lvol, rpc_client, msg, is_primary=True):
     front makes that unrepresentable: from here on the record is only ever
     removed by the monitor's delete state machine, which has to confirm the
     teardown first.
+
+    A replica rollback on the node that leads the lvstore is refused: there
+    the bdev name is the volume's real blob (see _replicas_after_leader_failover).
     """
+    if not is_primary and _replica_rollback_would_hit_leader(lvol, rpc_client):
+        logger.error(
+            "rollback: not tearing down %s for lvol %s: the node leads %s, so "
+            "the bdev is the volume's own blob, not a leftover of this "
+            "registration (%s)", lvol.top_bdev, lvol.get_id(), lvol.lvs_name, msg)
+        return False, msg
     db_controller = DBController()
     try:
         lvol.status = LVol.STATUS_IN_DELETION
