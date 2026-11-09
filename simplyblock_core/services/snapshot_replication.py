@@ -15,6 +15,7 @@ from simplyblock_core import (
 )
 from simplyblock_core.controllers import (
     lvol_controller,
+    lvol_events,
     qos_controller,
     replication_delta,
     replication_recovery_points,
@@ -2290,6 +2291,10 @@ def _merge_landing(task, remote_lv, remote_snode):
         # delta record (-ESTALE, e.g. after a target restart) stayed "merging"
         # forever instead of being transferred again (bed 2026-10-26).
         st = rpc.bdev_lvol_merge_base_stat(remote_lv.top_bdev) or {}
+        retry_at = task.function_params.get("merge_retry_at") or 0
+        if st.get("state") == "failed" and st.get("rc") != _SPDK_ESTALE and time.time() < retry_at:
+            # backing off after a failed merge: no relaunch before retry_at
+            return "pending"
         if st.get("state") not in ("running", "done") and st.get("rc") != _SPDK_ESTALE:
             # The merge is part of the replication: it runs in the
             # replication class like the transfer's source reads, not in
@@ -2317,6 +2322,8 @@ def _merge_landing(task, remote_lv, remote_snode):
         xfer_timing.stamp("landing_merge", lvol=remote_lv.get_id(), ms=st.get("ms", 0),
                           bytes=st.get("bytes", 0), clusters=st.get("clusters", 0))
         task.function_params["merged_landing"] = remote_lv.get_id()
+        for k in ("merge_fails", "merge_retry_at", "merge_alerted_at"):
+            task.function_params.pop(k, None)
         task.write_to_db()
         return "ok"
     if st.get("rc") == _SPDK_ESTALE:
@@ -2324,9 +2331,47 @@ def _merge_landing(task, remote_lv, remote_snode):
                      "transfer wrote; the transfer is repeated", task.uuid,
                      remote_lv.top_bdev, remote_snode.get_id())
         return "restart"
+    if state == "failed":
+        _merge_failed(task, remote_lv, remote_snode, st)
+        return "retry"
     logger.error("Replication task %s: merge of %s with its base failed on %s: %s",
                  task.uuid, remote_lv.top_bdev, remote_snode.get_id(), st)
     return "retry"
+
+
+def _merge_backoff(fails):
+    """Seconds to wait before relaunching a merge that failed *fails* times in a row."""
+    return min(constants.REPL_MERGE_RETRY_MIN_SEC * (2 ** max(fails - 1, 0)),
+               constants.REPL_MERGE_RETRY_MAX_SEC)
+
+
+def _merge_failed(task, remote_lv, remote_snode, st):
+    """Record a failed landing merge: back off before the relaunch, and raise a
+    REPLICATION_STALLED event once it keeps failing (rate-limited)."""
+    params = task.function_params
+    now = time.time()
+    fails = int(params.get("merge_fails") or 0) + 1
+    wait = _merge_backoff(fails)
+    params["merge_fails"] = fails
+    params["merge_retry_at"] = now + wait
+    logger.error("Replication task %s: merge of %s with its base failed on %s (%d in a row, "
+                 "retry in %.0fs): %s", task.uuid, remote_lv.top_bdev, remote_snode.get_id(),
+                 fails, wait, st)
+    xfer_timing.stamp("landing_merge_failed", lvol=remote_lv.get_id(), rc=st.get("rc"),
+                      fails=fails, retry_in=round(wait))
+    alerted = params.get("merge_alerted_at") or 0
+    if fails >= constants.REPL_MERGE_FAIL_ALERT and now - alerted >= constants.REPL_MERGE_ALERT_EVERY_SEC:
+        params["merge_alerted_at"] = now
+        try:
+            src = db.get_snapshot_by_id(params["snapshot_id"]).lvol
+        except Exception:                                 # noqa: BLE001
+            src = remote_lv
+        try:
+            lvol_events.replication_merge_failing(src, remote_snode.get_id(), st.get("rc"), fails, wait)
+        except Exception as e:                            # noqa: BLE001
+            logger.error("Replication task %s: could not log the stalled-merge event: %s",
+                         task.uuid, e)
+    task.write_to_db()
 
 
 def process_snap_replicate_finish(task, snapshot):

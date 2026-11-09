@@ -722,6 +722,16 @@ REPL_XFER_INLINE_WAIT_SEC = 1.0
 # pass interval (REPL_ACTIVE_PASS_SEC) notices a finished merge instead.
 REPL_MERGE_INLINE_WAIT_SEC = 0.0
 REPL_MERGE_POLL_SEC = 1.0
+# A landing merge that failed (e.g. -ENOMEM: the target could not get its
+# DMA buffers) is not relaunched every pass: it waits REPL_MERGE_RETRY_MIN_SEC,
+# doubling per consecutive failure up to REPL_MERGE_RETRY_MAX_SEC, and raises
+# a REPLICATION_STALLED event from REPL_MERGE_FAIL_ALERT failures on, at most
+# every REPL_MERGE_ALERT_EVERY_SEC (bed bf18 2026-11-09: 1883 relaunches in
+# 37 min, every one failing with -12 within 5 ms, with no event).
+REPL_MERGE_RETRY_MIN_SEC = 5.0
+REPL_MERGE_RETRY_MAX_SEC = 120.0
+REPL_MERGE_FAIL_ALERT = 3
+REPL_MERGE_ALERT_EVERY_SEC = 600.0
 # Pass interval of the snapshot replication runner while any transfer or
 # merge is in flight; TASK_EXEC_INTERVAL_SEC when idle. Not sub-second: each
 # pass reads the task table (see test_transfer_completion_latency).
