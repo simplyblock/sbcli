@@ -55,8 +55,15 @@ def add_target(cluster_id, target_name, target_cluster_id, target_pool=None, tim
     """Create a named replication destination for *cluster_id*.
 
     With *peer*, the target cluster belongs to another control plane: it is
-    checked through that control plane's peer API instead of the local database,
-    and a PeerError propagates when the peer cannot confirm it.
+    checked through that control plane's peer API instead of the local database.
+
+    Raises:
+        KeyError: *cluster_id*, a local *target_cluster_id*, or a local
+            *target_pool* is not in this control plane's database.
+        ReplicationConfigError: the target replicates to itself, its name is
+            taken, its pool is unusable, or the peer answers for another
+            cluster or another peer API version.
+        PeerError: the peer cannot be reached or refuses the credential.
     """
     db.get_cluster_by_id(cluster_id)                      # raises when unknown
     if target_cluster_id == cluster_id:
@@ -112,7 +119,14 @@ def add_target(cluster_id, target_name, target_cluster_id, target_pool=None, tim
 
 
 def _check_peer(target_cluster_id, peer: PeerConnection):
-    """Confirm that *peer* manages *target_cluster_id* and speaks our peer API."""
+    """Confirm that *peer* manages *target_cluster_id* and speaks our peer API.
+
+    Raises:
+        ReplicationConfigError: the peer answers for another cluster or
+            speaks another peer API version.
+        PeerError: the peer cannot be reached, refuses the credential, or
+            answers with something this control plane does not understand.
+    """
     info = HttpPeerClient(peer.endpoint, target_cluster_id, peer.secret, peer.ca_cert).info()
     if str(info.cluster_id) != target_cluster_id:
         raise ReplicationConfigError(
@@ -147,7 +161,14 @@ def remove_target(target_id):
 
 def add_policy(cluster_id, policy_name, target, interval_min=1, mode=None, keep_replicated=None,
                retention_schedule=None, consistency_group=False, rpo_target_seconds=None):
-    """Create a policy on *target* (id or name)."""
+    """Create a policy on *target* (id or name).
+
+    Raises:
+        KeyError: *cluster_id* or *target* is unknown.
+        ReplicationConfigError: the target belongs to another cluster or is on
+            a peer control plane (not supported yet), the name is taken, or a
+            setting is out of range.
+    """
     db.get_cluster_by_id(cluster_id)
     try:
         tgt = db.get_replication_target_by_id(target)

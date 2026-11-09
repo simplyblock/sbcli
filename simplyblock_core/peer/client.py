@@ -5,6 +5,7 @@ cluster's control plane: over HTTP when the target names a peer endpoint, and
 in-process otherwise. Both implement ``PeerClient``, so a caller never needs to
 know which kind of target it has.
 """
+import contextlib
 import hashlib
 import logging
 import os
@@ -71,12 +72,21 @@ class LocalPeerClient:
         return self._cluster_id
 
     def info(self) -> PeerInfo:
+        """Identity and peer API version of the target cluster.
+
+        Raises:
+            PeerNotFoundError: this control plane does not manage the cluster.
+        """
         try:
             return service.info(self._cluster_id)
         except KeyError as e:
             raise PeerNotFoundError(str(e)) from e
 
 
+# Process-local on purpose: each process writes the bundles it uses into its own
+# directory, and nothing depends on two processes (API replicas, services, the
+# CLI) agreeing about it. The lock only keeps two threads of one process from
+# creating two directories.
 _ca_dir: str | None = None
 _ca_dir_lock = threading.Lock()
 
@@ -89,6 +99,9 @@ def _ca_bundle_path(ca_cert: str) -> str:
     predictable name in the temp directory could be planted by another user
     before this process writes it. Named by the bundle's hash, so clients of
     the same bundle in this process share one file.
+
+    Raises:
+        OSError: the directory or the file cannot be created.
     """
     global _ca_dir
     with _ca_dir_lock:
@@ -135,6 +148,15 @@ class HttpPeerClient:
         return self._cluster_id
 
     def _request(self, method: str, path: str) -> Any:
+        """Send one call to the peer and return its JSON body.
+
+        Raises:
+            PeerUnreachableError: no answer (connection refused, timeout) or a 5xx
+                after the retries.
+            PeerAuthError: the peer refused the credential (401/403).
+            PeerNotFoundError: the peer does not know the cluster or object (404).
+            PeerProtocolError: any other status, or a body that is not JSON.
+        """
         url = f"{self._base}/{path}"
         logger.debug("Peer request: %s %s", method, url)
         try:
@@ -164,12 +186,20 @@ class HttpPeerClient:
 
     @staticmethod
     def _detail(response: requests.Response) -> str:
-        try:
+        """The ``detail`` of an error body, for the message of the error raised for it."""
+        # Only decorates an error already being raised: a body that is not JSON,
+        # or not an object, leaves the message without a detail.
+        with contextlib.suppress(ValueError, AttributeError):
             return str(response.json().get("detail", ""))
-        except (ValueError, AttributeError):
-            return ""
+        return ""
 
     def info(self) -> PeerInfo:
+        """Identity and peer API version of the target cluster.
+
+        Raises:
+            PeerError: as for every peer call (see ``_request``), and
+                PeerProtocolError when the answer is not a PeerInfo.
+        """
         try:
             return PeerInfo.model_validate(self._request("GET", "info"))
         except ValidationError as e:

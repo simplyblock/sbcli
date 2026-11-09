@@ -137,6 +137,26 @@ class TestAddPeerTarget:
                            target_pool="pool-by-name", peer=PEER)
 
 
+class TestPolicyOnPeerTarget:
+    """A peer target takes no policy until replication runs through the peer
+    client: every replication path starts from a policy and would look the
+    target cluster up in this control plane's database, where it has no record."""
+
+    def test_a_policy_is_refused(self, db, source_cluster, peer_answers):
+        target_id = rpc.add_target(SOURCE_CLUSTER_ID, "site-b", PEER_CLUSTER_ID, peer=PEER)
+
+        with pytest.raises(ReplicationConfigError, match="peer control plane"):
+            rpc.add_policy(SOURCE_CLUSTER_ID, "every-5m", target_id, interval_min=5)
+
+        assert DBController().get_replication_policies(SOURCE_CLUSTER_ID) == []
+
+    def test_a_policy_by_target_name_is_refused_too(self, db, source_cluster, peer_answers):
+        rpc.add_target(SOURCE_CLUSTER_ID, "site-b", PEER_CLUSTER_ID, peer=PEER)
+
+        with pytest.raises(ReplicationConfigError, match="peer control plane"):
+            rpc.add_policy(SOURCE_CLUSTER_ID, "every-5m", "site-b", interval_min=5)
+
+
 def test_a_local_target_still_needs_the_target_cluster_here(db, source_cluster):
     with pytest.raises(KeyError):
         rpc.add_target(SOURCE_CLUSTER_ID, "site-b", PEER_CLUSTER_ID)
