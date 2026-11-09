@@ -55,10 +55,13 @@ class PeerClient(Protocol):
     @property
     def cluster_id(self) -> str:
         """The target cluster every call addresses."""
-        ...
 
     def info(self) -> PeerInfo:
-        ...
+        """Identity, peer API version and capabilities of the target cluster.
+
+        Raises:
+            PeerError: the target's control plane cannot answer for the cluster.
+        """
 
 
 class LocalPeerClient:
