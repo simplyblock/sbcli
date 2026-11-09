@@ -6,6 +6,7 @@ import time
 import uuid
 
 import docker
+import requests
 
 from simplyblock_core import utils, constants
 from simplyblock_core.controllers import fdb_backup_events
@@ -16,14 +17,34 @@ from simplyblock_core.models.job_schedule import JobSchedule
 logger = lg.getLogger()
 db_controller = DBController()
 
+FDB_BACKUP_AGENT_CONTAINER_PREFIX = "app_fdb-backup-agent"
+
+
 def __get_fdb_cont():
-    snode = db_controller.get_mgmt_nodes()[0]
-    if not snode:
-        return
-    node_docker = docker.DockerClient(base_url=f"tcp://{snode.docker_ip_port}", version="auto")
-    for container in node_docker.containers.list():
-        if container.name.startswith("app_fdb-backup-agent"): # type: ignore[union-attr]
-            return container
+    """Return the running fdb-backup-agent container, wherever swarm placed it.
+
+    The agent is a single-replica service constrained only to ``node.role ==
+    manager``, so it lands on any mgmt node and moves on every stack redeploy
+    or node restart. Every mgmt node's Docker API is searched in turn; a node
+    whose API is unreachable is skipped, because the agent cannot be running
+    there anyway. ``None`` means the agent was found on no reachable node.
+    """
+    searched = []
+    for mnode in db_controller.get_mgmt_nodes():
+        try:
+            node_docker = docker.DockerClient(base_url=f"tcp://{mnode.docker_ip_port}", version="auto")
+            containers = node_docker.containers.list()
+        except (docker.errors.DockerException, requests.exceptions.RequestException) as e:
+            logger.warning(f"Skipping mgmt node {mnode.hostname} ({mnode.docker_ip_port}) "
+                           f"while looking for the fdb-backup-agent container: {e}")
+            continue
+        searched.append(mnode.hostname)
+        for container in containers:
+            if container.name.startswith(FDB_BACKUP_AGENT_CONTAINER_PREFIX):  # type: ignore[union-attr]
+                logger.info(f"fdb-backup-agent container found on mgmt node {mnode.hostname}")
+                return container
+    logger.error(f"fdb-backup-agent container not found on any reachable mgmt node, searched: {searched}")
+    return None
 
 def create_backup(cluster_id):
     container = __get_fdb_cont()
