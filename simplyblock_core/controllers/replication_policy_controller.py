@@ -26,8 +26,8 @@ from simplyblock_core.models.lvol_model import LVol, LVolReplication
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.replication import ReplicationPolicy, ReplicationTarget
 from simplyblock_core.models.snapshot import SnapShot
-from simplyblock_core.peer.client import HttpPeerClient
-from simplyblock_core.peer.protocol import PEER_API_VERSION
+from simplyblock_core.peer.client import HttpPeerClient, PeerError, peer_for_target
+from simplyblock_core.peer.protocol import PEER_API_VERSION, REPLICATION_CAPABILITIES
 
 logger = utils.get_logger(__name__)
 db = db_module.DBController()
@@ -137,6 +137,29 @@ def _check_peer(target_cluster_id, peer: PeerConnection):
             f"this control plane speaks {PEER_API_VERSION}")
 
 
+def _check_peer_replicates(target):
+    """Confirm the peer of *target* serves every step replication drives on it.
+
+    A policy on a peer target makes the source run its transfers through the
+    peer API; a peer on an older version that lacks one of those calls would
+    fail mid-replication instead, so it is refused here, when the policy is made.
+
+    Raises:
+        ReplicationConfigError: the peer cannot be asked, or lacks a call.
+    """
+    try:
+        info = peer_for_target(target).info()
+    except PeerError as e:
+        raise ReplicationConfigError(
+            f"Replication target {target.target_name}: the peer control plane at "
+            f"{target.peer_endpoint} cannot be asked what it serves: {e}") from e
+    missing = sorted(REPLICATION_CAPABILITIES - set(info.capabilities))
+    if missing:
+        raise ReplicationConfigError(
+            f"Replication target {target.target_name}: the peer control plane at "
+            f"{target.peer_endpoint} does not serve {', '.join(missing)}; upgrade it first")
+
+
 def list_targets(cluster_id=None):
     return db.get_replication_targets(cluster_id)
 
@@ -166,8 +189,8 @@ def add_policy(cluster_id, policy_name, target, interval_min=1, mode=None, keep_
     Raises:
         KeyError: *cluster_id* or *target* is unknown.
         ReplicationConfigError: the target belongs to another cluster or is on
-            a peer control plane (not supported yet), the name is taken, or a
-            setting is out of range.
+            a peer control plane that does not serve every replication call, the
+            name is taken, or a setting is out of range.
     """
     db.get_cluster_by_id(cluster_id)
     try:
@@ -178,13 +201,7 @@ def add_policy(cluster_id, policy_name, target, interval_min=1, mode=None, keep_
         raise ReplicationConfigError(
             f"Replication target {target} belongs to cluster {tgt.cluster_id}")
     if tgt.has_peer():
-        # Every replication path starts from a policy, and those paths still
-        # read and write the target cluster's records in this control plane's
-        # database, where a peer's cluster has none. Refused here, up front,
-        # until the replication steps go through the peer client.
-        raise ReplicationConfigError(
-            f"Replication target {tgt.target_name} is on a peer control plane "
-            f"({tgt.peer_endpoint}); replication to a peer control plane is not supported yet")
+        _check_peer_replicates(tgt)
 
     for existing in db.get_replication_policies(cluster_id):
         if existing.policy_name == policy_name:

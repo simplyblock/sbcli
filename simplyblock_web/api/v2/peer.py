@@ -32,6 +32,8 @@ from simplyblock_core.peer.protocol import (
     LandingRequest,
     LandingResponse,
     PeerInfo,
+    PlaceRequest,
+    PlaceResponse,
 )
 
 from ._dependencies import Cluster
@@ -112,5 +114,14 @@ def delete_snapshot(cluster: Cluster, snapshot_id: UUID) -> DeleteSnapshotRespon
         return service.delete_snapshot(cluster.get_id(), str(snapshot_id))
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except PreconditionError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+
+@api.post('/place', name='peer:place')
+def place(cluster: Cluster, request: PlaceRequest) -> PlaceResponse:
+    """Pick the member a volume's copies land on when its replication starts."""
+    try:
+        return service.place(cluster.get_id(), request)
     except PreconditionError as e:
         raise HTTPException(status_code=409, detail=str(e))

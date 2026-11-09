@@ -33,6 +33,7 @@ from simplyblock_core.peer.protocol import (
     HubAddress,
     HubPath,
     LandingRequest,
+    PlaceRequest,
     SourceSnapshot,
 )
 
@@ -625,3 +626,41 @@ class TestFinish:
 
         recorded = db.get_snapshot_by_id(answer.copy_id)
         assert not recorded.source_replicated_snap_uuid and not recorded.prev_snap_uuid
+
+
+class TestPlace:
+    """The destination picks the member a volume's copies land on, by the rules
+    replication_start applies: preferred (online), chain, capacity."""
+
+    def test_an_online_preferred_node_is_kept(self, db, lvstore):
+        answer = service.place(TGT, PlaceRequest(size=1 << 30, preferred_node=TS))
+
+        assert (answer.node_id, answer.rule) == (TS, "preferred")
+
+    def test_an_offline_preferred_node_gives_way_to_the_chain(self, db, lvstore):
+        secondary = db.get_storage_node_by_id(TS)
+        secondary.status = StorageNode.STATUS_OFFLINE
+        secondary.write_to_db(db.kv_store)
+        copy = _predecessor_copy(db, [TT])
+        copy.data_uuid = "D-1"
+        copy.write_to_db(db.kv_store)
+
+        answer = service.place(TGT, PlaceRequest(size=1 << 30, preferred_node=TS,
+                                                 data_uuids=["D-1"]))
+
+        assert (answer.node_id, answer.rule) == (TT, "chain")
+
+    def test_otherwise_by_capacity_without_the_origin_node(self, db, lvstore):
+        origin = _predecessor_copy(db, [TT])
+        tp = db.get_storage_node_by_id(TP)
+
+        with patch.object(lvol_controller, "_pick_replication_node", return_value=tp) as pick:
+            answer = service.place(TGT, PlaceRequest(size=1 << 30, exclude_copy_id=origin.get_id()))
+
+        assert (answer.node_id, answer.rule) == (TP, "capacity")
+        assert pick.call_args.kwargs["exclude"] == {TT}
+
+    def test_no_member_left_is_refused(self, db, lvstore):
+        with patch.object(lvol_controller, "_pick_replication_node", return_value=None), \
+                pytest.raises(service.LandingVolumeError):
+            service.place(TGT, PlaceRequest(size=1 << 30))

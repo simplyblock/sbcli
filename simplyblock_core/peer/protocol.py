@@ -17,7 +17,7 @@ PEER_API_VERSION = 1
 #: step before relying on it during a rolling upgrade of the two sites.
 CAPABILITIES: frozenset[str] = frozenset({
     "info", "discard_landing", "describe", "prepare_landing", "ensure_hub", "chain", "finish",
-    "delete_snapshot",
+    "delete_snapshot", "place",
 })
 
 #: Name prefix of a replication landing volume (``REP_<snapshot name>``). It is
@@ -254,3 +254,31 @@ class DeleteSnapshotResponse(BaseModel):
     #: itself was refused (``reason``); retention tries again on a later pass.
     deleted: bool
     reason: str = ""
+
+#: The calls replication to a peer uses; a peer must serve every one before a
+#: policy may replicate to it.
+REPLICATION_CAPABILITIES: frozenset[str] = CAPABILITIES - {"info"}
+
+
+class PlaceRequest(BaseModel):
+    """Pick the member a volume's copies land on, when replication starts.
+
+    The source applies its co-location rules from its own records and names
+    the node a subsystem sibling or a consistency-group member already
+    replicates to (``preferred_node``); the target keeps it when it is online,
+    else takes the member holding the volume's chain, else the least loaded.
+    """
+
+    size: Annotated[int, Field(ge=0)]
+    preferred_node: str = ""
+    #: data_uuids of the volume's snapshot chain (copies share it).
+    data_uuids: list[str] = Field(default_factory=list)
+    #: A copy whose node must not be picked: the origin of the snapshot the
+    #: volume was cloned from.
+    exclude_copy_id: str = ""
+
+
+class PlaceResponse(BaseModel):
+    node_id: str
+    #: Which rule chose it.
+    rule: Literal["preferred", "chain", "capacity"]

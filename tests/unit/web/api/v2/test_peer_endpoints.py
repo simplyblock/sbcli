@@ -17,6 +17,7 @@ from simplyblock_core.peer.protocol import (
     EnsureHubResponse,
     LandingResponse,
     PeerInfo,
+    PlaceResponse,
 )
 from simplyblock_core.peer.service import (
     LandingVolumeError,
@@ -221,3 +222,21 @@ class TestDeleteSnapshot:
         peer_service.delete_snapshot.side_effect = NotAReplicatedCopyError('not a copy')
 
         assert client.delete(SNAPSHOT_URL).status_code == 409
+
+
+PLACE_URL = f'/api/v2/_peer/clusters/{CLUSTER_ID}/place'
+
+
+class TestPlace:
+
+    def test_answers_through_the_service(self, client, db, cluster, peer_service):
+        peer_service.place.return_value = PlaceResponse(node_id='TP', rule='capacity')
+
+        response = client.post(PLACE_URL, json={'size': 1})
+
+        assert response.status_code == 200 and response.json()['node_id'] == 'TP'
+
+    def test_no_member_left_is_409(self, client, db, cluster, peer_service):
+        peer_service.place.side_effect = LandingVolumeError('no node')
+
+        assert client.post(PLACE_URL, json={'size': 1}).status_code == 409

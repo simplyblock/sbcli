@@ -35,6 +35,8 @@ from simplyblock_core.peer.protocol import (
     LandingRequest,
     LandingResponse,
     PeerInfo,
+    PlaceRequest,
+    PlaceResponse,
     SnapshotState,
 )
 from simplyblock_core.rpc_client import RPCException
@@ -1060,3 +1062,47 @@ def delete_snapshot(cluster_id: str, snapshot_id: str) -> DeleteSnapshotResponse
     if not snapshot_controller.delete(snapshot_id):
         return DeleteSnapshotResponse(deleted=False, reason=f"the delete of {snapshot_id} failed")
     return DeleteSnapshotResponse(deleted=True)
+
+
+def place(cluster_id: str, request: PlaceRequest) -> PlaceResponse:
+    """Pick the member a volume's copies land on (see PlaceRequest).
+
+    The order is replication_start's: the preferred node when it is online --
+    keeping a shared subsystem, or a consistency group, on one target node
+    outranks avoiding the origin node (soak case 7; ramen-e2e-cg 2026-09-26) --
+    then the online member holding the newest copy of the volume's chain, so
+    the backlog is linked, not re-shipped (2026-09-29), then the least loaded
+    online primary.
+
+    Raises:
+        KeyError: this control plane does not manage *cluster_id*.
+        LandingVolumeError: no member can take the volume.
+    """
+    from simplyblock_core.controllers import lvol_controller
+
+    db = DBController()
+    db.get_cluster_by_id(cluster_id)
+    if request.preferred_node:
+        with contextlib.suppress(KeyError):
+            node = db.get_storage_node_by_id(request.preferred_node)
+            if node.cluster_id == cluster_id and node.status == StorageNode.STATUS_ONLINE:
+                return PlaceResponse(node_id=node.get_id(), rule="preferred")
+        logger.warning("Preferred node %s is not an online member of %s; picking by chain "
+                       "and capacity instead", request.preferred_node, cluster_id)
+    wanted = set(request.data_uuids)
+    if wanted:
+        copies = [s for s in db.get_snapshots(cluster_id)
+                  if s.data_uuid in wanted and s.status != SnapShot.STATUS_IN_DELETION and s.lvol]
+        for copy in sorted(copies, key=lambda s: s.created_at, reverse=True):
+            with contextlib.suppress(KeyError):
+                node = db.get_storage_node_by_id(copy.lvol.node_id)
+                if node.status == StorageNode.STATUS_ONLINE:
+                    return PlaceResponse(node_id=node.get_id(), rule="chain")
+    exclude = set()
+    if request.exclude_copy_id:
+        with contextlib.suppress(KeyError):
+            exclude.add(db.get_snapshot_by_id(request.exclude_copy_id).lvol.node_id)
+    node = lvol_controller._pick_replication_node(db, cluster_id, request.size, exclude=exclude)
+    if node is None:
+        raise LandingVolumeError(f"Replication node not found on cluster {cluster_id}")
+    return PlaceResponse(node_id=node.get_id(), rule="capacity")

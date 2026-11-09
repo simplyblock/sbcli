@@ -35,6 +35,8 @@ from simplyblock_core.peer.protocol import (
     LandingRequest,
     LandingResponse,
     PeerInfo,
+    PlaceRequest,
+    PlaceResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -145,6 +147,15 @@ class PeerClient(Protocol):
             PeerError: the target's control plane cannot be reached or understood.
         """
 
+    def place(self, request: PlaceRequest) -> PlaceResponse:
+        """Pick the member a volume's copies land on, when its replication starts.
+
+        Raises:
+            PeerNotFoundError: the cluster is unknown.
+            PeerRefusedError: no member can take the volume.
+            PeerError: the target's control plane cannot be reached or understood.
+        """
+
 
 class LocalPeerClient:
     """A target cluster managed by this same control plane: calls the service directly."""
@@ -248,6 +259,20 @@ class LocalPeerClient:
         """
         try:
             return service.delete_snapshot(self._cluster_id, snapshot_id)
+        except KeyError as e:
+            raise PeerNotFoundError(str(e)) from e
+        except PreconditionError as e:
+            raise PeerRefusedError(str(e)) from e
+
+    def place(self, request: PlaceRequest) -> PlaceResponse:
+        """Pick the member (see ``PeerClient.place``).
+
+        Raises:
+            PeerNotFoundError: the cluster is unknown.
+            PeerRefusedError: no member can take the volume.
+        """
+        try:
+            return service.place(self._cluster_id, request)
         except KeyError as e:
             raise PeerNotFoundError(str(e)) from e
         except PreconditionError as e:
@@ -474,6 +499,18 @@ class HttpPeerClient:
             return DeleteSnapshotResponse.model_validate(self._request("DELETE", path))
         except ValidationError as e:
             raise PeerProtocolError(f"Unexpected delete response from {self._base}: {e}") from e
+
+    def place(self, request: PlaceRequest) -> PlaceResponse:
+        """Pick the member (see ``PeerClient.place``).
+
+        Raises:
+            PeerError: as for every peer call (see ``_request``), and
+                PeerProtocolError when the answer is not a PlaceResponse.
+        """
+        try:
+            return PlaceResponse.model_validate(self._request("POST", "place", request))
+        except ValidationError as e:
+            raise PeerProtocolError(f"Unexpected place response from {self._base}: {e}") from e
 
 
 def peer_for_target(target: ReplicationTarget) -> PeerClient:

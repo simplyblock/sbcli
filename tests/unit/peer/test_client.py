@@ -33,6 +33,7 @@ from simplyblock_core.peer.protocol import (
     DescribeRequest,
     EnsureHubRequest,
     LandingRequest,
+    PlaceRequest,
 )
 
 CLUSTER_ID = "6f9ad3a2-5b0e-4d55-9a84-0d3c3b1f2e10"
@@ -333,3 +334,17 @@ class TestDeleteSnapshot:
         assert method == "DELETE"
         assert url == f"https://cp-b.example:8443/api/v2/_peer/clusters/{CLUSTER_ID}/snapshots/T1"
         assert (answer.deleted, answer.reason) == (False, "cloned")
+
+
+class TestPlace:
+
+    def test_posts_the_request_and_reads_the_answer(self, session_request):
+        session_request.return_value = _response(body={"node_id": "TS", "rule": "preferred"})
+
+        answer = _client().place(PlaceRequest(size=1, preferred_node="TS", data_uuids=["D"]))
+
+        method, url = session_request.call_args.args
+        assert method == "POST"
+        assert url == f"https://cp-b.example:8443/api/v2/_peer/clusters/{CLUSTER_ID}/place"
+        assert session_request.call_args.kwargs["json"]["preferred_node"] == "TS"
+        assert (answer.node_id, answer.rule) == ("TS", "preferred")

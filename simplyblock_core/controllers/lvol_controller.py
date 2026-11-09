@@ -1,3 +1,4 @@
+import contextlib
 import copy
 import errno
 import random
@@ -49,6 +50,8 @@ from simplyblock_core.models.lvol_model import LVol, LVolReplication
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.peer.client import PeerError, peer_for_target
+from simplyblock_core.peer.protocol import PlaceRequest
 from simplyblock_core.prom_client import PromClient
 from simplyblock_core.rpc_client import RPCException, RPCRemoteError
 from simplyblock_core.services import replication_final_step
@@ -4936,11 +4939,15 @@ def replication_start_error(lvol_id, replication_cluster_id=None, replication_po
     if replication_pool_id and not replication_cluster_id:
         return "a replication pool needs replication_cluster_id naming its cluster"
 
+    # A destination on a peer control plane is not in this database: add_target
+    # confirmed it through the peer's /info, and the peer checks a pool hint.
+    peer = _destination_peer(db_controller, lvol, replication_cluster_id)
     if replication_cluster_id:
-        try:
-            db_controller.get_cluster_by_id(replication_cluster_id)
-        except KeyError:
-            return f"replication cluster {replication_cluster_id} does not exist"
+        if peer is None:
+            try:
+                db_controller.get_cluster_by_id(replication_cluster_id)
+            except KeyError:
+                return f"replication cluster {replication_cluster_id} does not exist"
         source_node = db_controller.get_storage_node_by_id(lvol.node_id)
         if source_node.cluster_id == replication_cluster_id:
             return f"replication cluster {replication_cluster_id} is the volume's own cluster"
@@ -4953,7 +4960,7 @@ def replication_start_error(lvol_id, replication_cluster_id=None, replication_po
                 return (f"volume {lvol_id} already replicates to cluster {current}; "
                         f"it cannot be started towards {replication_cluster_id}")
 
-    if replication_pool_id:
+    if replication_pool_id and peer is None:
         try:
             pool = db_controller.get_pool_by_id(replication_pool_id)
         except KeyError:
@@ -4982,6 +4989,43 @@ def requested_destination_pool(db_controller, lvol, cluster_id):
     except KeyError:
         return ""
     return pool_uuid if pool.cluster_id == cluster_id else ""
+
+
+def _destination_peer(db_controller, lvol, replication_cluster_id):
+    """The peer client of *replication_cluster_id* when the volume's policy
+    target puts it on a peer control plane; None for a destination in this
+    control plane (the only kind a volume without a policy can have)."""
+    if not (replication_cluster_id and getattr(lvol, "replication_policy_id", "")):
+        return None
+    try:
+        policy = db_controller.get_replication_policy_by_id(lvol.replication_policy_id)
+        target = db_controller.get_replication_target_by_id(policy.target_id)
+    except KeyError:
+        return None
+    if target.target_cluster_id != replication_cluster_id or not target.has_peer():
+        return None
+    return peer_for_target(target)
+
+
+def _place_on_peer(db_controller, lvol, peer, preferred_node):
+    """The node of a peer destination the volume's copies land on: the peer
+    applies the placement rules to its own members (peer.service.place).
+
+    Raises:
+        PeerError: the peer cannot answer, or no member can take the volume.
+    """
+    exclude_copy_id = ""
+    if lvol.cloned_from_snap:
+        with contextlib.suppress(KeyError):
+            exclude_copy_id = (db_controller.get_snapshot_by_id(lvol.cloned_from_snap)
+                               .source_replicated_snap_uuid or "")
+    all_snaps = db_controller.get_snapshots()
+    data_uuids = sorted({s.data_uuid for s in replication_backlog(db_controller, lvol, all_snaps)
+                         if s.data_uuid})
+    answer = peer.place(PlaceRequest(size=lvol.size, preferred_node=preferred_node or "",
+                                     data_uuids=data_uuids, exclude_copy_id=exclude_copy_id))
+    logger.info("Replicating on node %s of the peer destination (%s)", answer.node_id, answer.rule)
+    return answer.node_id
 
 
 def replication_start(lvol_id, replication_cluster_id=None, mode=None, interval_min=None,
@@ -5048,6 +5092,24 @@ def replication_start(lvol_id, replication_cluster_id=None, mode=None, interval_
     # Persist do_replicate/mode/interval regardless of whether a replication
     # node still needs to be selected below.
     lvol.write_to_db()
+    peer = _destination_peer(db_controller, lvol, replication_cluster_id)
+    if not lvol.replication_node_id and peer is not None:
+        # The destination's members are on a peer control plane, so the peer
+        # picks one by the same rules (peer.service.place). The co-location
+        # this cluster can see -- a subsystem sibling or a group member already
+        # replicating -- goes along as the preferred node; the peer keeps it
+        # when it is online.
+        snode = db_controller.get_storage_node_by_id(lvol.node_id)
+        cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+        preferred = (_sibling_replication_node(lvol, cluster)
+                     or _group_replication_node_for(lvol, db_controller))
+        try:
+            lvol.replication_node_id = _place_on_peer(db_controller, lvol, peer, preferred)
+        except PeerError as e:
+            logger.error("Replication node not found for lvol %s on the peer destination: %s",
+                         lvol.get_id(), e)
+            return False
+        lvol.write_to_db()
     if not lvol.replication_node_id:
         excluded_nodes = []
         if lvol.cloned_from_snap:
@@ -5153,7 +5215,9 @@ def replication_start(lvol_id, replication_cluster_id=None, mode=None, interval_
     for snap in replication_backlog(db_controller, lvol, all_snaps):
         if not snap.target_replicated_snap_uuid:
             matched = False
-            for sn in all_snaps:
+            # A peer's copies are not in this database: its prepare_landing
+            # links a copy of the same data when the snapshot's task runs.
+            for sn in (all_snaps if peer is None else []):
                 if (sn.data_uuid == snap.data_uuid and sn.get_id() != snap.get_id()
                         and (sn.lvol.node_id == lvol.replication_node_id
                              or (_repl_lvs and sn.lvol.lvs_name == _repl_lvs
