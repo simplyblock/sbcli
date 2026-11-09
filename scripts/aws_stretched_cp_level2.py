@@ -200,8 +200,7 @@ def install_sbcli(ips):
         "sudo dnf install git python3.11 python3.11-pip nvme-cli fio iptables -y",
         "sudo python3.11 -m pip install --upgrade pip setuptools wheel",
         "sudo python3.11 -m pip install ruamel.yaml",
-        f"sudo python3.11 -m pip install git+https://github.com/simplyblock/sbcli@{BRANCH}"
-        " --upgrade --force --ignore-installed requests",
+        f"sudo python3.11 -m pip install git+https://github.com/simplyblock/sbcli@{BRANCH} --upgrade --force --ignore-installed requests",  # noqa: E501
     ]
     with ThreadPoolExecutor(max_workers=len(ips)) as ex:
         for t in [ex.submit(ssh_exec, ip, cmds, False, True, 1800) for ip in ips]:
@@ -227,8 +226,8 @@ def scale_services_per_manager(mgmt_ip):
         if "simplyblock_core/services" not in args and "simplyblock-task-runner" not in args \
                 and "simplyblock-service" not in args:
             continue
-        ssh_exec(mgmt_ip, [f"sudo docker service update --replicas 2 --replicas-max-per-node 1 "
-                           f"--detach {name}"], check=True)
+        update = f"sudo docker service update --replicas 2 --replicas-max-per-node 1 --detach {name}"
+        ssh_exec(mgmt_ip, [update], check=True)
 
 
 def deploy():
