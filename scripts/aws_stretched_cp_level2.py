@@ -278,7 +278,7 @@ def deploy():
     log("phase 3: configure + deploy storage nodes")
     sn_ips = [n["ip"] for s in SITES for n in meta["sn"][s]]
     with ThreadPoolExecutor(max_workers=len(sn_ips)) as ex:
-        for t in [ex.submit(ssh_exec, ip, [f"{SBCTL} sn configure --max-subsys {MAX_SUBSYS}"], False, True)
+        for t in [ex.submit(ssh_exec, ip, [f"{SBCTL} sn configure"], False, True)
                   for ip in sn_ips]:
             t.result()
     with ThreadPoolExecutor(max_workers=len(sn_ips)) as ex:
