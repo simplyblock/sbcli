@@ -424,7 +424,7 @@ def run_tests(meta):
         "    def redirect_request(self, *a, **k):",
         "        return None",
         "op = urllib.request.build_opener(NoRedirect)",
-        f"H = {{'Authorization': '{cid} {meta['secret']}', 'Content-Type': 'application/json'}}",
+        f"H = {{'Authorization': 'Bearer {meta['secret']}', 'Content-Type': 'application/json'}}",
         "def call(method, path, body=None):",
         "    req = urllib.request.Request('http://127.0.0.1:5000' + path, data=body, method=method, headers=H)",
         "    try:",
