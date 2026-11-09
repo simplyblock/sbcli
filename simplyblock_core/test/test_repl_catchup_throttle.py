@@ -176,3 +176,11 @@ class TestWiring:
         src = inspect.getsource(final.task_runner)
         i = src.index('"catchup_win", "catchup_prev",')
         assert "catchup_cap_mbps" not in src[i - 200:i + 200]
+
+
+def test_entering_the_endgame_rearms_the_shrink_deadline():
+    src = inspect.getsource(final.task_runner)
+    claim = src.index("task = _acquire_lvs_claim(task, lvol, tasks)\n        # The endgame")
+    entered = src.index('xfer_timing.stamp("endgame_entered"')
+    assert "shrink_deadline=" in src[claim:entered]
+    assert "REPL_CUTOVER_SHRINK_TIMEOUT_SEC" in src[claim:entered]

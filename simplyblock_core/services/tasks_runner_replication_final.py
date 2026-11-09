@@ -722,6 +722,13 @@ def task_runner(task: JobSchedule, tasks):
                                "catchup_strikes") or task
             params = task.function_params
         task = _acquire_lvs_claim(task, lvol, tasks)
+        # The endgame gets its full convergence budget from here. The deadline
+        # an abandon set (back-off + timeout) also had to cover the prune gate
+        # between attempts, which takes minutes under load: bf18 (2026-11-09)
+        # entered second endgames with the deadline already past or seconds
+        # away, and abandoned them after one or a few rounds.
+        task = _record(task, shrink_deadline=(
+            int(time.time()) + constants.REPL_CUTOVER_SHRINK_TIMEOUT_SEC))
         params = task.function_params
         xfer_timing.stamp("endgame_entered", lvol=lvol_id, ms=(lag or 0) * 1000.0)
 
