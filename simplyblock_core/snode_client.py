@@ -7,9 +7,15 @@ from requests.adapters import HTTPAdapter
 from urllib3 import Retry
 
 from simplyblock_core.settings import Settings
+from simplyblock_core.utils import peer_address
 from simplyblock_core.utils.secrets import unwrap_secrets_for_send
 
 logger = logging.getLogger()
+
+
+# A node of the other site of a stretched control plane is named by that
+# site's DNS; connect to its node address instead (utils/peer_address.py).
+peer_address.install()
 
 
 class SNodeClientException(Exception):

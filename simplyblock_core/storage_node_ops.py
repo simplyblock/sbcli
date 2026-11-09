@@ -101,6 +101,7 @@ from simplyblock_core.utils import (
     dial_backoff,
     hublvol_reconnect,
     nvmf_listener,
+    peer_address,
     pull_docker_image_with_retry,
     rpc_budget,
 )
@@ -4044,7 +4045,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
              id_device_by_nqn=False, partition_size="", ha_jm_count=None, format_4k=False,
              spdk_proxy_image=None, spdk_sys_mem=None, expansion=False, failure_domain=None,
              force_format=False, site=None, networks=None,
-             pod_network=False):
+             pod_network=False, node_ip=None):
     """Add the storage node(s) configured on ``node_addr`` to the cluster.
 
     Returns a truthy value on success and False on the legacy failure paths.
@@ -4060,6 +4061,10 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
     if data_nics_list and (networks or pod_network):
         logger.error("data_nics are allowed only when the node is on the host network")
         return False
+    if node_ip:
+        # A node of the other site of a stretched control plane: its name is
+        # that site's DNS, its worker's address is reachable from here.
+        peer_address.register(node_addr, node_ip)
     snode_api = SNodeClient(node_addr)
     node_info, _ = snode_api.info()
     if node_info.get("nodes_config") and node_info["nodes_config"].get("nodes"):
