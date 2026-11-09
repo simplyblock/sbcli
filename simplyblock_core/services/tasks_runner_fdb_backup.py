@@ -1,6 +1,6 @@
 # coding=utf-8
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from simplyblock_core import db_controller, utils, constants
 from simplyblock_core.controllers import fdb_backup_controller
@@ -15,7 +15,7 @@ db = db_controller.DBController()
 
 
 def prune_old_backups(cluster_id):
-    ret = fdb_backup_controller.list_backups(cluster_id)
+    ret = fdb_backup_controller.list_backups(cluster_id, is_json=True)
     if not ret:
         return
 
@@ -25,8 +25,9 @@ def prune_old_backups(cluster_id):
 
     cl = db.get_cluster_by_id(cluster_id)
     logger.info("Pruning old backups")
-    date_to_delete_before = datetime.now()
-    date_to_delete_before = date_to_delete_before.replace(day=date_to_delete_before.day - cl.backup_retention_days)
+    # timedelta, not replace(day=...): the latter raises ValueError on the first
+    # retention_days days of every month and never crosses a month boundary.
+    date_to_delete_before = datetime.now() - timedelta(days=cl.backup_retention_days)
     for item in ret:
         # date = datetime.datetime.strptime(param[1:-1], "%Y/%m/%d.%H:%M:%S+0000").strftime("%Y-%m-%d %H:%M:%S")
         try:
