@@ -178,6 +178,13 @@ class TestApiVerdict:
             "standby", "no lease", redirects={"c1": "https://a.example"}))
         assert cpc.api_verdict("POST", "/api/v2/clusters/c1/control-plane/takeover", "c1").action == "serve"
 
+    def test_a_site_registers_itself_on_its_own_standby(self, monkeypatch):
+        """The joining site's operator posts its management node to its own
+        control plane, which is standby by then; the write is local."""
+        monkeypatch.setattr(cpc, "current_mode", lambda: cpc.ModeVerdict(
+            "standby", "no lease", redirects={"c1": "https://a.example"}))
+        assert cpc.api_verdict("POST", "/api/v2/management-nodes/", "c1").action == "serve"
+
     def test_a_disconnected_control_plane_answers_503_but_keeps_health(self, monkeypatch):
         def boom():
             raise RuntimeError("fdb timeout")

@@ -457,7 +457,11 @@ class ApiVerdict(NamedTuple):
 
 _MUTATING = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 #: Paths a standby or disconnected control plane always answers itself.
-_ALWAYS_LOCAL = ("/_meta", "/api/v2/_meta", "/api/v2/metrics", "/api/v1/metrics")
+# Served by every control plane regardless of its mode: health and metrics,
+# and a site's control plane registering itself (POST /management-nodes), which
+# is an act of the local site and must not depend on reaching the leader.
+_ALWAYS_LOCAL = ("/_meta", "/api/v2/_meta", "/api/v2/metrics", "/api/v1/metrics",
+                 "/api/v2/management-nodes")
 
 
 def api_verdict(method: str, path: str, cluster_id: str = "") -> ApiVerdict:

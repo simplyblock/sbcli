@@ -270,7 +270,9 @@ def add_mgmt_node(mgmt_ip, mode, cluster_id=None, site: str = "", site_api_endpo
         site = _validate_mgmt_node_site(cluster, site)
 
     for node in db_controller.get_mgmt_nodes():
-        if node.mgmt_ip == mgmt_ip:
+        # On Kubernetes every site's control plane registers under the same
+        # placeholder address, so a site tells two registrations apart.
+        if node.mgmt_ip == mgmt_ip and (not site or (node.site or "") == site):
             logger.error("Node already exists in the cluster")
             return False
 
