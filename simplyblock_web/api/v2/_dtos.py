@@ -155,6 +155,7 @@ class ClusterDTO(BaseModel):
     anti_affinity: bool
     enable_failure_domain: bool
     jc_compression_enabled: bool
+    lvol_geometry_enabled: bool
     secret: SecretStr
     tls_enabled: bool
     max_fault_tolerance: int
@@ -189,6 +190,7 @@ class ClusterDTO(BaseModel):
             anti_affinity=model.strict_node_anti_affinity,
             enable_failure_domain=model.enable_failure_domain,
             jc_compression_enabled=model.jc_compression_enabled,
+            lvol_geometry_enabled=model.lvol_geometry_enabled,
             secret=model.secret,
             tls_enabled=model.tls,
             max_fault_tolerance=model.max_fault_tolerance,

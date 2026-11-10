@@ -1006,6 +1006,11 @@ commands:
             type: bool
             action: store_true
             private: true
+          - name: "--disable-lvol-geometry"
+            help: "Create new logical volumes with ndcs=npcs=0 instead of the cluster's erasure coding geometry. Enabled by default; can be changed later with `cluster set-lvol-geometry`."
+            dest: disable_lvol_geometry
+            type: bool
+            action: store_true
           - name: "--name"
             help: >
               Assigns a name to the newly created cluster.
@@ -1220,6 +1225,11 @@ commands:
             help: "Disable JC (journal) compression. Enabled by default; can be changed later with `cluster set-jc-compression`."
             dest: disable_jc_compression
             private: true
+            type: bool
+            action: store_true
+          - name: "--disable-lvol-geometry"
+            help: "Create new logical volumes with ndcs=npcs=0 instead of the cluster's erasure coding geometry. Enabled by default; can be changed later with `cluster set-lvol-geometry`."
+            dest: disable_lvol_geometry
             type: bool
             action: store_true
           - name: "--name"
@@ -1628,6 +1638,23 @@ commands:
             completer: _completer_get_cluster_list
           - name: "--disable"
             help: "Disable JC compression (default action is to enable it)."
+            dest: disable
+            type: bool
+            action: store_true
+      - name: set-lvol-geometry
+        help: "Enable or disable LVol geometry on the cluster."
+        usage: >
+          When enabled (the default), new logical volumes inherit the cluster's erasure coding geometry
+          (data-chunks-per-stripe/parity-chunks-per-stripe) or the values passed at creation. When disabled, new
+          logical volumes are always created with ndcs=npcs=0. Existing logical volumes are not changed.
+        arguments:
+          - name: "cluster_id"
+            help: "The cluster id."
+            dest: cluster_id
+            type: str
+            completer: _completer_get_cluster_list
+          - name: "--disable"
+            help: "Disable LVol geometry (default action is to enable it)."
             dest: disable
             type: bool
             action: store_true
