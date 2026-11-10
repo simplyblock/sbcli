@@ -3155,6 +3155,14 @@ def delete_lvol(lvol: LVol, *, force_delete: bool = False, lock: bool = True) ->
     if active_mig:
         raise PreconditionError(f"Cannot delete lvol {lvol.uuid}: active migration {active_mig.uuid}")
 
+    # A subsystem a consistency-group move holds is losing or gaining
+    # namespaces on every node, and a step-2 target's non-moving root is what
+    # the commit records the movers under. The move's window is bounded.
+    if lvol.nqn in _moving_nqns_on_node(lvol.node_id, db_controller):
+        raise PreconditionError(
+            f"Cannot delete lvol {lvol.uuid}: subsystem {lvol.nqn} is held by a "
+            f"consistency-group subsystem move; delete it once the move ended")
+
     if lvol.status == LVol.STATUS_RESTORING and not force_delete:
         raise PreconditionError(f"Cannot delete lvol {lvol.uuid}: backup restore in progress")
 

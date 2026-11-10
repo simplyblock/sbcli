@@ -1072,7 +1072,7 @@ class ConsistencyGroupSubsystemMovePreparedDTO(BaseModel):
 class ConsistencyGroupSubsystemMoveStartDTO(BaseModel):
     """Request body for moving the namespaces: the hosts' suspend deadline in
     Unix seconds. The move refuses to begin once it has passed."""
-    deadline: Annotated[int, Field(ge=0)]
+    deadline: util.Unsigned
 
 
 class ConsistencyGroupColocateDTO(BaseModel):

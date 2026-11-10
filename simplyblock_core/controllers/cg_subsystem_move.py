@@ -214,7 +214,8 @@ def create_subsystem_move(group, lvol_id, request_id, purpose="join"):
     or a migration is active on the group, or holds a subsystem this move
     would take a namespace out of or into, cg_colocation.SubsystemLimitReached when the
     node cannot take a fresh subsystem, ColocationError for a volume that is
-    not an open member, a stretched cluster, or volumes that would share the
+    not an open member or has no live record, a moving volume not on the
+    group's node, a stretched cluster, or volumes that would share the
     target but allow different hosts (a subsystem has one host list, so the
     move would open or close a namespace nobody asked to), and ValueError for
     an unknown ``purpose``.
@@ -243,7 +244,11 @@ def create_subsystem_move(group, lvol_id, request_id, purpose="join"):
             f"namespaces between subsystems is not supported there yet")
 
     lvols = db.get_lvols(group.cluster_id)
-    by_id = {lv.get_id(): lv for lv in lvols}
+    by_id = {lv.get_id(): lv for lv in lvols if cg_colocation._alive(lv)}
+    if lvol_id not in by_id:
+        raise cg_colocation.ColocationError(
+            f"volume {lvol_id} is a member of consistency group {group.get_id()} "
+            f"but has no live volume record")
     joiner = by_id[lvol_id]
     reserved, fresh = _reserved_on_node(group.node_id)
     busy = cg_colocation.busy_nqns(db, group.cluster_id, lvols) | set(reserved)
@@ -331,7 +336,10 @@ def _create_target(record, root):
     volumes have there: optimized on the pinned (primary) node, non-optimized
     on the others, admitting the hosts the moving volumes allow, each with the
     keys its volume gives it (subsystem_access.grant, the same path a volume
-    create takes). Idempotent: an existing subsystem is left as it is."""
+    create takes). Idempotent per node: the subsystem is created only where
+    it is missing, and the hosts and listeners are reconciled every time,
+    so a retry after a failure between the create and the last listener
+    completes that node instead of skipping it."""
     db = _db()
     target = copy.copy(root)
     target.nqn = record["target_nqn"]
@@ -340,15 +348,18 @@ def _create_target(record, root):
         db, target.nqn, [db.get_lvol_by_id(v["lvol_id"]) for v in record["volumes"]])
     for index, node in enumerate(_nodes(record)):
         rpc = node.rpc_client()
-        if rpc.subsystem_get(target.nqn):
-            continue
-        from simplyblock_core.controllers import lvol_controller
-        rpc.subsystem_create(target.nqn, root.ha_type, str(uuid_mod.uuid4()),
-                             lvol_controller.lvol_min_cntlid(index),
-                             max_namespaces=target.max_namespace_per_subsys,
-                             allow_any_host=intended.any_host)
+        sub = rpc.subsystem_get(target.nqn)
+        if not sub:
+            from simplyblock_core.controllers import lvol_controller
+            rpc.subsystem_create(target.nqn, root.ha_type, str(uuid_mod.uuid4()),
+                                 lvol_controller.lvol_min_cntlid(index),
+                                 max_namespaces=target.max_namespace_per_subsys,
+                                 allow_any_host=intended.any_host)
+        listed = subsystem_access.listed_hosts(sub)
         for host in intended.hosts.values():
-            subsystem_access.grant(rpc, node, target.nqn, host, db)
+            if host.host_nqn not in listed:
+                subsystem_access.grant(rpc, node, target.nqn, host, db)
+        # publish_lvol_listeners takes "listener already exists" as success.
         _publish_listeners(target, node, is_primary=node.get_id() == root.node_id)
 
 
@@ -514,12 +525,18 @@ def _commit(group, move_id):
     db = _db()
     lvols = db.get_lvols(group.cluster_id)
     moving = {v["lvol_id"] for v in record["volumes"]}
-    if record.get("target_is_new"):
+    root = None
+    if not record.get("target_is_new"):
+        root = next((lv for lv in lvols if lv.nqn == record["target_nqn"]
+                     and lv.get_id() not in moving and cg_colocation._alive(lv)), None)
+    if root is None:
+        # A fresh target, or one whose non-moving volumes are all gone
+        # meanwhile (delete refuses a held subsystem, but a record can still
+        # vanish): the movers become the subsystem's record, rooted on the
+        # first of them.
         namespace = record["volumes"][0]["lvol_id"]
         max_ns = constants.MAX_NAMESPACES_PER_SUBSYSTEM
     else:
-        root = next(lv for lv in lvols
-                    if lv.nqn == record["target_nqn"] and lv.get_id() not in moving)
         namespace = root.namespace or root.get_id()
         max_ns = root.max_namespace_per_subsys
     updates = []

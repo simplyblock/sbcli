@@ -14,6 +14,7 @@ from unittest import mock
 
 import pytest
 
+from simplyblock_core import constants
 from simplyblock_core.controllers import cg_colocation as cgl
 from simplyblock_core.controllers import cg_subsystem_move as mv
 from simplyblock_core.controllers import lvol_controller
@@ -23,6 +24,7 @@ from simplyblock_core.db_controller import (
     SubsystemCapacityError,
     SubsystemMoveConflictError,
 )
+from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.lvol_model import LVol, LVolMini
 from simplyblock_core.models.pool import Pool
@@ -47,9 +49,11 @@ class _FakeNode:
 
     def __init__(self, subsystems):
         self.subsystems = subsystems
+        self.hosts: dict = {}
         self.fail_add_to = ""
         self.rpc = mock.MagicMock()
         self.rpc.subsystem_get.side_effect = self._get
+        self.rpc.subsystem_add_host.side_effect = self._add_host
         self.rpc.nvmf_subsystem_remove_ns.side_effect = self._remove
         self.rpc.nvmf_subsystem_add_ns2.side_effect = self._add
         self.rpc.subsystem_create.side_effect = self._create
@@ -59,7 +63,11 @@ class _FakeNode:
         if nqn not in self.subsystems:
             return None
         return {"nqn": nqn, "namespaces": [{"nsid": n, "uuid": u}
-                                           for n, u in sorted(self.subsystems[nqn].items())]}
+                                           for n, u in sorted(self.subsystems[nqn].items())],
+                "hosts": [{"nqn": h} for h in sorted(self.hosts.get(nqn, ()))]}
+
+    def _add_host(self, nqn, host, **kw):
+        self.hosts.setdefault(nqn, set()).add(host)
 
     def _remove(self, nqn, nsid):
         self.subsystems[nqn].pop(nsid, None)
@@ -188,6 +196,16 @@ def test_create_refuses_a_volume_that_is_not_a_member(db, world):
     group.write_to_db(db.kv_store)
     with pytest.raises(cgl.ColocationError, match="not a member"):
         mv.create_subsystem_move(group, "j", "req-1")
+
+
+def test_create_refuses_a_member_without_a_record(db, world):
+    """A membership whose volume record is gone is refused with a reason,
+    not a bare KeyError that the route turns into a 404 of the id alone."""
+    group, _, _ = world
+    db.get_lvol_by_id("j").remove(db.kv_store)
+    with pytest.raises(cgl.ColocationError, match="j.*no live volume record"):
+        mv.create_subsystem_move(group, "j", "req-1")
+    assert db.subsystem_move_reservations("N1") == (set(), 0)
 
 
 def test_create_refuses_on_a_stretched_cluster(db, world):
@@ -357,6 +375,33 @@ def test_prepare_lists_the_moving_volumes_hosts_on_the_target_with_their_keys(db
         assert listed["nqn.host-1"]["psk"] == "psk-name"
         assert listed["nqn.host-2"] == {}
     assert register.call_count == 2            # host-1's key, once per node
+
+
+def test_a_retried_prepare_repairs_a_partly_created_target(db, world):
+    """subsystem_create succeeded on a node but listing a host failed after
+    it. The retry finds the subsystem, must not create it again, and must
+    still list the hosts and publish the listeners it is missing; otherwise
+    that node's path is lost to the hosts after the commit."""
+    group, _, fakes = world
+    for uid in ("a1", "a2", "j"):
+        _restrict(db, uid, {"nqn": "nqn.host-1"})
+    rec = mv.create_subsystem_move(group, "j", "req-1")
+    t = rec["target_nqn"]
+    n1 = fakes["N1"]
+    n1.rpc.subsystem_add_host.side_effect = [RPCRemoteError("add_host failed", -1)]
+    with mock.patch.object(mv, "_publish_listeners") as publish, \
+            pytest.raises(RPCRemoteError):
+        mv.prepare_subsystem_move(group, rec["id"])
+    assert t in n1.subsystems and n1.hosts.get(t, set()) == set()
+    assert not [c for c in publish.call_args_list if c.args[1].get_id() == "N1"]
+
+    n1.rpc.subsystem_add_host.side_effect = n1._add_host
+    with mock.patch.object(mv, "_publish_listeners") as publish:
+        mv.prepare_subsystem_move(group, rec["id"])
+    assert n1.rpc.subsystem_create.call_count == 1
+    assert n1.hosts[t] == {"nqn.host-1"}
+    assert [c.args[1].get_id() for c in publish.call_args_list] == ["N1", "S1"]
+    assert fakes["S1"].hosts[t] == {"nqn.host-1"}
 
 
 def test_create_refuses_an_open_volume_beside_a_restricted_one(db, world):
@@ -536,6 +581,59 @@ def test_a_rollback_arriving_during_the_move_runs_after_it(db, world):
         assert f.subsystems["A"] == {1: "a1", 2: "a2"} and f.subsystems["J"] == {1: "j"}
         assert rec["target_nqn"] not in f.subsystems
     assert mv.get_subsystem_move(group, rec["id"])["status"] == "rolled_back"
+
+
+# --------------------------------------------------------------------------- #
+# A step-2 target with a non-moving root, and what may touch a held subsystem
+# --------------------------------------------------------------------------- #
+
+def _with_candidate(db, fakes):
+    """Volume c alone in the shared subsystem C (8 slots) on N1: the step-2
+    target for the group, with c as its non-moving root."""
+    _write_lvol(db, "c", "C", 1, maxns=8)
+    for f in fakes.values():
+        f.subsystems["C"] = {1: "c"}
+
+
+def test_commit_survives_the_targets_root_being_gone(db, world):
+    """The only non-moving volume of a step-2 target was deleted during the
+    move. The commit still lands: the movers become the subsystem's record,
+    rooted on the first of them, instead of a 500 that leaves the move
+    active for good."""
+    group, _, fakes = world
+    _with_candidate(db, fakes)
+    rec = mv.create_subsystem_move(group, "j", "req-1")
+    assert (rec["target_nqn"], rec["target_is_new"]) == ("C", False)
+    mv.prepare_subsystem_move(group, rec["id"])
+    mv.move_subsystem_move(group, rec["id"], deadline=int(time.time()) + 30)
+    db.get_lvol_by_id("c").remove(db.kv_store)
+    mv.commit_subsystem_move(group, rec["id"])
+    for uid in ("a1", "a2", "j"):
+        lv = db.get_lvol_by_id(uid)
+        assert (lv.nqn, lv.namespace) == ("C", "a1")
+        assert lv.max_namespace_per_subsys == constants.MAX_NAMESPACES_PER_SUBSYSTEM
+    assert mv.get_subsystem_move(group, rec["id"])["status"] == "committed"
+
+
+def test_deleting_a_volume_in_a_subsystem_a_move_holds_is_refused(db, world):
+    """c is no member, but its subsystem is the move's target: deleting it
+    now would pull the target's root from under the move."""
+    group, _, fakes = world
+    _with_candidate(db, fakes)
+    mv.create_subsystem_move(group, "j", "req-1")
+    with mock.patch.object(lvol_controller, "ops_gate", mock.MagicMock(unsafe=True)), \
+            pytest.raises(PreconditionError, match="subsystem move"):
+        lvol_controller.delete_lvol(db.get_lvol_by_id("c"))
+    assert db.get_lvol_by_id("c").status == LVol.STATUS_ONLINE
+
+
+def test_migrating_a_non_member_out_of_a_held_subsystem_is_refused(db, world):
+    group, _, fakes = world
+    _with_candidate(db, fakes)
+    _write_node(db, "N2")
+    mv.create_subsystem_move(group, "j", "req-1")
+    with pytest.raises(mc.MigrationConflictError, match="subsystem move"):
+        mc.create_group_migration("c", "N2")
 
 
 def test_an_unknown_move_id_is_not_found(db, world):

@@ -153,6 +153,38 @@ def test_a_moving_member_whose_subsystem_is_held_is_a_conflict():
         _select(g, lvols[2], lvols, busy_nqns={"A"})
 
 
+def test_a_joiner_on_another_node_is_refused():
+    """Before the join's migration lands the joiner is on its old node, whose
+    subsystems the group's node does not have; the move cannot run there."""
+    g = _group("g", ["a1", "a2"])
+    lvols = [_lv("a1", "A"), _lv("a2", "A", nsid=2), _lv("j", "J", maxns=1, node="N2")]
+    with pytest.raises(cgl.ColocationError, match="N2"):
+        _select(g, lvols[2], lvols)
+
+
+def test_a_member_in_deletion_is_not_moved():
+    g = _group("g", ["a1", "a2", "d"])
+    lvols = [_lv("a1", "A", maxns=2), _lv("a2", "A", maxns=2, nsid=2),
+             _lv("d", "D", maxns=1, status=LVol.STATUS_IN_DELETION), _lv("j", "J", maxns=1)]
+    t = _select(g, lvols[3], lvols)
+    assert (t.target_is_new, t.moving_ids) == (True, ["a1", "a2", "j"])
+
+
+def test_a_member_without_a_record_is_not_moved():
+    g = _group("g", ["a1", "a2", "ghost"])
+    lvols = [_lv("a1", "A", maxns=2), _lv("a2", "A", maxns=2, nsid=2), _lv("j", "J", maxns=1)]
+    t = _select(g, lvols[2], lvols)
+    assert (t.target_is_new, t.moving_ids) == (True, ["a1", "a2", "j"])
+
+
+def test_a_joiner_that_is_not_alive_is_refused():
+    g = _group("g", ["a1", "a2"])
+    lvols = [_lv("a1", "A"), _lv("a2", "A", nsid=2),
+             _lv("j", "J", maxns=1, status=LVol.STATUS_IN_DELETION)]
+    with pytest.raises(cgl.ColocationError, match="j"):
+        _select(g, lvols[2], lvols)
+
+
 def test_no_candidate_means_a_fresh_subsystem_below_the_limit():
     g = _group("g", ["a1"])
     lvols = [_lv("a1", "A", maxns=2), _lv("x", "A", maxns=2, nsid=2), _lv("j", "J", maxns=1)]

@@ -337,17 +337,35 @@ def select_move_target(group, joining_lvol, lvols, *, node_max_subsystems,
     be reserved by that other move), and so is any move that would take a
     namespace out of a busy subsystem: both raise SubsystemBusy, which the
     caller waits out. Raises SubsystemLimitReached in the last case.
+
+    Only live members move: one being deleted, or one whose record is gone,
+    needs no namespace in the target. The joiner must be live and on the
+    group's node, as must every member that moves: a joiner still on its old
+    node (its join migration not landed) would be moved into a subsystem
+    that node does not have. Raises ColocationError otherwise.
     """
     jid = joining_lvol.get_id()
     node = group.node_id
     live = [lv for lv in lvols if _alive(lv)]
-    member_ids = (_open_members(group) - {jid}) | {jid}
+    by_id = {lv.get_id(): lv for lv in live}
+    if not _alive(joining_lvol):
+        raise ColocationError(f"volume {jid} is being deleted")
+    member_ids = ((_open_members(group) & by_id.keys()) - {jid}) | {jid}
     g = group_subsystem_nqn(group, [lv for lv in live if lv.get_id() != jid])
     if not g or joining_lvol.nqn == g:
         return MoveTarget(g or joining_lvol.nqn, False, [])
 
+    away = sorted((lid, by_id[lid].node_id) for lid in member_ids
+                  if lid in by_id and by_id[lid].node_id != node)
+    if joining_lvol.node_id != node:
+        away = sorted(set(away) | {(jid, joining_lvol.node_id)})
+    if away:
+        raise ColocationError(
+            f"consistency group {group.get_id()} is on node {node} but "
+            + ", ".join(f"volume {lid} is on node {n}" for lid, n in away)
+            + "; the move needs every moving volume on the group's node")
+
     busy = set(busy_nqns)
-    by_id = {lv.get_id(): lv for lv in live}
     by_nqn: dict[str, list] = {}
     for lv in live:
         if lv.node_id == node:

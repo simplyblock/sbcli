@@ -100,6 +100,12 @@ def intended_for(db, nqn: str, lvols, pools: dict | None = None) -> Intended:
     return it
 
 
+def listed_hosts(subsystem: dict | None) -> set:
+    """The host NQNs a live subsystem (an ``nvmf_get_subsystems`` entry)
+    lists; empty for a subsystem that does not exist."""
+    return {h.get("nqn", "") for h in (subsystem or {}).get("hosts") or [] if h.get("nqn")}
+
+
 def key_scope(subsystem_nqn: str) -> str:
     return hashlib.sha1(subsystem_nqn.encode()).hexdigest()[:10]
 

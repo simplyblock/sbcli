@@ -2201,7 +2201,7 @@ def create_group_migration(lvol_id, target_node_id,
     "connect_strings"}]}`` and records it on every group in the scope.
     """
     try:
-        db.get_lvol_by_id(lvol_id)
+        lvol = db.get_lvol_by_id(lvol_id)
     except KeyError:
         raise ValueError(f"LVol {lvol_id} not found")
     try:
@@ -2225,6 +2225,14 @@ def create_group_migration(lvol_id, target_node_id,
             raise MigrationConflictError(
                 f"Consistency group {g.get_id()} already has an active migration "
                 f"to {g.migration.get('target_node_id')}")
+    # A subsystem a move holds (its sources and its target) can hold volumes
+    # of no group, so the groups' own records above do not cover it.
+    from simplyblock_core.controllers import lvol_controller
+    held = set(lvol_controller._moving_nqns_on_node(lvol.node_id, db)) & set(by_nqn)
+    if held:
+        raise MigrationConflictError(
+            f"subsystem(s) {sorted(held)} are held by a consistency-group subsystem move; "
+            f"migrate once the move ended")
 
     items = []
     try:
