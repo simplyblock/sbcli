@@ -732,6 +732,25 @@ def calculate_pool_count(alceml_count, number_of_distribs, cpu_count, poller_cou
     return int(small_pool_count), int(large_pool_count)
 
 
+def calculate_bdev_io_pool_size(spdk_cpu_mask):
+    """bdev_io_pool_size for a node with the given SPDK core mask.
+
+    Room for every thread's bdev_io cache (threads estimated as
+    BDEV_IO_POOL_THREADS_PER_CORE per core plus a few app threads) plus
+    BDEV_IO_POOL_HEADROOM in flight, never below BDEV_IO_POOL_SIZE_MIN nor
+    above the SPDK default (BDEV_IO_POOL_SIZE_MAX).
+    """
+    try:
+        cores = bin(int(str(spdk_cpu_mask), 16)).count("1") if spdk_cpu_mask else 0
+    except ValueError:
+        cores = 0
+    if cores <= 0:
+        return constants.BDEV_IO_POOL_SIZE_MAX
+    threads = constants.BDEV_IO_POOL_THREADS_PER_CORE * cores + 8
+    size = constants.BDEV_IO_CACHE_SIZE * (threads + 1) + constants.BDEV_IO_POOL_HEADROOM
+    return int(min(max(size, constants.BDEV_IO_POOL_SIZE_MIN), constants.BDEV_IO_POOL_SIZE_MAX))
+
+
 def calculate_minimum_hp_memory(small_pool_count, large_pool_count, lvol_count, max_prov, cpu_count):
     pool_consumption = (small_pool_count * 8 + large_pool_count * 128) / 1024
     memory_consumption = (4 * cpu_count + 1.1 * pool_consumption + 22 * lvol_count) * (
