@@ -239,8 +239,11 @@ def plan_late_join(group, lvol, lvols, groups) -> JoinPlan:
     """
     members = _open_members(group)
     if lvol.get_id() in members:
+        # The member's own subsystem does not vote for the group's (as in
+        # select_move_target): a lone member a rollback left outside would
+        # otherwise tie with the real one and win on NQN order.
         plan = JoinPlan()
-        nqn = group_subsystem_nqn(group, lvols)
+        nqn = group_subsystem_nqn(group, [lv for lv in lvols if lv.get_id() != lvol.get_id()])
         if nqn and lvol.nqn != nqn:
             plan.steps = [STEP_COLOCATE]
             plan.target_nqn = nqn

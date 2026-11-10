@@ -259,6 +259,30 @@ def test_late_join_into_an_empty_group_just_joins():
     assert cgl.plan_late_join(g, v, [v], [g]).steps == [cgl.STEP_JOIN]
 
 
+def test_a_member_left_outside_by_a_rollback_is_colocated_whichever_nqn_sorts_first():
+    # After a rolled-back swap the group holds a1 alone in one subsystem and
+    # the member v alone in another: one vote each. The member's own
+    # subsystem must not take part in the vote, or the tie-break on NQN
+    # declares v "already there" half of the time and nothing ever retries
+    # (live 2026-11-10, edge-node-window). Mirrors select_move_target, which
+    # never counts the joiner.
+    g = _group("g", ["a1", "v"])
+    for own, other in (("A", "B"), ("B", "A")):
+        lvols = [_lv("a1", other), _lv("v", own, group="g")]
+        plan = cgl.plan_late_join(g, lvols[1], lvols, [g])
+        assert plan.steps == [cgl.STEP_COLOCATE], (own, other, plan.steps)
+        assert plan.target_nqn == other
+
+
+def test_a_member_in_its_group_subsystem_or_alone_in_the_group_needs_nothing():
+    g = _group("g", ["a1", "v"])
+    lvols = [_lv("a1", "A"), _lv("v", "A", nsid=2, group="g")]
+    assert cgl.plan_late_join(g, lvols[1], lvols, [g]).steps == []
+    solo = _group("h", ["v"])
+    v = _lv("v", "V", group="h")
+    assert cgl.plan_late_join(solo, v, [v], [solo]).steps == []
+
+
 # --------------------------------------------------------------------------- #
 # Namespace moves are off until the client swap exists
 # --------------------------------------------------------------------------- #
