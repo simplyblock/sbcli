@@ -1175,6 +1175,10 @@ commands:
             help: "Hashicorp vault URL for storing encryption keys for this cluster"
             dest: hashicorp_vault_url
             type: str
+          - name: "--kmip-server-url"
+            help: "KMIP server address (host:port) for storing encryption keys for this cluster"
+            dest: kmip_server_url
+            type: str
           - name: "--alerting-config-path"
             help: "Path to the YAML alerting configuration file. Takes precedence over --contact-point."
             description: >
@@ -1424,6 +1428,10 @@ commands:
           - name: "--hashicorp-vault-url"
             help: "Hashicorp vault URL for storing encryption keys for this cluster"
             dest: hashicorp_vault_url
+            type: str
+          - name: "--kmip-server-url"
+            help: "KMIP server address (host:port) for storing encryption keys for this cluster"
+            dest: kmip_server_url
             type: str
       - name: op-stop
         help: "Stops the cluster accepting object lifecycle operations: creation, deletion and modification of volumes, snapshots, clones and pools. Read paths and the cluster's own maintenance are unaffected."

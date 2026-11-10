@@ -4,7 +4,7 @@ import time
 from collections.abc import Iterable
 from uuid import UUID, uuid4
 
-from pydantic import ValidationError
+from pydantic import HttpUrl, ValidationError
 
 from simplyblock_core.controllers import backup_events, tasks_controller
 from simplyblock_core.controllers.backup import manifest as backup_manifest
@@ -12,7 +12,9 @@ from simplyblock_core.controllers.backup.chain import BackupChain, location_of
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.kms import (
+    KMIPKMSSettings,
     KMSException,
+    VaultKMSSettings,
     backup_dek_path,
     backup_kek_name,
     create_kms_connection,
@@ -442,17 +444,25 @@ def _build_key_descriptor(cluster, backup: Backup) -> backup_manifest.KeyDescrip
     configured.
     """
     dek_path = backup_dek_path(cluster.get_id(), backup.uuid)
-    vault = cluster.hashicorp_vault_settings
+    kms_settings = cluster.get_kms_settings()
 
-    if vault is None:
+    if kms_settings is None:
         return backup_manifest.FDBKeyDescriptor(dek_path=dek_path)
 
-    return backup_manifest.HCPKeyDescriptor(
+    if isinstance(kms_settings, VaultKMSSettings):
+        return backup_manifest.HCPKeyDescriptor(
+            dek_path=dek_path,
+            kek_name=backup_kek_name(backup.uuid),
+            vault_base_url=HttpUrl(str(kms_settings.base_url)),
+            transit_mount=kms_settings.transit_mount,
+            kv_mount=kms_settings.kv_mount,
+        )
+
+    assert isinstance(kms_settings, KMIPKMSSettings)
+    return backup_manifest.KMIPKeyDescriptor(
         dek_path=dek_path,
         kek_name=backup_kek_name(backup.uuid),
-        vault_base_url=vault.base_url or None,
-        transit_mount=vault.transit_mount,
-        kv_mount=vault.kv_mount,
+        server_url=kms_settings.server_url,
     )
 
 

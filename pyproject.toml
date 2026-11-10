@@ -8,6 +8,7 @@ dynamic = ["version"]
 dependencies = [
     "foundationdb==7.3.63",
     "hvac",
+    "pykmip>=0.11",
     "requests>=2.33.0",
     "prettytable>=3.10.0",
     "docker",
@@ -53,6 +54,7 @@ simplyblock-task-runner = "simplyblock_core.services.task_runners:main"
 [dependency-groups]
 test = [
     "mock",
+    "cryptography",  # tests/integration/kms/conftest.py: throwaway PyKMIP test cert
     "httpx",  # fastapi.testclient
     "pytest>=9.0.3",
     "pytest-randomly",  # per-run seed + per-test reseed; see tests/AGENTS.md

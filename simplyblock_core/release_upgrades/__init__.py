@@ -82,8 +82,13 @@ def _plugins():
     from simplyblock_core.release_upgrades import (
         database_indices,
         jc_compression_upgrade,
+        kms_settings_migration,
     )
-    return [database_indices.DatabaseIndices(), jc_compression_upgrade.JCCompressionUpgrade()]
+    return [
+        database_indices.DatabaseIndices(),
+        kms_settings_migration.KMSSettingsMigration(),
+        jc_compression_upgrade.JCCompressionUpgrade(),
+    ]
 
 
 def run_pre_update(cluster) -> None:
