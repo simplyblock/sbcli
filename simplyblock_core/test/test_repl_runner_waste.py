@@ -70,7 +70,8 @@ def test_an_unreplicated_base_is_still_queued(env):
 class _T:
     def __init__(self):
         self.retry, self.status, self.function_result = 0, "running", ""
-        self.function_params, self.uuid = {"snapshot_id": "S"}, "T"
+        self.function_params: dict[str, Any] = {"snapshot_id": "S"}
+        self.uuid = "T"
 
     def write_to_db(self):
         pass

@@ -13,6 +13,7 @@ choreography is the simple "no-overlap" case (target primary → optimized, othe
 target paths → non_optimized, all source paths → inaccessible).
 """
 import uuid as uuid_lib
+from typing import Literal
 
 from simplyblock_core import constants, db_controller, utils, xfer_timing
 from simplyblock_core.models.hublvol import HubLVol
@@ -297,7 +298,7 @@ def prepare_receiving_hub(tgt_node, lvs_primary=None):
 def _hub_address(tgt_node, hub):
     """*hub*'s attach address: its names, NQN and port, and the target's data
     NICs of the transport it runs (RDMA when active, else TCP)."""
-    trtype = "RDMA" if tgt_node.active_rdma else "TCP"
+    trtype: Literal["TCP", "RDMA"] = "RDMA" if tgt_node.active_rdma else "TCP"
     return HubAddress(
         bdev_name=hub.bdev_name, remote_bdev_name=hub.get_remote_bdev_name(),
         nqn=hub.nqn, port=hub.nvmf_port,
