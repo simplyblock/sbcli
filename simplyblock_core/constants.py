@@ -556,6 +556,11 @@ REPL_CUTOVER_CONVERGE_TARGET_SEC = 2.0
 # succeed (REPL_CUTOVER_FREEZE_MAX_ROUND_SEC); otherwise rounds continue until
 # shrink_deadline.
 REPL_CUTOVER_MAX_SHRINK_ROUNDS = 12
+# A volume whose snapshots are not being deleted as fast as replication takes
+# them takes no new internal replication snapshot while this many are pending
+# deletion (in deletion, or replicated beyond what retention keeps). Sized to
+# match the endgame's round bound (2026-11-04).
+REPL_MAX_DELETION_BACKLOG = REPL_CUTOVER_MAX_SHRINK_ROUNDS
 # Hard limit SPDK puts on bdev_lvol_transfer_final_step: the final step's
 # terminate_timeout is armed when it starts and fails the transfer ("Task
 # transfer terminate timeout ...", transfer_state 'Failed') once it passes.
