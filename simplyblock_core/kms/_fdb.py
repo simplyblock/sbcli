@@ -1,17 +1,25 @@
 import json
+from typing import TYPE_CHECKING
 
 from pydantic import SecretStr
 
-from simplyblock_core.db_controller import DBController
-from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.utils import generate_hex_string
 
 from ._base import KMS
 from ._exceptions import KMSException
 
+if TYPE_CHECKING:
+    # Type-hint only: avoids a cycle, since db_controller imports models.cluster,
+    # which imports this package for KMSSettings (see kms/__init__.py).
+    from simplyblock_core.models.cluster import Cluster
+
 
 class LocalKMS(KMS):
-    def __init__(self, cluster: Cluster):
+    def __init__(self, cluster: "Cluster"):
+        # Imported here, not at module level, for the same reason as above:
+        # db_controller imports models.cluster, which imports this package.
+        from simplyblock_core.db_controller import DBController
+
         kv_store = DBController().kv_store
         if kv_store is None:
             raise KMSException("No database connection")

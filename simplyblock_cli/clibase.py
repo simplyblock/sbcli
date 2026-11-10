@@ -41,8 +41,22 @@ from simplyblock_core.exceptions import (
     PromoteIncompleteError,
 )
 from simplyblock_core.models.backup_config import BackupConfig, S3Credentials
-from simplyblock_core.models.cluster import Cluster, HashicorpVaultSettings
+from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.pool import Pool
+
+
+def _kms_settings_from_args(args):
+    """Raw ``kms_settings`` dict for cluster_ops.{create,add}_cluster from the
+    mutually exclusive ``--hashicorp-vault-url``/``--kmip-server-url`` flags."""
+    hashicorp_vault_url = getattr(args, 'hashicorp_vault_url', None)
+    kmip_server_url = getattr(args, 'kmip_server_url', None)
+    if hashicorp_vault_url and kmip_server_url:
+        raise ValueError("--hashicorp-vault-url and --kmip-server-url are mutually exclusive")
+    if hashicorp_vault_url:
+        return {"provider": "vault", "base_url": hashicorp_vault_url}
+    if kmip_server_url:
+        return {"provider": "kmip", "server_url": kmip_server_url}
+    return None
 
 
 def range_type(min, max):
@@ -1971,7 +1985,7 @@ class CLIWrapperBase:
             qpair_count, max_queue_size, inflight_io_threshold, strict_node_anti_affinity, is_single_node, name, fabric,
             client_data_nic, max_fault_tolerance=max_fault_tolerance, backup_config=backup_config,
             nvmf_base_port=args.nvmf_base_port, rpc_base_port=args.rpc_base_port, snode_api_port=args.snode_api_port,
-            hashicorp_vault_settings=HashicorpVaultSettings({"base_url": args.hashicorp_vault_url}) if args.hashicorp_vault_url else None,
+            kms_settings=_kms_settings_from_args(args),
             enable_failure_domain=enable_failure_domain,
             lvol_geometry_enabled=lvol_geometry_enabled,
             device_mode=device_mode,
@@ -2043,7 +2057,7 @@ class CLIWrapperBase:
             max_fault_tolerance=max_fault_tolerance,
             backup_config=backup_config,
             nvmf_base_port=args.nvmf_base_port, rpc_base_port=args.rpc_base_port, snode_api_port=args.snode_api_port,
-            hashicorp_vault_settings=HashicorpVaultSettings({"base_url": args.hashicorp_vault_url}) if args.hashicorp_vault_url else None,
+            kms_settings=_kms_settings_from_args(args),
             enable_failure_domain=enable_failure_domain,
             lvol_geometry_enabled=lvol_geometry_enabled,
             device_mode=device_mode,

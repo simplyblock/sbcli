@@ -22,6 +22,7 @@ from simplyblock_core.controllers.sync_replication_controller import (
     VolumeSyncStatus,
 )
 from simplyblock_core.db_controller import DBController
+from simplyblock_core.kms import KMSSettings
 from simplyblock_core.models.backup import Backup, BackupPolicy, GroupBackup
 from simplyblock_core.models.backup_config import (
     BackupConfig,
@@ -720,6 +721,13 @@ BackupConfigDTO = BackupConfig
 #: the cluster the request is asking to create. ``Cluster.set_backup_config``
 #: resolves it, so this shape reaches nothing beyond that call.
 UnresolvedBackupConfigDTO = UnresolvedBackupConfig
+
+#: A cluster's external KMS configuration, as the cluster-create request body
+#: takes it and as ``Cluster.set_kms_settings`` resolves it -- a discriminated
+#: union over backends (``provider``), not exposed in any response (write-only,
+#: like ``UnresolvedBackupConfigDTO``'s configuration is -- ``ClusterDTO`` only
+#: ever surfaces a derived boolean, never the raw backup config either).
+KMSSettingsDTO = KMSSettings
 
 #: Where a set of backups lives, without the credentials to reach it. Carried
 #: inside an export rather than named beside one: the manifests describe objects
