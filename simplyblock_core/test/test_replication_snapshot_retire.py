@@ -235,3 +235,91 @@ def test_a_source_that_points_elsewhere_is_left_alone(leg):
     db.snaps["B2"] = origin
     rsr.retire_source_lineage(db, src)
     assert origin.target_replicated_snap_uuid == "SOMETHING_ELSE"
+
+
+# --- orphaned copies (bed bf21 2026-11-10) -----------------------------------
+# Landing copies beside the lineage path (newer than the clone base, on an
+# abandoned branch) were never retired; three legs filled cluster B to 95%.
+
+NOW = 10000
+
+
+def _orphan_world(monkeypatch):
+    """LIVE is cloned from copy BASE (chained onto ANC). Beside it: NEWER (a
+    copy newer than the base), OLD (an old leaf), PAIRED (a copy whose source LS
+    belongs to the live volume LIVESRC), YOUNG (an orphan too young to judge),
+    USER (a user snapshot). GONE's record no longer exists."""
+    gone = _lvol("GONE")
+    live = _lvol("LIVE", cloned_from_snap="BASE")
+    live_src = _lvol("LIVESRC")
+    snaps = [
+        _snap("ANC", gone, "repl_internal_v_1", SnapShot.TYPE_USER, source="S0"),
+        _snap("BASE", gone, "repl_internal_v_2", SnapShot.TYPE_USER, source="S1", prev="ANC"),
+        _snap("NEWER", gone, "repl_internal_v_3", SnapShot.TYPE_USER, source="S2"),
+        _snap("OLD", gone, "repl_internal_w_1", SnapShot.TYPE_USER, source="S3"),
+        _snap("PAIRED", gone, "repl_internal_x_1", SnapShot.TYPE_USER, source="LS"),
+        _snap("LS", live_src, "repl_internal_x_1"),
+        _snap("YOUNG", gone, "repl_internal_y_1", SnapShot.TYPE_USER, source="S4"),
+        _snap("USER", gone, "nightly", SnapShot.TYPE_USER),
+    ]
+    for s in snaps:
+        s.created_at = 1000
+    snaps[6].created_at = NOW - 60
+    db = _FakeDB(snaps, [live, live_src])
+    monkeypatch.setattr(rsr.replication_recovery_points, "group_recovery_point_ids",
+                        lambda gids, db=None: set())
+    monkeypatch.setattr(rsr, "_sync_mini", lambda db, snap: db.minis_synced.append(snap.uuid))
+    monkeypatch.setattr(rsr, "_spdk_clones", lambda db, snap: [])
+    return db
+
+
+def test_sweep_retires_copies_beside_the_lineage(monkeypatch):
+    db = _orphan_world(monkeypatch)
+    assert set(rsr.retire_orphan_copies(db, CLUSTER, now=NOW)) == {"NEWER", "OLD"}
+    assert db.snaps["NEWER"].deleted and db.snaps["OLD"].deleted
+    assert set(db.minis_synced) == {"NEWER", "OLD"}
+
+
+def test_sweep_keeps_live_chain_live_pairs_young_copies_and_user_snapshots(monkeypatch):
+    db = _orphan_world(monkeypatch)
+    rsr.retire_orphan_copies(db, CLUSTER, now=NOW)
+    for kept in ("ANC", "BASE", "PAIRED", "LS", "YOUNG", "USER"):
+        assert not db.snaps[kept].deleted, kept
+
+
+def test_sweep_keeps_copies_spdk_still_clones_or_cannot_read(monkeypatch):
+    db = _orphan_world(monkeypatch)
+    monkeypatch.setattr(rsr, "_spdk_clones",
+                        lambda db, snap: ["LVOL_9"] if snap.uuid == "NEWER" else None)
+    assert rsr.retire_orphan_copies(db, CLUSTER, now=NOW) == []
+
+
+def test_sweep_leaves_other_clusters_and_recovery_points(monkeypatch):
+    db = _orphan_world(monkeypatch)
+    db.snaps["OLD"].cluster_id = "CL_b"
+    db.snaps["NEWER"].group_id = "G1"
+    monkeypatch.setattr(rsr.replication_recovery_points, "group_recovery_point_ids",
+                        lambda gids, db=None: {"NEWER"})
+    assert rsr.retire_orphan_copies(db, CLUSTER, now=NOW) == []
+
+
+def test_swept_copies_are_then_reaped(monkeypatch):
+    db = _orphan_world(monkeypatch)
+    rsr.retire_orphan_copies(db, CLUSTER, now=NOW)
+    deleted = []
+
+    def fake_delete(uuid):
+        deleted.append(uuid)
+        db.snaps.pop(uuid)
+        return True
+    from simplyblock_core.controllers import snapshot_controller
+    monkeypatch.setattr(snapshot_controller, "delete", fake_delete)
+    rsr.reap_retired(db, CLUSTER)
+    assert set(deleted) == {"NEWER", "OLD"}
+
+
+def test_a_requeued_endgame_round_copy_is_a_replication_snapshot():
+    copy = _snap("R", _lvol("REP"), "repl_round_0b7c", SnapShot.TYPE_USER, source="B9")
+    assert rsr.is_replication_snapshot(copy)
+    user = _snap("U2", _lvol("V"), "repl_round_by_hand", SnapShot.TYPE_USER)
+    assert not rsr.is_replication_snapshot(user)

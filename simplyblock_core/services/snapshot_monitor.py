@@ -1052,6 +1052,12 @@ def main():
                 logger.error(f"Snapshot intent reaping failed for cluster {cluster.get_id()}: {e}")
 
             try:
+                replication_snapshot_retire.retire_orphan_copies(db, cluster.get_id())
+            except Exception as e:
+                logger.error(f"Orphaned replication snapshot sweep failed for cluster "
+                             f"{cluster.get_id()}: {e}")
+
+            try:
                 deletions_in_flight += replication_snapshot_retire.reap_retired(
                     db, cluster.get_id())
             except Exception as e:

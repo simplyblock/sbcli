@@ -17,6 +17,8 @@ it, and SPDK on the lvstore leader reports no clones. Leaf-first, a delete
 never swap-merges into a neighbour, so the order of the chain does not matter.
 User snapshots are never marked.
 """
+import time
+
 from simplyblock_core import utils
 from simplyblock_core.controllers import replication_recovery_points
 from simplyblock_core.models.snapshot import SnapShot, SnapShotMini
@@ -24,7 +26,10 @@ from simplyblock_core.models.storage_node import StorageNode
 
 logger = utils.get_logger(__name__)
 
-_REPLICATION_NAME_PREFIXES = ("repl_internal_", "repl_commit_", "demote_")
+# repl_round_: the landing copy of an endgame round that was re-queued as an
+# ordinary transfer; not recognised, it was never retired and stopped the
+# lineage walk, leaving every older copy below it.
+_REPLICATION_NAME_PREFIXES = ("repl_internal_", "repl_commit_", "repl_round_", "demote_")
 
 
 def is_replication_snapshot(snap):
@@ -80,6 +85,88 @@ def retire_source_lineage(db, src_lvol):
         logger.info("Retiring %d replication snapshot(s) of migrated-away volume %s: %s",
                     len(retired), src_lvol.get_id(), ", ".join(retired))
     return retired
+
+
+# An orphaned replication copy must be at least this old before the sweep
+# retires it: a landing copy is born before its transfer is finalized and
+# chained, so a young one may still be about to gain a successor or a clone.
+ORPHAN_COPY_MIN_AGE_SEC = 900
+
+
+def retire_orphan_copies(db, cluster_id, now=None):
+    """Retire the replication snapshots of *cluster_id* that no lineage walk reaches.
+
+    retire_source_lineage walks back from a migrated-away volume's clone base,
+    so it misses what lies beside that path: landing copies newer than the base
+    (a cadence transfer that finished after the cutover clone was prepared),
+    copies on a branch the endgame abandoned, and both halves of a pair the
+    post-cutover prune skipped. Nothing else deletes them once their volume is
+    gone, and under rewrite load each pins up to a volume's worth of data (bed
+    bf21 2026-11-10: after three back-and-forth legs 15 such leaves on each
+    cluster; cluster B reached 93-95% cannot_allocate, writes failed, fio saw
+    EIO).
+
+    A copy is retired when it is a replication snapshot whose volume record is
+    gone, no volume is cloned from it, no snapshot chains onto it, it is older
+    than ORPHAN_COPY_MIN_AGE_SEC, it is not a group recovery point, its source
+    on the other cluster does not belong to a live volume (that pair is the
+    base of the live volume's next delta), and SPDK reports no clones. The
+    reaper then deletes it leaf-first like any retired snapshot. Returns the
+    retired ids."""
+    now = time.time() if now is None else now
+    minis = db.get_mini_snapshots()
+    lvols = db.get_mini_lvols()
+    lvol_ids = {lv.get_id() for lv in lvols}
+    cloned_from = {lv.cloned_from_snap for lv in lvols if lv.cloned_from_snap}
+    chained_onto = {m.prev_snap_uuid for m in minis if m.prev_snap_uuid}
+    retired = []
+    for mini in minis:
+        uuid = mini.get_id()
+        created = mini.created_at or 0                      # 0: legacy record, old
+        if mini.deleted or mini.status != SnapShot.STATUS_ONLINE \
+                or uuid in cloned_from or uuid in chained_onto \
+                or (created and now - created < ORPHAN_COPY_MIN_AGE_SEC):
+            continue
+        try:
+            snap = db.get_snapshot_by_id(uuid)
+        except KeyError:
+            continue
+        if snap.cluster_id != cluster_id or not is_replication_snapshot(snap):
+            continue
+        if not snap.lvol or snap.lvol.get_id() in lvol_ids:
+            continue
+        if _source_is_live(db, snap, lvol_ids):
+            continue
+        group = getattr(snap, "group_id", "") or ""
+        if group and snap.get_id() in replication_recovery_points.group_recovery_point_ids(
+                {group}, db=db):
+            continue
+        clones = _spdk_clones(db, snap)
+        if clones is None or clones:
+            continue
+        fresh = db.atomic_update(snap, _retire)
+        if fresh is None:
+            continue
+        _sync_mini(db, fresh)
+        _unlink_from_source(db, fresh)
+        retired.append(uuid)
+    if retired:
+        logger.info("Retiring %d orphaned replication snapshot(s) on cluster %s: %s",
+                    len(retired), cluster_id, ", ".join(retired))
+    return retired
+
+
+def _source_is_live(db, snap, lvol_ids):
+    """True when *snap* is a landing copy whose source snapshot still belongs
+    to a live volume on the other cluster."""
+    src_id = snap.source_replicated_snap_uuid
+    if not src_id:
+        return False
+    try:
+        src = db.get_snapshot_by_id(src_id)
+    except KeyError:
+        return False
+    return bool(src.lvol) and src.lvol.get_id() in lvol_ids and not src.deleted
 
 
 def _retire(snap):
