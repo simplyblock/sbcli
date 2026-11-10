@@ -314,3 +314,39 @@ class TestKubernetesSiteOnline:
         monkeypatch.setattr(cpc, "_http_answers", lambda ep, timeout=3.0: True)
         assert cpc._mgmt_node_online(Cluster(), self._node("docker", "10.0.0.5", "online"))
         assert not cpc._mgmt_node_online(Cluster(), self._node("docker", "10.0.0.5", "unreachable"))
+
+
+class TestHttpAnswers:
+    """_http_answers: a site's https endpoint answers with a certificate from
+    the cluster's CA, which the default trust store rejects; that still counts."""
+
+    @staticmethod
+    def _raising(exc):
+        def urlopen(url, timeout):
+            raise exc
+        return urlopen
+
+    def test_untrusted_certificate_counts_as_answering(self, monkeypatch):
+        import ssl
+        import urllib.error
+        import urllib.request
+        err = urllib.error.URLError(ssl.SSLCertVerificationError(1, "self-signed certificate in certificate chain"))
+        monkeypatch.setattr(urllib.request, "urlopen", self._raising(err))
+        assert cpc._http_answers("https://site-b.example:5000") is True
+
+    def test_other_tls_failures_and_refusals_do_not(self, monkeypatch):
+        import ssl
+        import urllib.error
+        import urllib.request
+        for err in (urllib.error.URLError(ssl.SSLEOFError(8, "EOF occurred in violation of protocol")),
+                    urllib.error.URLError(ConnectionRefusedError(111, "refused")),
+                    TimeoutError("timed out")):
+            monkeypatch.setattr(urllib.request, "urlopen", self._raising(err))
+            assert cpc._http_answers("https://site-b.example:5000") is False, err
+
+    def test_an_http_status_counts_as_answering(self, monkeypatch):
+        import urllib.error
+        import urllib.request
+        err = urllib.error.HTTPError("https://x/api/v2/_meta/health", 503, "unavailable", {}, None)
+        monkeypatch.setattr(urllib.request, "urlopen", self._raising(err))
+        assert cpc._http_answers("https://site-b.example:5000") is True

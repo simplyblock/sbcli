@@ -760,7 +760,15 @@ def move_leader_site(cluster_id: str, site: str, *, force: bool = False) -> Site
 def _http_answers(endpoint: str, *, timeout: float = 3.0) -> bool:
     """Whether anything answers HTTP at ``endpoint`` (the health route is
     served by every control plane whatever its mode); a refused or timed-out
-    connection is "no", any HTTP status is "yes"."""
+    connection is "no", any HTTP status is "yes".
+
+    An https endpoint serves a certificate from the cluster's own CA, which
+    this process's default trust store does not hold. A server that presented
+    a certificate has answered, so a failed verification is "yes" too; nothing
+    is sent or read beyond the handshake. Any other TLS failure (an EOF or a
+    reset mid-handshake, as a load balancer without a healthy target gives) is
+    "no"."""
+    import ssl
     import urllib.error
     import urllib.request
     url = endpoint.rstrip("/") + "/api/v2/_meta/health"
@@ -768,6 +776,10 @@ def _http_answers(endpoint: str, *, timeout: float = 3.0) -> bool:
         urllib.request.urlopen(url, timeout=timeout).close()  # noqa: S310 - the site's own API endpoint
         return True
     except urllib.error.HTTPError:
+        return True
+    except urllib.error.URLError as e:
+        return isinstance(e.reason, ssl.SSLCertVerificationError)
+    except ssl.SSLCertVerificationError:
         return True
     except Exception:  # noqa: BLE001 - not answering is the expected outcome
         return False
