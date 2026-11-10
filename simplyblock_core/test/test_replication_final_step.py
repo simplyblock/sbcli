@@ -27,6 +27,7 @@ class _RPC:
         self._final_step_ret = final_step_ret
         self._final_step_state = final_step_state
         self.final_step_gateways = []
+        self.final_step_kwargs = []
         self.ana_groups = []
 
     # hub attach fast-path: pretend the remote bdev already exists
@@ -40,7 +41,10 @@ class _RPC:
         return []
 
     def bdev_lvol_transfer_final_step(self, lvol_name, lvol_id, snapshot_name,
-                                      batch, gateway, operation):
+                                      batch, gateway, operation, partial_base=0,
+                                      cow_landing=False, applied=None):
+        self.final_step_kwargs.append({"partial_base": partial_base,
+                                       "cow_landing": cow_landing})
         # `gateway` is recorded separately: it was omitted from the event tuple,
         # which is how the controller-name-instead-of-bdev bug went unnoticed.
         self.events.append(("final_step", operation, lvol_name, snapshot_name, batch))
@@ -162,6 +166,9 @@ def test_run_cutover_happy_path(monkeypatch):
         src, tgt, _Lvol(), "lvs_tgt/LVOL_1", 42, "lvs_tgt/SNAP1", operation="replicate")
 
     assert ok is True and err is None
+    # The target is a clone of SNAP1: no chaining page may land on it as data,
+    # delta or not (no delta_base here: whole clusters).
+    assert src._rpc.final_step_kwargs == [{"partial_base": 0, "cow_landing": True}]
     kinds = [e[0] for e in events]
     # Source fenced (first ana) BEFORE the freeze/final_step; target enabled
     # (last ana) only after the peer add_clone.

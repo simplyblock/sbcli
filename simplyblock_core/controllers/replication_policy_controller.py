@@ -406,6 +406,10 @@ def detach_policy(lvol_id):
 
     # Stops streaming and cancels the non-DONE FN_SNAPSHOT_REPLICATION tasks.
     lvol_controller.replication_stop(lvol_id, from_policy=True)
+    # The spare landing volume kept ready on the destination has no transfer
+    # to serve any more.
+    from simplyblock_core import replication_spare
+    replication_spare.discard(lvol_id)
 
     if lvol.replication_demote_state in (LVol.REPLICATION_DEMOTE_PENDING,
                                          LVol.REPLICATION_DEMOTE_DONE):

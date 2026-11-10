@@ -620,15 +620,32 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     if not disable_monitoring:
         utils.render_and_deploy_alerting_configs(alert_config, contact_point, cluster.grafana_endpoint, cluster.uuid, cluster.secret.get_secret_value())
 
-    logger.info("Deploying swarm stack ...")
     log_level = "DEBUG" if constants.LOG_WEB_DEBUG else "INFO"
-    scripts.deploy_stack(cli_pass.get_secret_value(), dev_ip, constants.SIMPLY_BLOCK_DOCKER_IMAGE, cluster.secret.get_secret_value(), cluster.uuid,
-                            log_del_interval, metrics_retention_period, log_level, cluster.grafana_endpoint, str(disable_monitoring))
-    logger.info("Deploying swarm stack > Done")
+
+    def deploy_stack_phase(phase):
+        scripts.deploy_stack(cli_pass.get_secret_value(), dev_ip, constants.SIMPLY_BLOCK_DOCKER_IMAGE,
+                             cluster.secret.get_secret_value(), cluster.uuid, log_del_interval,
+                             metrics_retention_period, log_level, cluster.grafana_endpoint, str(disable_monitoring),
+                             phase=phase)
+
+    # Order matters: every simplyblock service exits on an unconfigured
+    # database, so the database must be configured after FDB is up and before
+    # those services are deployed (SFAM-2847).
+    logger.info("Deploying monitoring stack ...")
+    deploy_stack_phase("monitoring")
+    logger.info("Deploying monitoring stack > Done")
+
+    logger.info("Deploying FDB services ...")
+    deploy_stack_phase("fdb")
+    logger.info("Deploying FDB services > Done")
 
     logger.info("Configuring DB...")
     scripts.set_db_config_single()
     logger.info("Configuring DB > Done")
+
+    logger.info("Deploying simplyblock services ...")
+    deploy_stack_phase("app")
+    logger.info("Deploying simplyblock services > Done")
     monitoring_secret = cluster.secret
 
 

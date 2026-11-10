@@ -1371,7 +1371,7 @@ class RPCClient:
             params['bdev_io_cache_size'] = bdev_io_cache_size
         if iobuf_small_cache_size > 0:
             params['iobuf_small_cache_size'] = iobuf_small_cache_size
-        if iobuf_small_cache_size > 0:
+        if iobuf_large_cache_size > 0:
             params['iobuf_large_cache_size'] = iobuf_large_cache_size
         if params:
             return self._request("bdev_set_options", **params)
@@ -1394,7 +1394,12 @@ class RPCClient:
             return False
 
     def accel_set_options(self):
-        return self._request("accel_set_options", small_cache_size=512, large_cache_size=64)
+        # accel is not in the data path: its per-thread iobuf caches only park
+        # buffers (512 small + 64 large per thread used to hold ~160 MiB on a
+        # 13-thread node).
+        return self._request("accel_set_options",
+                             small_cache_size=constants.ACCEL_SMALL_CACHE_SIZE,
+                             large_cache_size=constants.ACCEL_LARGE_CACHE_SIZE)
 
     def distr_status_events_get(self):
         return self._request("distr_status_events_get")
@@ -2083,8 +2088,27 @@ class RPCClient:
         return self._request("bdev_lvol_remove_from_group",
                               bdev_group_id=group_id, lvol_vbdev_list=lvol_name_list)
 
-    def alceml_set_qos_weights(self, qos_weights):
+    def distrib_set_qos_weights(self, qos_weights):
+        """distrib's per-class shares (one table per process: every distrib of
+        the node). Set together with alceml's by
+        qos_controller.set_node_qos_weights."""
         return self._request("bdev_distrib_set_qos_weights", qos_weights=qos_weights)
+
+    def alceml_set_qos_weights(self, qos_weights):
+        """alceml's per-class shares (one table per process: every alceml of
+        the node), or ``RPC_UNSUPPORTED`` on a build without the RPC.
+
+        This wrapper used to send bdev_distrib_set_qos_weights, so alceml kept
+        its built-in {75, 25, 0, ...}: a class with weight 0 -- replication
+        among them -- only got the minimum budget per round on a busy device
+        (bf17, 2026-11-08).
+        """
+        try:
+            return self._request("alceml_set_qos_weights", qos_weights=qos_weights)
+        except RPCRemoteError as e:
+            if e.code == RPC_METHOD_NOT_FOUND:
+                return RPC_UNSUPPORTED
+            raise
 
     def jm_get_events(self):
         """Fetch every event the JM currently holds.
@@ -2226,7 +2250,8 @@ class RPCClient:
         return self._request("bdev_lvol_set_migration_flag", lvol_name=name)
 
     def bdev_lvol_transfer(self, name, offset, batch_size, bdev_name, operation="migrate", lvol_id=0,
-                           allow_partial=False, priority_class=0, partial_base=0):
+                           allow_partial=False, priority_class=0, partial_base=0, dest_clone=False,
+                           cow_landing=False, applied=None):
         """
         Start an async blob transfer from *name* (source composite bdev) to the
         NVMe-oF bdev *bdev_name* attached on the caller's node.
@@ -2252,11 +2277,33 @@ class RPCClient:
         fresh empty volume would silently drop every cluster the delta does not
         cover.
 
+        *dest_clone*: the destination is a clone of the snapshot whose copy
+        the delta applies on (the cutover clone): partial clusters are CoW'd
+        there (cow_landing), no merge follows, and no completion signal is
+        written into it. Never dropped on a retry: an SPDK without it answers
+        with a decode error (strict decoding), which the caller reads as "not
+        supported" -- sending into the clone without it would write that
+        signal as data at offset 0 of the clone.
+
         *priority_class* is the IO class the transfer reads its source in,
         without changing the source's own class (0 = the source's own). An SPDK
         older than the parameter refuses the whole request, so it is retried
         once without it, which reads in the source's class as before.
+
+        *cow_landing* (delta transfers only) asks the source NOT to pre-allocate
+        the clusters the delta covers only partly: the destination's first
+        write into such a cluster copies it from the landing volume's base
+        (page copy on a copy-offload lvstore), so no bdev_lvol_merge_base is
+        needed afterwards. Pass it only when the landing volume was chained to
+        its base BEFORE the transfer and the destination has page copy. An SPDK
+        without the parameter refuses it as undecodable; the transfer is then
+        retried without it (the merge path).
+
+        *applied*, if a dict, receives ``cow_landing``: whether the request the
+        SPDK accepted carried it -- only then may the caller skip the merge.
         """
+        if applied is not None:
+            applied["cow_landing"] = False
         params = {
             "lvol_name": name,
             "lvol_id": lvol_id,
@@ -2270,21 +2317,32 @@ class RPCClient:
         # disabled in 52e75afb2 while the fork's destination side corrupted
         # partial transfers), so it is retried without the delta, then without
         # the class: each step back sends more, never less.
+        if dest_clone:
+            params["dest_clone"] = True
         attempts = []
         if allow_partial and partial_base:
-            attempts.append(dict(params, allow_partial=True, partial_base=int(partial_base),
-                                 **({"priority_class": priority_class} if priority_class else {})))
+            delta = dict(params, allow_partial=True, partial_base=int(partial_base),
+                         **({"priority_class": priority_class} if priority_class else {}))
+            if cow_landing:
+                attempts.append(dict(delta, cow_landing=True))
+            attempts.append(delta)
         if priority_class:
             attempts.append(dict(params, priority_class=priority_class))
-        for extra in attempts:
+        for i, extra in enumerate(attempts):
             try:
-                return self._request("bdev_lvol_transfer", **extra)
+                ret = self._request("bdev_lvol_transfer", **extra)
             except RPCRemoteError as e:
                 if "decode" not in str(e):
                     raise
+                nxt = attempts[i + 1] if i + 1 < len(attempts) else params
                 logger.warning("bdev_lvol_transfer: SPDK does not take %s; retrying %s without it",
-                               ", ".join(k for k in ("partial_base", "priority_class") if k in extra),
+                               ", ".join(k for k in ("cow_landing", "partial_base", "priority_class")
+                                         if k in extra and k not in nxt),
                                name)
+                continue
+            if applied is not None:
+                applied["cow_landing"] = bool(extra.get("cow_landing"))
+            return ret
         return self._request("bdev_lvol_transfer", **params)
 
     def bdev_lvol_merge_base(self, name, priority_class=None):
@@ -2359,7 +2417,8 @@ class RPCClient:
         """
         return self._request("bdev_lvol_get_lvols", lvs_name=lvs_name)
 
-    def bdev_lvol_transfer_final_step(self, lvol_name, lvol_id, snapshot_name, batch_size, gateway, operation):
+    def bdev_lvol_transfer_final_step(self, lvol_name, lvol_id, snapshot_name, batch_size, gateway, operation,
+                                      partial_base=0, cow_landing=False, applied=None):
         """
         Start the final (live) transfer of a writable lvol from source to target.
         The source I/O is frozen for the brief delta transfer, then resumed.
@@ -2375,16 +2434,62 @@ class RPCClient:
             batch_size:    cluster batch size – pass ``2`` for the final step
             gateway:       target hub lvol bdev name (NVMe-oF attached on source)
             operation:     ``"migrate"`` or ``"replicate"``
+            partial_base:  SOURCE blob id of the snapshot whose copy the target
+                           lvol is a clone of. Non-zero asks for the dirty-page
+                           delta written since that snapshot instead of every
+                           dirty cluster whole, landed copy-on-write in the clone
+                           (``allow_partial`` + ``cow_landing``). The caller must
+                           have checked what SPDK cannot see (no other member
+                           wrote, the target really is that copy's clone). SPDK
+                           still falls back to whole clusters on its own when the
+                           volume's dirty generation does not qualify.
+            cow_landing:   the target lvol is already a clone of *snapshot_name*:
+                           SPDK sends no "transfer_task_completed" chaining page.
+                           A cross-cluster receiver never intercepts that page (it
+                           does so only for lvols with the intra-cluster
+                           migration flag), so without this it lands as DATA on
+                           the clone's first 4 KiB. Always true for the
+                           replicate cutover, whose target is always that clone.
+            applied:       optional dict; receives ``partial`` and
+                           ``cow_landing`` -- whether SPDK accepted those
+                           parameters (not whether it used the delta; its log
+                           says that).
+
+        A delta never goes without ``cow_landing``: the target is a clone and
+        has no merge step afterwards, so pre-allocated clusters would read the
+        blocks the delta does not carry as zeroes. An SPDK that does not decode
+        the parameters gets the plain request: whole clusters, as before.
 
         Poll progress with :meth:`bdev_lvol_transfer_stat` using *lvol_name*.
         """
-        return self._request("bdev_lvol_transfer_final_step",
-                              lvol_name=lvol_name,
-                              lvol_id=lvol_id,
-                              snapshot_name=snapshot_name,
-                              cluster_batch=batch_size,
-                              gateway=gateway,
-                              operation=operation)
+        params = {
+            "lvol_name": lvol_name,
+            "lvol_id": lvol_id,
+            "snapshot_name": snapshot_name,
+            "cluster_batch": batch_size,
+            "gateway": gateway,
+            "operation": operation,
+        }
+        if applied is not None:
+            applied.update(partial=False, cow_landing=False)
+        extra: dict = {}
+        if cow_landing or partial_base:
+            extra["cow_landing"] = True
+        if partial_base:
+            extra.update(allow_partial=True, partial_base=int(partial_base))
+        if extra:
+            try:
+                ret = self._request("bdev_lvol_transfer_final_step", **extra, **params)
+            except RPCRemoteError as e:
+                if "decode" not in str(e):
+                    raise
+                logger.warning("bdev_lvol_transfer_final_step: SPDK does not take %s; "
+                               "sending %s in whole clusters", ", ".join(sorted(extra)), lvol_name)
+            else:
+                if applied is not None:
+                    applied.update(partial=bool(partial_base), cow_landing=True)
+                return ret
+        return self._request("bdev_lvol_transfer_final_step", **params)
 
     def bdev_lvol_batch_transfer_final_step(self, lvol_names, lvol_ids, snapshot_names, batch_size, gateway, operation):
         """

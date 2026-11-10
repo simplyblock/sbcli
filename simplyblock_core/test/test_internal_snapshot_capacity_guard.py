@@ -44,6 +44,9 @@ def _db(util):
         def get_mini_snapshots(self):
             return []
 
+        def get_snapshots_by_lvol_id(self, lvol_id):
+            return []
+
         def get_replication_policies(self, cluster_id=None):
             return []
 
