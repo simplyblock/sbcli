@@ -40,6 +40,16 @@ A worker that already carries everything is left alone in either mode; a plain
 node restart never restarts the kubelet. The modes differ only in what happens
 on a shortfall.
 
+The huge-page pool is always part of this: the SPDK pod cannot start without
+it. The kubelet's CPU topology (`cpuManagerPolicy: static`, the reserved CPUs,
+the topology manager) is part of it only when the deployment asks for it --
+`storageNodes.enableCpuTopology` *and* `storageNodes.enableKubeletConfiguration`
+both on (the node agent's `CPU_TOPOLOGY_ENABLED=true` with
+`SKIP_KUBELET_CONFIGURATION=false`). A Talos deployment turns both on by
+default; a document that states either flag off keeps the node away from the
+kubelet in both modes -- nothing is verified, nothing is applied, and the
+kubelet is then yours to configure (or to leave alone).
+
 The node detects Talos by itself, from what the kubelet reports about its host
 in the Node object (`status.nodeInfo.osImage`, e.g. `Talos (v1.12.7)`), so no
 flag is needed for that. `TALOS_CLUSTER=true|false` on the node agent overrides
@@ -222,6 +232,8 @@ reboot. Set them in the machine config yourself if you need them.
 | `TALOS_CLUSTER` | unset (detect) | Override the Talos detection: `true` forces the Talos path, `false` the host-shell one. |
 | `TALOSCTL_IMAGE` | `ghcr.io/siderolabs/talosctl:v1.14.3` | Image the managed-mode Jobs run; pin to the cluster's Talos minor, mirror it for air-gapped sites. |
 | `TALOS_API_SECRET` | `talos-api-access-talos-secrets` | Name of the ServiceAccount / Secret above (managed mode). |
+| `CPU_TOPOLOGY_ENABLED` | `true` on Talos | Whether the kubelet's CPU topology is part of what the node verifies (pre-provisioned) or applies (managed). Set by the operator from `storageNodes.enableCpuTopology`. |
+| `SKIP_KUBELET_CONFIGURATION` | `false` on Talos | `true` keeps the node away from the kubelet even with the CPU topology on: the huge pages are still verified or applied, the kubelet is left as it is. Set by the operator from `storageNodes.enableKubeletConfiguration` (inverted). |
 
 Wipe Disks:
 * `talosctl wipe disk --nodes $NODEID nvme1n1`
