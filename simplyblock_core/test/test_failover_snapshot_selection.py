@@ -126,6 +126,8 @@ def test_ignores_other_lvols_and_other_task_types():
 
 # --- Split control planes: the copies are recorded on the peer's ---------------
 
+from pydantic import SecretStr  # noqa: E402
+
 from simplyblock_core.controllers.lvol_controller import _policy_peer  # noqa: E402
 from simplyblock_core.models.replication import ReplicationPolicy, ReplicationTarget  # noqa: E402
 from simplyblock_core.peer.client import HttpPeerClient  # noqa: E402
@@ -212,7 +214,7 @@ def _target_rec(peer_endpoint=""):
     t.uuid = "TGT"
     t.target_cluster_id = PEER_CLUSTER
     t.peer_endpoint = peer_endpoint
-    t.peer_secret = "s3cret" if peer_endpoint else ""
+    t.peer_secret = SecretStr("s3cret" if peer_endpoint else "")
     return t
 
 
