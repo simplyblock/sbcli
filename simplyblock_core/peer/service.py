@@ -109,10 +109,18 @@ def describe(cluster_id: str, request: DescribeRequest) -> DescribeResponse:
     if request.landing_lvol_id:
         response.landing_leaders = _landing_leaders(db, cluster_id, request.landing_lvol_id)
     for snapshot_id in request.snapshot_ids:
-        exists = _copy_on(db, cluster_id, snapshot_id) is not None
+        copy = _copy_on(db, cluster_id, snapshot_id)
+        if copy is None:
+            response.snapshots.append(SnapshotState(snapshot_id=snapshot_id, exists=False))
+            continue
         response.snapshots.append(SnapshotState(
-            snapshot_id=snapshot_id, exists=exists,
-            has_dependent_clone=exists and _has_dependent_clone(db, snapshot_id)))
+            snapshot_id=snapshot_id, exists=True,
+            has_dependent_clone=_has_dependent_clone(db, snapshot_id),
+            in_deletion=copy.status == SnapShot.STATUS_IN_DELETION,
+            pool_id=copy.pool_uuid or "",
+            lvol_id=copy.lvol.get_id() if copy.lvol else "",
+            size=copy.size, used_size=copy.used_size, created_at=copy.created_at,
+            group_id=copy.group_id, group_seq=copy.group_seq))
     for check in request.chain_checks:
         response.chains.append(ChainState(
             successor_id=check.successor_id, predecessor_id=check.predecessor_id,

@@ -116,6 +116,8 @@ def get_latest_replicated_snapshot(cluster: Cluster, lvol_id: UUID) -> Replicate
         snap = lvol_controller.latest_replicated_snapshot(str(lvol_id))
     except KeyError as e:
         raise HTTPException(404, str(e))
+    except PeerError as e:
+        raise HTTPException(status_code=502, detail=f"Peer control plane: {e}")
     if snap is None:
         raise HTTPException(404, f"Volume {lvol_id} has no replicated snapshot yet")
     return ReplicatedSnapshotDTO.from_model(snap)

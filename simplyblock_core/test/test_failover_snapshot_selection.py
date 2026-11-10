@@ -122,3 +122,106 @@ def test_ignores_other_lvols_and_other_task_types():
     got = _pick([_task("S_mine"), _task("S_theirs"), unrelated],
                 [mine, theirs, _target("T_mine"), _target("T_theirs")])
     assert got.get_id() == "T_mine"
+
+
+# --- Split control planes: the copies are recorded on the peer's ---------------
+
+from simplyblock_core.controllers.lvol_controller import _policy_peer  # noqa: E402
+from simplyblock_core.models.replication import ReplicationPolicy, ReplicationTarget  # noqa: E402
+from simplyblock_core.peer.client import HttpPeerClient  # noqa: E402
+from simplyblock_core.peer.protocol import DescribeResponse, SnapshotState  # noqa: E402
+
+PEER_CLUSTER = "CL_peer"
+
+
+class _FakePeer:
+    """Answers describe from a dict of copy id -> SnapshotState; counts calls."""
+
+    cluster_id = PEER_CLUSTER
+
+    def __init__(self, states):
+        self._states = states
+        self.calls = []
+
+    def describe(self, request):
+        self.calls.append(list(request.snapshot_ids))
+        return DescribeResponse(snapshots=[
+            self._states.get(sid, SnapshotState(snapshot_id=sid, exists=False))
+            for sid in request.snapshot_ids])
+
+
+def _copy(sid, **kw):
+    return SnapshotState(snapshot_id=sid, exists=True, **kw)
+
+
+def _pick_peer(tasks, snaps, peer):
+    # Only the source half is in this database: no target records at all.
+    return last_replicated_target_snapshot(_FakeDB(tasks, snaps), LVOL_ID, CLUSTER_ID, peer=peer)
+
+
+def test_peer_newest_copy_carries_what_a_clone_needs():
+    old = _snap("S_old", 100, "T_old")
+    new = _snap("S_new", 200, "T_new")
+    peer = _FakePeer({
+        "T_old": _copy("T_old"),
+        "T_new": _copy("T_new", pool_id="P_peer", lvol_id="LV_peer", size=10, used_size=4,
+                       created_at=201, group_id="G", group_seq=7),
+    })
+    got = _pick_peer([_task("S_old"), _task("S_new")], [old, new], peer)
+    assert got.get_id() == "T_new"
+    assert (got.cluster_id, got.pool_uuid, got.lvol.get_id()) == (PEER_CLUSTER, "P_peer", "LV_peer")
+    assert (got.size, got.used_size, got.created_at, got.group_id, got.group_seq) == (10, 4, 201, "G", 7)
+    assert peer.calls == [["T_new", "T_old"]], "one describe for every candidate, newest first"
+
+
+def test_peer_skips_gone_and_dying_copies():
+    a = _snap("S_a", 100, "T_a")
+    b = _snap("S_b", 200, "T_b")
+    c = _snap("S_c", 300, "T_c")
+    peer = _FakePeer({"T_a": _copy("T_a"), "T_b": _copy("T_b", in_deletion=True)})  # T_c is gone
+    got = _pick_peer([_task("S_a"), _task("S_b"), _task("S_c")], [a, b, c], peer)
+    assert got.get_id() == "T_a"
+
+
+def test_peer_none_when_nothing_replicated_asks_nothing():
+    running = _snap("S_running", 200, "T_running")
+    peer = _FakePeer({})
+    got = _pick_peer([_task("S_running", JobSchedule.STATUS_RUNNING)], [running], peer)
+    assert got is None
+    assert peer.calls == []
+
+
+class _PolicyDB:
+    def __init__(self, target):
+        self._policy = ReplicationPolicy()
+        self._policy.uuid = "POL"
+        self._policy.target_id = target.uuid
+        self._target = target
+
+    def get_replication_policy_by_id(self, pid):
+        if pid != "POL":
+            raise KeyError(pid)
+        return self._policy
+
+    def get_replication_target_by_id(self, tid):
+        return self._target
+
+
+def _target_rec(peer_endpoint=""):
+    t = ReplicationTarget()
+    t.uuid = "TGT"
+    t.target_cluster_id = PEER_CLUSTER
+    t.peer_endpoint = peer_endpoint
+    t.peer_secret = "s3cret" if peer_endpoint else ""
+    return t
+
+
+def test_policy_peer_only_for_a_target_on_a_peer_control_plane():
+    lvol = _lvol()
+    lvol.replication_policy_id = "POL"
+    peer = _policy_peer(_PolicyDB(_target_rec("http://cp-b:15000")), lvol)
+    assert isinstance(peer, HttpPeerClient) and peer.cluster_id == PEER_CLUSTER
+    assert _policy_peer(_PolicyDB(_target_rec()), lvol) is None, "a target in this control plane"
+    assert _policy_peer(_PolicyDB(_target_rec("http://cp-b:15000")), _lvol()) is None, "no policy"
+    lvol.replication_policy_id = "GONE"
+    assert _policy_peer(_PolicyDB(_target_rec("http://cp-b:15000")), lvol) is None, "policy deleted"

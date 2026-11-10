@@ -64,6 +64,17 @@ class SnapshotState(BaseModel):
     #: A live volume is cloned from the copy (e.g. a failed-over volume), so it
     #: must not be deleted.
     has_dependent_clone: bool = False
+    #: Retention is deleting the copy: it is no recovery point any more.
+    in_deletion: bool = False
+    #: What a caller needs to address and clone the copy (the source's
+    #: latest-snapshot read, for a test fail-over); empty when it does not exist.
+    pool_id: str = ""
+    lvol_id: str = ""
+    size: int = 0
+    used_size: int = 0
+    created_at: int = 0
+    group_id: str = ""
+    group_seq: int = 0
 
 
 class ChainState(ChainCheck):

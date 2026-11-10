@@ -51,7 +51,7 @@ from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.peer.client import PeerError, peer_for_target
-from simplyblock_core.peer.protocol import PlaceRequest
+from simplyblock_core.peer.protocol import DescribeRequest, PlaceRequest
 from simplyblock_core.prom_client import PromClient
 from simplyblock_core.rpc_client import RPCException, RPCRemoteError
 from simplyblock_core.services import replication_final_step
@@ -6013,8 +6013,62 @@ def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snaps
     return new_lvol, None
 
 
+def _newest_peer_copy(peer, snaps):
+    """The first of *snaps* (newest first) whose copy on *peer*'s cluster exists
+    and is not in deletion, as a detached SnapShot of that copy; or None.
+
+    The copies' records live in the peer's control plane, so one describe call
+    asks about all of them. The returned record is never written here.
+    """
+    if not snaps:
+        return None
+    answer = peer.describe(DescribeRequest(
+        snapshot_ids=[s.target_replicated_snap_uuid for s in snaps]))
+    states = {s.snapshot_id: s for s in answer.snapshots}
+    for snap in snaps:
+        state = states.get(snap.target_replicated_snap_uuid)
+        if state is None or not state.exists:
+            logger.warning(
+                f"Fail-over candidate {snap.get_id()}: copy {snap.target_replicated_snap_uuid} "
+                f"is gone from peer cluster {peer.cluster_id}; trying an older snapshot")
+            continue
+        if state.in_deletion:
+            logger.warning(
+                f"Fail-over candidate {snap.get_id()}: copy {state.snapshot_id} on peer cluster "
+                f"{peer.cluster_id} is in deletion; trying an older snapshot")
+            continue
+        copy_ = SnapShot()
+        copy_.uuid = state.snapshot_id
+        copy_.cluster_id = peer.cluster_id
+        copy_.pool_uuid = state.pool_id
+        copy_.size = state.size
+        copy_.used_size = state.used_size
+        copy_.created_at = state.created_at
+        copy_.group_id = state.group_id
+        copy_.group_seq = state.group_seq
+        copy_.status = SnapShot.STATUS_ONLINE
+        if state.lvol_id:
+            copy_.lvol = LVol()
+            copy_.lvol.uuid = state.lvol_id
+        return copy_
+    return None
+
+
+def _policy_peer(db_controller, lvol):
+    """The peer client of *lvol*'s policy target when that target is on a peer
+    control plane; None otherwise (no policy, or a target in this control plane)."""
+    if not getattr(lvol, "replication_policy_id", ""):
+        return None
+    try:
+        policy = db_controller.get_replication_policy_by_id(lvol.replication_policy_id)
+        target = db_controller.get_replication_target_by_id(policy.target_id)
+    except KeyError:
+        return None
+    return peer_for_target(target) if target.has_peer() else None
+
+
 def last_replicated_target_snapshot(db_controller, lvol_id, cluster_id, generation=0,
-                                     pin_snapshot_id=None):
+                                     pin_snapshot_id=None, peer=None):
     """Return the target-cluster copy of the most recent FULLY replicated
     snapshot of *lvol_id*, or None.
 
@@ -6031,6 +6085,10 @@ def last_replicated_target_snapshot(db_controller, lvol_id, cluster_id, generati
 
     Candidates are walked newest-first so an incomplete or disappearing newest
     snapshot falls back to the last good one rather than failing the fail-over.
+
+    With *peer* (the target is on another control plane), the copies are
+    judged by the peer's answer instead of this database, and the result is a
+    detached record of the peer's copy: good for reading, not for writing.
     """
     snaps = []
     for task in db_controller.get_job_tasks(cluster_id):
@@ -6065,6 +6123,8 @@ def last_replicated_target_snapshot(db_controller, lvol_id, cluster_id, generati
                 f"{len(snaps)} replicated point(s)-in-time exist")
             return None
         snaps = snaps[generation:]
+    if peer is not None:
+        return _newest_peer_copy(peer, snaps)
     for snap in snaps:
         try:
             target_snap = db_controller.get_snapshot_by_id(snap.target_replicated_snap_uuid)
@@ -6108,7 +6168,9 @@ def latest_replicated_snapshot(lvol_id: str) -> SnapShot | None:
         lvol_id = rel["active_lvol_id"]
     lvol = db_controller.get_lvol_by_id(lvol_id)
     node = db_controller.get_storage_node_by_id(lvol.node_id)
-    return last_replicated_target_snapshot(db_controller, lvol_id, node.cluster_id)
+    # Split control planes: the copies are recorded on the peer's.
+    return last_replicated_target_snapshot(db_controller, lvol_id, node.cluster_id,
+                                           peer=_policy_peer(db_controller, lvol))
 
 
 def _evict_stale_namespace(new_lvol, target_node, superseded=None):

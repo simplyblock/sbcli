@@ -487,6 +487,15 @@ class TestLatestReplicatedSnapshot:
 
         assert response.status_code == 404
 
+    def test_unreachable_peer_is_a_502(self, client, db, cluster, lvol_controller):
+        """Split control planes: the copies are on the peer's, which is down."""
+        lvol_controller.latest_replicated_snapshot.side_effect = PeerUnreachableError('connection refused')
+
+        response = client.get(RELATIONSHIPS_URL + f'{VOLUME_ID}/latest-snapshot')
+
+        assert response.status_code == 502
+        assert 'Peer control plane' in response.json()['detail']
+
 
 class TestLatestReplicatedGeneration:
     """The consistency-group form of the latest-replicated-snapshot read:
