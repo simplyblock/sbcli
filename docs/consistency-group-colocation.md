@@ -121,6 +121,7 @@ the forcing yet; they place as before and can be co-located later (§5).
 | volume on the pin | `join`, then `colocate` when not in the group's subsystem |
 | volume off the pin | `migrate` (`migrate_lvol_ids`, `target_node_id`), `join`, `colocate` |
 | volume already a member | `colocate` when not in the group's subsystem, the vote taken without it; else nothing |
+| a subsystem the move would touch is held by a migration or move | the steps as above, `colocation.refusal` = `SubsystemBusy: ...`; the operator waits it out (not 409: a hold ends) |
 | volume in another group / another pool / siblings in another group | 409 |
 
 **The member's own subsystem does not vote.** When `plan_late_join` plans a volume that is already a member (a rolled-back swap leaves the membership recorded and the volume in its own subsystem), the group's subsystem is computed without that member, as `select_move_target` computes it without the joiner. Counted, a lone member outside tied with the real subsystem and the tie-break on NQN order declared it "already there" half of the time, so nothing retried the move (live 2026-11-10).

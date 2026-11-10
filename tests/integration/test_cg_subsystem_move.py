@@ -661,6 +661,24 @@ def test_the_join_plan_carries_the_colocation_refusal(db, world):
                                           "maximum of 2 subsystems"}
 
 
+def test_the_join_plan_reports_a_held_subsystem_as_busy_not_as_a_refusal(db, world):
+    """A subsystem held by an active migration or move frees up: the plan says
+    so in the outcome (``SubsystemBusy``) for the operator to wait out, as the
+    create answers a MoveConflict. A 409 ended the join for good (live
+    2026-11-10: three siblings labeled at once, one planned while the others'
+    migration held their shared subsystem)."""
+    group, _, _ = world
+    group.members.pop("j")
+    group.write_to_db(db.kv_store)
+    _write_lvol(db, "j", "J", 1, maxns=1)
+    with mock.patch.object(cgl, "busy_nqns", return_value={"A"}):
+        plan = cgl.late_join_plan(db.get_consistency_group_by_id(group.get_id()),
+                                  db.get_lvol_by_id("j"))
+    assert plan.steps == [cgl.STEP_JOIN, cgl.STEP_COLOCATE]
+    assert plan.colocation == {"target_nqn": "", "target_is_new": False, "moving_lvol_ids": [],
+                               "refusal": "SubsystemBusy: subsystem A is held by an active migration or move"}
+
+
 def test_the_join_plan_names_the_fresh_target_it_would_need(db, world):
     group, _, _ = world
     group.members.pop("j")

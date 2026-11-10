@@ -987,8 +987,10 @@ class ConsistencyGroupColocationDTO(BaseModel):
     """The subsystem move a late join would end in, computed against the state
     the pinned node has once the join's migration landed. Nothing is reserved.
     ``target_nqn`` is empty for a fresh subsystem (``target_is_new``), and
-    ``refusal`` names why the group could not be brought into one subsystem
-    (``SubsystemLimitReached: ...``) -- the join would be refused for it."""
+    ``refusal`` names why the group could not be brought into one subsystem:
+    ``SubsystemLimitReached: ...`` is final (the join would be refused for
+    it); ``SubsystemBusy: ...`` is a subsystem held by an active migration or
+    move, which ends, so the join is waited, not refused."""
     target_nqn: str = ""
     target_is_new: bool = False
     moving_lvol_ids: list[str] = []

@@ -490,6 +490,13 @@ def _colocation_outcome(group, lvol, lvols, plan) -> dict:
     except SubsystemLimitReached as e:
         return {"target_nqn": "", "target_is_new": False, "moving_lvol_ids": [],
                 "refusal": f"SubsystemLimitReached: {e}"}
+    except SubsystemBusy as e:
+        # A hold ends, unlike a capacity refusal: the plan says so for the
+        # operator to wait out, as the create answers a MoveConflict. A 409
+        # here ended the join for good (live 2026-11-10: siblings labeled at
+        # once, one planned while the others' migration held their subsystem).
+        return {"target_nqn": "", "target_is_new": False, "moving_lvol_ids": [],
+                "refusal": f"SubsystemBusy: {e}"}
     return {"target_nqn": t.target_nqn, "target_is_new": t.target_is_new,
             "moving_lvol_ids": t.moving_ids, "refusal": ""}
 
