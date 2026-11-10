@@ -114,32 +114,6 @@ def _landing_peer(snapshot, landing) -> PeerClient:
     return _peer_for(snapshot.lvol, cluster_id)
 
 
-def _set_transfer_class(node_ids, bdev, wire_class, what):
-    """Best-effort: set the IO service class of *bdev* on each online node.
-
-    Replication traffic runs in its own service class
-    (constants.QOS_REPLICATION_CLASS_ID). The transfer reads its source in that
-    class by itself (bdev_lvol_transfer priority_class), leaving the source
-    snapshot's own class alone: client reads of the volume fall through to that
-    snapshot and must not be scheduled as replication. The landing volume on
-    the target is written only by the transfer and carries the class as its
-    own; once it is converted it backs fail-over clones, so it is reset to 0
-    (the class SPDK gives every snapshot) here. SPDK does not persist it.
-    """
-    for node_id in node_ids:
-        try:
-            node = db.get_storage_node_by_id(node_id)
-        except KeyError:
-            continue
-        if node.status != StorageNode.STATUS_ONLINE:
-            continue
-        try:
-            node.rpc_client(timeout=10).bdev_lvol_set_priority_class(bdev, wire_class)
-        except Exception as e:                            # noqa: BLE001
-            logger.warning("Setting service class %s on %s %s on %s failed (non-fatal): %s",
-                           wire_class, what, bdev, node_id, e)
-
-
 def _replication_class_on(cluster_id):
     """qos_controller.replication_class_available, but never raises: the
     service class is an optimisation and must not stop a transfer."""
@@ -547,16 +521,6 @@ def _hand_off_to_successor(task, snapshot):
             # the next pass finishes it as before
             logger.warning("Hand-off to task %s failed: %s", t.uuid, e)
         return
-
-
-def _rpc_or_none(fn, *args):
-    """Call an RPC whose failure the caller handles itself; a raise is
-    logged and reported as None so the caller's failure branch runs."""
-    try:
-        return fn(*args)
-    except RPCException as e:
-        logger.error("%s%s failed: %s", getattr(fn, "__name__", fn), args, e)
-        return None
 
 
 def _backoff_seconds(retry):
@@ -1116,12 +1080,6 @@ def process_snap_replicate_start(task, snapshot):
     _await_transfer_completion(task, snapshot, snode)
 
 
-def _landing_volume_snapshot_members(remote_lv):
-    """Ids of the online target members on which *remote_lv* is a snapshot
-    (peer.service.converted_members)."""
-    return peer_service.converted_members(db, remote_lv)
-
-
 def _receiving_leader_node(remote_lv):
     """The node that currently leads *remote_lv*'s lvstore, or None.
 
@@ -1136,15 +1094,6 @@ def _receiving_leader_node(remote_lv):
     the recorded node; nothing moves leadership back on its own.
     """
     return _lvs_leader_among(remote_lv.nodes, remote_lv.node_id, remote_lv.lvs_name)
-
-
-def _secondary_lacks_bdev(node, bdev_name):
-    """True when *node* has no bdev *bdev_name* (the add_clone's -19)."""
-    try:
-        return node.rpc_client(timeout=10).bdev_get(bdev_name) is None
-    except Exception as e:  # noqa: BLE001
-        logger.warning("Could not probe %s on %s: %s", bdev_name, node.get_id(), e)
-        return False
 
 
 def _lvs_leader_among(nodes_ids, preferred_id, lvs_name):
@@ -1235,11 +1184,6 @@ def _select_source_node(snapshot, exclude=()):
         why = (f"{role} {node_id[:8]}" + (f" (skipped: {'; '.join(skipped)})" if skipped else ""))
         return node, why
     return None, "; ".join(skipped) or "no member"
-
-
-def _leaders_of(lvol_like):
-    """The online members of *lvol_like*'s lvstore reporting leadership."""
-    return peer_service.lvs_leaders(db, lvol_like)
 
 
 _SETTLED_LEADER = peer_service._SETTLED_LEADER   # the settle cache lives with the settle
@@ -1351,12 +1295,6 @@ def _restart_elsewhere(task, msg):
 def _switches_exhausted(task):
     """True when node switches must start counting as retries (see constants)."""
     return int(task.function_params.get("node_switches") or 0) > constants.REPL_MAX_NODE_SWITCHES
-
-
-def _require_lvs_leader(node, lvs_name, what):
-    """True when *node* currently holds LVS leadership for *lvs_name*
-    (peer.service.require_leader: a convert on a non-leader degrades silently)."""
-    return peer_service.require_leader(node, lvs_name, what)
 
 
 def _other_active_transfers_to_node(current_task, target_node_id):
@@ -1673,7 +1611,7 @@ def _previous_replicated_snapshot(snapshot, replicate_to_source):
 
     REPLICATED is the whole precondition, and it applies to the snap_ref_id
     shortcut too. Returning a referenced predecessor that had never been
-    replicated handed _resolve_chain_target a BLANK remote-copy id, which it
+    replicated handed the chain step a BLANK remote-copy id, which it
     read as "there is a remote copy, but I cannot resolve it" and refused to
     finalize on. The transfer then retried for ever and the volume's snapshot
     never got its replicated marker (lab 2026-08-20: 299 "Predecessor snapshot
@@ -1746,52 +1684,6 @@ def _previous_replicated_snapshot(snapshot, replicate_to_source):
     return None
 
 
-def _resolve_chain_target(snapshot, replicate_to_source, remote_snode):
-    """Resolve the remote-cluster snapshot the new copy must be chained to.
-
-    Returns ``(target_prev_snap, prev_snap_for_db, ok)``. ``ok`` is False when
-    a replicated predecessor exists but its remote copy cannot be used — the
-    caller must fail-and-retry rather than finalize an unchained snapshot: an
-    unchained copy reads only its own delta (zeros elsewhere) and retention's
-    delete cannot swap-merge segments into a successor."""
-    prev_snap = _previous_replicated_snapshot(snapshot, replicate_to_source)
-    if not prev_snap:
-        return None, None, True
-    remote_copy_uuid = (prev_snap.source_replicated_snap_uuid
-                        if replicate_to_source
-                        else prev_snap.target_replicated_snap_uuid)
-    if not remote_copy_uuid:
-        # A blank id is not an unresolvable copy, it is NO copy: this
-        # predecessor was never replicated, so there is nothing on the remote
-        # side to chain onto and this snapshot starts the chain. Treating the
-        # blank as a broken reference made the task refuse to finalize and
-        # retry for ever (see _previous_replicated_snapshot).
-        logger.info("Predecessor %s has no copy on the remote side; the new "
-                    "snapshot starts the chain", prev_snap.get_id())
-        return None, None, True
-    try:
-        _snap_obj = db.get_snapshot_by_id(remote_copy_uuid)
-    except KeyError as e:
-        logger.error(
-            "Predecessor snapshot %s has remote copy %s but it cannot be "
-            "resolved (%s); refusing to finalize an unchained snapshot",
-            prev_snap.get_id(), remote_copy_uuid, e)
-        return None, None, False
-    # Any member of the copy's lvstore can chain onto it: the bdev is the
-    # lvstore's, the same on primary, secondary and tertiary. Comparing with
-    # the node the copy was created on refused every chain while the target
-    # primary was down and its secondary led (bf8 2026-11-02, R4 tgt-mid):
-    # each cycle fell back to a full transfer and then failed to finish.
-    members = list(getattr(_snap_obj.lvol, "nodes", None) or [_snap_obj.lvol.node_id])
-    if remote_snode.get_id() not in members:
-        logger.error(
-            "Predecessor remote copy %s lives on node %s but the new snapshot "
-            "is on %s; cannot chain across lvstores",
-            remote_copy_uuid, _snap_obj.lvol.node_id, remote_snode.get_id())
-        return None, None, False
-    return {"snap_bdev": _snap_obj.snap_bdev}, _snap_obj, True
-
-
 def _prechain_landing_volume(task, snapshot, replicate_to_source, remote_lv, leader_id):
     """Chain the landing volume onto the destination's copy of the PREVIOUS
     snapshot, before the transfer runs, so only the delta has to be sent.
@@ -1807,19 +1699,11 @@ def _prechain_landing_volume(task, snapshot, replicate_to_source, remote_lv, lea
     correct, and the bar it sets). Members chained are recorded on the task so
     neither a retry nor the finish step adds the same clone entry twice.
     """
-    prev_snap = _previous_replicated_snapshot(snapshot, replicate_to_source)
-    if not prev_snap:
-        logger.info("Landing volume %s stays a full-transfer target: %s starts the chain, "
-                    "so there is no predecessor to clone from",
-                    remote_lv.top_bdev, snapshot.get_id())
-        return False
-    copy_id = (prev_snap.source_replicated_snap_uuid if replicate_to_source
-               else prev_snap.target_replicated_snap_uuid)
+    copy_id = _predecessor_copy_id(snapshot, replicate_to_source)
     if not copy_id:
-        # A blank id is NO copy, not an unresolvable one: the predecessor was
-        # never replicated, so this snapshot starts the chain.
-        logger.info("Landing volume %s stays a full-transfer target: predecessor %s has "
-                    "no copy on the destination", remote_lv.top_bdev, prev_snap.get_id())
+        logger.info("Landing volume %s stays a full-transfer target: %s starts the chain, "
+                    "so there is no predecessor's copy to clone from",
+                    remote_lv.top_bdev, snapshot.get_id())
         return False
 
     prechained = list(task.function_params.get("prechained_node_ids") or [])
@@ -1951,29 +1835,6 @@ def _deferred_chain_gate(task, snapshot, replicate_to_source):
     return "pending"
 
 
-def _chained_onto(node, lvol_bdev, snap_bdev):
-    """Whether *lvol_bdev* already reads through *snap_bdev* on *node*."""
-    try:
-        ret = node.rpc_client().bdev_get(lvol_bdev)
-    except Exception:                                     # noqa: BLE001
-        return False
-    if isinstance(ret, list):
-        ret = ret[0] if ret else {}
-    base = (((ret or {}).get("driver_specific") or {}).get("lvol") or {}).get("base_snapshot")
-    return bool(base) and base == snap_bdev.split("/")[-1]
-
-
-def _record_chained(task, node):
-    """Remember that the landing volume is chained on *node* (see
-    _prechained_nodes_for), so a later pass of the finish does not chain it
-    again."""
-    chained = list(task.function_params.get("prechained_node_ids") or [])
-    if node.get_id() not in chained:
-        chained.append(node.get_id())
-        task.function_params["prechained_node_ids"] = chained
-        task.write_to_db()
-
-
 def _discard_landing_for_retry(task, snapshot, remote_lv, msg):
     """Delete the landing volume and send the snapshot again from the start."""
     try:
@@ -1986,16 +1847,35 @@ def _discard_landing_for_retry(task, snapshot, remote_lv, msg):
     _suspend_for_retry(task, msg, backoff=True)
 
 
-def _prechained_nodes_for(task, remote_lv):
-    """Nodes already carrying the landing volume's clone entry.
+def _prechained_nodes_for(task, landing_id):
+    """Members already carrying the landing volume's clone entry, in the order
+    they were chained.
 
     Empty unless the record was made about THIS landing volume: adding the same
     clone entry twice is not idempotent on the SPDK side, and trusting a stale
     record would skip a chain the volume actually needs.
     """
-    if task.function_params.get("allow_partial_landing") != remote_lv.get_id():
-        return set()
-    return set(task.function_params.get("prechained_node_ids") or [])
+    if task.function_params.get("allow_partial_landing") != landing_id:
+        return []
+    return list(task.function_params.get("prechained_node_ids") or [])
+
+
+def _predecessor_copy_id(snapshot, replicate_to_source):
+    """The id of the destination's copy of *snapshot*'s predecessor -- the copy
+    the new one is chained onto -- or "" when this snapshot starts the chain.
+
+    The predecessor is this cluster's newest older snapshot of the volume that
+    was replicated (_previous_replicated_snapshot). A blank copy id is NO copy,
+    not an unresolvable one: the predecessor was never replicated, so there is
+    nothing to chain onto (treating it as broken made the task retry for ever).
+    A fail-back reads the source-side marker. Whether the destination can use
+    the copy it names is the destination's call (chain, finish).
+    """
+    prev = _previous_replicated_snapshot(snapshot, replicate_to_source)
+    if prev is None:
+        return ""
+    return ((prev.source_replicated_snap_uuid if replicate_to_source
+             else prev.target_replicated_snap_uuid) or "")
 
 
 #: process_snap_replicate_finish could not finish yet: the landing volume is
@@ -2004,75 +1884,6 @@ FINISH_PENDING = "finish-pending"
 #: process_snap_replicate_finish discarded the landing volume and suspended the
 #: task for a new transfer: nothing left for the caller to record.
 FINISH_ABANDONED = "finish-abandoned"
-#: -ESTALE as SPDK reports it: a Linux errno, whatever this host's errno says
-_SPDK_ESTALE = -116
-
-
-def _merge_landing(task, remote_lv, remote_snode):
-    """Fill the landing volume from its base after a delta transfer.
-
-    The destination pre-allocates every cluster the delta touches and receives
-    only the delta's blocks; the rest of each such cluster must come from the
-    base the landing volume is chained onto, once, before the convert. That
-    merge is a job on the target (it takes minutes for a large delta, longer
-    than an RPC may): it is started -- idempotently, a running job is not
-    started twice -- and waited for briefly inline, then on later passes.
-
-    Returns "ok", "pending" (still merging), "retry" (try the finish again
-    later; a failed job is started again) or "restart" (the target lost the
-    record of what arrived: transfer again into a fresh landing volume). Only
-    transfers that named a base (partial_base) need it; for any other the
-    landing volume holds every block already.
-    """
-    if not task.function_params.get("partial_base"):
-        return "ok"
-    if task.function_params.get("merged_landing") == remote_lv.get_id():
-        return "ok"
-    rpc = remote_snode.rpc_client()
-    try:
-        # Look before starting: a start relaunches a failed job and answers
-        # "running" before the relaunch fails again. With no inline wait every
-        # pass then saw only "running", and a landing volume that lost its
-        # delta record (-ESTALE, e.g. after a target restart) stayed "merging"
-        # forever instead of being transferred again (bed 2026-10-26).
-        st = rpc.bdev_lvol_merge_base_stat(remote_lv.top_bdev) or {}
-        if st.get("state") not in ("running", "done") and st.get("rc") != _SPDK_ESTALE:
-            # The merge is part of the replication: it runs in the
-            # replication class like the transfer's source reads, not in
-            # Default beside client IO and the journal (bf10 2026-11-02: a
-            # target merging 5-8 GB per cycle in Default had its journal
-            # heartbeats time out and its lvstore demoted).
-            merge_class = (constants.QOS_REPLICATION_WIRE_CLASS
-                           if _replication_class_on(remote_snode.cluster_id) else None)
-            st = rpc.bdev_lvol_merge_base(remote_lv.top_bdev, priority_class=merge_class)
-        deadline = time.time() + constants.REPL_MERGE_INLINE_WAIT_SEC
-        while (st or {}).get("state") == "running" and time.time() < deadline:
-            time.sleep(constants.REPL_MERGE_POLL_SEC)
-            st = rpc.bdev_lvol_merge_base_stat(remote_lv.top_bdev)
-    except Exception as e:                                # noqa: BLE001
-        logger.error("Replication task %s: merge of %s with its base on %s: %s",
-                     task.uuid, remote_lv.top_bdev, remote_snode.get_id(), e)
-        return "retry"
-    st = st or {}
-    state = st.get("state")
-    if state == "running":
-        return "pending"
-    if state == "done":
-        logger.info("Landing volume %s merged with its base on %s: %s", remote_lv.top_bdev,
-                    remote_snode.get_id(), st)
-        xfer_timing.stamp("landing_merge", lvol=remote_lv.get_id(), ms=st.get("ms", 0),
-                          bytes=st.get("bytes", 0), clusters=st.get("clusters", 0))
-        task.function_params["merged_landing"] = remote_lv.get_id()
-        task.write_to_db()
-        return "ok"
-    if st.get("rc") == _SPDK_ESTALE:
-        logger.error("Replication task %s: %s on %s no longer knows which blocks the "
-                     "transfer wrote; the transfer is repeated", task.uuid,
-                     remote_lv.top_bdev, remote_snode.get_id())
-        return "restart"
-    logger.error("Replication task %s: merge of %s with its base failed on %s: %s",
-                 task.uuid, remote_lv.top_bdev, remote_snode.get_id(), st)
-    return "retry"
 
 
 def _task_peer(task, snapshot):
@@ -2155,13 +1966,8 @@ def process_snap_replicate_finish(task, snapshot):
     # predecessor by volume and age (snap_ref_id is never populated on internal
     # snapshots: chain_attempts=0 in every run of labs 2026-08-10..14); the
     # destination refuses to finish when that copy cannot be used.
-    prev = _previous_replicated_snapshot(snapshot, replicate_to_source)
-    predecessor_id = ""
-    if prev is not None:
-        predecessor_id = ((prev.source_replicated_snap_uuid if replicate_to_source
-                           else prev.target_replicated_snap_uuid) or "")
-    chained = (list(task.function_params.get("prechained_node_ids") or [])
-               if task.function_params.get("allow_partial_landing") == landing_id else [])
+    predecessor_id = _predecessor_copy_id(snapshot, replicate_to_source)
+    chained = _prechained_nodes_for(task, landing_id)
     answer = _task_peer(task, snapshot).finish(FinishRequest(
         source_cluster_id=snapshot.cluster_id, landing_lvol_id=landing_id,
         snapshot=SourceSnapshot(

@@ -11,6 +11,8 @@ from unittest.mock import MagicMock, patch
 from simplyblock_core import constants
 from simplyblock_core.controllers import qos_controller
 from simplyblock_core.exceptions import PreconditionError
+from simplyblock_core.peer import service as peer_service
+from simplyblock_core.rpc_client import RPCException
 from simplyblock_core.services import snapshot_replication
 
 
@@ -227,19 +229,18 @@ class TestTransferClass(unittest.TestCase):
         up, down = self._node(), self._node("offline")
         db = MagicMock()
         db.get_storage_node_by_id.side_effect = lambda i: {"a": up, "b": down}[i]
-        with patch.object(snapshot_replication, "db", db):
-            snapshot_replication._set_transfer_class(["a", "b"], "lvs/SNAP", 7, "x")
-        up.rpc_client.return_value.bdev_lvol_set_priority_class.assert_called_once_with("lvs/SNAP", 7)
+        # a converted landing volume goes back to class 0, on the destination
+        peer_service._reset_service_class(db, ["a", "b"], "lvs/SNAP")
+        up.rpc_client.return_value.bdev_lvol_set_priority_class.assert_called_once_with("lvs/SNAP", 0)
         down.rpc_client.assert_not_called()
 
     def test_rpc_failure_is_not_fatal(self):
         up = self._node()
-        up.rpc_client.return_value.bdev_lvol_set_priority_class.side_effect = RuntimeError("boom")
+        up.rpc_client.return_value.bdev_lvol_set_priority_class.side_effect = RPCException("boom")
         db = MagicMock()
         db.get_storage_node_by_id.return_value = up
-        with patch.object(snapshot_replication, "db", db), \
-                self.assertLogs(snapshot_replication.logger, "WARNING"):
-            snapshot_replication._set_transfer_class(["a"], "lvs/SNAP", 7, "x")
+        with self.assertLogs(peer_service.logger, "WARNING"):
+            peer_service._reset_service_class(db, ["a"], "lvs/SNAP")
 
     def test_lookup_failure_falls_back_to_default(self):
         with patch.object(qos_controller, "replication_class_available",

@@ -307,8 +307,8 @@ class TestNeverTransferIntoASnapshot(unittest.TestCase):
         db = MagicMock()
         db.get_storage_node_by_id.side_effect = lambda nid: nodes[nid]
         remote_lv = SimpleNamespace(nodes=["n-p", "n-s", "n-t"], node_id="n-p", top_bdev="LVS_1/LVOL_92")
-        with patch.object(snapshot_replication, "db", db):
-            self.assertEqual(snapshot_replication._landing_volume_snapshot_members(remote_lv), ["n-p"])
+        # read on the destination, in ensure_hub
+        self.assertEqual(peer_service.converted_members(db, remote_lv), ["n-p"])
 
 
 class TestRelocatedChainIsLinkedNotReshipped(unittest.TestCase):

@@ -10,6 +10,7 @@ from typing import ClassVar
 from unittest.mock import MagicMock, patch
 
 from simplyblock_core.controllers import replication_delta
+from simplyblock_core.peer import service as peer_service
 from simplyblock_core.peer.protocol import EnsureHubResponse
 from simplyblock_core.services import snapshot_replication
 
@@ -261,33 +262,27 @@ class TestOverlapWithMerge(unittest.TestCase):
 
     def test_a_landing_chained_by_an_earlier_pass_is_recognised(self):
         """The finish chains, then waits for the merge over several passes;
-        add_clone again fails with "File exists" (bed run 4)."""
+        add_clone again fails with "File exists" (bed run 4). The destination
+        asks SPDK first (peer.service._reads_through)."""
         node = MagicMock()
         node.rpc_client.return_value.bdev_get.return_value = {
             "driver_specific": {"lvol": {"base_snapshot": "LVOL_59"}}}
-        self.assertTrue(snapshot_replication._chained_onto(node, "LVS_25/LVOL_61", "LVS_25/LVOL_59"))
-        self.assertFalse(snapshot_replication._chained_onto(node, "LVS_25/LVOL_61", "LVS_25/LVOL_55"))
+        self.assertTrue(peer_service._reads_through(node, "LVS_25/LVOL_61", "LVS_25/LVOL_59"))
+        self.assertFalse(peer_service._reads_through(node, "LVS_25/LVOL_61", "LVS_25/LVOL_55"))
         node.rpc_client.return_value.bdev_get.return_value = [{"driver_specific": {"lvol": {}}}]
-        self.assertFalse(snapshot_replication._chained_onto(node, "LVS_25/LVOL_61", "LVS_25/LVOL_59"))
+        self.assertFalse(peer_service._reads_through(node, "LVS_25/LVOL_61", "LVS_25/LVOL_59"))
 
-    def test_a_chain_is_recorded_once(self):
-        task = SimpleNamespace(function_params={}, write_to_db=MagicMock())
-        node = SimpleNamespace(get_id=lambda: "n1")
-        snapshot_replication._record_chained(task, node)
-        snapshot_replication._record_chained(task, node)
-        self.assertEqual(task.function_params["prechained_node_ids"], ["n1"])
-        task.write_to_db.assert_called_once()
 
 class TestLandingMerge(unittest.TestCase):
     """After a delta, the landing volume's pre-allocated clusters hold only the
     delta's blocks; the rest comes from the base before the convert, as a job
-    on the target that the finish starts and then waits for across passes."""
+    on the target that the finish starts and then waits for across passes
+    (peer.service._merge_landing, on the destination)."""
 
     #: what bdev_lvol_merge_base_stat answers before any job ran
     NONE: ClassVar[dict] = {"state": "none", "rc": 0}
 
     def _merge(self, params, start=None, stats=(NONE,), side_effect=None, class_on=False):
-        task = SimpleNamespace(function_params=params, write_to_db=MagicMock(), uuid="t")
         lv = SimpleNamespace(get_id=lambda: "landing", top_bdev="LVS/LAND")
         node = MagicMock()
         node.get_id.return_value = "n1"
@@ -295,8 +290,16 @@ class TestLandingMerge(unittest.TestCase):
         rpc.bdev_lvol_merge_base.return_value = start
         rpc.bdev_lvol_merge_base.side_effect = side_effect
         rpc.bdev_lvol_merge_base_stat.side_effect = list(stats)
-        with patch.object(snapshot_replication, "_replication_class_on", return_value=class_on),                 patch.object(snapshot_replication.constants, "REPL_MERGE_INLINE_WAIT_SEC", 0.05),                 patch.object(snapshot_replication.constants, "REPL_MERGE_POLL_SEC", 0.01):
-            return snapshot_replication._merge_landing(task, lv, node), rpc, task
+        # finish_landing merges only a delta (partial_base) not merged yet
+        if not params.get("partial_base") or params.get("merged"):
+            return "ok", rpc, params
+        with patch.object(peer_service, "_replication_class_on", return_value=class_on), \
+                patch.object(peer_service.constants, "REPL_MERGE_INLINE_WAIT_SEC", 0.05), \
+                patch.object(peer_service.constants, "REPL_MERGE_POLL_SEC", 0.01):
+            res = peer_service._merge_landing(lv, node)
+        if res == "ok":
+            params["merged"] = True
+        return res, rpc, params
 
     def test_a_full_transfer_needs_no_merge(self):
         res, rpc, _ = self._merge({})
@@ -308,8 +311,8 @@ class TestLandingMerge(unittest.TestCase):
                                      stats=[self.NONE, {"state": "done", "rc": 0, "clusters": 3}])
         self.assertEqual(res, "ok")
         rpc.bdev_lvol_merge_base.assert_called_once_with("LVS/LAND", priority_class=None)
-        self.assertEqual(task.function_params["merged_landing"], "landing")
-        res, rpc, _ = self._merge(dict(task.function_params))
+        self.assertTrue(task["merged"])
+        res, rpc, _ = self._merge(dict(task))
         self.assertEqual(res, "ok")
         rpc.bdev_lvol_merge_base.assert_not_called()
 
@@ -317,7 +320,7 @@ class TestLandingMerge(unittest.TestCase):
         res, _, task = self._merge({"partial_base": 7}, start={"state": "running"},
                                    stats=[self.NONE] + [{"state": "running"}] * 50)
         self.assertEqual(res, "pending")
-        self.assertNotIn("merged_landing", task.function_params)
+        self.assertNotIn("merged", task)
 
     def test_a_lost_record_repeats_the_transfer(self):
         res, _, _ = self._merge({"partial_base": 7}, start={"state": "failed", "rc": -116})
@@ -338,7 +341,7 @@ class TestLandingMerge(unittest.TestCase):
                                   stats=[self.NONE, {"state": "done", "rc": 0}], class_on=True)
         self.assertEqual(res, "ok")
         rpc.bdev_lvol_merge_base.assert_called_once_with(
-            "LVS/LAND", priority_class=snapshot_replication.constants.QOS_REPLICATION_WIRE_CLASS)
+            "LVS/LAND", priority_class=peer_service.constants.QOS_REPLICATION_WIRE_CLASS)
 
     def test_a_running_merge_is_not_started_again(self):
         res, rpc, _ = self._merge({"partial_base": 7}, stats=[{"state": "running"}] * 50)

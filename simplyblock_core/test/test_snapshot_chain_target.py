@@ -6,8 +6,13 @@ old lookup matched target-cluster nodes against source-cluster instances, so
 run). Every replicated snapshot ended up a standalone blob: fail-over clones
 read only the last delta and zeros elsewhere.
 """
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
+
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.snapshot import SnapShot
+from simplyblock_core.peer import service as peer_service
+from simplyblock_core.peer.protocol import FinishRequest, SourceSnapshot
 from simplyblock_core.services import snapshot_replication as sr
 
 
@@ -108,37 +113,47 @@ def test_failback_uses_source_replicated_uuid(monkeypatch):
     assert prev.uuid == "back"
 
 
-def test_resolve_chain_target_happy_path(monkeypatch):
-    remote_copy = _mk_snap("T2", 210, "RLV", "REMOTE")
+def test_the_predecessors_copy_is_named_for_the_chain(monkeypatch):
     cur = _mk_snap("cur", 300, "LV1", "N1")
     _patch(monkeypatch, [_mk_snap("old2", 200, "LV1", "N1", target="T2"),
-                         remote_copy, cur])
-    tps, prev_db, ok = sr._resolve_chain_target(cur, False, _Node("REMOTE"))
-    assert ok is True
-    assert tps == {"snap_bdev": "LVS/T2"}
-    assert prev_db.uuid == "T2"
+                         _mk_snap("T2", 210, "RLV", "REMOTE"), cur])
+    assert sr._predecessor_copy_id(cur, False) == "T2"
 
 
-def test_resolve_chain_target_no_predecessor_is_ok(monkeypatch):
+def test_no_predecessor_names_no_copy(monkeypatch):
     cur = _mk_snap("cur", 300, "LV1", "N1")
     _patch(monkeypatch, [cur])
-    tps, prev_db, ok = sr._resolve_chain_target(cur, False, _Node("REMOTE"))
-    assert (tps, prev_db, ok) == (None, None, True)
+    assert sr._predecessor_copy_id(cur, False) == ""
 
 
-def test_resolve_chain_target_missing_remote_copy_fails_loudly(monkeypatch):
+def _finish_onto(copy_id, copies):
+    """The destination's finish of a landing volume on REMOTE, chained onto
+    *copy_id* (peer.service.finish_landing)."""
+    db = MagicMock()
+    db.get_lvol_by_id.return_value = SimpleNamespace(status="online", lvs_name="LVS",
+                                                     top_bdev="LVS/REP_cur")
+
+    def snapshot(uuid):
+        if uuid not in copies:
+            raise KeyError(uuid)
+        return copies[uuid]
+
+    db.get_snapshot_by_id.side_effect = snapshot
+    leader = MagicMock()
+    leader.get_id.return_value = "REMOTE"
+    with patch.object(peer_service, "stable_leader", return_value=(leader, "")):
+        return peer_service.finish_landing(db, FinishRequest(
+            source_cluster_id="SRC", landing_lvol_id="L", predecessor_id=copy_id, link="source",
+            snapshot=SourceSnapshot(snapshot_id="cur", snap_name="cur", size=1)))
+
+
+def test_a_missing_remote_copy_fails_the_finish_loudly():
     """A predecessor exists but its remote copy is gone: the finish must FAIL
     (retry later), never finalize an unchained snapshot silently."""
-    cur = _mk_snap("cur", 300, "LV1", "N1")
-    _patch(monkeypatch, [_mk_snap("old2", 200, "LV1", "N1", target="T_GONE"), cur])
-    tps, prev_db, ok = sr._resolve_chain_target(cur, False, _Node("REMOTE"))
-    assert ok is False
+    answer = _finish_onto("T_GONE", {})
+    assert answer.state == "retry" and "cannot be resolved" in answer.reason
 
 
-def test_resolve_chain_target_wrong_node_fails_loudly(monkeypatch):
-    remote_copy = _mk_snap("T2", 210, "RLV", "OTHER_NODE")
-    cur = _mk_snap("cur", 300, "LV1", "N1")
-    _patch(monkeypatch, [_mk_snap("old2", 200, "LV1", "N1", target="T2"),
-                         remote_copy, cur])
-    tps, prev_db, ok = sr._resolve_chain_target(cur, False, _Node("REMOTE"))
-    assert ok is False
+def test_a_copy_outside_the_leaders_lvstore_fails_the_finish_loudly():
+    answer = _finish_onto("T2", {"T2": _mk_snap("T2", 210, "RLV", "OTHER_NODE")})
+    assert answer.state == "retry" and "across lvstores" in answer.reason

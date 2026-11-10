@@ -303,9 +303,8 @@ def test_prechained_nodes_are_ignored_for_a_different_landing_volume():
     task = _Task(allow_partial=True, allow_partial_landing="REP_LV_1",
                  prechained_node_ids=["N_TGT", "N_TGT_SEC"])
 
-    assert sr._prechained_nodes_for(task, _LandingLV("REP_LV_1")) == {
-        "N_TGT", "N_TGT_SEC"}
-    assert sr._prechained_nodes_for(task, _LandingLV("REP_LV_2")) == set()
+    assert sr._prechained_nodes_for(task, "REP_LV_1") == ["N_TGT", "N_TGT_SEC"]
+    assert sr._prechained_nodes_for(task, "REP_LV_2") == []
 
 
 # --------------------------------------------------------------------------
