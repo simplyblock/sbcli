@@ -294,6 +294,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    enable_failure_domain=False,
                    enable_hang_device=False,
                    jc_compression_enabled=True,
+                   lvol_geometry_enabled=True,
                    max_subsys=0, hugepages_mem=0, spdk_vcpu_count=0,
                    cluster_vip=None,
                    ) -> str:
@@ -444,6 +445,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.strict_node_anti_affinity = strict_node_anti_affinity
     cluster.enable_failure_domain = enable_failure_domain
     cluster.jc_compression_enabled = jc_compression_enabled
+    cluster.lvol_geometry_enabled = lvol_geometry_enabled
     validate_spdk_sizing(max_subsys, hugepages_mem, spdk_vcpu_count)
     cluster.max_subsys = max_subsys or 0
     cluster.hugepages_mem = hugepages_mem or 0
@@ -555,6 +557,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
                 hashicorp_vault_settings : t.Optional[HashicorpVaultSettings] = None,
                 enable_failure_domain=False,
                 jc_compression_enabled=True,
+                lvol_geometry_enabled=True,
 ) -> str:
     """Thin wrapper around _add_cluster_impl() that serializes create calls
     for the same name behind a ClusterCreateLock.
@@ -581,7 +584,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
         client_data_nic=client_data_nic, max_fault_tolerance=max_fault_tolerance, backup_config=backup_config,
         nvmf_base_port=nvmf_base_port, rpc_base_port=rpc_base_port, snode_api_port=snode_api_port,
         hashicorp_vault_settings=hashicorp_vault_settings, enable_failure_domain=enable_failure_domain,
-        jc_compression_enabled=jc_compression_enabled,
+        jc_compression_enabled=jc_compression_enabled, lvol_geometry_enabled=lvol_geometry_enabled,
     )
     if not name:
         return _add_cluster_impl(**kwargs)
@@ -607,6 +610,7 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
                 hashicorp_vault_settings : t.Optional[HashicorpVaultSettings] = None,
                 enable_failure_domain=False,
                 jc_compression_enabled=True,
+                lvol_geometry_enabled=True,
 ) -> str:
 
     clusters = db_controller.get_clusters()
@@ -654,6 +658,7 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
     cluster.strict_node_anti_affinity = strict_node_anti_affinity
     cluster.enable_failure_domain = enable_failure_domain
     cluster.jc_compression_enabled = jc_compression_enabled
+    cluster.lvol_geometry_enabled = lvol_geometry_enabled
 
     if clusters:
         cfg = db_controller.get_deploy_config()
@@ -2650,6 +2655,15 @@ def set_jc_compression(cluster_id, enable) -> t.List[str]:
     for message in messages:
         logger.info(message)
     return messages
+
+
+def set_lvol_geometry(cluster_id, enable) -> None:
+    """Enable or disable LVol geometry cluster-wide. Applies to lvols
+    created from now on; existing lvols keep their ndcs/npcs."""
+    db_controller.atomic_update(
+        db_controller.get_cluster_by_id(cluster_id),
+        lambda c: setattr(c, "lvol_geometry_enabled", bool(enable)))
+    logger.info(f"LVol geometry {'enabled' if enable else 'disabled'} on cluster {cluster_id}")
 
 
 def get_logs(cluster_id, limit=50, **kwargs) -> t.List[dict]:

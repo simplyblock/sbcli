@@ -269,6 +269,11 @@ class Cluster(BaseModel):
     # every resume path is skipped, so compression never starts. Toggled at
     # runtime with `cluster set-jc-compression`.
     jc_compression_enabled: bool = True
+    # LVol geometry: new lvols inherit distr_ndcs/distr_npcs (or the values
+    # passed at create). When False every new lvol is created with
+    # ndcs=npcs=0, i.e. the distrib's own layout. Toggled at runtime with
+    # `cluster set-lvol-geometry`; existing lvols keep their geometry.
+    lvol_geometry_enabled: bool = True
     snapshot_replication_target_cluster: str = ""
     snapshot_replication_target_pool: str = ""
     snapshot_replication_timeout: int = 60*10

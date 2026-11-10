@@ -76,6 +76,7 @@ class ClusterParams(BaseModel):
     hashicorp_vault_settings: Optional[HashicorpVaultSettings] = None
     enable_failure_domain: bool = False
     jc_compression_enabled: bool = True
+    lvol_geometry_enabled: bool = True
     # max_subsys and spdk_vcpu_count are capacity decisions with real
     # consequences if silently defaulted (max_subsys=0 means the product
     # ceiling; spdk_vcpu_count=0 means no cluster-wide core requirement at

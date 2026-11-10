@@ -391,6 +391,7 @@ class CLIWrapper(CLIWrapperBase):
             self.init_cluster__set(subparser)
         self.init_cluster__set_shared_placement(subparser)
         self.init_cluster__set_jc_compression(subparser)
+        self.init_cluster__set_lvol_geometry(subparser)
         self.init_cluster__event_alerts(subparser)
         self.init_cluster__switch_write_protection(subparser)
         self.init_cluster__change_name(subparser)
@@ -447,6 +448,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--enable-failure-domain', help='Enable failure-domain anti-affinity. Each storage node must then be added with a --failure-domain tag (rack/cabinet/DC); data, journal and secondary/tertiary copies are spread across distinct failure domains (best-effort). Deploy-time only: a cluster cannot be upgraded into this feature, it must be redeployed.', dest='enable_failure_domain', action='store_true')
         if self.developer_mode:
             subcommand.add_argument('--disable-jc-compression', help='Disable JC (journal) compression. Enabled by default; can be changed later with `cluster set-jc-compression`.', dest='disable_jc_compression', action='store_true')
+        subcommand.add_argument('--disable-lvol-geometry', help='Create new logical volumes with ndcs=npcs=0 instead of the cluster\'s erasure coding geometry. Enabled by default; can be changed later with `cluster set-lvol-geometry`.', dest='disable_lvol_geometry', action='store_true')
         subcommand.add_argument('--name', '-n', help='Assigns a name to the newly created cluster.', type=str, dest='name')
         subcommand.add_argument('--qpair-count', help='The NVMe/TCP transport qpair count per logical volume. Default: `32`.', type=range_type(0, 128), default=32, dest='qpair_count')
         subcommand.add_argument('--client-qpair-count', help='The default NVMe/TCP transport qpair count per logical volume for client. Default: `3`.', type=range_type(0, 128), default=3, dest='client_qpair_count')
@@ -489,6 +491,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--enable-failure-domain', help='Enable failure-domain anti-affinity. Each storage node must then be added with a --failure-domain tag (rack/cabinet/DC); data, journal and secondary/tertiary copies are spread across distinct failure domains (best-effort). Deploy-time only: a cluster cannot be upgraded into this feature, it must be redeployed.', dest='enable_failure_domain', action='store_true')
         if self.developer_mode:
             subcommand.add_argument('--disable-jc-compression', help='Disable JC (journal) compression. Enabled by default; can be changed later with `cluster set-jc-compression`.', dest='disable_jc_compression', action='store_true')
+        subcommand.add_argument('--disable-lvol-geometry', help='Create new logical volumes with ndcs=npcs=0 instead of the cluster\'s erasure coding geometry. Enabled by default; can be changed later with `cluster set-lvol-geometry`.', dest='disable_lvol_geometry', action='store_true')
         subcommand.add_argument('--name', '-n', help='Assigns a name to the newly created cluster.', type=str, dest='name')
         subcommand.add_argument('--client-data-nic', help='Network interface name from client to use for logical volume connection.', type=str, dest='client_data_nic')
         subcommand.add_argument('--use-backup', help='The path to JSON file with S3/MinIO backup configuration.', type=str, dest='use_backup')
@@ -634,6 +637,11 @@ class CLIWrapper(CLIWrapperBase):
         subcommand = self.add_sub_command(subparser, 'set-jc-compression', 'Enable or disable JC (journal) compression on the cluster.')
         subcommand.add_argument('cluster_id', help='The cluster id.', type=str).completer = self._completer_get_cluster_list
         subcommand.add_argument('--disable', help='Disable JC compression (default action is to enable it).', dest='disable', action='store_true')
+
+    def init_cluster__set_lvol_geometry(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'set-lvol-geometry', 'Enable or disable LVol geometry on the cluster.')
+        subcommand.add_argument('cluster_id', help='The cluster id.', type=str).completer = self._completer_get_cluster_list
+        subcommand.add_argument('--disable', help='Disable LVol geometry (default action is to enable it).', dest='disable', action='store_true')
 
     def init_cluster__event_alerts(self, subparser):
         subcommand = self.add_sub_command(subparser, 'event-alerts', 'Provisions the Grafana alert rules read from the cluster event log.')
@@ -1524,6 +1532,8 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.cluster__set_shared_placement(sub_command, args)
                 elif sub_command in ['set-jc-compression']:
                     ret = self.cluster__set_jc_compression(sub_command, args)
+                elif sub_command in ['set-lvol-geometry']:
+                    ret = self.cluster__set_lvol_geometry(sub_command, args)
                 elif sub_command in ['event-alerts']:
                     ret = self.cluster__event_alerts(sub_command, args)
                 elif sub_command in ['switch-write-protection']:

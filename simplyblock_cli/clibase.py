@@ -699,6 +699,10 @@ class CLIWrapperBase:
         messages = cluster_ops.set_jc_compression(args.cluster_id, enable=not args.disable)
         return "\n".join(messages) if messages else True
 
+    def cluster__set_lvol_geometry(self, sub_command, args):
+        cluster_ops.set_lvol_geometry(args.cluster_id, enable=not args.disable)
+        return True
+
     def cluster__change_name(self, sub_command, args):
         cluster_id = args.cluster_id
         cluster_name = args.name
@@ -1436,6 +1440,7 @@ class CLIWrapperBase:
         client_data_nic = args.client_data_nic
         enable_failure_domain = getattr(args, 'enable_failure_domain', False)
         jc_compression_enabled = not args.disable_jc_compression
+        lvol_geometry_enabled = not args.disable_lvol_geometry
 
         max_fault_tolerance = min(distr_npcs, 2) if distr_npcs >= 1 else 1
 
@@ -1453,6 +1458,7 @@ class CLIWrapperBase:
             hashicorp_vault_settings=HashicorpVaultSettings({"base_url": args.hashicorp_vault_url}) if args.hashicorp_vault_url else None,
             enable_failure_domain=enable_failure_domain,
             jc_compression_enabled=jc_compression_enabled,
+            lvol_geometry_enabled=lvol_geometry_enabled,
         )
 
     def cluster_create(self, args):
@@ -1491,6 +1497,7 @@ class CLIWrapperBase:
         client_data_nic = args.client_data_nic
         enable_failure_domain = getattr(args, 'enable_failure_domain', False)
         jc_compression_enabled = not args.disable_jc_compression
+        lvol_geometry_enabled = not args.disable_lvol_geometry
         # Private (developer-mode-only) arg: absent unless sbctl was run with --dev.
         enable_hang_device = getattr(args, "enable_hang_device", False)
 
@@ -1516,6 +1523,7 @@ class CLIWrapperBase:
             enable_failure_domain=enable_failure_domain,
             enable_hang_device=enable_hang_device,
             jc_compression_enabled=jc_compression_enabled,
+            lvol_geometry_enabled=lvol_geometry_enabled,
             max_subsys=args.max_subsys or 0,
             hugepages_mem=utils.parse_size(args.hugepages_mem) if args.hugepages_mem else 0,
             spdk_vcpu_count=args.vcpu_count or 0,
