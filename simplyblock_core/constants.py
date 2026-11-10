@@ -433,6 +433,18 @@ IOBUF_SMALL_POOL_EXTRA_BYTES = 300 * 1024 * 1024
 # The NVMe-oF poll-group cache (buf_cache_size) is kept: it is used.
 BDEV_IOBUF_SMALL_CACHE_SIZE = 16
 BDEV_IOBUF_LARGE_CACHE_SIZE = 2
+# bdev_io pool (bdev_set_options bdev_io_pool_size). The SPDK default of 65535
+# bdev_ios at ~53 KiB each (bdev_io + module contexts) pins ~3.3 GiB of
+# hugepages per node. Measured on bed bf20 (2026-11-10, 10 nodes, heavy IO +
+# migration, RPC bdev_get_io_pool_stats every 2 s): p99 2973 in use, max 6861,
+# startup burst ~16640, zero NOMEM. Every SPDK thread takes BDEV_IO_CACHE_SIZE
+# into its cache when it starts and SPDK aborts if the pool runs dry, so the
+# size also scales with the thread count (bf20: 4 reactor cores -> 13 threads).
+BDEV_IO_CACHE_SIZE = 256
+BDEV_IO_POOL_SIZE_MIN = 24576
+BDEV_IO_POOL_SIZE_MAX = 65535
+BDEV_IO_POOL_THREADS_PER_CORE = 4
+BDEV_IO_POOL_HEADROOM = 16384
 ACCEL_SMALL_CACHE_SIZE = 32
 ACCEL_LARGE_CACHE_SIZE = 2
 EXTRA_HUGE_PAGE_MEMORY = 3221225472

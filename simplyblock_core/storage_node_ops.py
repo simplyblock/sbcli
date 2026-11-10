@@ -4836,7 +4836,8 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                 if not ret:
                     logger.error("Failed to set iobuf options")
                     return False
-            rpc_client.bdev_set_options(0, 0, constants.BDEV_IOBUF_SMALL_CACHE_SIZE,
+            rpc_client.bdev_set_options(utils.calculate_bdev_io_pool_size(snode.spdk_cpu_mask), 0,
+                                constants.BDEV_IOBUF_SMALL_CACHE_SIZE,
                                 constants.BDEV_IOBUF_LARGE_CACHE_SIZE)
             rpc_client.accel_set_options()
         except Exception as e:
@@ -9603,7 +9604,8 @@ def _restart_storage_node_impl(
         if not ret:
             logger.error("Failed to set iobuf options")
             return False
-    rpc_client.bdev_set_options(0, 0, constants.BDEV_IOBUF_SMALL_CACHE_SIZE,
+    rpc_client.bdev_set_options(utils.calculate_bdev_io_pool_size(snode.spdk_cpu_mask), 0,
+                                constants.BDEV_IOBUF_SMALL_CACHE_SIZE,
                                 constants.BDEV_IOBUF_LARGE_CACHE_SIZE)
     rpc_client.accel_set_options()
 
