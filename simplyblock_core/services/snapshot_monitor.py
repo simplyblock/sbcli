@@ -803,6 +803,27 @@ def _cadence_waits_for_leader(node_id, lvs_name, leaderless):
     return True
 
 
+def _cutover_endgame_lvol_ids(cluster_id):
+    """Ids of the volumes whose cutover endgame is in progress: a live
+    FN_REPLICATION_FINAL task that took its first shrink snapshot or holds the
+    lvstore claim (snapshot_replication._cutover_holds_retention, for all of
+    them in one task read). Empty when the tasks cannot be read."""
+    try:
+        tasks = db.get_job_tasks(cluster_id)
+    except Exception as e:                                # noqa: BLE001
+        logger.warning("Cannot read tasks to find cutover endgames: %s", e)
+        return set()
+    ids = set()
+    for task in tasks:
+        if (task.function_name != JobSchedule.FN_REPLICATION_FINAL
+                or task.status == JobSchedule.STATUS_DONE or task.canceled):
+            continue
+        params = task.function_params or {}
+        if params.get("lvol_id") and (params.get("shrink_snap_id") or params.get("cutover_lvs")):
+            ids.add(params["lvol_id"])
+    return ids
+
+
 def _cadence_capacity_hold(cluster_id):
     """Why no cadence snapshot may be taken on *cluster_id* now, or "".
 
@@ -827,6 +848,21 @@ def _cadence_capacity_hold(cluster_id):
         return ""
     return (f"cluster {cluster_id} is at {util}% capacity, at or above its "
             f"warning threshold of {warn}%")
+
+
+def _exempt_from_capacity_hold(repl_lvols, cluster_id):
+    """The volumes among *repl_lvols* whose policy is a migration: they keep
+    their cadence through a capacity hold (see take_due_internal_snapshots)."""
+    try:
+        policies = {p.get_id(): p for p in db.get_replication_policies(cluster_id)}
+    except Exception:                                     # noqa: BLE001
+        return []
+    out = []
+    for lv in repl_lvols:
+        pol = policies.get(getattr(lv, "replication_policy_id", "") or "")
+        if pol is not None and getattr(pol, "mode", "") == "migration":
+            out.append(lv)
+    return out
 
 
 def take_due_internal_snapshots(cluster_id, now_ts):
@@ -857,10 +893,34 @@ def take_due_internal_snapshots(cluster_id, now_ts):
         repl_lvols = [lv for lv in repl_lvols if lv.get_id() not in waiting]
         if not repl_lvols:
             return
+    # A volume in its cutover endgame takes its own snapshots (the shrink
+    # rounds), and its cutover clone sits on the copy of the last one. A
+    # cadence snapshot taken meanwhile moves the live volume's dirty tracking
+    # onto a snapshot the clone does not sit on: bf15 (2026-11-07) took three
+    # while a prepared cutover waited for the runner, and its final step had
+    # to send every cluster those snapshots own whole -- the 12 s limit, twice.
+    in_endgame = _cutover_endgame_lvol_ids(cluster_id)
+    if in_endgame:
+        skipped = [lv.get_id() for lv in repl_lvols if lv.get_id() in in_endgame]
+        if skipped:
+            logger.info("No cadence snapshot for %s: cutover endgame in progress",
+                        ", ".join(sorted(skipped)))
+            repl_lvols = [lv for lv in repl_lvols if lv.get_id() not in in_endgame]
+            if not repl_lvols:
+                return
     hold = _cadence_capacity_hold(cluster_id)
     if hold:
-        logger.warning("Holding internal replication snapshots: %s", hold)
-        return
+        # A migrating volume is exempt: its snapshots are how it leaves the
+        # cluster, and holding them locked every migration of bed bf12/bf13
+        # (2026-11-04/05): the retention held for a cutover keeps the usage
+        # above the threshold, the hold keeps the cutover from ever catching
+        # up. Fail-over replication is held as before.
+        migrating = _exempt_from_capacity_hold(repl_lvols, cluster_id)
+        logger.warning("Holding internal replication snapshots: %s%s", hold,
+                       f" (except {len(migrating)} migrating volume(s))" if migrating else "")
+        repl_lvols = migrating
+        if not repl_lvols:
+            return
     all_snaps = db.get_mini_snapshots()
     sync = db.get_cluster_by_id(cluster_id).sync_replication
     leaderless: set = set()

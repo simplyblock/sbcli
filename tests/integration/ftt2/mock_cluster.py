@@ -537,6 +537,7 @@ _FTT2_DISPATCH = {
     'jc_set_hint_lcpu_mask':                 _STATIC_TRUE,
     'bdev_PT_NoExcl_create':                 _STATIC_TRUE,
     'alceml_set_qos_weights':                _STATIC_TRUE,
+    'bdev_distrib_set_qos_weights':          _STATIC_TRUE,
     'nvmf_get_blocked_ports_rdma':           _STATIC_EMPTY_LIST,
     'thread_get_stats':                      lambda s, p: {'threads': []},
     'distr_status_events_update':            _STATIC_TRUE,

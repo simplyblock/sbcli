@@ -94,7 +94,7 @@ def _install(monkeypatch, nodes, rep, cutover_ret):
     calls = []
 
     def _run_cutover(src, tgt, lvol, comp, map_id, snap, operation="replicate",
-                     src_exec=None, tgt_exec=None):
+                     src_exec=None, tgt_exec=None, delta_base=None):
         calls.append((src.get_id(), tgt.get_id(), comp, map_id, snap, operation))
         return cutover_ret
     monkeypatch.setattr(runner.replication_final_step, "run_cutover", _run_cutover)
