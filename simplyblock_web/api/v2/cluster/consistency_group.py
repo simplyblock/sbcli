@@ -238,10 +238,13 @@ def prepare_subsystem_move(cluster: Cluster, group: ConsistencyGroupResource, mo
                            ) -> ConsistencyGroupSubsystemMovePreparedDTO:
     """Create a fresh target on every HA node and assign the moving
     namespaces their nsids there. Returns the target's connect entries for
-    ``host_nqn``. Idempotent."""
+    ``host_nqn``. Idempotent; 409 ``MoveConflict`` after waiting out another
+    step of the move."""
     host_nqn = body.host_nqn if body is not None else None
     try:
         record, entries = cg_subsystem_move.prepare_subsystem_move(group, move_id, host_nqn=host_nqn)
+    except cg_subsystem_move.MoveConflictError as e:
+        raise _conflict("MoveConflict", str(e))
     except KeyError as e:
         raise HTTPException(404, str(e))
     return ConsistencyGroupSubsystemMovePreparedDTO(
@@ -257,8 +260,10 @@ def move_subsystem_move(cluster: Cluster, group: ConsistencyGroupResource, move_
 
     409 ``DeadlinePassed`` before anything is touched once ``deadline`` has
     passed; 409 ``MoveFailed`` with ``namespaces_at`` when a namespace could
-    not be moved (the sources are restored first). A repeat after success
-    answers with ``namespaces_at: target``."""
+    not be moved: ``source`` once the sources are restored, ``target`` when
+    restoring failed too and a rollback has to make them whole. A repeat after success
+    answers with ``namespaces_at: target``. 409 ``MoveConflict`` when the move
+    is not prepared, or after waiting out another step of it."""
     try:
         record = cg_subsystem_move.move_subsystem_move(group, move_id, body.deadline)
     except cg_subsystem_move.DeadlinePassedError as e:
@@ -277,7 +282,8 @@ def move_subsystem_move(cluster: Cluster, group: ConsistencyGroupResource, move_
                    status_code=204, responses={204: {"content": None}})
 def commit_subsystem_move(cluster: Cluster, group: ConsistencyGroupResource, move_id: str) -> Response:
     """Switch the moving volumes to the target and end the move. Idempotent;
-    409 ``MoveConflict`` while the namespaces are not on the target."""
+    409 ``MoveConflict`` while the namespaces are not on the target, or after
+    waiting out another step of the move."""
     try:
         cg_subsystem_move.commit_subsystem_move(group, move_id)
     except cg_subsystem_move.MoveConflictError as e:
@@ -292,11 +298,14 @@ def commit_subsystem_move(cluster: Cluster, group: ConsistencyGroupResource, mov
                    status_code=204, responses={204: {"content": None}})
 def rollback_subsystem_move(cluster: Cluster, group: ConsistencyGroupResource, move_id: str) -> Response:
     """Put every namespace back into its source and end the move. Idempotent;
-    409 ``MoveFailed`` when a namespace could not be restored."""
+    409 ``MoveFailed`` when a namespace could not be restored, ``MoveConflict``
+    after waiting out another step of the move."""
     try:
         cg_subsystem_move.rollback_subsystem_move(group, move_id)
     except cg_subsystem_move.MoveFailedError as e:
         raise _conflict("MoveFailed", str(e), namespaces_at=e.namespaces_at)
+    except cg_subsystem_move.MoveConflictError as e:
+        raise _conflict("MoveConflict", str(e))
     except KeyError as e:
         raise HTTPException(404, str(e))
     return Response(status_code=204)

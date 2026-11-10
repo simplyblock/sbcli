@@ -331,7 +331,12 @@ def select_move_target(group, joining_lvol, lvols, *, node_max_subsystems,
     3. No candidate: a fresh subsystem, unless the node's subsystem count plus
        the fresh subsystems other moves reserved reaches its limit.
 
-    Raises SubsystemLimitReached in the last case and nowhere else.
+    ``busy_nqns`` are the subsystems an active migration or another move
+    holds; a move holds its sources and its target. The group's subsystem is
+    refused as a target while it is busy (the free slots its records show may
+    be reserved by that other move), and so is any move that would take a
+    namespace out of a busy subsystem: both raise SubsystemBusy, which the
+    caller waits out. Raises SubsystemLimitReached in the last case.
     """
     jid = joining_lvol.get_id()
     node = group.node_id
@@ -341,15 +346,18 @@ def select_move_target(group, joining_lvol, lvols, *, node_max_subsystems,
     if not g or joining_lvol.nqn == g:
         return MoveTarget(g or joining_lvol.nqn, False, [])
 
+    busy = set(busy_nqns)
+    by_id = {lv.get_id(): lv for lv in live}
     by_nqn: dict[str, list] = {}
     for lv in live:
         if lv.node_id == node:
             by_nqn.setdefault(lv.nqn, []).append(lv)
     in_g = by_nqn.get(g, [])
     if in_g and len(in_g) < _capacity(in_g[0]):
+        _require_free(g, busy)
+        _require_free_sources([jid], by_id, busy)
         return MoveTarget(g, False, [jid])
 
-    busy = set(busy_nqns)
     best = None
     for nqn, subs in by_nqn.items():
         if nqn in busy or not _shares_subsystem(subs[0]):
@@ -363,18 +371,32 @@ def select_move_target(group, joining_lvol, lvols, *, node_max_subsystems,
         if best is None or key < best[0]:
             best = (key, nqn, moving)
     if best is not None:
+        _require_free_sources(best[2], by_id, busy)
         return MoveTarget(best[1], False, best[2])
 
     count = (node_subsystem_count if node_subsystem_count is not None
              else count_node_subsystems(node, lvols))
     if count + reserved_fresh < node_max_subsystems:
-        return MoveTarget("", True, sorted(member_ids))
+        moving = sorted(member_ids)
+        _require_free_sources(moving, by_id, busy)
+        return MoveTarget("", True, moving)
     raise SubsystemLimitReached(node, node_max_subsystems)
 
 
 class SubsystemBusy(ColocationError):
-    """The subsystem a volume would leave is held by an active migration or
-    another subsystem move."""
+    """A subsystem the move would take a namespace out of, or put one into,
+    is held by an active migration or another subsystem move."""
+
+
+def _require_free(nqn, busy):
+    if nqn in busy:
+        raise SubsystemBusy(f"subsystem {nqn} is held by an active migration or move")
+
+
+def _require_free_sources(moving_ids, by_id, busy):
+    for lid in moving_ids:
+        if lid in by_id:
+            _require_free(by_id[lid].nqn, busy)
 
 
 def select_leave_target(leaving_lvol, lvols, *, node_max_subsystems,

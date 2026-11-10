@@ -126,6 +126,33 @@ def test_busy_foreign_pool_and_standalone_subsystems_are_not_candidates():
     assert t.target_is_new
 
 
+def test_the_group_subsystem_held_by_another_move_is_a_conflict():
+    """Another move already reserved its namespaces into the group's
+    subsystem: the free slots the records show are spoken for, so the joiner
+    waits instead of being added on top of them."""
+    g = _group("g", ["a1", "a2"])
+    lvols = [_lv("a1", "A"), _lv("a2", "A", nsid=2), _lv("j", "J", maxns=1)]
+    with pytest.raises(cgl.SubsystemBusy, match="A"):
+        _select(g, lvols[2], lvols, busy_nqns={"A"})
+
+
+def test_a_joiner_whose_subsystem_is_held_is_a_conflict():
+    g = _group("g", ["a1", "a2"])
+    lvols = [_lv("a1", "A"), _lv("a2", "A", nsid=2), _lv("j", "J", maxns=1)]
+    with pytest.raises(cgl.SubsystemBusy, match="J"):
+        _select(g, lvols[2], lvols, busy_nqns={"J"})
+
+
+def test_a_moving_member_whose_subsystem_is_held_is_a_conflict():
+    """The whole group would move to a fresh subsystem, but one member sits
+    in a subsystem a migration or another move holds."""
+    g = _group("g", ["a1", "a2"])
+    lvols = [_lv("a1", "A", maxns=2), _lv("a2", "A", maxns=2, nsid=2), _lv("j", "J", maxns=1)]
+    assert _select(g, lvols[2], lvols).target_is_new
+    with pytest.raises(cgl.SubsystemBusy, match="A"):
+        _select(g, lvols[2], lvols, busy_nqns={"A"})
+
+
 def test_no_candidate_means_a_fresh_subsystem_below_the_limit():
     g = _group("g", ["a1"])
     lvols = [_lv("a1", "A", maxns=2), _lv("x", "A", maxns=2, nsid=2), _lv("j", "J", maxns=1)]

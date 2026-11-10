@@ -502,6 +502,17 @@ class TestSubsystemMoveRoutes:
         assert client.post(f'{BASE}/subsystem-moves/M1/rollback').status_code == 204
         assert calls == [("commit", "M1"), ("rollback", "M1")]
 
+    def test_a_step_overlapping_another_step_is_409(self, client, db, cluster, monkeypatch):
+        from simplyblock_core.controllers import cg_subsystem_move
+
+        def busy(g, mid, **kw):
+            raise cg_subsystem_move.MoveConflictError("another step of subsystem move M1 is running")
+        self._route(db, monkeypatch, prepare_subsystem_move=busy, rollback_subsystem_move=busy)
+        for step in ("prepare", "rollback"):
+            resp = client.post(f'{BASE}/subsystem-moves/M1/{step}')
+            assert resp.status_code == 409, step
+            assert resp.json()["detail"]["reason"] == "MoveConflict"
+
     def test_an_unknown_move_is_404(self, client, db, cluster, monkeypatch):
         def missing(g, mid):
             raise KeyError(mid)

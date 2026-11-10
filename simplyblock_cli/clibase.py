@@ -35,7 +35,11 @@ from simplyblock_core.controllers.backup.manifest import (
     parse_export,
     parse_group_export,
 )
-from simplyblock_core.exceptions import MigrationConflictError, PreconditionError
+from simplyblock_core.exceptions import (
+    MigrationConflictError,
+    PreconditionError,
+    SubsystemMoveInProgressError,
+)
 from simplyblock_core.models.backup_config import BackupConfig, S3Credentials
 from simplyblock_core.models.cluster import Cluster, HashicorpVaultSettings
 from simplyblock_core.models.pool import Pool
@@ -1098,7 +1102,10 @@ class CLIWrapperBase:
         if args.site:
             kwargs['site'] = args.site
 
-        data, err = lvol_controller.connect_lvol(args.volume_id, **kwargs)
+        try:
+            data, err = lvol_controller.connect_lvol(args.volume_id, **kwargs)
+        except SubsystemMoveInProgressError as e:
+            return str(e)
         if err:
             return err
         if data:

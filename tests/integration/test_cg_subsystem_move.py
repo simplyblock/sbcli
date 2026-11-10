@@ -8,6 +8,7 @@ and assigns nsids; move switches the namespaces while the hosts' suspend
 deadline holds; commit switches the records; rollback restores the sources.
 The storage nodes are faked (a namespace table per node), the database is real.
 """
+import threading
 import time
 from unittest import mock
 
@@ -228,6 +229,34 @@ def _new_lvol(uid, maxns=4):
     return new
 
 
+def test_a_subsystem_held_by_another_move_makes_the_create_a_conflict(db, world):
+    """The refusal is a MoveConflict, which the operator waits out, not a
+    ColocationRefused, which it takes as final."""
+    group, _, _ = world
+    with mock.patch.object(cgl, "select_move_target", side_effect=cgl.SubsystemBusy("A is held")), \
+            pytest.raises(mv.MoveConflictError, match="A is held"):
+        mv.create_subsystem_move(group, "j", "req-1")
+    assert db.subsystem_move_reservations("N1") == (set(), 0)
+
+
+def test_a_reservation_overlapping_another_moves_subsystems_is_refused(db, world):
+    """Two groups' creates can select the same target before either
+    reserves it. The reservation transaction, not the selection, is where
+    the second one must lose."""
+    group, _, _ = world
+    rec = mv.create_subsystem_move(group, "j", "req-1")
+    other = ConsistencyGroup()
+    other.uuid = "cgmv-h"
+    other.cluster_id = CLUSTER
+    other.group_name = "cgmv-h"
+    other.node_id = "N1"
+    other.write_to_db(db.kv_store)
+    with pytest.raises(SubsystemMoveConflictError, match="held by another"):
+        db.reserve_subsystem_move(other, "N1", dict(rec, id="m2", request_id="r2"), {"A", "Q"}, 0)
+    assert db.subsystem_move_reservations("N1") == ({"A", "J", rec["target_nqn"]}, 1)
+    assert db.get_consistency_group_by_id("cgmv-h").subsystem_move == {}
+
+
 def test_a_claim_never_joins_a_subsystem_held_by_a_move(db, world):
     group, _, _ = world
     _write_lvol(db, "x", "X", 1, maxns=8)               # room for the whole group
@@ -258,6 +287,26 @@ def test_a_reserved_fresh_subsystem_counts_against_the_cap(db, world):
         db.claim_lvol_ns_slot(new, db.get_storage_node_by_id("N1"), False, "nqn.cgmv:lvol:n1")
 
 
+def test_a_fresh_reservation_past_the_node_limit_is_refused_in_the_transaction(db, world):
+    """Two groups' creates can both see the last free subsystem slot before
+    either reserves it. The reservation recounts the node's subsystems plus
+    what other moves reserved, inside its transaction, and the second one
+    loses with the same refusal the selection gives."""
+    group, _, _ = world
+    _write_node(db, "N1", max_lvol=3)                    # A and J held: one spare
+    rec = mv.create_subsystem_move(group, "j", "req-1")  # takes it
+    other = ConsistencyGroup()
+    other.uuid = "cgmv-h"
+    other.cluster_id = CLUSTER
+    other.group_name = "cgmv-h"
+    other.node_id = "N1"
+    other.write_to_db(db.kv_store)
+    with pytest.raises(SubsystemCapacityError, match="N1"):
+        db.reserve_subsystem_move(other, "N1", dict(rec, id="m2", request_id="r2"), {"X"}, 1)
+    assert db.subsystem_move_reservations("N1") == ({"A", "J", rec["target_nqn"]}, 1)
+    assert db.get_consistency_group_by_id("cgmv-h").subsystem_move == {}
+
+
 def test_a_second_reservation_on_the_group_is_refused(db, world):
     group, _, _ = world
     rec = mv.create_subsystem_move(group, "j", "req-1")
@@ -280,6 +329,55 @@ def test_prepare_creates_the_fresh_target_on_every_ha_node_and_assigns_one_nsid_
     again, _ = mv.prepare_subsystem_move(group, rec["id"])
     assert again["volumes"] == out["volumes"]
     assert fakes["N1"].rpc.subsystem_create.call_count == 1
+
+
+def _restrict(db, uid, *hosts):
+    lv = db.get_lvol_by_id(uid)
+    lv.allowed_hosts = [dict(h) for h in hosts]
+    lv.write_to_db(db.kv_store)
+
+
+def test_prepare_lists_the_moving_volumes_hosts_on_the_target_with_their_keys(db, world):
+    """The fresh target admits exactly the hosts the moving volumes allow, on
+    every HA node, each with the keys its volume gives it: a host added
+    without its key is a host admitted unauthenticated."""
+    from simplyblock_core.controllers import host_auth
+    group, _, fakes = world
+    for uid in ("a1", "a2", "j"):
+        _restrict(db, uid, {"nqn": "nqn.host-1", "psk": "secret-1"}, {"nqn": "nqn.host-2"})
+    rec = mv.create_subsystem_move(group, "j", "req-1")
+    with mock.patch.object(host_auth, "_register_dhchap_keys_on_node",
+                           return_value={"psk": "psk-name"}) as register:
+        mv.prepare_subsystem_move(group, rec["id"])
+    t = rec["target_nqn"]
+    for f in fakes.values():
+        assert f.rpc.subsystem_create.call_args.kwargs["allow_any_host"] is False
+        listed = {c.args[1]: c.kwargs for c in f.rpc.subsystem_add_host.call_args_list
+                  if c.args[0] == t}
+        assert listed["nqn.host-1"]["psk"] == "psk-name"
+        assert listed["nqn.host-2"] == {}
+    assert register.call_count == 2            # host-1's key, once per node
+
+
+def test_create_refuses_an_open_volume_beside_a_restricted_one(db, world):
+    """One subsystem has one host list. Moving an open volume in with a
+    restricted one would close the open one or open the restricted one, so
+    the move is refused before anything is reserved."""
+    group, _, _ = world
+    _restrict(db, "j", {"nqn": "nqn.host-1"})
+    with pytest.raises(cgl.ColocationError, match="allow different hosts"):
+        mv.create_subsystem_move(group, "j", "req-1")
+    assert db.subsystem_move_reservations("N1") == (set(), 0)
+
+
+def test_create_refuses_volumes_that_allow_different_hosts(db, world):
+    group, _, _ = world
+    _restrict(db, "a1", {"nqn": "nqn.host-1"})
+    _restrict(db, "a2", {"nqn": "nqn.host-1"})
+    _restrict(db, "j", {"nqn": "nqn.host-2"})
+    with pytest.raises(cgl.ColocationError, match="allow different hosts"):
+        mv.create_subsystem_move(group, "j", "req-1")
+    assert db.subsystem_move_reservations("N1") == (set(), 0)
 
 
 def test_move_refuses_after_the_deadline_without_touching_a_node(db, world):
@@ -321,6 +419,31 @@ def test_a_partial_move_restores_the_sources_and_reports_source(db, world):
     assert db.get_consistency_group_by_id(group.get_id()).subsystem_move["namespaces_at"] == "source"
 
 
+def test_a_failed_move_whose_restore_also_fails_does_not_claim_the_sources(db, world):
+    """A namespace that could not be moved and could not be put back either
+    is in no subsystem. The caller must not resume hosts on sources missing
+    it: the answer says target, the record says the restore failed, and a
+    rollback once the node answers again makes the sources whole."""
+    group, _, fakes = world
+    rec = mv.create_subsystem_move(group, "j", "req-1")
+    mv.prepare_subsystem_move(group, rec["id"])
+
+    def refuse(*a, **k):
+        raise RPCRemoteError("add refused", -1)
+    fakes["N1"].rpc.nvmf_subsystem_add_ns2.side_effect = refuse
+
+    with pytest.raises(mv.MoveFailedError, match="restoring the sources failed") as caught:
+        mv.move_subsystem_move(group, rec["id"], deadline=int(time.time()) + 30)
+    assert caught.value.namespaces_at == "target"
+    assert db.get_consistency_group_by_id(group.get_id()).subsystem_move["status"] == "rollback_failed"
+    assert fakes["N1"].subsystems["A"] == {2: "a2"}
+
+    fakes["N1"].rpc.nvmf_subsystem_add_ns2.side_effect = fakes["N1"]._add
+    mv.rollback_subsystem_move(group, rec["id"])
+    assert fakes["N1"].subsystems["A"] == {1: "a1", 2: "a2"}
+    assert mv.get_subsystem_move(group, rec["id"])["status"] == "rolled_back"
+
+
 def test_commit_switches_every_record_and_deletes_emptied_sources(db, world):
     group, _, fakes = world
     rec = mv.create_subsystem_move(group, "j", "req-1")
@@ -360,6 +483,58 @@ def test_rollback_puts_namespaces_back_and_deletes_an_empty_fresh_target(db, wor
     assert _nqns(db) == [("A", 1), ("A", 2), ("J", 1)]
     assert db.subsystem_move_reservations("N1") == (set(), 0)
     mv.rollback_subsystem_move(group, rec["id"])        # retried: a no-op
+    assert mv.get_subsystem_move(group, rec["id"])["status"] == "rolled_back"
+
+
+# --------------------------------------------------------------------------- #
+# Steps that overlap: another replica ends or restarts the move meanwhile
+# --------------------------------------------------------------------------- #
+
+def test_a_step_that_outlived_its_move_writes_nothing_onto_the_group(db, world):
+    """A rollback on another replica ended the move while this replica's move
+    was still in its RPC loop. The loop's final record write must not rebuild
+    a record from the empty group: one without an id could never be committed,
+    rolled back, or superseded, and the group would refuse every later move."""
+    group, _, fakes = world
+    rec = mv.create_subsystem_move(group, "j", "req-1")
+    mv.prepare_subsystem_move(group, rec["id"])
+
+    def end_the_move_meanwhile(nqn, bdev, uuid, nguid, nsid=None, **kw):
+        fakes["S1"]._add(nqn, bdev, uuid, nguid, nsid=nsid)
+        db.release_subsystem_move(group, "N1", rec["id"], "rolled_back")
+    fakes["S1"].rpc.nvmf_subsystem_add_ns2.side_effect = end_the_move_meanwhile
+
+    with pytest.raises(KeyError, match="not active"):
+        mv.move_subsystem_move(group, rec["id"], deadline=int(time.time()) + 30)
+    assert db.get_consistency_group_by_id(group.get_id()).subsystem_move == {}
+    assert mv.get_subsystem_move(group, rec["id"])["status"] == "rolled_back"
+    assert mv.create_subsystem_move(group, "j", "req-2")["id"]     # the group takes a new move
+
+
+def test_a_rollback_arriving_during_the_move_runs_after_it(db, world):
+    """A rollback sent to another replica (here: another thread) while the
+    move is in its RPC loop waits for the loop, then puts back what the move
+    put in, on every node. Run through the loop instead, it would restore the
+    first node while the move is still filling the second, and release the
+    move under the loop's feet."""
+    group, _, fakes = world
+    rec = mv.create_subsystem_move(group, "j", "req-1")
+    mv.prepare_subsystem_move(group, rec["id"])
+    rollback = threading.Thread(target=mv.rollback_subsystem_move, args=(group, rec["id"]))
+
+    def start_a_rollback_meanwhile(nqn, bdev, uuid, nguid, nsid=None, **kw):
+        fakes["N1"]._add(nqn, bdev, uuid, nguid, nsid=nsid)
+        if rollback.ident is None:
+            rollback.start()
+            rollback.join(timeout=1)      # unserialized, it has run to the end by now
+    fakes["N1"].rpc.nvmf_subsystem_add_ns2.side_effect = start_a_rollback_meanwhile
+
+    out = mv.move_subsystem_move(group, rec["id"], deadline=int(time.time()) + 30)
+    rollback.join()
+    assert out["namespaces_at"] == "target"
+    for f in fakes.values():
+        assert f.subsystems["A"] == {1: "a1", 2: "a2"} and f.subsystems["J"] == {1: "j"}
+        assert rec["target_nqn"] not in f.subsystems
     assert mv.get_subsystem_move(group, rec["id"])["status"] == "rolled_back"
 
 

@@ -6410,6 +6410,22 @@ def _retire_source_data_path(db_controller, lvol):
                            "on %s failed: %s", lvol.get_id(), node_id, e)
 
 
+def _connection_strings_after_failover(new_lvol) -> list:
+    """The connect entries of the volume a fail-over just created, serialized,
+    or an empty list when they cannot be built: the volume exists by now, so
+    a failed build is logged and the fail-over still answers. A subsystem
+    move holding the subsystem is one such failure; the client connects
+    after it."""
+    try:
+        conn, conn_err = connect_lvol(new_lvol.get_id())
+    except SubsystemMoveInProgressError as e:
+        conn, conn_err = False, str(e)
+    if conn_err:
+        logger.warning(f"Fail-over lvol created but connection-string build failed: {conn_err}")
+        return []
+    return [c.model_dump(by_alias=True) for c in conn]
+
+
 def failover_from_replicated_copy(template, copy, source_cluster_id):
     """Fail one consistency-group member over from a replicated copy on the peer,
     when the member's source record is gone.
@@ -6481,12 +6497,7 @@ def failover_from_replicated_copy(template, copy, source_cluster_id):
             logger.warning("Group reconstitution after fail-over of %s failed: %s",
                            template.get_id(), e)
 
-    connection_strings = []
-    conn, conn_err = connect_lvol(new_lvol.get_id())
-    if conn_err:
-        logger.warning(f"Fail-over lvol created but connection-string build failed: {conn_err}")
-    else:
-        connection_strings = [c.model_dump(by_alias=True) for c in conn]
+    connection_strings = _connection_strings_after_failover(new_lvol)
     logger.info("Failed %s over from replicated copy %s to %s on cluster %s",
                 template.get_id(), copy.get_id(), new_lvol.get_id(), target_node.cluster_id)
     return {
@@ -6672,12 +6683,7 @@ def replicate_lvol_on_target_cluster(lvol_id, generation=0, pin_snapshot_id=None
 
     # Provide the new connection paths (primary/secondary/tertiary) — identical
     # NQN, different IP/port — so the client can fail over to the target cluster.
-    connection_strings = []
-    conn, conn_err = connect_lvol(new_lvol.get_id())
-    if conn_err:
-        logger.warning(f"Fail-over lvol created but connection-string build failed: {conn_err}")
-    else:
-        connection_strings = [c.model_dump(by_alias=True) for c in conn]
+    connection_strings = _connection_strings_after_failover(new_lvol)
 
     # Requirement 4 (consistency groups): a generation older than the current
     # membership must SAY so — which current members the chosen point-in-time

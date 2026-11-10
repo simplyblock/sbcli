@@ -1820,13 +1820,33 @@ class DBController(metaclass=Singleton):
             g.subsystem_move = record
             return None
 
+        # Two creates can select one subsystem before either reserves it;
+        # the read of the node's reservations here is what makes the second
+        # one lose, since it conflicts with the first one's write.
+        moving = self._read_moving_tx(tr, node_id)
+        held = {n for m in moving.values() for n in m.get("nqns", ())} & set(nqns)
+        if held:
+            raise SubsystemMoveConflictError(
+                f"subsystems {sorted(held)} are held by another active move on node {node_id}")
+        if fresh:
+            # The selection counted the node's subsystems outside this
+            # transaction; two creates can both see the last free slot. Recount
+            # here the way the namespace-slot claim does, with what other
+            # moves reserved, so the second one loses.
+            from simplyblock_core.controllers import lvol_controller
+            node = StorageNode().read_from_db(tr, id=node_id)[0]
+            node_max = lvol_controller.max_subsystems_for_node(node)
+            minis = LVolMini().read_from_db(tr.snapshot)
+            reserved = sum(int(m.get("fresh", 0)) for m in moving.values())
+            if lvol_controller.count_lvol_subsystems(node, minis) + reserved + fresh > node_max:
+                raise SubsystemCapacityError(
+                    f"Too many subsystems on node: {node_id}, max subsystems reached: {node_max}")
         fresh_group = self._atomic_update_tx(
             tr, key, ConsistencyGroup, mutate, ConsistencyGroup.active_indexes(self.kv_store))
         if fresh_group is None:
             raise KeyError(f"consistency group {group.get_id()} not found")
         if "existing" in outcome:
             return outcome["existing"]
-        moving = self._read_moving_tx(tr, node_id)
         moving[record["id"]] = {"nqns": sorted(nqns), "fresh": int(fresh)}
         tr.set(self._moving_key(node_id), json.dumps(moving).encode())
         alloc_key = f"{self.NS_SLOT_ALLOC_PREFIX}/{node_id}".encode()
@@ -1842,7 +1862,10 @@ class DBController(metaclass=Singleton):
 
         Idempotent on ``record["request_id"]``: a retry returns the move
         already recorded under that id. Raises SubsystemMoveConflictError when
-        another move or a migration is active on the group."""
+        another move or a migration is active on the group, or another active
+        move on the node holds one of ``nqns``; SubsystemCapacityError when the
+        ``fresh`` subsystems would take the node past its limit, recounted in
+        the transaction."""
         return self._transact(DBController._reserve_subsystem_move_tx,
                               group, node_id, record, nqns, fresh)
 
