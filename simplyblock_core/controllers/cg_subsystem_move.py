@@ -147,6 +147,7 @@ def _update_record(group, move_id, **fields):
         if current.get("id") != move_id:
             return False
         g.subsystem_move = dict(current, **fields)
+        return True
     fresh = _db().atomic_update(group, mutate)
     record = (fresh.subsystem_move if fresh is not None else None) or {}
     if record.get("id") != move_id:
