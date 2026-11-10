@@ -797,6 +797,10 @@ class CLIWrapperBase:
         return cluster_ops.set_shared_placement(
             args.cluster_id, enable=enable, force=force)
 
+    def cluster__set_lvol_geometry(self, sub_command, args):
+        cluster_ops.set_lvol_geometry(args.cluster_id, enable=not args.disable)
+        return True
+
     def cluster__change_name(self, sub_command, args):
         cluster_id = args.cluster_id
         cluster_name = args.name
@@ -1940,6 +1944,7 @@ class CLIWrapperBase:
         is_single_node = args.is_single_node
         client_data_nic = args.client_data_nic
         enable_failure_domain = getattr(args, 'enable_failure_domain', False)
+        lvol_geometry_enabled = not args.disable_lvol_geometry
         device_mode = getattr(args, 'device_mode', 'nvme')
         inline_checksum = getattr(args, 'inline_checksum', False)
 
@@ -1960,6 +1965,7 @@ class CLIWrapperBase:
             nvmf_base_port=args.nvmf_base_port, rpc_base_port=args.rpc_base_port, snode_api_port=args.snode_api_port,
             hashicorp_vault_settings=HashicorpVaultSettings({"base_url": args.hashicorp_vault_url}) if args.hashicorp_vault_url else None,
             enable_failure_domain=enable_failure_domain,
+            lvol_geometry_enabled=lvol_geometry_enabled,
             device_mode=device_mode,
             inline_checksum=inline_checksum,
             atomic_4k=atomic_4k,
@@ -2003,6 +2009,7 @@ class CLIWrapperBase:
         fabric = args.fabric
         client_data_nic = args.client_data_nic
         enable_failure_domain = getattr(args, 'enable_failure_domain', False)
+        lvol_geometry_enabled = not args.disable_lvol_geometry
         device_mode = getattr(args, 'device_mode', 'nvme')
         # Private (developer-mode-only) arg: absent unless sbctl was run with --dev.
         enable_hang_device = getattr(args, "enable_hang_device", False)
@@ -2030,6 +2037,7 @@ class CLIWrapperBase:
             nvmf_base_port=args.nvmf_base_port, rpc_base_port=args.rpc_base_port, snode_api_port=args.snode_api_port,
             hashicorp_vault_settings=HashicorpVaultSettings({"base_url": args.hashicorp_vault_url}) if args.hashicorp_vault_url else None,
             enable_failure_domain=enable_failure_domain,
+            lvol_geometry_enabled=lvol_geometry_enabled,
             device_mode=device_mode,
             enable_hang_device=enable_hang_device,
             max_subsys=args.max_subsys or 0,
