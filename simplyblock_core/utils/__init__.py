@@ -705,11 +705,29 @@ def calculate_pool_count(alceml_count, number_of_distribs, cpu_count, poller_cou
     # Small buffers are sized off the max number of subsystems (max_lvol /
     # --max-subsys) on the node: a fixed base plus 16 small bufs per
     # NS-add poll group (128) per subsystem.
-    small_pool_count = 100000 + max_lvol * 16 * 128
-    # Large buffers are effectively unused, so the computed count is reduced
-    # by 3x to reclaim huge-page memory.
-    large_pool_count = (48 * (alceml_count + number_of_distribs + 3 + poller_count) + (
-            6 + alceml_count + number_of_distribs) * 32 + poller_number * 15 + 384 + 16 * poller_number + constants.EXTRA_LARGE_POOL_COUNT) / 3
+    # Plus IOBUF_SMALL_POOL_EXTRA_BYTES of 8 KiB buffers for replication: its
+    # transfers and landing merges take their buffers from the small pool as
+    # chains of 8 KiB (preallocated, immune to heap fragmentation; a request
+    # waits for a buffer instead of failing with -ENOMEM).
+    small_pool_count = (100000 + max_lvol * 16 * 128
+                        + constants.IOBUF_SMALL_POOL_EXTRA_BYTES // constants.IOBUF_SMALL_BUFSIZE)
+    # Large buffers are not used in the data path: the NVMe-oF transport's
+    # io_unit_size is 8 KiB (small buffers only), no exported bdev supports
+    # zcopy, and every bdev caller supplies aligned buffers, so the bdev layer
+    # never draws one. The pool used to be ~3800 x 132 KiB (~490 MiB of
+    # hugepages per node) -- memory the heap ran short of (bed bf18
+    # 2026-11-09: 5816 DMA allocation failures). A fixed reserve covers the
+    # per-thread caches (bdev 16 + accel ACCEL_LARGE_CACHE_SIZE per thread)
+    # and the rare bounce buffer. The previous formula is kept below for
+    # reference only.
+    #   (48 * (alceml + distribs + 3 + pollers) + (6 + alceml + distribs) * 32
+    #    + pollers * 15 + 384 + 16 * pollers + EXTRA_LARGE_POOL_COUNT) / 3
+    large_pool_count = constants.IOBUF_LARGE_POOL_BYTES // constants.IOBUF_LARGE_BUFSIZE
+    # floor: room for the per-thread caches twice over (threads ~ pollers)
+    min_large = (constants.BDEV_IOBUF_LARGE_CACHE_SIZE + constants.ACCEL_LARGE_CACHE_SIZE) \
+        * max(poller_number, 1) * 2
+    if large_pool_count < min_large:
+        large_pool_count = min_large
 
     return int(small_pool_count), int(large_pool_count)
 

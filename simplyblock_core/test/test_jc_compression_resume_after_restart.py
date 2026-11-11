@@ -148,7 +148,7 @@ def test_a_device_left_on_no_driver_after_a_reboot_is_bound():
     # dev-ocp 2026-11-05: after a MachineConfig reboot master-2's drives were
     # on neither the kernel nvme driver nor SPDK's, and the restart found none.
     api = _API()
-    node_info = {"nvme_pcie_list": [], "spdk_pcie_list": []}
+    node_info: dict[str, list[str]] = {"nvme_pcie_list": [], "spdk_pcie_list": []}
     storage_node_ops._rebind_own_devices_to_spdk(
         _snode(["0000:00:02.0", "0000:00:03.0"], []), api, node_info)
     assert api.bound == ["0000:00:02.0", "0000:00:03.0"]

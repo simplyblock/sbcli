@@ -194,6 +194,31 @@ def _active_relationship(lvol_id):
     return None
 
 
+def _cutover_blocks_release(lvol, rep):
+    """True when *lvol* cannot stop replicating because its cutover is inside
+    the IO freeze (or done moving it).
+
+    A cutover_pending relationship alone used to block, but that state also
+    stands while the cutover is converging, waiting, retrying after a failed
+    final step -- or, before that path was fixed, stuck for good (bf12
+    2026-11-03: detach refused for 15h+). Anything short of the freeze is
+    released: replication_stop cancels the cutover task, and the runner
+    reverts the relationship and deletes the clone. When the tasks cannot be
+    read, refuse.
+    """
+    if rep is None or rep.state != LVolReplication.STATE_CUTOVER_PENDING:
+        return False
+    try:
+        cluster_id = db.get_storage_node_by_id(lvol.node_id).cluster_id
+        tasks = db.get_job_tasks(cluster_id)
+    except Exception as e:                              # noqa: BLE001
+        logger.warning("Cannot read the cutover tasks of %s (%s); treating its "
+                       "cutover as in flight", lvol.get_id(), e)
+        return True
+    from simplyblock_core.controllers import tasks_controller
+    return tasks_controller.replication_final_task_freezing(tasks, lvol.get_id())
+
+
 def _resolve_policy(policy):
     if not policy or not str(policy).strip():
         # An empty policy is not "no policy": attaching it would clear the
@@ -271,7 +296,7 @@ def stop_member_replication(lvol_id):
         logger.info("Volume %s follows no replication policy; stop is a no-op", lvol_id)
         return True
     rep = _active_relationship(lvol_id)
-    if rep is not None and rep.state == LVolReplication.STATE_CUTOVER_PENDING:
+    if _cutover_blocks_release(lvol, rep):
         raise ReplicationConfigError(
             f"Volume {lvol_id} has a cutover in flight; wait for it to finish "
             f"before stopping its replication")
@@ -361,7 +386,7 @@ def detach_policy(lvol_id):
         return True
 
     rep = _active_relationship(lvol_id)
-    if rep is not None and rep.state == LVolReplication.STATE_CUTOVER_PENDING:
+    if _cutover_blocks_release(lvol, rep):
         raise ReplicationConfigError(
             f"Volume {lvol_id} has a cutover in flight; wait for it to finish "
             f"before detaching the replication policy")
@@ -381,6 +406,10 @@ def detach_policy(lvol_id):
 
     # Stops streaming and cancels the non-DONE FN_SNAPSHOT_REPLICATION tasks.
     lvol_controller.replication_stop(lvol_id, from_policy=True)
+    # The spare landing volume kept ready on the destination has no transfer
+    # to serve any more.
+    from simplyblock_core import replication_spare
+    replication_spare.discard(lvol_id)
 
     if lvol.replication_demote_state in (LVol.REPLICATION_DEMOTE_PENDING,
                                          LVol.REPLICATION_DEMOTE_DONE):

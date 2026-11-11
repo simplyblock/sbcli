@@ -458,11 +458,16 @@ def list_plans(cluster_id):
 
 
 def cancel_plan(plan_id):
-    """Cancel every volume whose cutover has not prepared its target clone.
+    """Cancel every volume whose cutover is not freezing.
 
-    A cutover past that point is already freezing or about to; stopping it
-    there leaves a half-built target, so it is left to finish. Volumes the plan
-    started keep replicating; stop them or commit them again separately.
+    A cutover inside its IO freeze (or already done) is left to finish:
+    stopping it there could leave the volume half moved. Anything before that
+    -- converging, or with its target clone prepared but waiting -- is
+    canceled, and the cutover runner reverts the relationship and deletes the
+    clone. Sparing every prepared cutover (the previous rule) left a volume
+    whose final step had failed uncancelable for good (bf12 2026-11-03).
+    Volumes the plan started keep replicating; stop them or commit them again
+    separately.
     """
     db = DBController()
     plan = get_plan(plan_id, db)
@@ -473,10 +478,8 @@ def cancel_plan(plan_id):
             task = db.get_task_by_id(vol["task_id"])
         except KeyError:
             continue
-        if "tgt_lvol_composite" in (task.function_params or {}):
+        if not tasks_controller.cancel_cutover_unless_freezing(task):
             continue
-        task.canceled = True
-        task.write_to_db(db.kv_store)
         vol["state"] = MigrationPlan.VOL_CANCELED
     if all(v["state"] in MigrationPlan.VOL_TERMINAL for v in plan.volumes):
         plan.status = MigrationPlan.STATUS_CANCELED

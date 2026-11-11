@@ -1042,6 +1042,11 @@ commands:
             dest: enable_failure_domain
             type: bool
             action: store_true
+          - name: "--disable-lvol-geometry"
+            help: "Create new logical volumes with ndcs=npcs=0 instead of the cluster's erasure coding geometry. Enabled by default; can be changed later with `cluster set-lvol-geometry`."
+            dest: disable_lvol_geometry
+            type: bool
+            action: store_true
           - name: "--sync-replication"
             help: "Enable site-level synchronous replication over exactly two sites. Each storage node must then be added with --site; every lvstore is replicated to the other site. Requires --ha-type ha. Deploy-time only: a cluster cannot be upgraded into this feature, it must be redeployed."
             dest: sync_replication
@@ -1308,6 +1313,11 @@ commands:
           - name: "--enable-failure-domain"
             help: "Enable failure-domain anti-affinity. Each storage node must then be added with a --failure-domain tag (rack/cabinet/DC); data, journal and secondary/tertiary copies are spread across distinct failure domains (best-effort). Deploy-time only: a cluster cannot be upgraded into this feature, it must be redeployed."
             dest: enable_failure_domain
+            type: bool
+            action: store_true
+          - name: "--disable-lvol-geometry"
+            help: "Create new logical volumes with ndcs=npcs=0 instead of the cluster's erasure coding geometry. Enabled by default; can be changed later with `cluster set-lvol-geometry`."
+            dest: disable_lvol_geometry
             type: bool
             action: store_true
           - name: "--sync-replication"
@@ -1820,6 +1830,23 @@ commands:
           - name: "--force"
             help: "Bypass the rebalancing / non-online-node guards. Required when --disable is passed."
             dest: force
+            type: bool
+            action: store_true
+      - name: set-lvol-geometry
+        help: "Enable or disable LVol geometry on the cluster."
+        usage: >
+          When enabled (the default), new logical volumes inherit the cluster's erasure coding geometry
+          (data-chunks-per-stripe/parity-chunks-per-stripe) or the values passed at creation. When disabled, new
+          logical volumes are always created with ndcs=npcs=0. Existing logical volumes are not changed.
+        arguments:
+          - name: "cluster_id"
+            help: "The cluster id."
+            dest: cluster_id
+            type: str
+            completer: _completer_get_cluster_list
+          - name: "--disable"
+            help: "Disable LVol geometry (default action is to enable it)."
+            dest: disable
             type: bool
             action: store_true
       - name: event-alerts

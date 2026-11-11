@@ -1703,6 +1703,87 @@ def _ana_failover_once(node) -> bool:
     return True
 
 
+#: lvstore key -> monotonic time of the last takeover attempt (rate limit).
+_leaderless_takeover_tried: dict[tuple, float] = {}
+LEADERLESS_TAKEOVER_INTERVAL_SEC = 30
+
+
+def _member_lvstores(snode):
+    """``(lvs_name, members)`` for every lvstore ``snode`` belongs to: its own
+    (as primary) and those it holds a secondary or tertiary role in."""
+    from simplyblock_core.controllers.lvol_controller import role_secondary_ids
+    result = []
+    for owner in db.get_storage_nodes_by_cluster_id(snode.cluster_id):
+        if not owner.lvstore:
+            continue
+        ids = [owner.get_id()] + role_secondary_ids(owner)
+        if snode.get_id() not in ids:
+            continue
+        members = []
+        for nid in ids:
+            try:
+                members.append(owner if nid == owner.get_id() else db.get_storage_node_by_id(nid))
+            except KeyError:
+                continue
+        result.append((owner.lvstore, members))
+    return result
+
+
+def _take_over_leaderless_lvstores(snode):
+    """Give a leader to an lvstore that lost it with an OFFLINE member.
+
+    Leadership moves to a secondary only on client IO: SPDK promotes the
+    member a write arrives on. An lvstore without client IO (a replication
+    TARGET: the hub rejects receive IO on a non-leader) therefore stays
+    leaderless for as long as its primary is down, and nothing can land on it
+    (bf11 2026-11-03: LVS_2 had no leader for the whole 42 min shutdown of its
+    primary; replication stalled with "Error creating remote lvol").
+
+    The takeover goes through find_leader_with_failover, which since #1592
+    makes a node leader only after every other member is proven non-leader or
+    SPDK-dead, twice, LEADERSHIP_SAFETY_WINDOW_SEC apart. Replication itself
+    still never grants leadership; this is the node-offline handling of the
+    control plane. Not done:
+      * while a restart task of the node is RUNNING (the restart flow owns the
+        lvstore's leadership and port blocks during its phases);
+      * on sync-replication clusters (sites; the passive triplet must stay
+        leaderless) and on two-node arbitrated clusters (the arbiter owns
+        leadership there);
+      * more often than every LEADERLESS_TAKEOVER_INTERVAL_SEC per lvstore.
+    """
+    if storage_node_ops._sync_site(snode):
+        return
+    if storage_node_ops._cluster_two_node_arbitrated(snode.cluster_id, db=db):
+        return
+    try:
+        task_id = tasks_controller.get_active_node_restart_task(snode.cluster_id, snode.get_id())
+        if task_id and db.get_task_by_id(task_id).status == JobSchedule.STATUS_RUNNING:
+            return
+    except Exception as e:                                  # noqa: BLE001
+        logger.debug("Restart-task lookup for %s failed: %s", snode.get_id(), e)
+        return
+    for lvs_name, members in _member_lvstores(snode):
+        if not any(m.status == StorageNode.STATUS_ONLINE for m in members):
+            continue
+        key = (snode.cluster_id, lvs_name)
+        now = time.monotonic()
+        if now - _leaderless_takeover_tried.get(key, -1e9) < LEADERLESS_TAKEOVER_INTERVAL_SEC:
+            continue
+        _leaderless_takeover_tried[key] = now
+        try:
+            leader, _ = storage_node_ops.find_leader_with_failover(members, lvs_name)
+        except Exception as e:                              # noqa: BLE001
+            logger.error("Leader takeover for %s (member %s offline) failed: %s",
+                         lvs_name, snode.get_id(), e)
+            continue
+        if leader is None:
+            logger.warning("%s has no leader while member %s is offline; no member "
+                           "could be proven safe to lead yet", lvs_name, snode.get_id())
+        else:
+            logger.info("%s is led by %s while member %s is offline",
+                        lvs_name, leader.get_id(), snode.get_id())
+
+
 def _ana_failover_rearm(node_id) -> None:
     """Forget the one-shot marker so the next offline episode re-triggers."""
     _ana_failover_applied.discard(node_id)
@@ -2135,6 +2216,15 @@ def node_port_check_fun(snode):
                         f"Check: node port {snode.mgmt_ip}, {port} ... {ret} "
                         f"(advisory: peer owns this LVS and may be fencing it)")
                     continue
+                owner_id = port_lvs_owner.get(port)
+                if ret is False and owner_id and owner_id != snode.get_id():
+                    held = _blocked_port_age(snode, port)
+                    if held < PEER_PORT_FENCE_GRACE_SEC:
+                        logger.info(
+                            f"Check: node port {snode.mgmt_ip}, {port} ... {ret} "
+                            f"(peer-owned LVS fenced {held:.0f}s, within the "
+                            f"{PEER_PORT_FENCE_GRACE_SEC:.0f}s takeover grace; not counted)")
+                        continue
                 logger.info(f"Check: node port {snode.mgmt_ip}, {port} ... {ret}")
                 node_port_check &= ret
             _remediate_stale_port_blocks(db, snode, port_results, port_lvs_owner)
@@ -2290,6 +2380,33 @@ _blocked_port_since: dict = {}
 #: any legitimate fence the restart flow holds. The restart-owns-LVS gate,
 #: not this timeout, is what keeps the remediation off deliberate fences.
 STALE_PORT_BLOCK_SEC = 12.0
+
+#: How long a PEER-owned LVS port may read blocked on a follower before the
+#: block counts against the follower's own health verdict.
+#:
+#: A follower fences the client port of the lvstore it is taking over -- that
+#: is the takeover, not a fault. The advisory in node_port_check_fun covers it
+#: only while the owner or another follower is ONLINE/RESTARTING, so when the
+#: owner had just gone UNREACHABLE (the exact moment a takeover runs) one
+#: sample of the fresh fence flipped the healthy follower DOWN. Docker lab
+#: 2026-11-09 08:59 (SFAM-2851): vm203 was cut, vm204 fenced LVS_2's 4430 at
+#: 08:59:01.79 as it took over, the monitor sampled 4430 at 08:59:05.42 with
+#: ping, API, SPDK and RPC all passing, set vm204 DOWN at 08:59:07 and left
+#: LVS_2's 23 volumes with no path at all. The fence was gone by 08:59:19.
+#:
+#: Peer statuses are not enumerated again here; age is. A takeover fence is
+#: short-lived, a leaked one is not. Twice STALE_PORT_BLOCK_SEC gives the leak
+#: remediation at least one chance to lift the fence (plus a missed poll)
+#: before the block is allowed to count against the node.
+PEER_PORT_FENCE_GRACE_SEC = 2 * STALE_PORT_BLOCK_SEC
+
+
+def _blocked_port_age(snode, port):
+    """Seconds ``port`` has read blocked on ``snode``; starts the clock on the
+    first observation. Shares _blocked_port_since with the leak remediation,
+    which clears the entry once the port reads open again."""
+    now = time.monotonic()
+    return now - _blocked_port_since.setdefault((snode.get_id(), port), now)
 
 #: Node statuses in which a stale fence may be lifted.
 #:
@@ -2715,6 +2832,10 @@ def check_node(snode):
                             "(not previously triggered)", snode.get_id())
         except Exception as e:
             logger.error("ANA failover for offline node %s failed: %s", snode.get_id(), e)
+        try:
+            _take_over_leaderless_lvstores(snode)
+        except Exception as e:                              # noqa: BLE001
+            logger.error("Leaderless takeover for offline node %s failed: %s", snode.get_id(), e)
         return True
 
     # Any non-OFFLINE observation ends the episode: re-arm so a future
