@@ -142,6 +142,22 @@ The add fails with the numbers if a wait runs out. What `talosctl` printed is
 copied into the node agent's log before a completed Job is deleted; a failed Job
 is left in place with its pod log.
 
+Managed mode adds simplyblock's pages on top of the worker's own, as the node
+does on every other host. The first time it sees a worker it records the pages
+each NUMA node already carries as the user's baseline, and the patch sets each
+NUMA node to that baseline plus simplyblock's count; a pool the worker already
+had is never taken for the SPDK pod, even one large enough for it, and a manual
+increase made later is absorbed into the baseline. The pool is never shrunk.
+The record (`hugepages_baseline_node<N>` and `hugepages_sb_node<N>`) lives in
+`/var/simplyblock` on the worker, which Talos keeps across reboots -- it has to,
+because the machine config re-applies the whole pool on boot and a record lost
+with it would count simplyblock's pages as the user's on the next add. A worker
+whose pool was put in place by hand and that is then switched to Managed should
+have that pool set to `"0"` in its machine config first (or the record written
+as `0`), or Managed sizes a second allocation on top of the first. Pre-provisioned
+mode keeps no record: the pool is yours, and the node only verifies that it
+covers the SPDK pod.
+
 Managed mode does not remove the cluster-admin step: allowing the Talos API to
 be reached from the simplyblock namespace is a control-plane machine-config
 change only the cluster's operator can make. It saves the per-worker sizing and
