@@ -671,8 +671,8 @@ def _configure_talos_kubelet_topology(node_name, namespace, values, reserved_sys
     if not _talos_machine_config_managed():
         return (f"the kubelet on Talos node '{node_name}' does not run with the CPU topology settings "
                 f"(cpuManagerPolicy static, reservedSystemCPUs {reserved_system_cpus}) and the machine config is "
-                f"pre-provisioned (TALOS_MACHINE_CONFIG=preprovisioned). Apply this patch to the worker with "
-                f"'talosctl -n <node ip> patch mc -p @patch.yaml' -- Talos restarts the kubelet itself; a kubelet "
+                f"pre-provisioned (TALOS_MACHINE_CONFIG=preprovisioned). Save the YAML below as patch.yaml and apply it "
+                f"to the worker with 'talosctl -n <node ip> patch mc -p @patch.yaml' -- Talos restarts the kubelet itself; a kubelet "
                 f"that ran under another policy first needs /var/lib/kubelet/cpu_manager_state removed, see "
                 f"docs/talos.md -- {_TALOS_MANAGED_HINT}:\n"
                 f"{_machine_config_patch_text(_talos_kubelet_patch(reserved_system_cpus))}")
@@ -994,7 +994,7 @@ def _preprovisioned_hugepage_refusal(required_mib, node_name, host_short):
         return err
     shortfall = _hugepage_shortfall(node_utils.get_huge_memory(), required_mib)
     return (f"Talos node '{node_name}': {shortfall}, and the machine config is pre-provisioned "
-            f"(TALOS_MACHINE_CONFIG=preprovisioned). Apply this patch to the worker with "
+            f"(TALOS_MACHINE_CONFIG=preprovisioned). Save the YAML below as patch.yaml and apply it to the worker with "
             f"'talosctl -n <node ip> patch mc -p @patch.yaml', then restart its kubelet with "
             f"'talosctl -n <node ip> service kubelet restart' so it advertises the pool, {_TALOS_MANAGED_HINT}:\n"
             f"{_machine_config_patch_text(_talos_sysfs_patch(pages_per_numa))}")

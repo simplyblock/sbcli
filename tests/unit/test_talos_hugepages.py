@@ -670,7 +670,9 @@ class TestSpdkProcessStartOnPreprovisionedTalos(_TalosHandlerCase):
         data, error = self._start(host_pool=[2 * GIB], kubelet_capacity=['0'])
         self.assertFalse(data)
         self.assertIn('pre-provisioned', error)
-        self.assertIn("'talosctl -n <node ip> patch mc -p @patch.yaml'", error)
+        # The YAML is in the message itself; nothing writes a file anywhere (the host has no shell).
+        self.assertIn("Save the YAML below as patch.yaml and apply it to the worker with "
+                      "'talosctl -n <node ip> patch mc -p @patch.yaml'", error)
         self.assertIn('service kubelet restart', error)
         self.assertIn('talosMachineConfig: Managed', error)
         pages = k8s_node._hugepages_per_numa([{"huge_page_memory": 12 * GIB, "max_size": 0, "socket": 0}])[0]
