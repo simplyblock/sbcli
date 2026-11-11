@@ -126,15 +126,54 @@ failure, and roll them out. A pool set through `machine.sysctls`
 request (`spdk_mem` rounded to 2 MiB plus 512 MiB per pod); do not set both.
 
 The refusal message carries this YAML; nothing writes a file for you (the host
-has no shell, and the node agent's filesystem is not yours). Save it as
-`patch.yaml` where you run `talosctl` and apply with:
+has no shell, and the node agent's filesystem is not yours). A refusal for a
+worker whose pool is short looks like this in the node agent's log (or, with
+`\n` in place of the line breaks, in the HTTP body the control plane logs):
 
 ```
-talosctl -n <node ip> patch mc -p @patch.yaml
+Talos node 'worker-3': host provides 4000 MiB of huge pages but the SPDK pod
+requests 6088 MiB (hugepages-2Mi), i.e. at least 3044 2 MiB pages, and the
+machine config is pre-provisioned (TALOS_MACHINE_CONFIG=preprovisioned). Save
+the YAML below as patch.yaml and apply it to the worker with 'talosctl -n <node
+ip> patch mc -p @patch.yaml', then restart its kubelet with 'talosctl -n <node
+ip> service kubelet restart' so it advertises the pool, or set
+storageNodes.talosMachineConfig: Managed on the StorageCluster to let the node
+apply it through the Talos API:
+machine:
+  sysfs:
+    devices.system.node.node0.hugepages.hugepages-2048kB.nr_hugepages: '3423'
 ```
 
-The same patch works inline, with the YAML given as JSON after `-p`, which
-saves the file when rolling it out to a fleet of identical workers.
+The file is the lines from `machine:` to the end, nothing else:
+
+```yaml title="patch.yaml"
+machine:
+  sysfs:
+    devices.system.node.node0.hugepages.hugepages-2048kB.nr_hugepages: '3423'
+```
+
+Save it where you run `talosctl` and apply it, then restart the kubelet so it
+advertises the new pool:
+
+```
+talosctl -n <node ip> patch mc --mode=no-reboot -p @patch.yaml
+talosctl -n <node ip> service kubelet restart
+```
+
+The count is simplyblock's own sizing for the worker and replaces whatever the
+key held; a pool kept for another consumer has to be added to it by hand (the
+node verifies only that the total covers the SPDK pod). The same patch works
+inline, as JSON after `-p`, which saves the file when rolling it out to a fleet
+of identical workers:
+
+```
+talosctl -n <node ip> patch mc --mode=no-reboot \
+  -p '{"machine":{"sysfs":{"devices.system.node.node0.hugepages.hugepages-2048kB.nr_hugepages":"3423"}}}'
+```
+
+The kubelet refusal has the same shape, with `machine.kubelet.extraConfig` in
+place of `machine.sysfs`; the operator retries the add on its own once the
+patch is in.
 
 Both settings take effect without a reboot; Talos restarts the kubelet itself
 for the `extraConfig` change. Two things to know:
