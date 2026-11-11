@@ -1709,18 +1709,18 @@ def test_latest_generation_asks_the_peer_for_the_copies(monkeypatch):
 def test_latest_generation_refuses_when_the_peer_lost_a_copy_meanwhile(monkeypatch):
     """The copies are asked for again after the cut is chosen; one pruned in
     between is a refusal to retry, never a mixed or missing member."""
-    from simplyblock_core.peer.protocol import DescribeResponse, SnapshotState
-    peer = _FakeGroupPeer({sid: SnapshotState(snapshot_id=sid, exists=True)
-                           for sid in ("T1_LV1", "T1_LV2", "T2_LV1", "T2_LV2")})
-    first = peer.describe
-    answers = iter([None, "pruned"])
+    from simplyblock_core.peer.protocol import SnapshotState
 
-    def describe(request):
-        if next(answers) == "pruned":
-            return DescribeResponse(snapshots=[SnapshotState(snapshot_id=sid, exists=sid != "T2_LV2")
-                                               for sid in request.snapshot_ids])
-        return first(request)
-    peer.describe = describe
+    class _PruningPeer(_FakeGroupPeer):
+        """Retention prunes T2_LV2 on the peer after the first describe."""
+
+        def describe(self, request):
+            answer = super().describe(request)
+            self._states.pop("T2_LV2", None)
+            return answer
+
+    peer = _PruningPeer({sid: SnapshotState(snapshot_id=sid, exists=True)
+                         for sid in ("T1_LV1", "T1_LV2", "T2_LV1", "T2_LV2")})
     db = _FakeDB()
     _install(monkeypatch, db)
     policy_id = _split_group(monkeypatch, db, peer)
