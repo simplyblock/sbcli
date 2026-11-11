@@ -390,6 +390,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    nvmf_base_port=4420, rpc_base_port=8080, snode_api_port=50001, container_image_prefix=None,
                    hashicorp_vault_settings : HashicorpVaultSettings | None = None,
                    enable_failure_domain=False,
+                   lvol_geometry_enabled=True,
                    device_mode=constants.DEVICE_MODE_NVME,
                    enable_hang_device=False,
                    max_subsys=0, hugepages_mem=0, spdk_vcpu_count=0,
@@ -550,6 +551,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.inflight_io_threshold = inflight_io_threshold
     cluster.strict_node_anti_affinity = strict_node_anti_affinity
     cluster.enable_failure_domain = enable_failure_domain
+    cluster.lvol_geometry_enabled = lvol_geometry_enabled
     cluster.sync_replication = bool(sync_replication)
     validate_spdk_sizing(max_subsys, hugepages_mem, spdk_vcpu_count)
     cluster.max_subsys = max_subsys or 0
@@ -583,15 +585,32 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     if not disable_monitoring:
         utils.render_and_deploy_alerting_configs(alert_config, contact_point, cluster.grafana_endpoint, cluster.uuid, cluster.secret.get_secret_value())
 
-    logger.info("Deploying swarm stack ...")
     log_level = "DEBUG" if constants.LOG_WEB_DEBUG else "INFO"
-    scripts.deploy_stack(cli_pass.get_secret_value(), dev_ip, constants.SIMPLY_BLOCK_DOCKER_IMAGE, cluster.secret.get_secret_value(), cluster.uuid,
-                            log_del_interval, metrics_retention_period, log_level, cluster.grafana_endpoint, str(disable_monitoring))
-    logger.info("Deploying swarm stack > Done")
+
+    def deploy_stack_phase(phase):
+        scripts.deploy_stack(cli_pass.get_secret_value(), dev_ip, constants.SIMPLY_BLOCK_DOCKER_IMAGE,
+                             cluster.secret.get_secret_value(), cluster.uuid, log_del_interval,
+                             metrics_retention_period, log_level, cluster.grafana_endpoint, str(disable_monitoring),
+                             phase=phase)
+
+    # Order matters: every simplyblock service exits on an unconfigured
+    # database, so the database must be configured after FDB is up and before
+    # those services are deployed (SFAM-2847).
+    logger.info("Deploying monitoring stack ...")
+    deploy_stack_phase("monitoring")
+    logger.info("Deploying monitoring stack > Done")
+
+    logger.info("Deploying FDB services ...")
+    deploy_stack_phase("fdb")
+    logger.info("Deploying FDB services > Done")
 
     logger.info("Configuring DB...")
     scripts.set_db_config_single()
     logger.info("Configuring DB > Done")
+
+    logger.info("Deploying simplyblock services ...")
+    deploy_stack_phase("app")
+    logger.info("Deploying simplyblock services > Done")
     monitoring_secret = cluster.secret
 
 
@@ -674,6 +693,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
                 nvmf_base_port=4420, rpc_base_port=8080, snode_api_port=50001,
                 hashicorp_vault_settings : HashicorpVaultSettings | None = None,
                 enable_failure_domain=False,
+                lvol_geometry_enabled=True,
                 device_mode=constants.DEVICE_MODE_NVME,
                 inline_checksum=False,
                 atomic_4k=False,
@@ -711,6 +731,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
         client_data_nic=client_data_nic, max_fault_tolerance=max_fault_tolerance, backup_config=backup_config,
         nvmf_base_port=nvmf_base_port, rpc_base_port=rpc_base_port, snode_api_port=snode_api_port,
         hashicorp_vault_settings=hashicorp_vault_settings, enable_failure_domain=enable_failure_domain,
+        lvol_geometry_enabled=lvol_geometry_enabled,
         device_mode=device_mode,
         inline_checksum=inline_checksum,
         atomic_4k=atomic_4k,
@@ -748,6 +769,7 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
                 nvmf_base_port=4420, rpc_base_port=8080, snode_api_port=50001,
                 hashicorp_vault_settings : HashicorpVaultSettings | None = None,
                 enable_failure_domain=False,
+                lvol_geometry_enabled=True,
                 device_mode=constants.DEVICE_MODE_NVME,
                 inline_checksum=False,
                 atomic_4k=False,
@@ -809,6 +831,7 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
     cluster.secret = SecretStr(utils.generate_string(20))
     cluster.strict_node_anti_affinity = strict_node_anti_affinity
     cluster.enable_failure_domain = enable_failure_domain
+    cluster.lvol_geometry_enabled = lvol_geometry_enabled
     cluster.sync_replication = bool(sync_replication)
     cluster.leader_site = leader_site or ""
     cluster.device_mode = _validated_device_mode(device_mode)
@@ -3431,6 +3454,15 @@ def get_log_events(cluster_id, limit=EVENT_LOG_TAIL) -> builtins.list[EventObj]:
     events = db_controller.get_events(cluster_id, limit=limit, reverse=True)
     events.reverse()
     return events
+
+
+def set_lvol_geometry(cluster_id, enable) -> None:
+    """Enable or disable LVol geometry cluster-wide. Applies to lvols
+    created from now on; existing lvols keep their ndcs/npcs."""
+    db_controller.atomic_update(
+        db_controller.get_cluster_by_id(cluster_id),
+        lambda c: setattr(c, "lvol_geometry_enabled", bool(enable)))
+    logger.info(f"LVol geometry {'enabled' if enable else 'disabled'} on cluster {cluster_id}")
 
 
 def get_logs(cluster_id, limit=50, **kwargs) -> builtins.list[dict]:

@@ -4828,7 +4828,8 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                 if not ret:
                     logger.error("Failed to set iobuf options")
                     return False
-            rpc_client.bdev_set_options(0, 0, 0, 0)
+            rpc_client.bdev_set_options(0, 0, constants.BDEV_IOBUF_SMALL_CACHE_SIZE,
+                                constants.BDEV_IOBUF_LARGE_CACHE_SIZE)
             rpc_client.accel_set_options()
         except Exception as e:
             # First contact with the just-created SPDK pod (write_to_db above
@@ -5007,8 +5008,8 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
 
         # set qos values: always, the replication service class needs its share
         # even without user classes (see qos_controller.get_qos_weights_list)
-        logger.info("Setting Alcemls QOS weights")
-        ret = rpc_client.alceml_set_qos_weights(qos_controller.get_qos_weights_list(cluster_id))
+        logger.info("Setting distrib and alceml QOS weights")
+        ret = qos_controller.set_node_qos_weights(rpc_client, qos_controller.get_qos_weights_list(cluster_id))
         if not ret:
             logger.error("Failed to set Alcemls QOS")
             # fatal only where user classes depend on it, as before
@@ -9112,32 +9113,6 @@ def _reconcile_discovered_devices(snode, nvme_devs):
     return new_devices
 
 
-def _rebind_nvme_devices_to_spdk(snode, snode_api, spdk_pcie_list):
-    """Bind the node's known NVMe devices back to SPDK where they are not.
-
-    SPDK drives a device only while it is bound to uio_pci_generic or
-    vfio-pci, and that binding does not survive a reboot of the host: the
-    devices come back on the kernel nvme driver. The devices to bind are the
-    ones the node was configured with (ssd_pcie), or the ones it is known to
-    own when it was configured with all of them.
-
-    Returns whether any bind was attempted, so the caller knows to re-read the
-    node's device lists.
-    """
-    if snode.ssd_pcie:
-        wanted = list(snode.ssd_pcie)
-    else:
-        wanted = [dev.pcie_address for dev in snode.nvme_devices if dev.pcie_address]
-    missing = [addr for addr in dict.fromkeys(wanted) if addr not in (spdk_pcie_list or [])]
-    for addr in missing:
-        logger.info(f"Binding NVMe device {addr} to SPDK, it is not bound (host rebooted?)")
-        try:
-            snode_api.bind_device_to_spdk(addr)
-        except Exception as e:
-            logger.warning(f"Failed to bind NVMe device {addr} to SPDK: {e}")
-    return bool(missing)
-
-
 def _restart_storage_node_impl(
         node_id, max_lvol=0, max_snap=0, max_prov=0,
         spdk_image=None, set_spdk_debug=None,
@@ -9587,7 +9562,8 @@ def _restart_storage_node_impl(
         if not ret:
             logger.error("Failed to set iobuf options")
             return False
-    rpc_client.bdev_set_options(0, 0, 0, 0)
+    rpc_client.bdev_set_options(0, 0, constants.BDEV_IOBUF_SMALL_CACHE_SIZE,
+                                constants.BDEV_IOBUF_LARGE_CACHE_SIZE)
     rpc_client.accel_set_options()
 
     # 2- set socket implementation options
@@ -9699,11 +9675,6 @@ def _restart_storage_node_impl(
             logger.error("No eligible block devices were found!")
             return False
     else:
-        # After a host reboot the node's NVMe devices are back on the kernel
-        # nvme driver, so spdk_pcie_list (devices bound to uio/vfio) is empty
-        # and the restart would find no devices at all.
-        if _rebind_nvme_devices_to_spdk(snode, snode_api, node_info['spdk_pcie_list']):
-            node_info, _ = snode_api.info()
         if not snode.ssd_pcie:
             ssds = node_info['spdk_pcie_list']
         else:
@@ -9758,8 +9729,8 @@ def _restart_storage_node_impl(
 
     # set qos values: always, the replication service class needs its share
     # even without user classes (see qos_controller.get_qos_weights_list)
-    logger.info("Setting Alcemls QOS weights")
-    ret = rpc_client.alceml_set_qos_weights(qos_controller.get_qos_weights_list(snode.cluster_id))
+    logger.info("Setting distrib and alceml QOS weights")
+    ret = qos_controller.set_node_qos_weights(rpc_client, qos_controller.get_qos_weights_list(snode.cluster_id))
     if not ret:
         logger.error("Failed to set Alcemls QOS")
         # fatal only where user classes depend on it, as before
@@ -11783,16 +11754,25 @@ def _rebind_own_devices_to_spdk(snode, snode_api, node_info):
     setup.sh, so every restart after a shutdown failed with "No NVMe devices
     was found!" (bf7 2026-10-30: e0ad4fa0 and 5055ad5c, shut down by the
     suspend drain, stayed offline for hours).
+
+    A device is bound unless SPDK already holds it, not only when the kernel
+    nvme driver does: after a host reboot a device can be left on no driver at
+    all, and skipping it failed every restart the same way (dev-ocp
+    2026-11-05: master-2's four drives, unbound after its MachineConfig
+    reboot). A device the node has given up, removed or failed and migrated,
+    is not taken back: an operator may have handed it to the kernel on purpose.
     """
-    kernel_bound = set((node_info or {}).get("nvme_pcie_list") or [])
+    spdk_bound = set((node_info or {}).get("spdk_pcie_list") or [])
     own = list(snode.ssd_pcie or [])
+    given_up = (NVMeDevice.STATUS_REMOVED, NVMeDevice.STATUS_FAILED_AND_MIGRATED)
     for dev in snode.nvme_devices:
-        if dev.bdev_type != "aio" and dev.pcie_address and dev.pcie_address not in own:
+        if (dev.bdev_type != "aio" and dev.pcie_address and dev.pcie_address not in own
+                and getattr(dev, "status", None) not in given_up):
             own.append(dev.pcie_address)
     for pci in own:
-        if pci not in kernel_bound:
+        if pci in spdk_bound:
             continue
-        logger.info("Binding %s back to SPDK on %s (left on the kernel driver by a shutdown)",
+        logger.info("Binding %s back to SPDK on %s (not on the SPDK driver after a shutdown or reboot)",
                     pci, snode.get_id())
         try:
             snode_api.bind_device_to_spdk(pci)

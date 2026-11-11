@@ -419,6 +419,22 @@ MIN_HUGE_PAGE_MEMORY_FOR_LVOL = 209715200
 MIN_SYS_MEMORY_FOR_LVOL = 524288000
 EXTRA_SMALL_POOL_COUNT = 30000
 EXTRA_LARGE_POOL_COUNT = 10240
+# iobuf pools (calculate_pool_count). Large buffers are not used in the data
+# path (NVMe-oF io_unit_size is 8 KiB, no zcopy, bdev callers supply buffers):
+# a fixed 100 MiB reserve instead of ~490 MiB. Small buffers get 300 MiB more,
+# for replication's transfers and merges (chains of 8 KiB). bed bf18
+# 2026-11-09: the hugepage heap ran out (5816 DMA allocation failures).
+IOBUF_SMALL_BUFSIZE = 8 * 1024
+IOBUF_LARGE_BUFSIZE = 132 * 1024
+IOBUF_LARGE_POOL_BYTES = 100 * 1024 * 1024
+IOBUF_SMALL_POOL_EXTRA_BYTES = 300 * 1024 * 1024
+# Per-thread iobuf caches of modules that do not draw buffers in the data
+# path: they only park pool buffers (bdev default 128/16, accel was 512/64).
+# The NVMe-oF poll-group cache (buf_cache_size) is kept: it is used.
+BDEV_IOBUF_SMALL_CACHE_SIZE = 16
+BDEV_IOBUF_LARGE_CACHE_SIZE = 2
+ACCEL_SMALL_CACHE_SIZE = 32
+ACCEL_LARGE_CACHE_SIZE = 2
 EXTRA_HUGE_PAGE_MEMORY = 3221225472
 EXTRA_SYS_MEMORY = 0.10
 
@@ -546,6 +562,11 @@ REPL_CUTOVER_CONVERGE_TARGET_SEC = 2.0
 # succeed (REPL_CUTOVER_FREEZE_MAX_ROUND_SEC); otherwise rounds continue until
 # shrink_deadline.
 REPL_CUTOVER_MAX_SHRINK_ROUNDS = 12
+# A volume whose snapshots are not being deleted as fast as replication takes
+# them takes no new internal replication snapshot while this many are pending
+# deletion (in deletion, or replicated beyond what retention keeps). Sized to
+# match the endgame's round bound (2026-11-04).
+REPL_MAX_DELETION_BACKLOG = REPL_CUTOVER_MAX_SHRINK_ROUNDS
 # Hard limit SPDK puts on bdev_lvol_transfer_final_step: the final step's
 # terminate_timeout is armed when it starts and fails the transfer ("Task
 # transfer terminate timeout ...", transfer_state 'Failed') once it passes.
@@ -569,6 +590,59 @@ REPL_CUTOVER_FREEZE_MAX_ROUND_SEC = (REPL_CUTOVER_FINAL_STEP_LIMIT_SEC
 # released, the volume replicates on its ordinary cadence, and the endgame is
 # retried after this long (the abandon burns one attempt of the task's budget).
 REPL_CUTOVER_ENDGAME_BACKOFF_SEC = 300
+# --- cutover source throttle ----------------------------------------------
+# A round converges to overhead / (1 - W/T): with the application writing at
+# W and the delta transferring at T, no number of rounds gets under the
+# per-round fixed cost divided by that factor (bed bf13 2026-11-05: W/T = 0.4,
+# ~5 s of fixed cost, rounds settled at 6-13 s against a 2 s target for 34
+# rounds). Once the first rounds show the delta is not shrinking, the source
+# volume's write bandwidth is capped for the rest of the endgame -- including
+# the clone build and the preconnect wait, whose writes the frozen final step
+# must copy -- and restored when the endgame ends (cutover done, abandoned or
+# failed). A volume whose pool carries QoS of its own is not throttled.
+REPL_CUTOVER_THROTTLE_AFTER_ROUND = 2
+REPL_CUTOVER_THROTTLE_W_MBPS = 8
+# Each failed or abandoned attempt of the same cutover halves the cap (8, 4,
+# 2, 1 MB/s), never below this.
+REPL_CUTOVER_THROTTLE_MIN_MBPS = 1
+# Endgame rounds send each round snapshot's dirty pages straight into the
+# cutover clone (cow_landing, like the final step) instead of replicating it
+# into a landing volume that the target then merges with its base whole
+# cluster by whole cluster (bf18, 2026-11-09: 9.2-9.8 GB, 35-44 s per round of
+# a randomly written 10 GiB volume, whatever the source cap). Needs the
+# early-prepared clone and an SPDK whose bdev_lvol_transfer takes cow_landing
+# (no completion signal into a clone, spdk #89).
+REPL_CUTOVER_DIRECT_ROUNDS = True
+# Sends of one direct round (a failed or vanished transfer is sent again)
+# before the endgame is abandoned.
+REPL_CUTOVER_DIRECT_ROUND_SUBMITS = 3
+# --- catch-up throttle ------------------------------------------------------
+# A volume whose replication persistently cannot catch up never reaches the
+# endgame: the target cannot absorb what the source writes (bf17, 2026-11-08:
+# the last volume of eight waited for hours behind seven already migrated
+# onto the same saturated target). Whatever the cause, it is detected from
+# the volume's own replication alone: the catch-up wait is cut into windows
+# of this length, and a window in which neither the lowest lag nor the
+# lowest byte backlog improved on the previous window's by
+# REPL_CATCHUP_PROGRESS_FRACTION is a window without progress. The first
+# window is a baseline.
+# 120 s (was 300): the throttle now engages after ~6 min instead of >= 15.
+# Bed bf20 (2026-11-10, heavy fio): three volumes that started late shared the
+# replication bandwidth and sat 13-23 min at 90-280 s lag before reaching the
+# endgame, which then cut each over in ~3 min; round 1 took 36 min instead of
+# ~18 (bf21). A delta round under that load takes ~75-150 s, so a window still
+# normally sees the lag's low point; a window without one is a single strike.
+REPL_CATCHUP_WINDOW_SEC = 120
+REPL_CATCHUP_PROGRESS_FRACTION = 0.1
+# After this many windows in a row without progress the source volume's
+# writes are capped: first at REPL_CATCHUP_THROTTLE_FACTOR of its measured
+# write rate (or REPL_CATCHUP_THROTTLE_START_MBPS when there is no measurement),
+# then halved after every further run of windows without progress, never below
+# REPL_CUTOVER_THROTTLE_MIN_MBPS. The cap stays until the cutover ends (done,
+# failed for good or canceled): a failed endgame does not lift it.
+REPL_CATCHUP_STRIKES = 2
+REPL_CATCHUP_THROTTLE_FACTOR = 0.5
+REPL_CATCHUP_THROTTLE_START_MBPS = 64
 # How long after its freeze_started_at stamp a cutover counts as freezing (and
 # so is spared by a plan cancel or a policy detach). A freeze is bounded by the
 # final-step limit plus fence/restore RPCs; a stamp older than this is a pass
@@ -583,6 +657,23 @@ REPL_CUTOVER_FREEZE_GUARD_SEC = 120
 # seconds. Before that the cutover waits and takes NO snapshots of its own --
 # the iterative snapshots ARE the endgame.
 REPL_CUTOVER_ENDGAME_LAG_SEC = 50
+# ... or once it keeps up in bytes: at most one replication snapshot is still
+# outstanding and that snapshot plus what the live volume wrote since the
+# newest snapshot is at most this much (dirty-page counts of the source
+# leader). A volume written gigabytes per cadence interval keeps pace with an
+# RPO of minutes and never meets the time gate (bf14, 2026-11-06: 5 of 8
+# volumes never entered the endgame in two hours). The shrink deadline and
+# the abandon/back-off rules still end an endgame that does not converge.
+REPL_CUTOVER_ENDGAME_BACKLOG_BYTES = 8 * 1024 ** 3
+# The cutover's final step sends the dirty-page delta written since the
+# clone's base snapshot (cow_landing into the clone) instead of every dirty
+# cluster whole, when SPDK and the write-count check allow it. Off: whole
+# clusters, as before.
+REPL_FINAL_STEP_DELTA = True
+# Timeout of each member's write-count / dirty-count read made for the
+# delta decisions above. The final step's read runs with the source fenced,
+# so it must stay short; a member that does not answer means "no delta".
+REPL_FINAL_DELTA_COUNTS_TIMEOUT_SEC = 2
 # Migration-plan forecast fallbacks, used until the plan's own transfers and
 # cutovers have been measured (simplyblock_core/migration_forecast.py).
 REPL_FORECAST_DEFAULT_BYTES_PER_SEC = 200 * 1024 * 1024
@@ -600,6 +691,10 @@ REPL_MIGRATION_DEFAULT_INTERVAL_MIN = 1
 REPL_CUTOVER_POLL_INTERVAL_SEC = 0.2
 # How long a single runner pass may stay inside the convergence loop.
 REPL_CUTOVER_CONVERGE_BUDGET_SEC = 60
+# ... and however short its rounds, one pass never stays inline longer than
+# this: the window above is re-armed per round, and the runner is single
+# threaded (other cutovers wait to freeze, their dirty sets growing).
+REPL_CUTOVER_PASS_MAX_INLINE_SEC = 120
 # Always worth polling inline for at least this long: a round that finishes
 # just after the pass is handed back costs a full TASK_EXEC_INTERVAL_SEC of
 # writes in the next round.
@@ -654,10 +749,31 @@ REPL_XFER_INLINE_WAIT_SEC = 1.0
 # pass interval (REPL_ACTIVE_PASS_SEC) notices a finished merge instead.
 REPL_MERGE_INLINE_WAIT_SEC = 0.0
 REPL_MERGE_POLL_SEC = 1.0
+# A landing merge that failed (e.g. -ENOMEM: the target could not get its
+# DMA buffers) is not relaunched every pass: it waits REPL_MERGE_RETRY_MIN_SEC,
+# doubling per consecutive failure up to REPL_MERGE_RETRY_MAX_SEC, and raises
+# a REPLICATION_STALLED event from REPL_MERGE_FAIL_ALERT failures on, at most
+# every REPL_MERGE_ALERT_EVERY_SEC (bed bf18 2026-11-09: 1883 relaunches in
+# 37 min, every one failing with -12 within 5 ms, with no event).
+REPL_MERGE_RETRY_MIN_SEC = 5.0
+REPL_MERGE_RETRY_MAX_SEC = 120.0
+REPL_MERGE_FAIL_ALERT = 3
+REPL_MERGE_ALERT_EVERY_SEC = 600.0
 # Pass interval of the snapshot replication runner while any transfer or
 # merge is in flight; TASK_EXEC_INTERVAL_SEC when idle. Not sub-second: each
 # pass reads the task table (see test_transfer_completion_latency).
 REPL_ACTIVE_PASS_SEC = 1.0
+# Worker pool of the snapshot replication runner: how many replication tasks
+# run at the same time. One runner used to execute every task of every volume
+# of every cluster one after the other, and a task holds it for its whole
+# transfer (a cutover round waits inline up to REPL_XFER_INLINE_WAIT_CUTOVER_SEC)
+# and for every slow metadata RPC on the target (bed bf13 2026-11-05: landing
+# creates of 20-47 s, converts of 32 s, so four replicating volumes got 1.7-way
+# concurrency and a converging cutover waited 22-34 s for its round to start).
+# 0 runs the tasks inline on the pass loop (tests, single-volume debugging).
+REPL_RUNNER_WORKERS = int(os.getenv("REPL_RUNNER_WORKERS", "8"))
+# Pause before a task that returned a failure is dispatched again.
+REPL_RUNNER_RETRY_PAUSE_SEC = 3.0
 # Requests a replication transfer keeps in flight. A full transfer sends one
 # whole cluster per request (16 x 2 MiB = 32 MiB in flight); a delta
 # (allow_partial) sends at most 64 KiB per request, so it needs a deeper window

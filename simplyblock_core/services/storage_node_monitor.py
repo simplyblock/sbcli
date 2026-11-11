@@ -2214,6 +2214,15 @@ def node_port_check_fun(snode):
                         f"Check: node port {snode.mgmt_ip}, {port} ... {ret} "
                         f"(advisory: peer owns this LVS and may be fencing it)")
                     continue
+                owner_id = port_lvs_owner.get(port)
+                if ret is False and owner_id and owner_id != snode.get_id():
+                    held = _blocked_port_age(snode, port)
+                    if held < PEER_PORT_FENCE_GRACE_SEC:
+                        logger.info(
+                            f"Check: node port {snode.mgmt_ip}, {port} ... {ret} "
+                            f"(peer-owned LVS fenced {held:.0f}s, within the "
+                            f"{PEER_PORT_FENCE_GRACE_SEC:.0f}s takeover grace; not counted)")
+                        continue
                 logger.info(f"Check: node port {snode.mgmt_ip}, {port} ... {ret}")
                 node_port_check &= ret
             _remediate_stale_port_blocks(db, snode, port_results, port_lvs_owner)
@@ -2369,6 +2378,33 @@ _blocked_port_since: dict = {}
 #: any legitimate fence the restart flow holds. The restart-owns-LVS gate,
 #: not this timeout, is what keeps the remediation off deliberate fences.
 STALE_PORT_BLOCK_SEC = 12.0
+
+#: How long a PEER-owned LVS port may read blocked on a follower before the
+#: block counts against the follower's own health verdict.
+#:
+#: A follower fences the client port of the lvstore it is taking over -- that
+#: is the takeover, not a fault. The advisory in node_port_check_fun covers it
+#: only while the owner or another follower is ONLINE/RESTARTING, so when the
+#: owner had just gone UNREACHABLE (the exact moment a takeover runs) one
+#: sample of the fresh fence flipped the healthy follower DOWN. Docker lab
+#: 2026-11-09 08:59 (SFAM-2851): vm203 was cut, vm204 fenced LVS_2's 4430 at
+#: 08:59:01.79 as it took over, the monitor sampled 4430 at 08:59:05.42 with
+#: ping, API, SPDK and RPC all passing, set vm204 DOWN at 08:59:07 and left
+#: LVS_2's 23 volumes with no path at all. The fence was gone by 08:59:19.
+#:
+#: Peer statuses are not enumerated again here; age is. A takeover fence is
+#: short-lived, a leaked one is not. Twice STALE_PORT_BLOCK_SEC gives the leak
+#: remediation at least one chance to lift the fence (plus a missed poll)
+#: before the block is allowed to count against the node.
+PEER_PORT_FENCE_GRACE_SEC = 2 * STALE_PORT_BLOCK_SEC
+
+
+def _blocked_port_age(snode, port):
+    """Seconds ``port`` has read blocked on ``snode``; starts the clock on the
+    first observation. Shares _blocked_port_since with the leak remediation,
+    which clears the entry once the port reads open again."""
+    now = time.monotonic()
+    return now - _blocked_port_since.setdefault((snode.get_id(), port), now)
 
 #: Node statuses in which a stale fence may be lifted.
 #:

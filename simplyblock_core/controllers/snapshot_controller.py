@@ -761,7 +761,7 @@ def reap_snapshot_intents(cluster_id, now_ts=None, max_age=None):
 
 
 def add(lvol_id, snapshot_name, lock=True, all_snaps=None, all_lvols=None,
-        bypass_migration_check=False, snap_type=SnapShot.TYPE_USER):
+        bypass_migration_check=False, snap_type=SnapShot.TYPE_USER, replicate=True):
     try:
         lvol = db_controller.get_lvol_by_id(lvol_id)
     except KeyError:
@@ -1125,7 +1125,9 @@ def add(lvol_id, snapshot_name, lock=True, all_snaps=None, all_lvols=None,
         snap.write_to_db()
 
     snapshot_events.snapshot_create(snap)
-    if lvol.do_replicate:
+    # replicate=False: a cutover's direct round, sent into the cutover clone
+    # by the cutover itself (tasks_runner_replication_final)
+    if lvol.do_replicate and replicate:
         task = tasks_controller.add_snapshot_replication_task(snap.cluster_id, snap.lvol.node_id, snap.get_id())
         if task:
             snapshot_events.replication_task_created(snap)
