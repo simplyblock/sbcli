@@ -130,6 +130,20 @@ answers. With a third coordinator site FoundationDB survives and the command is 
 move. Afterwards the data plane is failed over as today (on a sync-replication cluster: the site
 fence and forced promotes).
 
+### Metro-DR: the site fence takes over first
+
+A Metro-DR failover (Ramen with MetroFencing) fences the lost site through the surviving site's
+CSI driver: csi-addons' `NetworkFence` becomes `POST /api/v2/clusters/{id}/sites/{site}/fence` on
+that site's own control plane. When the lost site led, that control plane is the standby, and the
+leader it would redirect to is the site being fenced. So the fence routes
+(`sites/{site}/fence|unfence|status`) are served where they arrive, and a fence of the **leading**
+site asked on the other site runs `takeover` first: the `NetworkFence` is the out-of-band
+confirmation, and `takeover` still probes the site and refuses (409, `detail.alive`) while anything
+of it answers. The fence itself is a task; once the survivor's agent holds the lease (within one
+cycle), its task runners execute it, and the CSI driver's repeated calls see it `done`. With a
+third coordinator site this needs no operator step; without one, the FDB recovery comes first
+(above), and the fence answers 503 until FoundationDB answers on the survivor.
+
 ### Return of the lost site
 
 Automatic at every layer. FoundationDB catches the returning region up on its own; the returning
@@ -146,6 +160,7 @@ back.
 | `GET /api/v2/clusters/{id}/control-plane/` | mode of the answering control plane, lease, per-site readiness, FDB region lag |
 | `POST /api/v2/clusters/{id}/control-plane/leader-site` `{site, force}` | planned move; 409 with `detail.problems` while a gate is red |
 | `POST /api/v2/clusters/{id}/control-plane/takeover` `{site, confirm_site_down, operator}` | unplanned move; 409 with `detail.alive` while the confirmed site answers |
+| `POST /api/v2/clusters/{id}/sites/{site}/fence` | served on the site it arrives at; a fence of the leading site from the other site takes over first (409 with `detail.alive` while the site answers) |
 | `PUT /api/v2/clusters/{id}` `{leader_site}` | unchanged: the operators' role swap; on a stretched control plane it moves the lease too, **without** the readiness gates |
 
 `ClusterDTO.stretched_control_plane` and `ManagementNodeDTO.site` expose the new fields.
@@ -154,9 +169,9 @@ back.
 
 - Exactly two control-plane sites; a third site holds storage nodes (1+2) and, outside sbcli, FDB
   coordinators and satellite logs.
-- No automatic takeover. Between the loss of the leader site and the operator's command the
-  cluster has no leader: no promotion, migration or capacity decision is made. Storage nodes keep
-  serving what the data plane allows.
+- No automatic takeover outside a site fence. Between the loss of the leader site and the
+  operator's command (or a Metro-DR fence of that site) the cluster has no leader: no promotion,
+  migration or capacity decision is made. Storage nodes keep serving what the data plane allows.
 - A standby redirects mutating calls with 307 only when the leader site's API endpoint is recorded
   (`site_api_endpoints`); otherwise it answers 503 naming the gap.
 - A control plane without a site (no `SB_CONTROL_PLANE_SITE`, no `MgmtNode.site`) on a stretched

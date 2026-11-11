@@ -25,6 +25,7 @@ import datetime
 import json
 import logging
 import os
+import re
 import socket
 import threading
 import time
@@ -464,13 +465,20 @@ _ALWAYS_LOCAL = ("/_meta", "/api/v2/_meta", "/api/v2/metrics", "/api/v1/metrics"
                  "/api/v2/management-nodes")
 
 
+# A site fence is the step that makes a stretched cluster's surviving site
+# lead (``take_over_before_fence``): the leader it would be redirected to is
+# the site being fenced, so it is served where it arrives. The fence itself is
+# a task, and only the leading control plane's task runners execute it.
+_SITE_FENCE_ROUTE = re.compile(r'/api/v2/clusters/[0-9a-fA-F-]{36}/sites/[^/]+/(fence|unfence|status)/?$')
+
+
 def api_verdict(method: str, path: str, cluster_id: str = "") -> ApiVerdict:
     """What the web app does with a request: serve it, redirect it (307) to
     the leader's API, or answer 503. Reads are served locally everywhere -
     FoundationDB never serves stale data - except when the database does not
     answer at all. ``cluster_id`` (parsed from the path by the caller) picks
     the stretched cluster when there are several."""
-    if path.startswith(_ALWAYS_LOCAL) or "/control-plane" in path:
+    if path.startswith(_ALWAYS_LOCAL) or "/control-plane" in path or _SITE_FENCE_ROUTE.search(path):
         return ApiVerdict("serve")
     try:
         verdict = current_mode()
@@ -864,6 +872,35 @@ def takeover(cluster_id: str, site: str, confirm_site_down: str, *, operator: st
         cluster, site, confirm_site_down,
         how=f"takeover by {who}; site {confirm_site_down} confirmed down, nothing there answered")
     return control_plane_status(cluster_id)
+
+
+def take_over_before_fence(cluster: Cluster, fenced_site: str) -> bool:
+    """Make this control plane's site lead before it fences ``fenced_site``.
+
+    A Metro-DR failover fences the lost site through the surviving site's
+    CSI driver (csi-addons ``NetworkFence``), which asks its own control
+    plane. On a stretched control plane that is the standby whenever the lost
+    site led, and the leader it would defer to is the site being fenced. So a
+    fence of the leading site, asked on the other site, takes over first:
+    the NetworkFence is the out-of-band confirmation that site is down, and
+    ``takeover`` still probes it and refuses while anything there answers.
+
+    True when it took over; False when there was nothing to do (not a
+    stretched cluster, this control plane has no site, the fenced site is
+    this one, or it does not lead). Raises what ``takeover`` raises."""
+    site = local_site()
+    if not cluster.stretched_control_plane or not site or not fenced_site or fenced_site == site:
+        return False
+    cluster_id = cluster.get_id()
+    lease = DBController().get_control_plane_lease(cluster_id)
+    leading = (lease.holder_site if lease is not None and lease.state != ControlPlaneLease.STATE_RELEASED
+               and not lease_expired(lease) else cluster.leader_site)
+    if leading != fenced_site:
+        return False
+    logger.info(f"cluster {cluster_id}: the fence of site {fenced_site}, which leads, was asked on "
+                f"site {site}; taking over first")
+    takeover(cluster_id, site, fenced_site, operator=f"site fence (NetworkFence) on {site}")
+    return True
 
 
 # ------------------------------------------------------- scheme and sites --

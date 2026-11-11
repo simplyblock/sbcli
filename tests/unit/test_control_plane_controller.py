@@ -350,3 +350,62 @@ class TestHttpAnswers:
         err = urllib.error.HTTPError("https://x/api/v2/_meta/health", 503, "unavailable", {}, None)
         monkeypatch.setattr(urllib.request, "urlopen", self._raising(err))
         assert cpc._http_answers("https://site-b.example:5000") is True
+
+
+class TestTakeOverBeforeFence:
+    """A Metro-DR fence of the leading site, asked on the other site's
+    standby, takes over first (Ramen's NetworkFence is the confirmation)."""
+
+    def _setup(self, monkeypatch, *, local="b", leader="a", lease_holder="a", stretched=True):
+        from unittest.mock import MagicMock
+
+        from simplyblock_core.models.cluster import Cluster
+        c = Cluster()
+        c.uuid, c.stretched_control_plane, c.leader_site = "c1", stretched, leader
+        db = MagicMock()
+        db.get_control_plane_lease.return_value = _lease(holder=lease_holder) if lease_holder else None
+        monkeypatch.setattr(cpc, "DBController", lambda: db)
+        monkeypatch.setattr(cpc, "local_site", lambda: local)
+        calls = []
+        monkeypatch.setattr(cpc, "takeover", lambda cid, site, down, operator="": calls.append((cid, site, down)))
+        self.cluster = c
+        return calls
+
+    def test_fencing_the_leading_site_from_the_other_takes_over(self, monkeypatch):
+        calls = self._setup(monkeypatch)
+        assert cpc.take_over_before_fence(self.cluster, "a") is True
+        assert calls == [("c1", "b", "a")]
+
+    def test_fencing_a_site_that_does_not_lead_changes_nothing(self, monkeypatch):
+        calls = self._setup(monkeypatch, local="a", leader="a", lease_holder="a")
+        assert cpc.take_over_before_fence(self.cluster, "b") is False
+        assert calls == []
+
+    def test_a_fence_of_the_own_site_or_off_a_stretched_cluster_changes_nothing(self, monkeypatch):
+        calls = self._setup(monkeypatch, local="a")
+        assert cpc.take_over_before_fence(self.cluster, "a") is False
+        calls = self._setup(monkeypatch, stretched=False)
+        assert cpc.take_over_before_fence(self.cluster, "a") is False
+        assert calls == []
+
+    def test_without_a_live_lease_the_recorded_leader_site_decides(self, monkeypatch):
+        calls = self._setup(monkeypatch, lease_holder=None, leader="a")
+        assert cpc.take_over_before_fence(self.cluster, "a") is True
+        assert calls == [("c1", "b", "a")]
+
+    def test_a_refused_takeover_propagates(self, monkeypatch):
+        self._setup(monkeypatch)
+
+        def refuse(*a, **k):
+            raise cpc.ControlPlaneTakeoverRefusedError("site a still answers", ["mgmt a answers"])
+        monkeypatch.setattr(cpc, "takeover", refuse)
+        with pytest.raises(cpc.ControlPlaneTakeoverRefusedError):
+            cpc.take_over_before_fence(self.cluster, "a")
+
+    def test_the_fence_routes_are_served_where_they_arrive(self, monkeypatch):
+        monkeypatch.setattr(cpc, "current_mode", lambda: cpc.ModeVerdict(
+            "standby", "no lease", redirects={"c1": "https://a.example"}))
+        cid = "236f43b7-8bca-4b02-b909-a9eb1b0eea26"
+        for route in ("fence", "unfence", "status"):
+            assert cpc.api_verdict("POST", f"/api/v2/clusters/{cid}/sites/a/{route}", cid).action == "serve"
+        assert cpc.api_verdict("POST", f"/api/v2/clusters/{cid}/storage-pools", cid).action == "redirect"
