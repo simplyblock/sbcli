@@ -299,6 +299,13 @@ class _TalosHandlerCase(unittest.TestCase):
         for p in patches:
             p.start()
             self.addCleanup(p.stop)
+        # The managed flow's baseline files (the user's pages per NUMA node and
+        # the total simplyblock last set) live in a directory of their own.
+        self.state_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.state_dir, ignore_errors=True)
+        p = patch.object(k8s_node, '_TALOS_HUGEPAGES_STATE_DIR', self.state_dir)
+        p.start()
+        self.addCleanup(p.stop)
         self.batch = k8s_node.core_utils.get_k8s_batch_client.return_value
         self.core = k8s_node.core_utils.get_k8s_core_client.return_value
         self.core.list_namespaced_pod.return_value.items = []
@@ -322,7 +329,9 @@ class _TalosHandlerCase(unittest.TestCase):
 
     def _start(self, host_pool, kubelet_capacity, spdk_mem=12 * GIB, env=None):
         """Run the handler with the host pool and kubelet capacity sequences
-        the agent will observe on successive reads (the last value repeats)."""
+        the agent will observe on successive reads (the last value repeats).
+        The host pool is given in bytes; the pre-provisioned check reads it
+        as Hugetlb, the managed flow as NUMA node 0's page count."""
         host = list(host_pool)
         # The first read_node is the Talos detection (_talos_host); the
         # capacity sequence starts with the read after it.
@@ -331,8 +340,24 @@ class _TalosHandlerCase(unittest.TestCase):
         kube_iter = (_node(kube[min(i, len(kube) - 1)]) for i in range(10_000))
         self.core.read_node.side_effect = lambda name: next(kube_iter)
         with patch.dict(os.environ, env or self.env, clear=True), \
-                patch.object(k8s_node.node_utils, 'get_huge_memory', side_effect=lambda: next(host_iter)):
+                patch.object(k8s_node.node_utils, 'get_huge_memory', side_effect=lambda: next(host_iter)), \
+                patch.object(k8s_node, '_talos_nr_hugepages', side_effect=lambda numa: next(host_iter) // (2 * MIB)):
             return k8s_node.spdk_process_start(_body(spdk_mem=spdk_mem))
+
+    def _state(self, numa=0):
+        """The managed flow's record for a NUMA node: (user baseline, last
+        total), None where a file is missing."""
+        out = []
+        for name in (f'hugepages_baseline_node{numa}', f'hugepages_sb_node{numa}'):
+            path = os.path.join(self.state_dir, name)
+            out.append(int(open(path).read()) if os.path.exists(path) else None)
+        return tuple(out)
+
+    def _provisioned(self, user_pages, total_pages, numa=0):
+        """Record a previous managed run: the user's pages and the total it set."""
+        for name, value in ((f'hugepages_baseline_node{numa}', user_pages), (f'hugepages_sb_node{numa}', total_pages)):
+            with open(os.path.join(self.state_dir, name), 'w') as f:
+                f.write(str(value))
 
     def _topology_env(self, **extra):
         env = dict(self.env, CPU_TOPOLOGY_ENABLED='true', SKIP_KUBELET_CONFIGURATION='false', RESERVED_SYSTEM_CPUS='0,1')
@@ -348,6 +373,10 @@ class TestSpdkProcessStartOnTalos(_TalosHandlerCase):
     def setUp(self):
         super().setUp()
         self.env = dict(self.env, TALOS_MACHINE_CONFIG='managed')
+        # A worker the managed flow has provisioned before, with no pages of
+        # the user's own: a 16 GiB host pool then reads as simplyblock's. The
+        # first-sight and shared-host cases below start from a clean record.
+        self._provisioned(user_pages=0, total_pages=8192)
 
     def test_short_pool_is_patched_then_the_kubelet_restarted_then_the_add_proceeds(self):
         """Host pool short, kubelet at zero: the patch Job runs, the agent
@@ -371,7 +400,7 @@ class TestSpdkProcessStartOnTalos(_TalosHandlerCase):
         data, error = self._start(host_pool=[2 * GIB], kubelet_capacity=['0'])
         self.assertFalse(data)
         self.assertIn('after applying the machine config patch', error)
-        self.assertIn('host provides 2048 MiB', error)
+        self.assertIn('NUMA node 0 carries 1024 2 MiB pages, short of 6942', error)
         self.assertEqual(self._talos_jobs(), ['snode-talos-hugepages-worker-1'])
         self.core.create_namespaced_pod.assert_not_called()
 
@@ -470,6 +499,74 @@ class TestSpdkProcessStartOnTalos(_TalosHandlerCase):
             data, error = k8s_node.spdk_process_start(_body(spdk_mem=12 * GIB))
         self.assertIsNone(error, error)
         huge.assert_not_called()
+
+    # --- the user's own pages (the baseline the sysfs writer keeps elsewhere) ---
+
+    def _fresh_host(self):
+        for name in os.listdir(self.state_dir):
+            os.remove(os.path.join(self.state_dir, name))
+
+    def _patch_targets(self):
+        [job] = [j for j in self._jobs_created() if j['metadata']['name'].startswith('snode-talos-hugepages-')]
+        sysfs = json.loads(job['spec']['template']['spec']['containers'][0]['args'][-1])['machine']['sysfs']
+        return {int(k.split('.')[3].removeprefix('node')): int(v) for k, v in sysfs.items()}
+
+    def test_first_sight_adds_simplyblocks_pages_on_top_of_the_hosts(self):
+        """A worker never seen before carries 1024 pages of somebody else's:
+        the patch sets 1024 + 6942, not 6942, and the record says whose is
+        which."""
+        self._fresh_host()
+        data, error = self._start(host_pool=[2 * GIB, 7966 * 2 * MIB], kubelet_capacity=['0', '16Gi'])
+        self.assertIsNone(error, error)
+        self.assertEqual(self._patch_targets(), {0: 1024 + 6942})
+        self.assertEqual(self._state(), (1024, 7966))
+
+    def test_a_pool_that_already_covers_the_pod_is_not_taken_for_it(self):
+        """16 GiB of the user's pages cover the 12 GiB pod, and the old flow
+        would have applied nothing; now that pool is the baseline and
+        simplyblock's own pages go on top of it."""
+        self._fresh_host()
+        data, error = self._start(host_pool=[16 * GIB, (8192 + 6942) * 2 * MIB], kubelet_capacity=['16Gi', '30Gi'])
+        self.assertIsNone(error, error)
+        self.assertEqual(self._talos_jobs(), ['snode-talos-hugepages-worker-1', 'snode-talos-kubelet-worker-1'])
+        self.assertEqual(self._patch_targets(), {0: 8192 + 6942})
+        self.assertEqual(self._state(), (8192, 8192 + 6942))
+
+    def test_a_reboot_does_not_stack_a_second_allocation(self):
+        """Talos re-applies the machine config on boot, so the host comes
+        back with the full total; with the record kept across the reboot
+        that is not read as the user's pages."""
+        self._provisioned(user_pages=1024, total_pages=7966)
+        data, error = self._start(host_pool=[7966 * 2 * MIB], kubelet_capacity=['16Gi'])
+        self.assertIsNone(error, error)
+        self.assertEqual(self._talos_jobs(), [])
+        self.assertEqual(self._state(), (1024, 7966))
+
+    def test_a_manual_increase_is_absorbed_into_the_users_share(self):
+        self._provisioned(user_pages=1024, total_pages=7966)
+        data, error = self._start(host_pool=[(7966 + 1000) * 2 * MIB], kubelet_capacity=['16Gi'])
+        self.assertIsNone(error, error)
+        self.assertEqual(self._talos_jobs(), [])
+        self.assertEqual(self._state(), (2024, 8966))
+
+    def test_the_pool_is_never_shrunk(self):
+        """The host holds 8192 pages of simplyblock's from a larger sizing;
+        6942 is what it needs now. No patch, and the surplus is recorded as
+        simplyblock's rather than left to read as the user's next time."""
+        self._provisioned(user_pages=0, total_pages=8192)
+        data, error = self._start(host_pool=[16 * GIB], kubelet_capacity=['16Gi'])
+        self.assertIsNone(error, error)
+        self.assertEqual(self._talos_jobs(), [])
+        self.assertEqual(self._state(), (0, 8192))
+
+    def test_a_host_whose_pool_cannot_be_read_is_refused_before_any_job(self):
+        with patch.object(k8s_node, '_talos_nr_hugepages', side_effect=OSError('No such file or directory')):
+            with patch.dict(os.environ, self.env, clear=True):
+                self.core.read_node.return_value = _node('0')
+                data, error = k8s_node.spdk_process_start(_body(spdk_mem=12 * GIB))
+        self.assertFalse(data)
+        self.assertIn("cannot read the host's huge-page pool", error)
+        self.create_job.assert_not_called()
 
     # --- kubelet CPU topology through the Talos API ---
 
@@ -596,6 +693,13 @@ class TestSpdkProcessStartOnPreprovisionedTalos(_TalosHandlerCase):
         self.assertIn("'talosctl -n <node ip> service kubelet restart'", error)
         self.assertNotIn('patch mc', error)
         self._nothing_applied()
+
+    def test_the_pool_is_the_users_and_no_baseline_is_kept(self):
+        """Pre-provisioned verifies the pool as a whole and never records
+        whose pages they are: the sizing is the operator's."""
+        data, error = self._start(host_pool=[16 * GIB], kubelet_capacity=['16Gi'])
+        self.assertIsNone(error, error)
+        self.assertEqual(os.listdir(self.state_dir), [])
 
     def test_pool_and_kubelet_sufficient_proceeds_without_any_credentials(self):
         data, error = self._start(host_pool=[16 * GIB], kubelet_capacity=['16Gi'])

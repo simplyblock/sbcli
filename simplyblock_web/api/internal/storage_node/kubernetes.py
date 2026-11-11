@@ -716,10 +716,11 @@ def _hugepage_shortfall(host_hugetlb_bytes, required_mib):
     pages than the SPDK pod is about to request, or None when it carries
     enough.
 
-    Used where the node cannot write the pages itself (Talos), both to decide
-    whether anything has to be applied and to judge the result. Without it
-    the pod would sit Pending on 'Insufficient hugepages-2Mi' with nothing
-    naming the number. ``host_hugetlb_bytes`` is Hugetlb from /proc/meminfo:
+    Used where the node may not write the pages itself (a Talos host with a
+    pre-provisioned machine config) to decide whether the add can go ahead.
+    Without it the pod would sit Pending on 'Insufficient hugepages-2Mi'
+    with nothing naming the number. The managed flow sizes per NUMA node
+    instead (_talos_managed_pool). ``host_hugetlb_bytes`` is Hugetlb from /proc/meminfo:
     the pool across every page size and NUMA node, so this is a lower bound
     -- it can only pass a pod that at least fits the host as a whole.
     """
@@ -790,6 +791,85 @@ _TALOS_JOB_TIMEOUT_S = 300
 _TALOS_HUGEPAGE_WAIT_S = 240
 _TALOS_HUGEPAGE_POLL_S = 5
 
+# Where the managed Talos flow keeps the user's huge-page baseline per NUMA
+# node (see _talos_managed_pool). The agent's /etc/simplyblock is the host's
+# /var/simplyblock, on the partition Talos keeps across reboots, and it has to
+# be: the machine config re-applies the whole pool after a reboot, so a
+# baseline kept on a tmpfs (where the sysfs writer keeps its own, rightly --
+# a reboot zeroes its pool) would count simplyblock's pages as the user's on
+# every boot and the pool would grow by one allocation per reboot.
+_TALOS_HUGEPAGES_STATE_DIR = os.path.dirname(constants.NODES_CONFIG_FILE)
+
+
+def _talos_nr_hugepages(numa):
+    """The 2 MiB pages NUMA node ``numa`` of the host carries right now, read
+    from the host's sysfs (the agent mounts it at /sys). Raises OSError when
+    the file cannot be read, which on a NUMA node the node config names is a
+    host the add must not guess about."""
+    path = f"/sys/devices/system/node/node{numa}/hugepages/hugepages-2048kB/nr_hugepages"
+    with open(path) as f:
+        return int(f.read().strip())
+
+
+def _talos_managed_pool(pages_per_numa):
+    """Per NUMA node of ``pages_per_numa`` (simplyblock's own sizing, see
+    _hugepages_per_numa): the pages the host carries now, the user's share of
+    them, and the total the machine config has to hold -- the user's share
+    plus simplyblock's pages -- as ``{numa: (current, user, target)}``.
+
+    The user's share is what the sysfs writer on other hosts calls the
+    baseline (core_utils.user_hugepages_baseline): what the host carried the
+    first time simplyblock saw it, plus any later manual increase. Without
+    it the patch would set the pool to simplyblock's number and a host
+    shared with another huge-page consumer would lose that consumer's pages
+    -- or, when that consumer's pages already covered the SPDK pod, be left
+    with a pool two workloads then fight over."""
+    pool = {}
+    for numa, sb_pages in sorted(pages_per_numa.items()):
+        current = _talos_nr_hugepages(numa)
+        user = core_utils.user_hugepages_baseline(numa, current, _TALOS_HUGEPAGES_STATE_DIR)
+        pool[numa] = (current, user, user + sb_pages)
+    return pool
+
+
+def _talos_pool_shortfall(pool):
+    """The NUMA nodes of a _talos_managed_pool whose host count is below
+    the target, as 'NUMA node N carries X 2 MiB pages, short of Y' phrases,
+    or an empty list when every node holds its target."""
+    return [f"NUMA node {numa} carries {current} 2 MiB pages, short of {target}"
+            for numa, (current, _, target) in sorted(pool.items()) if current < target]
+
+
+def _save_talos_pool(pool):
+    """Record, per NUMA node, the total the host holds once the managed flow
+    is done with it, which the next run measures the user's changes against
+    (core_utils.save_sb_hugepages_allocation). The pool is never shrunk --
+    a node config sized down leaves its surplus in place rather than
+    reclaiming pages another consumer may have started using -- so the
+    recorded total is the larger of the target and what the host carries,
+    or the surplus would read as the user's pages on the next run and be
+    added to on top."""
+    for numa, (current, _, target) in pool.items():
+        if not core_utils.save_sb_hugepages_allocation(numa, max(current, target), _TALOS_HUGEPAGES_STATE_DIR):
+            logger.error("NUMA node %s: the huge-page total could not be recorded; the next run will "
+                         "read simplyblock's pages as the user's", numa)
+
+
+def _wait_for_talos_pool(pool):
+    """Block until every NUMA node of ``pool`` carries its target, or return
+    the message to fail with. Talos writes the kernel parameter
+    asynchronously after the machine config patch is accepted, so the pool
+    appears some seconds after the patch Job completes."""
+    deadline = time.monotonic() + _TALOS_HUGEPAGE_WAIT_S
+    while True:
+        short = _talos_pool_shortfall(
+            {numa: (_talos_nr_hugepages(numa), user, target) for numa, (_, user, target) in pool.items()})
+        if not short:
+            return None
+        if time.monotonic() >= deadline:
+            return f"after applying the machine config patch, {'; '.join(short)}"
+        time.sleep(_TALOS_HUGEPAGE_POLL_S)
+
 
 def _talos_api_access_missing(k8s_core_v1, namespace, name):
     """None when the Talos API access Secret is there (or cannot be
@@ -819,21 +899,6 @@ def _kubelet_hugepages_mib(k8s_core_v1, node_name):
     kubelet is restarted."""
     node = k8s_core_v1.read_node(node_name)
     return _quantity_to_mib((node.status.capacity or {}).get('hugepages-2Mi'))
-
-
-def _wait_for_host_hugepages(required_mib):
-    """Block until the host's pool covers the pod's request, or return the
-    message to fail with. Talos writes the kernel parameter asynchronously
-    after the machine config patch is accepted, so the pool appears some
-    seconds after the patch Job completes."""
-    deadline = time.monotonic() + _TALOS_HUGEPAGE_WAIT_S
-    while True:
-        shortfall = _hugepage_shortfall(node_utils.get_huge_memory(), required_mib)
-        if shortfall is None:
-            return None
-        if time.monotonic() >= deadline:
-            return f"after applying the machine config patch, {shortfall}"
-        time.sleep(_TALOS_HUGEPAGE_POLL_S)
 
 
 def _wait_for_kubelet_hugepages(k8s_core_v1, node_name, required_mib):
@@ -958,16 +1023,39 @@ def _provision_talos_hugepages(required_mib, node_name, namespace, values):
     kubelet restart. With the machine config pre-provisioned (the default,
     see _talos_machine_config_managed) nothing is ever applied: a short
     pool fails the add with the patch to apply.
+
+    The two modes size the host differently. Pre-provisioned verifies the
+    pool as a whole: it is the operator's, and it only has to cover the SPDK
+    pod. Managed owns its part of the pool and adds it on top of the user's
+    (_talos_managed_pool), per NUMA node: the host is short whenever a NUMA
+    node carries less than the user's pages plus simplyblock's, so a pool
+    another consumer reserved is never taken for the SPDK pod, and never
+    overwritten by the patch either.
     """
     k8s_core_v1 = core_utils.get_k8s_core_client()
-    host_short = _hugepage_shortfall(node_utils.get_huge_memory(), required_mib) is not None
     kubelet_short = _kubelet_hugepages_mib(k8s_core_v1, node_name) < required_mib
-    if not host_short and not kubelet_short:
-        logger.info("Huge-page pool on '%s' already covers the SPDK pod's %s MiB; nothing to apply",
-                    node_name, required_mib)
-        return None
     if not _talos_machine_config_managed():
+        host_short = _hugepage_shortfall(node_utils.get_huge_memory(), required_mib) is not None
+        if not host_short and not kubelet_short:
+            logger.info("Huge-page pool on '%s' already covers the SPDK pod's %s MiB; nothing to apply",
+                        node_name, required_mib)
+            return None
         return _preprovisioned_hugepage_refusal(required_mib, node_name, host_short)
+
+    pages_per_numa, err = _configured_pages_per_numa()
+    if err:
+        return err
+    try:
+        pool = _talos_managed_pool(pages_per_numa)
+    except OSError as e:
+        return f"Talos node '{node_name}': cannot read the host's huge-page pool: {e}"
+    host_short = bool(_talos_pool_shortfall(pool))
+    if not host_short and not kubelet_short:
+        logger.info("Huge-page pool on '%s' already holds the user's pages plus simplyblock's per NUMA node "
+                    "(%s) and the kubelet advertises it; nothing to apply",
+                    node_name, {numa: f"{current} = {user} + {target - user}" for numa, (current, user, target) in pool.items()})
+        _save_talos_pool(pool)
+        return None
 
     api_access_name = os.environ.get("TALOS_API_SECRET") or constants.TALOS_API_SECRET
     missing = _talos_api_access_missing(k8s_core_v1, namespace, api_access_name)
@@ -978,19 +1066,19 @@ def _provision_talos_hugepages(required_mib, node_name, namespace, values):
                       TALOS_API_SECRET=api_access_name)
 
     if host_short:
-        pages_per_numa, err = _configured_pages_per_numa()
-        if err:
-            return err
-        logger.info("Reserving huge pages on Talos node '%s' through the Talos API: %s 2 MiB pages per NUMA node",
-                    node_name, pages_per_numa)
-        job_values["TALOS_PATCH"] = json.dumps(_talos_sysfs_patch(pages_per_numa), separators=(',', ':'))
+        targets = {numa: target for numa, (_, _, target) in pool.items()}
+        logger.info("Reserving huge pages on Talos node '%s' through the Talos API, per NUMA node: %s "
+                    "(2 MiB pages, the user's own pages kept on top: %s)",
+                    node_name, targets, {numa: user for numa, (_, user, _) in pool.items()})
+        job_values["TALOS_PATCH"] = json.dumps(_talos_sysfs_patch(targets), separators=(',', ':'))
         err = _run_talos_job("patch", node_name, namespace, job_values)
         if err:
             return err
-        err = _wait_for_host_hugepages(required_mib)
+        err = _wait_for_talos_pool(pool)
         if err:
             return err
         kubelet_short = True  # the kubelet booted before this pool existed
+    _save_talos_pool(pool)
 
     if kubelet_short:
         logger.info("Restarting the kubelet on Talos node '%s' so it advertises the huge-page pool", node_name)
