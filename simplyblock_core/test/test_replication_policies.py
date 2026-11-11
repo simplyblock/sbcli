@@ -1637,3 +1637,93 @@ def test_stop_guard_also_uses_truthiness():
     src = inspect.getsource(lvol_controller.replication_stop)
     guard = [ln for ln in src.splitlines() if "replication_policy_id" in ln][0]
     assert "is not None" not in guard, guard.strip()
+
+
+class _FakeGroupPeer:
+    """The peer control plane of a split target: answers describe from a dict
+    of copy id -> SnapshotState and records each call."""
+
+    cluster_id = "CL_TGT"
+
+    def __init__(self, states):
+        self._states = states
+        self.calls = []
+
+    def describe(self, request):
+        from simplyblock_core.peer.protocol import DescribeResponse, SnapshotState
+        self.calls.append(sorted(request.snapshot_ids))
+        return DescribeResponse(snapshots=[
+            self._states.get(sid, SnapshotState(snapshot_id=sid, exists=False))
+            for sid in request.snapshot_ids])
+
+
+def _split_group(monkeypatch, db, peer):
+    """A two-member group whose policy targets a cluster on a peer control
+    plane: only the SOURCE half is in this database (no T* records)."""
+    monkeypatch.setattr(LVol, "write_to_db", lambda self, kv=None: None)
+    target_id = rpc.add_target("CL_SRC", "site-b", "CL_TGT")
+    policy_id = rpc.add_policy("CL_SRC", "group-first", target_id)
+    # Made a peer target afterwards: add_policy would ask a real peer for /info.
+    db.get_replication_target_by_id(target_id).peer_endpoint = "http://cp-b:15000"
+    monkeypatch.setattr(rpc, "peer_for_target", lambda target: peer)
+    group = _cg_group(policy_id, ["LV1", "LV2"], last_seq=2)
+    db._groups.append(group)
+    lv1, lv2 = _lvol("LV1", policy_id=policy_id), _lvol("LV2", policy_id=policy_id)
+    lv1.group_id = lv2.group_id = group.get_id()
+    db._lvols.extend([lv1, lv2])
+    db._snapshots.extend([
+        _group_snap("S1_LV1", lv1, group, 1, target="T1_LV1"),
+        _group_snap("S1_LV2", lv2, group, 1, target="T1_LV2"),
+        _group_snap("S2_LV1", lv1, group, 2, target="T2_LV1"),
+        _group_snap("S2_LV2", lv2, group, 2, target="T2_LV2"),
+    ])
+    db._tasks.extend([_done_replication_task(s) for s in ("S1_LV1", "S1_LV2", "S2_LV1", "S2_LV2")])
+    return policy_id
+
+
+def test_latest_generation_asks_the_peer_for_the_copies(monkeypatch):
+    """Split control planes (run 20261111-1457 kept groups off): the copies'
+    records live in the peer's control plane, so a local lookup finds none and
+    no generation would qualify. The peer judges them; generation 2 lost LV2's
+    copy to retention there, so generation 1 is the common cut, returned as
+    the peer's records."""
+    from simplyblock_core.peer.protocol import SnapshotState
+    peer = _FakeGroupPeer({
+        sid: SnapshotState(snapshot_id=sid, exists=True, pool_id="POOL_B", lvol_id="REP",
+                           group_id="CG_B", group_seq=int(sid[1]), size=1 << 30)
+        for sid in ("T1_LV1", "T1_LV2", "T2_LV1")})
+    peer._states["T2_LV2"] = SnapshotState(snapshot_id="T2_LV2", exists=True, in_deletion=True)
+    db = _FakeDB()
+    _install(monkeypatch, db)
+    policy_id = _split_group(monkeypatch, db, peer)
+
+    seq, members = rpc.latest_replicated_generation(policy_id)
+
+    assert seq == 1
+    assert {k: v.get_id() for k, v in members.items()} == {"LV1": "T1_LV1", "LV2": "T1_LV2"}
+    assert all(m.cluster_id == "CL_TGT" and m.pool_uuid == "POOL_B" for m in members.values()), \
+        "a clone of the copy needs the peer cluster and pool"
+    assert peer.calls[0] == ["T1_LV1", "T1_LV2", "T2_LV1", "T2_LV2"], "one describe judges every candidate"
+
+
+def test_latest_generation_refuses_when_the_peer_lost_a_copy_meanwhile(monkeypatch):
+    """The copies are asked for again after the cut is chosen; one pruned in
+    between is a refusal to retry, never a mixed or missing member."""
+    from simplyblock_core.peer.protocol import DescribeResponse, SnapshotState
+    peer = _FakeGroupPeer({sid: SnapshotState(snapshot_id=sid, exists=True)
+                           for sid in ("T1_LV1", "T1_LV2", "T2_LV1", "T2_LV2")})
+    first = peer.describe
+    answers = iter([None, "pruned"])
+
+    def describe(request):
+        if next(answers) == "pruned":
+            return DescribeResponse(snapshots=[SnapshotState(snapshot_id=sid, exists=sid != "T2_LV2")
+                                               for sid in request.snapshot_ids])
+        return first(request)
+    peer.describe = describe
+    db = _FakeDB()
+    _install(monkeypatch, db)
+    policy_id = _split_group(monkeypatch, db, peer)
+
+    with pytest.raises(ReplicationConfigError, match="LV2"):
+        rpc.latest_replicated_generation(policy_id)

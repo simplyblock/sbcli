@@ -6013,29 +6013,23 @@ def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snaps
     return new_lvol, None
 
 
-def _newest_peer_copy(peer, snaps):
-    """The first of *snaps* (newest first) whose copy on *peer*'s cluster exists
-    and is not in deletion, as a detached SnapShot of that copy; or None.
+def peer_usable_copies(peer, copy_ids):
+    """The copies among *copy_ids* that exist on *peer*'s cluster and are not
+    in deletion, as {copy_id: detached SnapShot}.
 
     The copies' records live in the peer's control plane, so one describe call
-    asks about all of them. The returned record is never written here.
+    asks about all of them. The returned records are never written here.
     """
-    if not snaps:
-        return None
-    answer = peer.describe(DescribeRequest(
-        snapshot_ids=[s.target_replicated_snap_uuid for s in snaps]))
-    states = {s.snapshot_id: s for s in answer.snapshots}
-    for snap in snaps:
-        state = states.get(snap.target_replicated_snap_uuid)
-        if state is None or not state.exists:
-            logger.warning(
-                f"Fail-over candidate {snap.get_id()}: copy {snap.target_replicated_snap_uuid} "
-                f"is gone from peer cluster {peer.cluster_id}; trying an older snapshot")
+    if not copy_ids:
+        return {}
+    answer = peer.describe(DescribeRequest(snapshot_ids=list(copy_ids)))
+    usable = {}
+    for state in answer.snapshots:
+        if not state.exists:
+            logger.warning(f"Copy {state.snapshot_id} is gone from peer cluster {peer.cluster_id}")
             continue
         if state.in_deletion:
-            logger.warning(
-                f"Fail-over candidate {snap.get_id()}: copy {state.snapshot_id} on peer cluster "
-                f"{peer.cluster_id} is in deletion; trying an older snapshot")
+            logger.warning(f"Copy {state.snapshot_id} on peer cluster {peer.cluster_id} is in deletion")
             continue
         copy_ = SnapShot()
         copy_.uuid = state.snapshot_id
@@ -6050,7 +6044,20 @@ def _newest_peer_copy(peer, snaps):
         if state.lvol_id:
             copy_.lvol = LVol()
             copy_.lvol.uuid = state.lvol_id
-        return copy_
+        usable[state.snapshot_id] = copy_
+    return usable
+
+
+def _newest_peer_copy(peer, snaps):
+    """The first of *snaps* (newest first) whose copy on *peer*'s cluster exists
+    and is not in deletion, as a detached SnapShot of that copy; or None."""
+    copies = peer_usable_copies(peer, [s.target_replicated_snap_uuid for s in snaps])
+    for snap in snaps:
+        copy_ = copies.get(snap.target_replicated_snap_uuid)
+        if copy_ is not None:
+            return copy_
+        logger.warning(f"Fail-over candidate {snap.get_id()}: no usable copy on peer cluster "
+                       f"{peer.cluster_id}; trying an older snapshot")
     return None
 
 

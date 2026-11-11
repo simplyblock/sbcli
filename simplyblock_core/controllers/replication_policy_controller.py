@@ -1279,8 +1279,11 @@ def _failed_home_relationship(lvol_id):
     return None
 
 
-def _resolve_group_failover_generation(policy, volumes):
+def _resolve_group_failover_generation(policy, volumes, peer=None):
     """The one generation every pending member fails over to.
+
+    With *peer* (the policy's target is on another control plane), whether a
+    copy still exists on the target is the peer's answer, not this database's.
 
     A consistency group restores as ONE crash-consistent cut, so every member
     must clone from a snapshot of the SAME group generation. Selecting per
@@ -1358,7 +1361,7 @@ def _resolve_group_failover_generation(policy, volumes):
         and task.status == JobSchedule.STATUS_DONE
     }
 
-    by_seq: dict = {}
+    shipped = []
     # `group_id` carries no index of its own; the cluster scope is what keeps
     # this off a cluster-wide snapshot scan.
     for snap in db.get_snapshots(group.cluster_id):
@@ -1370,14 +1373,26 @@ def _resolve_group_failover_generation(policy, volumes):
             continue
         if snap.get_id() not in replicated or not snap.target_replicated_snap_uuid:
             continue
-        try:
-            target_copy = db.get_snapshot_by_id(snap.target_replicated_snap_uuid)
-        except KeyError:
-            continue
-        if (target_copy.status == SnapShot.STATUS_IN_DELETION
-                or getattr(target_copy, "deleted", False)):
-            continue
-        by_seq.setdefault(seq, {})[lvol_id] = snap.get_id()
+        shipped.append((seq, lvol_id, snap))
+
+    if peer is not None:
+        usable = set(lvol_controller.peer_usable_copies(
+            peer, [snap.target_replicated_snap_uuid for _, _, snap in shipped]))
+    else:
+        usable = set()
+        for _, _, snap in shipped:
+            try:
+                target_copy = db.get_snapshot_by_id(snap.target_replicated_snap_uuid)
+            except KeyError:
+                continue
+            if (target_copy.status != SnapShot.STATUS_IN_DELETION
+                    and not getattr(target_copy, "deleted", False)):
+                usable.add(snap.target_replicated_snap_uuid)
+
+    by_seq: dict = {}
+    for seq, lvol_id, snap in shipped:
+        if snap.target_replicated_snap_uuid in usable:
+            by_seq.setdefault(seq, {})[lvol_id] = snap.get_id()
 
     candidates = (sorted(incumbent_seqs) if incumbent_seqs
                   else sorted(by_seq, reverse=True))
@@ -1399,6 +1414,16 @@ def _resolve_group_failover_generation(policy, volumes):
         f"No group generation of policy {policy.policy_name} is fully "
         f"replicated for all {len(pending_ids)} pending member(s); refusing a "
         f"mixed-generation fail-over{missing}")
+
+
+def _policy_target_peer(policy):
+    """The peer client of *policy*'s target when that target is on another
+    control plane; None for a target in this control plane (or none at all)."""
+    try:
+        target = db.get_replication_target_by_id(policy.target_id)
+    except KeyError:
+        return None
+    return peer_for_target(target) if target.has_peer() else None
 
 
 def latest_replicated_generation(policy_id: str) -> tuple[int, dict[str, SnapShot]]:
@@ -1430,13 +1455,26 @@ def latest_replicated_generation(policy_id: str) -> tuple[int, dict[str, SnapSho
     if not group_members:
         raise ReplicationConfigError(
             f"Policy {policy.policy_name} has no consistency group")
-    seq, covered = _resolve_group_failover_generation(policy, group_members)
+    peer = _policy_target_peer(policy)
+    seq, covered = _resolve_group_failover_generation(policy, group_members, peer=peer)
     if not covered:
         raise ReplicationConfigError(
             f"Policy {policy.policy_name} has no member left to resolve a "
             f"generation for; every member has already failed over")
 
     members = {}
+    if peer is not None:
+        # The copies live in the peer's control plane: asked again for the
+        # same reason the local branch re-fetches (retention may have run).
+        wanted = {lvol_id: db.get_snapshot_by_id(sid).target_replicated_snap_uuid
+                  for lvol_id, sid in covered.items()}
+        copies = lvol_controller.peer_usable_copies(peer, list(wanted.values()))
+        gone = sorted(lvol_id for lvol_id, cid in wanted.items() if cid not in copies)
+        if gone:
+            raise ReplicationConfigError(
+                f"Generation {seq} of policy {policy.policy_name} lost the copies of "
+                f"{', '.join(gone)} on peer cluster {peer.cluster_id}; try again")
+        return seq, {lvol_id: copies[cid] for lvol_id, cid in wanted.items()}
     for lvol_id, source_snap_id in covered.items():
         source_snap = db.get_snapshot_by_id(source_snap_id)
         # Re-fetched rather than carried from the scan above: the scan proved

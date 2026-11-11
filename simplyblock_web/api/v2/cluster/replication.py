@@ -272,6 +272,8 @@ def get_latest_replicated_generation(cluster: Cluster,
             policy.get_id())
     except ReplicationConfigError as e:
         raise _config_error(e)
+    except PeerError as e:
+        raise HTTPException(status_code=502, detail=f"Peer control plane: {e}")
     return ReplicatedGenerationDTO(
         group_seq=seq,
         members=[ReplicatedSnapshotDTO.from_model(snap) for snap in members.values()],

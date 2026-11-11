@@ -530,3 +530,14 @@ class TestLatestReplicatedGeneration:
         response = client.get(POLICIES_URL + f'{REPLICATION_POLICY_ID}/latest-generation')
 
         assert response.status_code == 400
+
+    def test_unreachable_peer_is_a_502(self, client, db, cluster, replication_policy,
+                                       replication_policy_controller):
+        """Split control planes: the copies are on the peer's, which is down."""
+        replication_policy_controller.latest_replicated_generation.side_effect = \
+            PeerUnreachableError('connection refused')
+
+        response = client.get(POLICIES_URL + f'{REPLICATION_POLICY_ID}/latest-generation')
+
+        assert response.status_code == 502
+        assert 'Peer control plane' in response.json()['detail']
