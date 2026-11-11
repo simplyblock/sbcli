@@ -204,6 +204,18 @@ def task_lease_heartbeat(task, owner=None):
     def _beat():
         while not stop.wait(constants.TASK_LEASE_HEARTBEAT_SEC):
             try:
+                # A control plane that stopped leading the stretched cluster
+                # (docs/stretched-control-plane.md) lets its task leases go
+                # stale instead of refreshing them: the new leader's runner
+                # then resumes the task, which is the hand-over the lease
+                # was designed for. Imported lazily: the controller imports
+                # the DB layer, which this module's importers already pull in.
+                from simplyblock_core.controllers import control_plane_controller
+                enabled, reason = control_plane_controller.services_enabled()
+                if not enabled:
+                    logger.warning(f"Lease heartbeat of task {task.uuid} stopped: "
+                                   f"this control plane does not lead ({reason})")
+                    return
                 if not refresh_task_lease(task, owner):
                     return
             except Exception as e:

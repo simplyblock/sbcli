@@ -1,7 +1,7 @@
 import time
 
 from simplyblock_core import constants, db_controller, utils
-from simplyblock_core.controllers import lvol_events
+from simplyblock_core.controllers import control_plane_controller, lvol_events
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.stats import LVolStatObject, PoolStatObject
@@ -279,6 +279,7 @@ def collect_lvol_record(cluster, lvol, snode, rpc_client):
 def main():
     logger.info("Starting stats collector...")
     while True:
+        control_plane_controller.wait_until_services_enabled("lvol-stat-collector")
         try:
             db.get_clusters()
         except Exception as e:

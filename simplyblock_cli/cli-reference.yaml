@@ -1052,6 +1052,23 @@ commands:
             dest: sync_replication
             type: bool
             action: store_true
+          - name: "--stretched-control-plane"
+            help: "Run a control plane on each of the cluster's two sites over one FoundationDB, one of them leading (docs/stretched-control-plane.md). Requires --ha-type ha and one of: --sync-replication (any n+k over two sites); --enable-failure-domain with 1+1 (two sites) or 1+2 (three storage sites), where a node's failure domain is its site. Deploy-time only."
+            dest: stretched_control_plane
+            type: bool
+            action: store_true
+          - name: "--site"
+            help: "With --stretched-control-plane: the site this control plane runs in (1-63 characters from [A-Za-z0-9._-])."
+            dest: site
+            type: str
+          - name: "--site-api-endpoint"
+            help: "With --stretched-control-plane: this site's API endpoint (https://host:port), where the other site's standby control plane redirects mutating calls."
+            dest: site_api_endpoint
+            type: str
+          - name: "--leader-site"
+            help: "With --stretched-control-plane or --sync-replication: the site that leads (defaults to --site on a stretched control plane)."
+            dest: leader_site
+            type: str
           - name: "--device-mode"
             help: "Storage-device mode for the whole cluster. 'nvme' (default): NVMe PCIe devices auto-detected and attached via the SPDK nvme driver. 'lblk': arbitrary Linux block devices wrapped in SPDK AIO bdevs; devices are selected at 'sn configure' by name or serial number. Deploy-time only; inter-node fabric (nvme-tcp/rdma) is unaffected."
             dest: device_mode
@@ -1325,6 +1342,23 @@ commands:
             dest: sync_replication
             type: bool
             action: store_true
+          - name: "--stretched-control-plane"
+            help: "Run a control plane on each of the cluster's two sites over one FoundationDB, one of them leading (docs/stretched-control-plane.md). Requires --ha-type ha and one of: --sync-replication (any n+k over two sites); --enable-failure-domain with 1+1 (two sites) or 1+2 (three storage sites), where a node's failure domain is its site. Deploy-time only."
+            dest: stretched_control_plane
+            type: bool
+            action: store_true
+          - name: "--site"
+            help: "With --stretched-control-plane: the site this control plane runs in (1-63 characters from [A-Za-z0-9._-])."
+            dest: site
+            type: str
+          - name: "--site-api-endpoint"
+            help: "With --stretched-control-plane: this site's API endpoint (https://host:port), where the other site's standby control plane redirects mutating calls."
+            dest: site_api_endpoint
+            type: str
+          - name: "--leader-site"
+            help: "With --stretched-control-plane or --sync-replication: the site that leads (defaults to --site on a stretched control plane)."
+            dest: leader_site
+            type: str
           - name: "--device-mode"
             help: "Storage-device mode for the whole cluster. 'nvme' (default): NVMe PCIe devices auto-detected and attached via the SPDK nvme driver. 'lblk': arbitrary Linux block devices wrapped in SPDK AIO bdevs; devices are selected at 'sn configure' by name or serial number. Deploy-time only; inter-node fabric (nvme-tcp/rdma) is unaffected."
             dest: device_mode
@@ -2842,6 +2876,62 @@ commands:
               is ignored.
             dest: alerting_config_path
             type: str
+          - name: "--site"
+            help: "Stretched control plane: the site this control plane runs in (required on a cluster created with --stretched-control-plane, refused otherwise)."
+            dest: site
+            type: str
+          - name: "--api-endpoint"
+            help: "Stretched control plane: this site's API endpoint (https://host:port), where the other site's standby control plane redirects mutating calls."
+            dest: api_endpoint
+            type: str
+      - name: status
+        help: "Stretched control plane: the mode of this control plane, the lease, and the readiness of every site for a leadership move."
+        arguments:
+          - name: "cluster_id"
+            help: "The cluster id."
+            dest: cluster_id
+            type: str
+            completer: _completer_get_cluster_list
+          - name: "--json"
+            help: "Print outputs in json format."
+            dest: json
+            type: bool
+            action: store_true
+      - name: set-leader-site
+        help: "Stretched control plane: the planned leadership move. Refused while a readiness gate of the site is red (FoundationDB region lag, nodes not online, the site recorded lost, a site activation, sync replication not settled, tasks running) unless --force."
+        arguments:
+          - name: "cluster_id"
+            help: "The cluster id."
+            dest: cluster_id
+            type: str
+            completer: _completer_get_cluster_list
+          - name: "site"
+            help: "The site whose control plane should lead."
+            dest: site
+            type: str
+          - name: "--force"
+            help: "Move even while a readiness gate is red (audited)."
+            dest: force
+            type: bool
+            action: store_true
+      - name: takeover
+        help: "Stretched control plane: the unplanned leadership move after the leading site is down. Probes the site declared down and refuses while anything there answers. FoundationDB must answer on the surviving site (after the FDB recovery when the coordinator majority was lost with the leader)."
+        arguments:
+          - name: "cluster_id"
+            help: "The cluster id."
+            dest: cluster_id
+            type: str
+            completer: _completer_get_cluster_list
+          - name: "--site"
+            help: "The surviving site, which takes the lead."
+            dest: site
+            type: str
+            required: true
+          - name: "--confirm-site-down"
+            help: "The leading site confirmed down out of band (power, console, provider status)."
+            dest: confirm_site_down
+            type: str
+            required: true
       - name: list
         help: "Lists all control plane nodes."
         arguments:

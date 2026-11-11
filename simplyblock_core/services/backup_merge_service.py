@@ -5,7 +5,7 @@ and triggers merges when retention limits are exceeded.
 import time
 
 from simplyblock_core import constants, db_controller, utils
-from simplyblock_core.controllers import activation_gate
+from simplyblock_core.controllers import activation_gate, control_plane_controller
 from simplyblock_core.controllers.backup import policy as backup_policy
 from simplyblock_core.models.cluster import Cluster
 
@@ -16,6 +16,7 @@ db = db_controller.DBController()
 def main():
     logger.info("Starting backup merge service...")
     while True:
+        control_plane_controller.wait_until_services_enabled("backup-merge-service")
         clusters = db.get_clusters()
         for cl in clusters:
             if cl.status == Cluster.STATUS_IN_ACTIVATION:

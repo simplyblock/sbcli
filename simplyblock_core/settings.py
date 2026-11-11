@@ -52,6 +52,18 @@ class Settings(BaseSettings):
     tls_key: Path = Path("/etc/simplyblock/tls/tls.key")
     tls_certificate_authority: Path = Path("/etc/simplyblock/tls/ca.crt")
 
+    control_plane_site: Annotated[
+        str,
+        Field(
+            description=(
+                "The site this control plane runs in on a stretched cluster "
+                "(docs/stretched-control-plane.md). Set by the operator on every "
+                "control-plane pod; a Docker management node falls back to its "
+                "MgmtNode record."
+            )
+        ),
+    ] = ""
+
     log_response_bodies: Annotated[
         bool,
         Field(

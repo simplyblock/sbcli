@@ -7,6 +7,7 @@ import time
 from graypy import GELFTCPHandler
 
 from simplyblock_core import constants
+from simplyblock_core.controllers import control_plane_controller
 
 SBCLI_NAME = constants.SIMPLY_BLOCK_CLI_NAME
 
@@ -109,6 +110,7 @@ def main():
     logger.info("Starting SBCLI worker.")
 
     while True:
+        control_plane_controller.wait_until_services_enabled("tasks-cluster-status")
         logger.info("Running cluster commands")
         clusters = list_clusters()
         print(clusters)

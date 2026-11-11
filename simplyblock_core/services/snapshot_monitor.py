@@ -5,6 +5,7 @@ from datetime import datetime
 
 from simplyblock_core import constants, db_controller, migration_turn, utils
 from simplyblock_core.controllers import (
+    control_plane_controller,
     lvol_controller,
     replication_delta,
     replication_snapshot_retire,
@@ -1028,6 +1029,7 @@ def take_due_internal_snapshots(cluster_id, now_ts):
 def main():
     logger.info("Starting LVol monitor...")
     while True:
+        control_plane_controller.wait_until_services_enabled("snapshot-monitor")
         try:
             db.get_clusters()
         except Exception as e:

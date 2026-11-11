@@ -21,6 +21,7 @@ from simplyblock_core.models.backup import (
 )
 from simplyblock_core.models.base_model import BaseModel
 from simplyblock_core.models.cluster import Cluster, DeployConfig, PortReservation
+from simplyblock_core.models.control_plane_lease import ControlPlaneLease
 from simplyblock_core.models.events import EventObj
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_migration import LVolMigration
@@ -621,6 +622,13 @@ class DBController(metaclass=Singleton):
         if node is None:
             raise KeyError(f'No management node found for hostname {hostname}')
         return node
+
+    def get_control_plane_lease(self, cluster_id: str) -> ControlPlaneLease | None:
+        """The stretched control plane's lease of ``cluster_id``, or None
+        when no site has ever held it (docs/stretched-control-plane.md)."""
+        if not cluster_id:
+            raise KeyError('ControlPlaneLease lookup with a blank cluster id')
+        return single_or_none(ControlPlaneLease().read_from_db(self.kv_store, cluster_id))
 
     def get_lvol_stats(self, lvol, limit=20) -> list[LVolStatObject]:
         if isinstance(lvol, str):

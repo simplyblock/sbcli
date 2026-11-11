@@ -1,7 +1,11 @@
 import time
 
 from simplyblock_core import constants, db_controller, utils
-from simplyblock_core.controllers import device_controller, tasks_controller
+from simplyblock_core.controllers import (
+    control_plane_controller,
+    device_controller,
+    tasks_controller,
+)
 from simplyblock_core.controllers.device_controller import CAUSE_LOCAL_FAILURE
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.nvme_device import NVMeDevice
@@ -162,6 +166,7 @@ def _sweep_aio_devices(node) -> None:
 def main():
     logger.info("Starting Device monitor...")
     while True:
+        control_plane_controller.wait_until_services_enabled("device-monitor")
         try:
             db.get_clusters()
         except Exception as e:

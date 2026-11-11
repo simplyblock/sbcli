@@ -43,6 +43,7 @@ import time
 from simplyblock_core import constants, utils
 from simplyblock_core import db_controller as db_mod
 from simplyblock_core.controllers import (
+    control_plane_controller,
     migration_controller,
     migration_events,
     tasks_controller,
@@ -1454,6 +1455,7 @@ def main():
     logger.info("Starting Batch Migration orchestrator task runner...")
 
     while True:
+        control_plane_controller.wait_until_services_enabled("tasks-runner-batch-migration")
         clusters = db.get_clusters()
 
         if not clusters:

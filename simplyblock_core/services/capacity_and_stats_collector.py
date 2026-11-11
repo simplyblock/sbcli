@@ -2,7 +2,7 @@ import statistics
 import time
 
 from simplyblock_core import constants, db_controller, utils
-from simplyblock_core.controllers import device_events
+from simplyblock_core.controllers import control_plane_controller, device_events
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.stats import (
     ClusterStatObject,
@@ -364,6 +364,7 @@ db = db_controller.DBController()
 def main():
     logger.info("Starting capacity and stats collector...")
     while True:
+        control_plane_controller.wait_until_services_enabled("capacity-and-stats-collector")
         try:
             db.get_clusters()
         except Exception as e:

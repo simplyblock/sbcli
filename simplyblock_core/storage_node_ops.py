@@ -101,6 +101,7 @@ from simplyblock_core.utils import (
     dial_backoff,
     hublvol_reconnect,
     nvmf_listener,
+    peer_address,
     pull_docker_image_with_retry,
     rpc_budget,
 )
@@ -4002,16 +4003,16 @@ def validate_node_site(cluster, site) -> str:
         NodeSiteError: the site is missing / malformed on a sync cluster, or
             given on a cluster without sync replication.
     """
-    if not cluster.sync_replication:
+    if not cluster.sync_replication and cluster.stretched_control_plane is not True:
         if site:
             raise NodeSiteError(
                 "--site was given but this cluster was not created with "
-                "--sync-replication; sites exist only on sync-replication clusters")
+                "--sync-replication or --stretched-control-plane; sites exist only on those clusters")
         return ""
     if not site:
         raise NodeSiteError(
-            "this cluster was created with --sync-replication; --site is required "
-            "when adding a node")
+            "this cluster was created with --sync-replication or --stretched-control-plane; "
+            "--site is required when adding a node")
     if not _SITE_PATTERN.fullmatch(site):
         raise NodeSiteError(
             f"invalid site {site!r}: use 1-63 characters from [A-Za-z0-9._-], "
@@ -4044,7 +4045,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
              id_device_by_nqn=False, partition_size="", ha_jm_count=None, format_4k=False,
              spdk_proxy_image=None, spdk_sys_mem=None, expansion=False, failure_domain=None,
              force_format=False, site=None, networks=None,
-             pod_network=False):
+             pod_network=False, node_ip=None):
     """Add the storage node(s) configured on ``node_addr`` to the cluster.
 
     Returns a truthy value on success and False on the legacy failure paths.
@@ -4060,6 +4061,10 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
     if data_nics_list and (networks or pod_network):
         logger.error("data_nics are allowed only when the node is on the host network")
         return False
+    if node_ip:
+        # A node of the other site of a stretched control plane: its name is
+        # that site's DNS, its worker's address is reachable from here.
+        peer_address.register(node_addr, node_ip)
     snode_api = SNodeClient(node_addr)
     node_info, _ = snode_api.info()
     if node_info.get("nodes_config") and node_info["nodes_config"].get("nodes"):
@@ -4160,12 +4165,34 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         # it, so the flag is fixed for the cluster's lifetime). 32-bit int,
         # >= 0 to activate; -1/None means unset.
         if cluster.enable_failure_domain:
-            if failure_domain is None or failure_domain < 0:
+            # ``is True``: unit tests hand a MagicMock cluster in, whose
+            # attributes are all truthy.
+            site_bound_fd = (cluster.stretched_control_plane is True
+                             and not cluster.sync_replication and bool(site))
+            if site_bound_fd:
+                # Stretched control plane over 1+1 / 1+2 with failure domains
+                # (docs/stretched-control-plane.md): the failure domain of a
+                # node IS its site, assigned per site on first use. An explicit
+                # --failure-domain must agree with the site's id.
+                from simplyblock_core.controllers import control_plane_controller
+                try:
+                    site_fd = control_plane_controller.site_failure_domain(cluster_id, site)
+                except ValueError as e:
+                    logger.error(str(e))
+                    return False
+                if failure_domain is not None and failure_domain >= 0 and failure_domain != site_fd:
+                    logger.error(f"--failure-domain {failure_domain} disagrees with site {site!r}, "
+                                 f"whose failure domain is {site_fd} on this stretched cluster; "
+                                 f"omit --failure-domain or pass {site_fd}.")
+                    return False
+                failure_domain_id = site_fd
+            elif failure_domain is None or failure_domain < 0:
                 logger.error("This cluster was created with --enable-failure-domain; "
                              "--failure-domain <id> (a non-negative integer) is required "
                              "when adding a node.")
                 return False
-            failure_domain_id = failure_domain
+            else:
+                failure_domain_id = failure_domain
         else:
             if failure_domain is not None and failure_domain >= 0:
                 logger.error("--failure-domain was given but this cluster does not have the "

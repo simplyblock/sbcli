@@ -26,6 +26,7 @@ services:
       - "/etc/foundationdb:/etc/foundationdb"
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
       FLASK_DEBUG: "False"
       FLASK_ENV: "production"
       FLASK_PORT: 5000
@@ -52,6 +53,7 @@ services:
       - hostnet
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
 
   MgmtNodeMonitor:
     <<: *service-base
@@ -66,6 +68,7 @@ services:
       - hostnet
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
 
   LVolStatsCollector:
     <<: *service-base
@@ -80,6 +83,7 @@ services:
       - hostnet
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
 
   MainDistrEventCollector:
     <<: *service-base
@@ -94,6 +98,7 @@ services:
       - "/etc/foundationdb:/etc/foundationdb"
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
 
   TwoNodeArbiter:
     <<: *service-base
@@ -108,6 +113,7 @@ services:
       - "/etc/foundationdb:/etc/foundationdb"
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
 
   TwoNodeEventCollector:
     <<: *service-base
@@ -122,6 +128,7 @@ services:
       - "/etc/foundationdb:/etc/foundationdb"
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
 
   CapacityAndStatsCollector:
     <<: *service-base
@@ -136,6 +143,7 @@ services:
       - hostnet
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
 
   CapacityMonitor:
     <<: *service-base
@@ -150,6 +158,7 @@ services:
       - hostnet
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
 
   HealthCheck:
     <<: *service-base
@@ -164,6 +173,7 @@ services:
       - hostnet
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
 
   DeviceMonitor:
     <<: *service-base
@@ -178,6 +188,7 @@ services:
       - hostnet
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
 
   LVolMonitor:
     <<: *service-base
@@ -192,6 +203,7 @@ services:
       - hostnet
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
 
   SnapshotMonitor:
     <<: *service-base
@@ -206,12 +218,14 @@ services:
       - hostnet
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
 
   CleanupFDB:
     <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
       LOG_DELETION_INTERVAL: "${LOG_DELETION_INTERVAL}"
     command: "python3 simplyblock_core/workers/cleanup_foundationdb.py"
     deploy:
@@ -235,6 +249,7 @@ services:
       - hostnet
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
 
   TasksRunnerMigration:
     <<: *service-base
@@ -249,6 +264,7 @@ services:
       - hostnet
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
 
   TasksRunnerLVolMigration:
     <<: *service-base
@@ -263,6 +279,7 @@ services:
       - hostnet
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
 
   TasksRunnerBatchMigration:
     <<: *service-base
@@ -277,6 +294,7 @@ services:
       - hostnet
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
 
   TasksRunnerFailedMigration:
     <<: *service-base
@@ -291,6 +309,7 @@ services:
       - hostnet
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
 
   TasksRunnerClusterStatus:
     <<: *service-base
@@ -305,6 +324,7 @@ services:
       - hostnet
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
 
   TasksRunnerNewDeviceMigration:
     <<: *service-base
@@ -319,6 +339,7 @@ services:
       - hostnet
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
 
   TasksNodeAddRunner:
     <<: *service-base
@@ -333,6 +354,7 @@ services:
       - hostnet
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
 
   TasksNodeRemovalRunner:
     <<: *service-base
@@ -347,6 +369,7 @@ services:
       - hostnet
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
 
   TasksRunnerClusterExpand:
     <<: *service-base
@@ -361,6 +384,7 @@ services:
       - hostnet
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
 
   TasksRunnerPortAllow:
     <<: *service-base
@@ -375,6 +399,7 @@ services:
       - hostnet
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
 
   TasksRunnerJCCompResume:
     <<: *service-base
@@ -389,6 +414,7 @@ services:
       - hostnet
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
 
   TasksRunnerSyncResync:
     <<: *service-base
@@ -403,6 +429,7 @@ services:
       - hostnet
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
 
   TasksRunnerSyncPromote:
     <<: *service-base
@@ -417,6 +444,7 @@ services:
       - hostnet
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
 
   TasksRunnerLVolSyncDelete:
     <<: *service-base
@@ -431,6 +459,7 @@ services:
       - hostnet
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
 
   TasksRunnerBackup:
     <<: *service-base
@@ -445,6 +474,7 @@ services:
       - hostnet
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
 
   BackupMergeService:
     <<: *service-base
@@ -459,6 +489,7 @@ services:
       - hostnet
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
 
   SnapshotReplication:
     <<: *service-base
@@ -473,6 +504,7 @@ services:
       - hostnet
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
 
   TasksRunnerReplicationFinal:
     <<: *service-base
@@ -487,6 +519,7 @@ services:
       - hostnet
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
 
   BackupService:
     <<: *service-base
@@ -501,6 +534,7 @@ services:
       - hostnet
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
 
   FDBExporter:
     <<: *service-base
