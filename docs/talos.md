@@ -33,6 +33,44 @@ operator passes it to the node agent as `TALOS_MACHINE_CONFIG`.
 | Pre-provisioned (**default**) | `Preprovisioned` or unset | You, before the node is added | None |
 | Managed | `Managed` | The node, through the Talos API, while it is added | An `os:admin` Secret (see below) |
 
+### Where the mode is set
+
+The mode is a field of the deployment document, `spec.cluster.talosMachineConfig`
+on the `ClusterDeploymentConfig`, next to the cluster's name and sizing. The
+operator copies it to `spec.storageNodes.talosMachineConfig` of the
+StorageCluster it creates, and from there to every node agent as
+`TALOS_MACHINE_CONFIG`. Unset means `Preprovisioned`. The document's CRD accepts
+the field only when `spec.environment` is `Talos`; on any other environment it
+is refused at `kubectl apply`.
+
+```yaml
+apiVersion: storage.simplyblock.io/v1alpha2
+kind: ClusterDeploymentConfig
+spec:
+  environment: Talos
+  cluster:
+    name: mycluster
+    talosMachineConfig: Managed      # Preprovisioned (default) | Managed
+    enableCpuTopology: true          # default true on Talos
+    enableKubeletConfiguration: true # default true on Talos
+```
+
+The two flags below the mode decide whether the kubelet's CPU topology is part
+of it at all (see the next section); a Talos document turns both on unless it
+states otherwise. A document produced by the operator's discovery run states
+none of the three, so a discovered Talos cluster is pre-provisioned with the
+kubelet included.
+
+The mode can be changed on a running cluster by patching the StorageCluster:
+
+```
+kubectl -n simplyblock patch storagecluster mycluster --type=merge \
+  -p '{"spec":{"storageNodes":{"talosMachineConfig":"Managed"}}}'
+```
+
+The node agents roll with the new value and apply it on the next node add or
+restart; nodes that are online stay as they are.
+
 In both modes the node first reads what the worker already has: the host's
 huge-page pool (`/proc/meminfo`), the kubelet's advertised `hugepages-2Mi`
 capacity, and the kubelet's live configuration (`nodes/<name>/proxy/configz`).
