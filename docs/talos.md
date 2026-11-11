@@ -87,11 +87,16 @@ failure, and roll them out. A pool set through `machine.sysctls`
 `vm.nr_hugepages` is honoured as well, as long as it covers the SPDK pod's
 request (`spdk_mem` rounded to 2 MiB plus 512 MiB per pod); do not set both.
 
-Apply with:
+The refusal message carries this YAML; nothing writes a file for you (the host
+has no shell, and the node agent's filesystem is not yours). Save it as
+`patch.yaml` where you run `talosctl` and apply with:
 
 ```
 talosctl -n <node ip> patch mc -p @patch.yaml
 ```
+
+The same patch works inline, with the YAML given as JSON after `-p`, which
+saves the file when rolling it out to a fleet of identical workers.
 
 Both settings take effect without a reboot; Talos restarts the kubelet itself
 for the `extraConfig` change. Two things to know:
