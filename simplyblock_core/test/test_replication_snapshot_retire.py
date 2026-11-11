@@ -323,3 +323,137 @@ def test_a_requeued_endgame_round_copy_is_a_replication_snapshot():
     assert rsr.is_replication_snapshot(copy)
     user = _snap("U2", _lvol("V"), "repl_round_by_hand", SnapShot.TYPE_USER)
     assert not rsr.is_replication_snapshot(user)
+
+
+# --- migrated chains are collapsed (bed bf21 2026-11-10) ---------------------
+# A migrated volume is a clone of its newest landing copy, which sat on every
+# older copy and on the chain ancestors earlier legs sent along: depth up to 7
+# after five rounds, 93-99 % device use. The ancestors below the clone base are
+# merged away one per pass; the base itself, user snapshots and anything a
+# transfer or a live volume's retention still uses stay.
+
+def _chain_world(monkeypatch):
+    """MIG (live) is cloned from BASE <- X1 <- X2 <- U (user) <- X3, all landing
+    copies of a gone volume except U; BASE's source S_BASE is gone too."""
+    gone = _lvol("GONE")
+    mig = _lvol("MIG", cloned_from_snap="BASE")
+    snaps = [
+        _snap("X3", gone, "repl_internal_m_0", SnapShot.TYPE_USER, source="S3"),
+        _snap("U", gone, "nightly", SnapShot.TYPE_USER, prev="X3"),
+        _snap("X2", gone, "repl_internal_m_1", SnapShot.TYPE_USER, source="S2", prev="U"),
+        _snap("X1", gone, "repl_commit_m", SnapShot.TYPE_USER, source="S1", prev="X2"),
+        _snap("BASE", gone, "repl_commit_m2", SnapShot.TYPE_USER, source="S_BASE", prev="X1"),
+    ]
+    db = _FakeDB(snaps, [mig])
+    db.tasks = []
+    db.get_job_tasks_by_function = lambda cluster_id, fn: db.tasks
+    monkeypatch.setattr(rsr.replication_recovery_points, "group_recovery_point_ids",
+                        lambda gids, db=None: set())
+    monkeypatch.setattr(rsr, "_sync_mini", lambda db, snap: db.minis_synced.append(snap.uuid))
+
+    def spdk_clones(db_, snap):
+        kids = [s for s in db.snaps.values() if s.prev_snap_uuid == snap.uuid]
+        return [k.snap_bdev for k in kids]
+    monkeypatch.setattr(rsr, "_spdk_clones", spdk_clones)
+    deleted: list = []
+
+    def fake_delete(uuid):
+        """The delete swap-merges *uuid* into its child; the monitor relinks."""
+        deleted.append(uuid)
+        gone_snap = db.snaps.pop(uuid)
+        for s in db.snaps.values():
+            if s.prev_snap_uuid == uuid:
+                s.prev_snap_uuid = gone_snap.prev_snap_uuid
+        return True
+    from simplyblock_core.controllers import snapshot_controller
+    monkeypatch.setattr(snapshot_controller, "delete", fake_delete)
+    return db, deleted
+
+
+def test_collapse_merges_ancestors_one_per_pass_down_to_a_user_snapshot(monkeypatch):
+    db, deleted = _chain_world(monkeypatch)
+    passes = []
+    while rsr.collapse_migrated_chains(db, CLUSTER):
+        passes.append(list(deleted))
+        deleted.clear()
+    assert passes == [["X1"], ["X2"]]
+    # the base stays (the delta base of a migration back), so do the user
+    # snapshot and everything below it
+    assert set(db.snaps) == {"BASE", "U", "X3"}
+    assert db.snaps["BASE"].prev_snap_uuid == "U"
+
+
+def test_collapse_detaches_the_victim_from_its_source(monkeypatch):
+    db, deleted = _chain_world(monkeypatch)
+    src = _snap("S1", _lvol("OTHER_GONE"), "repl_commit_m")
+    src.cluster_id = "CL_b"
+    src.target_replicated_snap_uuid = "X1"
+    db.snaps["S1"] = src
+    rsr.collapse_migrated_chains(db, CLUSTER)
+    assert deleted == ["X1"]
+    assert src.target_replicated_snap_uuid == ""
+
+
+def test_collapse_waits_for_a_delete_in_flight_or_a_transfer(monkeypatch):
+    db, deleted = _chain_world(monkeypatch)
+    db.snaps["X2"].status = SnapShot.STATUS_IN_DELETION
+    assert rsr.collapse_migrated_chains(db, CLUSTER) == 0
+    db.snaps["X2"].status = SnapShot.STATUS_ONLINE
+    db.snaps["BASE"].status = SnapShot.STATUS_IN_REPLICATION
+    assert rsr.collapse_migrated_chains(db, CLUSTER) == 0
+    db.snaps["BASE"].status = SnapShot.STATUS_ONLINE
+    from simplyblock_core.models.job_schedule import JobSchedule
+    t = JobSchedule()
+    t.function_params = {"snapshot_id": "X1"}
+    t.status = JobSchedule.STATUS_NEW
+    db.tasks = [t]
+    assert rsr.collapse_migrated_chains(db, CLUSTER) == 0
+    t.status = JobSchedule.STATUS_DONE
+    assert rsr.collapse_migrated_chains(db, CLUSTER) == 1
+    assert deleted == ["X1"]
+
+
+def test_collapse_never_touches_a_pair_of_a_live_volume(monkeypatch):
+    """Until the migrated-away source is gone its pairs are its retention's."""
+    db, deleted = _chain_world(monkeypatch)
+    src_vol = _lvol("SRCVOL")
+    db.lvols["SRCVOL"] = src_vol
+    db.snaps["S_BASE"] = _snap("S_BASE", src_vol, "repl_commit_m2")
+    assert rsr.collapse_migrated_chains(db, CLUSTER) == 0
+    assert deleted == []
+
+
+def test_collapse_skips_ancestors_with_other_children_clones_or_recovery_points(monkeypatch):
+    db, deleted = _chain_world(monkeypatch)
+    # X1 has a second child in the DB: deleting it would not merge into BASE alone
+    db.snaps["SIDE"] = _snap("SIDE", _lvol("GONE"), "repl_internal_side", SnapShot.TYPE_USER,
+                             source="S9", prev="X1")
+    assert rsr.collapse_migrated_chains(db, CLUSTER) == 1
+    assert deleted == ["X2"]            # X1 skipped, the next one merges into X1
+    deleted.clear()
+    db.snaps.pop("SIDE")
+    db.lvols["CLONE"] = _lvol("CLONE", cloned_from_snap="X1")
+    assert rsr.collapse_migrated_chains(db, CLUSTER) == 0
+    db.lvols.pop("CLONE")
+    db.snaps["X1"].group_id = "G1"
+    monkeypatch.setattr(rsr.replication_recovery_points, "group_recovery_point_ids",
+                        lambda gids, db=None: {"X1"})
+    assert rsr.collapse_migrated_chains(db, CLUSTER) == 0
+    assert deleted == []
+
+
+def test_collapse_trusts_spdk_over_the_db_link(monkeypatch):
+    db, deleted = _chain_world(monkeypatch)
+    monkeypatch.setattr(rsr, "_spdk_clones", lambda db_, snap: ["LVS_1/SOMETHING_ELSE"])
+    assert rsr.collapse_migrated_chains(db, CLUSTER) == 0
+    monkeypatch.setattr(rsr, "_spdk_clones", lambda db_, snap: None)
+    assert rsr.collapse_migrated_chains(db, CLUSTER) == 0
+    assert deleted == []
+
+
+def test_collapse_leaves_volumes_not_cloned_from_a_replication_copy(monkeypatch):
+    db, deleted = _chain_world(monkeypatch)
+    db.snaps["BASE"].snap_name = "golden-image"
+    db.snaps["BASE"].source_replicated_snap_uuid = ""
+    assert rsr.collapse_migrated_chains(db, CLUSTER) == 0
+    assert rsr.collapse_migrated_chains(db, "CL_b") == 0

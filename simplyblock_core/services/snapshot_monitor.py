@@ -3,7 +3,13 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
-from simplyblock_core import constants, db_controller, migration_turn, utils
+from simplyblock_core import (
+    constants,
+    db_controller,
+    migration_turn,
+    replication_spare,
+    utils,
+)
 from simplyblock_core.controllers import (
     lvol_controller,
     replication_delta,
@@ -597,6 +603,86 @@ def _deletion_backlog(lvol):
     return in_deletion + max(0, replicated - _keep_replicated_for(lvol))
 
 
+def _pending_source_snapshots(lvol):
+    """How many of *lvol*'s internal snapshots replication or retention still
+    owes something: not replicated yet, being deleted, or replicated beyond
+    what retention keeps."""
+    unreplicated = 0
+    for s in db.get_snapshots_by_lvol_id(lvol.get_id()):
+        if (s.snap_type == SnapShot.TYPE_INTERNAL and s.status == SnapShot.STATUS_ONLINE
+                and not (s.target_replicated_snap_uuid or s.source_replicated_snap_uuid)):
+            unreplicated += 1
+    return unreplicated + _deletion_backlog(lvol)
+
+
+#: lvol id -> the hold record of a cadence held for an unmerged backlog
+#: (snapshot_replication._hold_progress); per monitor process.
+_MERGE_HOLDS: dict = {}
+
+
+def _merge_behind_hold(lvol, cluster_id):
+    """Why *lvol* takes no cadence snapshot because its chain would grow, or "".
+
+    The chain must never grow (bed bf21 2026-11-10: depth 7, 93-99 % device
+    use): no new snapshot while more than REPL_MAX_PENDING_SOURCE_SNAPSHOTS of
+    the volume's own are unreplicated or unpruned, or more than
+    REPL_MAX_UNMERGED_LANDING_LAYERS of its copies on the target are not
+    merged away (snapshot_replication.merge_backlog). While held and no
+    transfer of the volume is live -- nothing else would restart its retention
+    -- retention is started here. A hold that sees no progress for
+    REPL_MERGE_HOLD_MAX_SEC is released once, loudly; an error never holds."""
+    from simplyblock_core import xfer_timing
+    from simplyblock_core.services import snapshot_replication as sr
+    vid = lvol.get_id()
+    try:
+        pending = _pending_source_snapshots(lvol)
+        layers, detail, prunable = sr.merge_backlog(lvol, cluster_id)
+    except Exception as e:                                # noqa: BLE001
+        logger.debug("No merge backlog reading for %s: %s", vid, e)
+        return ""
+    over_src = pending > constants.REPL_MAX_PENDING_SOURCE_SNAPSHOTS
+    over_tgt = layers > constants.REPL_MAX_UNMERGED_LANDING_LAYERS
+    hold = _MERGE_HOLDS.get(vid)
+    if not (over_src or over_tgt):
+        if hold:
+            _MERGE_HOLDS.pop(vid, None)
+            logger.info("Cadence of lvol %s resumes: merge caught up", vid)
+            xfer_timing.stamp("cadence_resumed", lvol=vid, layers=layers, pending=pending)
+        return ""
+    new_hold, expired = sr._hold_progress(hold, pending + layers, time.time())
+    if expired:
+        _MERGE_HOLDS.pop(vid, None)
+        logger.error("Cadence of lvol %s was held for %ds without its backlog shrinking "
+                     "(%d source snapshots pending, target: %s); taking the snapshot "
+                     "anyway -- investigate its retention", vid,
+                     constants.REPL_MERGE_HOLD_MAX_SEC, pending, detail)
+        xfer_timing.stamp("cadence_hold_expired", lvol=vid, layers=layers, pending=pending)
+        return ""
+    _MERGE_HOLDS[vid] = new_hold
+    why = (f"merge behind: {pending} source snapshots pending (limit "
+           f"{constants.REPL_MAX_PENDING_SOURCE_SNAPSHOTS}), {layers} unmerged landing "
+           f"layers on the target (limit {constants.REPL_MAX_UNMERGED_LANDING_LAYERS}: "
+           f"{detail})")
+    if not hold:
+        xfer_timing.stamp("cadence_held_merge_behind", lvol=vid, layers=layers,
+                          pending=pending)
+    if (prunable or over_src) and not _volume_transfer_live(lvol, cluster_id):
+        sr.prune_async(lvol)
+    return why
+
+
+def _volume_transfer_live(lvol, cluster_id):
+    """Whether a replication task of one of *lvol*'s snapshots is live (its
+    finish restarts the volume's retention). True when unknown."""
+    try:
+        ids = {s.get_id() for s in db.get_snapshots_by_lvol_id(lvol.get_id())}
+        tasks = db.get_job_tasks_by_function(cluster_id, JobSchedule.FN_SNAPSHOT_REPLICATION)
+    except Exception:                                     # noqa: BLE001
+        return True
+    return any(t.status != JobSchedule.STATUS_DONE and not t.canceled
+               and (t.function_params or {}).get("snapshot_id") in ids for t in tasks)
+
+
 def _outstanding_internal_snapshot(lvol, all_snaps):
     """The newest internal snapshot of *lvol* that has NOT reached the remote
     side yet, or None when the last one completed.
@@ -979,6 +1065,17 @@ def take_due_internal_snapshots(cluster_id, now_ts):
                     "unreplicated internal snapshot (%s)",
                     group_id, blocked[0].get_id(), blocked[1].get_id())
                 continue
+            # One member whose chain would grow holds the whole generation,
+            # for the same reason.
+            held = ""
+            for lv in members:
+                held = _merge_behind_hold(lv, cluster_id)
+                if held:
+                    logger.warning("Skipping group snapshot for group %s: member %s: "
+                                   "replication held: %s", group_id, lv.get_id(), held)
+                    break
+            if held:
+                continue
             group = db.get_consistency_group_by_id(group_id)
             # A group is pinned to one LVS: one lookup defers it as a whole.
             if sync and _cadence_waits_for_leader(group.node_id, group.lvs_name, leaderless):
@@ -1014,6 +1111,11 @@ def take_due_internal_snapshots(cluster_id, now_ts):
                     "snapshots are waiting to be deleted (limit %d); replication "
                     "waits for deletion to catch up",
                     lvol.get_id(), backlog, constants.REPL_MAX_DELETION_BACKLOG)
+                continue
+            held = _merge_behind_hold(lvol, cluster_id)
+            if held:
+                logger.warning("Skipping internal replication snapshot for lvol %s: "
+                               "replication held: %s", lvol.get_id(), held)
                 continue
             name = f"repl_internal_{lvol.get_id()[:8]}_{now_ts}"
             logger.info(f"Taking internal replication snapshot for lvol {lvol.get_id()}: {name}")
@@ -1055,6 +1157,19 @@ def main():
                 replication_snapshot_retire.retire_orphan_copies(db, cluster.get_id())
             except Exception as e:
                 logger.error(f"Orphaned replication snapshot sweep failed for cluster "
+                             f"{cluster.get_id()}: {e}")
+
+            try:
+                deletions_in_flight += replication_snapshot_retire.collapse_migrated_chains(
+                    db, cluster.get_id())
+            except Exception as e:
+                logger.error(f"Migrated chain collapse failed for cluster "
+                             f"{cluster.get_id()}: {e}")
+
+            try:
+                replication_spare.sweep(cluster.get_id())
+            except Exception as e:
+                logger.error(f"Spare landing volume sweep failed for cluster "
                              f"{cluster.get_id()}: {e}")
 
             try:

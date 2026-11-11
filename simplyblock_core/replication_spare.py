@@ -79,12 +79,24 @@ def prestage(snapshot, remote_lv, create_landing):
     runner's landing-volume factory: (lvol id, error). Best effort."""
     lvol_id = snapshot.lvol.get_id()
     try:
+        # A transfer still draining after its volume's cutover (or after the
+        # volume left its policy) must not create a spare the discard already
+        # ran for: nothing would ever delete it (bed bf21 2026-11-10: 15-21
+        # REP_spare_* per cluster for 8 volumes).
+        if not _replicating(lvol_id):
+            return None
         if find(lvol_id, remote_lv.pool_uuid) is not None:
             return None
         remote_node = db.get_storage_node_by_id(remote_lv.node_id)
         lv_id, err = create_landing(spare_name(lvol_id), snapshot, remote_node, remote_lv.pool_uuid)
         if not lv_id:
             logger.warning("Could not pre-stage a spare landing volume for %s: %s", lvol_id, err)
+            return None
+        if not _replicating(lvol_id):
+            # stopped while the spare was created: the discard may have run
+            logger.info("Volume %s stopped replicating while its spare was created; "
+                        "discarding it", lvol_id)
+            discard(lvol_id, remote_lv.pool_uuid)
             return None
         logger.info("Pre-staged spare landing volume %s for %s on %s", lv_id, lvol_id,
                     remote_node.get_id())
@@ -111,3 +123,38 @@ def discard(lvol_id, pool_uuid=None):
         logger.warning("Could not delete spare landing volume %s of %s: %s",
                        spare.get_id(), lvol_id, e)
         return False
+
+
+def _replicating(lvol_id):
+    """Whether *lvol_id* still replicates on its cadence (and so may need a
+    spare). False once its cutover stopped it (do_replicate cleared), when it
+    is being deleted or gone."""
+    try:
+        lvol = db.get_lvol_by_id(lvol_id)
+    except KeyError:
+        return False
+    return bool(lvol.do_replicate) and lvol.status != LVol.STATUS_IN_DELETION
+
+
+def sweep(cluster_id):
+    """Discard the spares on *cluster_id* whose volume no longer replicates.
+
+    A spare is named after its source volume and lives on the destination,
+    so the volume's own clean-up paths (cutover end, policy detach) are the
+    only ones that know about it; one they missed -- a spare created by a
+    transfer that drained after them, or by a control plane without that
+    check -- stayed for good (bed bf21 2026-11-10: 15-21 per cluster for 8
+    volumes). Returns how many were deleted."""
+    deleted = 0
+    for lv in db.get_lvols(cluster_id):
+        name = getattr(lv, "lvol_name", "") or ""
+        if not name.startswith(PREFIX) or lv.status != LVol.STATUS_ONLINE:
+            continue
+        owner = name[len(PREFIX):]
+        if _replicating(owner):
+            continue
+        logger.info("Spare landing volume %s (%s) belongs to %s, which no longer "
+                    "replicates; discarding it", lv.get_id(), name, owner)
+        if discard(owner, lv.pool_uuid):
+            deleted += 1
+    return deleted

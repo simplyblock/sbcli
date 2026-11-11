@@ -64,6 +64,7 @@ class TestPrestage:
         node = MagicMock()
         create = MagicMock(return_value=("NEW", None))
         with patch.object(rs.db, "get_lvol_by_name", side_effect=KeyError), \
+                patch.object(rs, "_replicating", return_value=True), \
                 patch.object(rs.db, "get_storage_node_by_id", return_value=node):
             assert rs.prestage(_snapshot(), remote_lv, create) == "NEW"
         create.assert_called_once()

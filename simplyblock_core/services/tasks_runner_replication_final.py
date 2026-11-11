@@ -280,6 +280,7 @@ def _record_cutover_done(task):
 
     _restore_source_throttle(task)
     _stop_source_replication(task)
+    _discard_source_spare(task)
     _delete_direct_rounds(task)
     _prune_endgame_snapshots(task)
     _delete_source_if_requested(task)
@@ -310,6 +311,25 @@ def _stop_source_replication(task):
     except Exception as e:
         logger.error(f"Could not stop replication on the source after "
                      f"cutover: {e}")
+
+
+def _discard_source_spare(task):
+    """The source no longer replicates: its cadence spare (replication_spare)
+    on the target is unused for good. The discard before the freeze
+    (_discard_spare_landing) can be undone by a cadence transfer that drains
+    after it and pre-stages a new one; with --delete-source nothing named
+    after the volume was ever cleaned up again (bed bf21 2026-11-10: 15-21
+    REP_spare_* per cluster for 8 volumes). Runs after the cadence stopped,
+    so the pre-stage's own re-check keeps it from coming back."""
+    lvol_id = (task.function_params or {}).get("lvol_id")
+    if not lvol_id:
+        return
+    try:
+        from simplyblock_core import replication_spare
+        replication_spare.discard(lvol_id)
+    except Exception as e:                                # noqa: BLE001
+        logger.warning("Could not discard the cadence spare of %s after the cutover: %s",
+                       lvol_id, e)
 
 
 def _prune_endgame_snapshots(task):
