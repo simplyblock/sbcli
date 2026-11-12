@@ -127,7 +127,7 @@ class TestResumeFinish(unittest.TestCase):
         peer = MagicMock()
         peer.finish.return_value = FinishResponse(state="gone", reason="landing volume r-1 is gone")
         snap = SimpleNamespace(get_id=lambda: "s-1", cluster_id="c-1", snap_name="s-1", size=1,
-                               used_size=0, data_uuid="", lvol=SimpleNamespace(get_id=lambda: "lv"))
+                               used_size=0, data_uuid="", lvol=SimpleNamespace(get_id=lambda: "lv", to_dict=dict))
         with patch.object(snapshot_replication, "_deferred_chain_gate", return_value="ok"), \
                 patch.object(snapshot_replication, "_previous_replicated_snapshot", return_value=None), \
                 patch.object(snapshot_replication, "_task_peer", return_value=peer), \

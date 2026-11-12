@@ -7,7 +7,7 @@ them, instead of a DTO in ``_dtos.py`` that the client side could not import.
 from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SecretStr, field_serializer
 
 #: Bumped on an incompatible change to any peer endpoint. A caller refuses a
 #: peer whose version it does not speak instead of guessing.
@@ -18,6 +18,9 @@ PEER_API_VERSION = 1
 CAPABILITIES: frozenset[str] = frozenset({
     "info", "discard_landing", "describe", "prepare_landing", "ensure_hub", "chain", "finish",
     "delete_snapshot", "place",
+    # finish records the source volume and group with each copy (step 3): what
+    # a fail-over on this side, with the source cut off, clones the copy as.
+    "copy_metadata",
 })
 
 #: Name prefix of a replication landing volume (``REP_<snapshot name>``). It is
@@ -204,6 +207,50 @@ class ChainResponse(BaseModel):
     reason: str = ""
 
 
+class AllowedHost(BaseModel):
+    """A host allowed on the source volume's subsystem, with its keys."""
+
+    nqn: str
+    dhchap_key: SecretStr | None = None
+    dhchap_ctrlr_key: SecretStr | None = None
+    psk: SecretStr | None = None
+
+    @field_serializer("dhchap_key", "dhchap_ctrlr_key", "psk", when_used="json")
+    def _unwrap(self, value: SecretStr | None) -> str | None:
+        # Unwrapped only for the wire; the Python dump keeps the mask.
+        return value.get_secret_value() if value is not None else None
+
+    def to_entry(self) -> dict:
+        """The plain ``LVol.allowed_hosts`` entry, keys in clear."""
+        entry = {"nqn": self.nqn}
+        for key in ("dhchap_key", "dhchap_ctrlr_key", "psk"):
+            value = getattr(self, key)
+            if value is not None:
+                entry[key] = value.get_secret_value()
+        return entry
+
+
+class SourceVolume(BaseModel):
+    """The source volume as it was when the snapshot was taken: the template a
+    fail-over on the copy's side clones the copy as, keeping its name, NQN,
+    namespace and size. The host keys travel in ``allowed_hosts`` as secrets,
+    never inside ``record``."""
+
+    #: ``LVol.to_dict()`` of the snapshot's embedded volume, without ``allowed_hosts``.
+    record: dict
+    allowed_hosts: list[AllowedHost] = Field(default_factory=list)
+
+
+class SourceGroup(BaseModel):
+    """The consistency group a group snapshot belongs to, on the source."""
+
+    group_name: str
+    policy_id: str = ""
+    #: The source volume ids in this generation: a fail-over on the copy's side
+    #: takes a generation as complete only when it holds a copy of each.
+    members: list[str]
+
+
 class SourceSnapshot(BaseModel):
     """What the copy's record carries over from the source snapshot."""
 
@@ -214,6 +261,11 @@ class SourceSnapshot(BaseModel):
     data_uuid: str = ""
     group_id: str = ""
     group_seq: Annotated[int, Field(ge=0)] = 0
+    #: Empty only from a caller that predates step 3; the copy is then not one
+    #: a fail-over with the source cut off can use.
+    volume: SourceVolume | None = None
+    #: Set on a group snapshot (``group_seq`` > 0).
+    group: SourceGroup | None = None
 
 
 class FinishRequest(BaseModel):

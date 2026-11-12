@@ -106,7 +106,7 @@ def test_a_leaderless_target_keeps_the_finish_pending(monkeypatch):
     monkeypatch.setattr(sr, "_previous_replicated_snapshot", lambda snap, to_source: None)
     monkeypatch.setattr(sr, "_task_peer", lambda task, snap: _Peer())
     snap = SimpleNamespace(get_id=lambda: "S", cluster_id="CL", snap_name="s", size=1,
-                           used_size=0, data_uuid="", lvol=SimpleNamespace(get_id=lambda: "LV"))
+                           used_size=0, data_uuid="", lvol=SimpleNamespace(get_id=lambda: "LV", to_dict=dict))
     assert sr.process_snap_replicate_finish(t, snap) == sr.FINISH_PENDING
     assert t.retry == 0 and "not_before" not in t.function_params
     assert "leader" in t.function_params["pending_why"]

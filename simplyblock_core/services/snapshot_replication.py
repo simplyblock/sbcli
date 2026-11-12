@@ -31,13 +31,16 @@ from simplyblock_core.peer.client import (
     peer_for_target,
 )
 from simplyblock_core.peer.protocol import (
+    AllowedHost,
     ChainCheck,
     ChainRequest,
     DescribeRequest,
     EnsureHubRequest,
     FinishRequest,
     LandingRequest,
+    SourceGroup,
     SourceSnapshot,
+    SourceVolume,
 )
 from simplyblock_core.rpc_client import RPCException
 
@@ -1936,6 +1939,38 @@ def _close_hub(task, snapshot, hub_node_id):
         logger.warning("Transfer hub detach on %s failed (non-fatal): %s", src_node.get_id(), e)
 
 
+def _source_volume(snapshot):
+    """The snapshot's embedded volume record, sent with the copy so a fail-over
+    on the copy's side can clone it with the source cut off; None when the
+    snapshot embeds none. The host keys go as secrets, outside the record."""
+    lvol = getattr(snapshot, "lvol", None)
+    if lvol is None:
+        return None
+    record = lvol.to_dict()
+    hosts = record.pop("allowed_hosts", None) or []
+    return SourceVolume(record=record, allowed_hosts=[AllowedHost(**h) for h in hosts])
+
+
+def _source_group(snapshot):
+    """The group of a group snapshot, with the source volumes of its generation;
+    None for a snapshot outside a group, or when the group record is gone: the
+    copy then carries no member list, which the other side takes as a
+    generation it cannot prove complete, never as a complete one."""
+    seq = getattr(snapshot, "group_seq", 0) or 0
+    group_id = getattr(snapshot, "group_id", "") or ""
+    if not seq or not group_id:
+        return None
+    try:
+        group = db.get_consistency_group_by_id(group_id)
+    except KeyError:
+        logger.warning("Snapshot %s names group %s, which is gone; its copy carries no "
+                       "member list", snapshot.get_id(), group_id)
+        return None
+    return SourceGroup(
+        group_name=group.group_name, policy_id=group.policy_id or "",
+        members=sorted(lid for lid in (group.members or {}) if group.included_in_seq(lid, seq)))
+
+
 def process_snap_replicate_finish(task, snapshot):
     """After the transfer: the destination makes the landing volume the copy of
     *snapshot* (finish: chain, merge, convert, record, retire); this cluster
@@ -1974,7 +2009,8 @@ def process_snap_replicate_finish(task, snapshot):
             snapshot_id=snapshot.get_id(), snap_name=snapshot.snap_name, size=snapshot.size,
             used_size=snapshot.used_size or 0, data_uuid=snapshot.data_uuid or "",
             group_id=getattr(snapshot, "group_id", "") or "",
-            group_seq=getattr(snapshot, "group_seq", 0) or 0),
+            group_seq=getattr(snapshot, "group_seq", 0) or 0,
+            volume=_source_volume(snapshot), group=_source_group(snapshot)),
         sent_to=sent_to, predecessor_id=predecessor_id,
         partial_base=int(task.function_params.get("partial_base") or 0),
         chained_on=chained,

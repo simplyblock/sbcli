@@ -953,6 +953,12 @@ def _record_copy(db, request, landing, leader, predecessor, copy_id):
     # generation selector returns this record.
     copy.group_id = source.group_id
     copy.group_seq = source.group_seq
+    # What a fail-over here, with the source cut off, clones the copy as.
+    if source.volume is not None:
+        copy.source_volume = dict(source.volume.record,
+                                  allowed_hosts=[h.to_entry() for h in source.volume.allowed_hosts])
+    if source.group is not None:
+        copy.source_group = source.group.model_dump()
     if request.link == "source":
         copy.source_replicated_snap_uuid = source.snapshot_id
     elif request.link == "target":
