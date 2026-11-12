@@ -33,6 +33,7 @@ from stress_test.continuous_k8s_native_failover import (
 )
 from utils.pnfs_utils import (
     PnfsEvidenceError,
+    PnfsProbeError,
     assert_layouts_taken,
     nfsexport_status,
 )
@@ -46,6 +47,15 @@ class _PnfsRwxMixin:
 
     #: Where create_fio_job mounts the claim inside the pod.
     MOUNT = "/spdkvol"
+
+    #: How many consecutive layout checks may find nothing probeable before
+    #: the soak stops. One is normal -- the lifecycle is always relaunching
+    #: pods. Three in a row is not, and the run that motivated this stayed
+    #: blind for 19h39m: the metadata server had been dead since 11:15 on
+    #: 2026-11-11 and the soak kept firing outages into a cluster with no
+    #: data path. The check runs before and after every outage, so three
+    #: is a couple of outages, not a couple of days.
+    BLIND_CYCLES_FATAL = 3
 
     # Class-level defaults for the same reason lblk_stress has them: the
     # guard that decides whether to run the one-time setup has to READ these
@@ -207,13 +217,44 @@ class _PnfsRwxMixin:
         try:
             proven = assert_layouts_taken(self.k8s_utils, pods,
                                           mountpoint=self.MOUNT,
+                                          logger=self.logger,
                                           allow_server_io=True)
+        except PnfsProbeError as exc:
+            # Caught before its parent on purpose: PnfsProbeError IS a
+            # PnfsEvidenceError, and catching only the parent reports "I
+            # could not look" as "the layout is gone". Run 42803434177 did
+            # exactly that and its failure message both asserted and
+            # disclaimed the same thing.
+            #
+            # One blind cycle is not a finding -- the soak is relaunching
+            # fio pods continuously. Being blind for BLIND_CYCLES_FATAL in
+            # a row is, and it is a finding about the mounts, not about
+            # layouts: in that run every pod was unprobeable for 19h39m
+            # because the metadata server had been dead since 11:15, and
+            # nothing said so.
+            self._pnfs_blind = getattr(self, "_pnfs_blind", 0) + 1
+            if self._pnfs_blind < self.BLIND_CYCLES_FATAL:
+                self.logger.warning(
+                    "[pnfs-stress] %s: could not probe any mount this cycle "
+                    "(%d of %d in a row), so the layout check was skipped. "
+                    "%s", when, self._pnfs_blind, self.BLIND_CYCLES_FATAL,
+                    exc)
+                return
+            raise PnfsProbeError(
+                f"[pnfs-stress] {when}: no mount has been probeable for "
+                f"{self._pnfs_blind} checks in a row. Every fio pod is "
+                f"either between generations or wedged on a mountstats "
+                f"read, which is what a dead metadata server looks like "
+                f"from here. This is NOT a layout verdict -- check the MDS "
+                f"pod's readiness and the kubelet's FailedMount events "
+                f"first. {exc}") from exc
         except PnfsEvidenceError as exc:
             raise PnfsEvidenceError(
                 f"[pnfs-stress] {when}: a mount is no longer holding a pNFS "
                 f"layout. This is the silent-fallback case -- IO would keep "
                 f"verifying while every byte went through the metadata "
                 f"server. {exc}") from exc
+        self._pnfs_blind = 0
 
         settled = self._cluster_settled()
         at = time.time()
