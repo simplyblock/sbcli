@@ -3,6 +3,7 @@ import builtins
 import contextlib
 import copy
 import json
+import logging
 import os
 import re
 import shlex
@@ -22,6 +23,13 @@ import yaml
 from docker.errors import DockerException
 from kubernetes import client as k8s_client
 from pydantic import SecretStr
+from tenacity import (
+    Retrying,
+    before_sleep_log,
+    retry_if_exception_type,
+    stop_after_delay,
+    wait_fixed,
+)
 
 import docker
 from simplyblock_core import (
@@ -50,6 +58,7 @@ from simplyblock_core.controllers.cluster_expansion.planner import (
 )
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.exceptions import (
+    MonitoringConfigError,
     SyncReplicationSiteError,
     reject_on_sync_replication,
 )
@@ -119,51 +128,92 @@ async def watch_events(cluster_id):
         yield batch
 
 
-def _create_update_user(cluster_id, grafana_url, grafana_secret: SecretStr, user_secret: SecretStr, update_secret=False):
-    session = requests.session()
+#: Per-request bound on a Grafana API call.
+GRAFANA_REQUEST_TIMEOUT_SEC = 10
+#: How long Grafana may stay unreachable (still starting, or the proxy in
+#: front of it) before a user sync gives up.
+GRAFANA_READY_TIMEOUT_SEC = 60
+
+
+class _GrafanaUnavailable(Exception):
+    """Grafana could not answer: a connection failure, a timeout or a 5xx.
+    Transient, unlike a 4xx, which no retry changes."""
+
+
+def _grafana_request(session: requests.Session, method: str, url: str, **kwargs) -> requests.Response:
+    try:
+        response = session.request(method, url, timeout=GRAFANA_REQUEST_TIMEOUT_SEC, **kwargs)
+    except (requests.ConnectionError, requests.Timeout) as e:
+        raise _GrafanaUnavailable(f"{method} {url}: {e}") from e
+    if response.status_code >= 500:
+        raise _GrafanaUnavailable(f"{method} {url}: HTTP {response.status_code}")
+    return response
+
+
+def _sync_grafana_user(cluster_id, grafana_url, grafana_secret: SecretStr, user_secret: SecretStr) -> None:
+    """Make Grafana's user for the cluster exist, with ``user_secret`` as its password.
+
+    Idempotent: the user is created when the lookup does not find it and has
+    its password reset otherwise, so a run that failed half-way, or a cluster
+    whose user was never created, converges on a re-run. Raises
+    MonitoringConfigError when Grafana refuses the change or stays
+    unreachable for GRAFANA_READY_TIMEOUT_SEC.
+    """
+    session = requests.Session()
     session.auth = ("admin", grafana_secret.get_secret_value())
-    headers = {
-        'X-Requested-By': '',
-        'Content-Type': 'application/json',
-    }
-    retries = 5
-    if update_secret:
-        url = f"{grafana_url}/api/users/lookup?loginOrEmail={cluster_id}"
-        response = session.request("GET", url, headers=headers)
-        userid = response.json().get("id")
+    session.headers.update({'X-Requested-By': ''})
 
-        payload = json.dumps({
-            "password": user_secret.get_secret_value()
-        })
+    def sync() -> None:
+        lookup = _grafana_request(session, "GET", f"{grafana_url}/api/users/lookup",
+                                  params={"loginOrEmail": cluster_id})
+        if lookup.status_code == 404:
+            action = "create"
+            response = _grafana_request(session, "POST", f"{grafana_url}/api/admin/users", json={
+                "name": cluster_id,
+                "login": cluster_id,
+                "password": user_secret.get_secret_value(),
+            })
+        elif lookup.ok:
+            action = "update the password of"
+            response = _grafana_request(
+                session, "PUT", f"{grafana_url}/api/admin/users/{lookup.json()['id']}/password",
+                json={"password": user_secret.get_secret_value()})
+        else:
+            action, response = "look up", lookup
+        if not response.ok:
+            raise MonitoringConfigError(
+                f"Grafana at {grafana_url} refused to {action} user {cluster_id}: "
+                f"HTTP {response.status_code} {response.text[:200]}")
 
-        url = f"{grafana_url}/api/admin/users/{userid}/password"
+    try:
+        Retrying(
+            stop=stop_after_delay(GRAFANA_READY_TIMEOUT_SEC),
+            wait=wait_fixed(3),
+            retry=retry_if_exception_type(_GrafanaUnavailable),
+            before_sleep=before_sleep_log(logger, logging.WARNING),
+            reraise=True,
+        )(sync)
+    except _GrafanaUnavailable as e:
+        raise MonitoringConfigError(f"Grafana at {grafana_url} is unreachable: {e}") from e
+    logger.debug(f"Grafana user {cluster_id} in sync")
 
-        while retries > 0:
-            response = session.request("PUT", url, headers=headers, data=payload)
-            if response.status_code == 200:
-                logger.debug(f"user create/update {cluster_id} succeeded")
-                return response.status_code == 200
-            logger.debug(response.status_code)
-            logger.debug("waiting for grafana api to come up")
-            retries -= 1
-            time.sleep(3)
 
-    else:
-        payload = json.dumps({
-            "name": cluster_id,
-            "login": cluster_id,
-            "password": user_secret.get_secret_value()
-        })
-        url = f"{grafana_url}/api/admin/users"
-        while retries > 0:
-            response = session.request("POST", url, headers=headers, data=payload)
-            if response.status_code == 200:
-                logger.debug(f"user create/update {cluster_id} succeeded")
-                return response.status_code == 200
-            logger.debug(response.status_code)
-            logger.debug("waiting for grafana api to come up")
-            retries -= 1
-            time.sleep(3)
+def _add_grafana_user_or_disable_monitoring(cluster: Cluster, grafana_secret: SecretStr) -> None:
+    """Create Grafana's user for a cluster being created; on failure, create it without monitoring.
+
+    A cluster is usable without its dashboards, so an unreachable or refusing
+    Grafana does not fail the create. The cluster is marked
+    ``disable_monitoring`` instead, so nothing later (``update-secret``)
+    expects a Grafana user that does not exist. Must run before the cluster
+    record is first written.
+    """
+    try:
+        _sync_grafana_user(cluster.uuid, cluster.grafana_endpoint, grafana_secret, cluster.secret)
+    except MonitoringConfigError as e:
+        logger.warning(
+            f"Could not create the Grafana user for cluster {cluster.uuid}: {e}. "
+            f"Continuing with monitoring disabled for this cluster")
+        cluster.disable_monitoring = True
 
 
 def _add_graylog_input(cluster_ip, password: SecretStr):
@@ -635,7 +685,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     if not disable_monitoring:
         _set_max_result_window(os_endpoint)
         _add_graylog_input(graylog_endpoint, monitoring_secret)
-        _create_update_user(cluster.uuid, cluster.grafana_endpoint, monitoring_secret, cluster.secret)
+        _add_grafana_user_or_disable_monitoring(cluster, monitoring_secret)
 
     cluster.db_connection = db_connection  # type: ignore[assignment]
     cluster.status = Cluster.STATUS_UNREADY
@@ -880,7 +930,7 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
         cfg.write_to_db()
 
     if not cluster.disable_monitoring:
-        _create_update_user(cluster.uuid, cluster.grafana_endpoint, cluster.grafana_secret, cluster.secret)
+        _add_grafana_user_or_disable_monitoring(cluster, cluster.grafana_secret)
 
     if cluster.mode == "kubernetes":
         utils.patch_prometheus_configmap(cluster.uuid, cluster.secret.get_secret_value())
@@ -3414,16 +3464,41 @@ def get_secret(cluster_id) -> str:
 
 
 def set_secret(cluster_id, secret: SecretStr) -> None:
+    """Rotate the cluster secret.
+
+    The copies outside FDB -- Grafana's user for the cluster, and the
+    Prometheus scrape config and event log alert data source that authenticate
+    with the secret -- are updated first and the record last. A failure part-way
+    leaves the old secret in force for the API, and a re-run converges: the
+    Grafana sync is idempotent and the config rotation is keyed on the stored
+    secret, so a copy already rotated is left alone.
+    """
     cluster = db_controller.get_cluster_by_id(cluster_id)
     plain = secret.get_secret_value().strip()
     if len(plain) < 20:
         raise ValueError("Secret must be at least 20 char")
+    # The API splits "<cluster-id> <secret>" on whitespace, and the monitoring
+    # configs carry the secret as a quoted YAML scalar.
+    if any(c.isspace() or c in "'\"" for c in plain):
+        raise ValueError("Secret must not contain whitespace or quotes")
+    old = cluster.secret.get_secret_value()
     secret = SecretStr(plain)
 
-    _create_update_user(cluster_id, cluster.grafana_endpoint, cluster.grafana_secret, secret, update_secret=True)
+    # A cluster created without monitoring has nothing outside FDB to update.
+    if not cluster.disable_monitoring:
+        _sync_grafana_user(cluster_id, cluster.grafana_endpoint, cluster.grafana_secret, secret)
+        if cluster.mode == "kubernetes":
+            if not utils.rotate_prometheus_configmap_secret(old, plain):
+                logger.warning(
+                    f"{utils.PROMETHEUS_CONFIGMAP} does not carry the secret of cluster {cluster_id}, "
+                    f"so Prometheus is not scraping it with that secret; left unchanged")
+        else:
+            _rotate_docker_monitoring_secret(cluster_id, old, plain)
 
-    cluster.secret = secret
-    cluster.write_to_db(db_controller.kv_store)
+    def _apply(c):
+        c.secret = secret
+
+    db_controller.atomic_update(cluster, _apply)
 
 
 def set_fabric(cluster_id, fabric) -> None:
@@ -3608,6 +3683,85 @@ def _install_provisioning_on_all_managers(files: dict[str, str]) -> None:
             + "; ".join(f"{ip} ({reason})" for ip, reason in failed.items())
             + ". Fix those nodes and re-run; Grafana provisions nothing on a node it cannot "
               "read them from")
+
+
+PROMETHEUS_CONFIG_TARGET = "/etc/prometheus/prometheus.yml"
+
+
+def _service_mount_source(service, target: str) -> str | None:
+    mounts = service.attrs['Spec']['TaskTemplate']['ContainerSpec'].get('Mounts') or []
+    return {mount.get('Target'): mount.get('Source') for mount in mounts}.get(target)
+
+
+def _run_on_mgmt_node(node, command: builtins.list[str], directory: str) -> bytes:
+    """Run ``command`` as root on a management node, with ``directory`` mounted.
+
+    Host paths of the monitoring stack belong to root, and the image runs as
+    USER simplyblock; see _install_provisioning_on_all_managers.
+    """
+    node_docker = docker.DockerClient(base_url=f"tcp://{node.docker_ip_port}", version="auto", timeout=60)
+    return node_docker.containers.run(
+        constants.SIMPLY_BLOCK_DOCKER_IMAGE, command, user="root",
+        volumes=[f"{directory}:{directory}"], remove=True, detach=False)
+
+
+def _rotate_secret_on_all_managers(nodes, path: str, old: str, new: str) -> bool:
+    """Swap ``old`` for ``new`` in the host file ``path`` on every management node.
+
+    Each manager holds its own copy (the monitoring services are global on, or
+    reschedule among, the managers). Rewritten in place, so a single-file bind
+    mount keeps its inode. Returns whether any copy carried ``old``.
+    """
+    directory = os.path.dirname(path)
+    changed = False
+    failed = {}
+    for node in nodes:
+        try:
+            current = _run_on_mgmt_node(node, ["cat", path], directory).decode('utf-8')
+            rotated, count = utils.replace_secret_token(current, old, new)
+            if count:
+                encoded = base64.b64encode(rotated.encode('utf-8')).decode('ascii')
+                _run_on_mgmt_node(
+                    node, ["sh", "-c", f"echo {encoded} | base64 -d > {shlex.quote(path)}"], directory)
+                changed = True
+        except DockerException as e:
+            failed[node.mgmt_ip] = str(e)
+
+    if failed:
+        raise MonitoringConfigError(
+            f"Could not rotate the cluster secret in {path} on: "
+            + "; ".join(f"{ip} ({reason})" for ip, reason in failed.items())
+            + ". Fix those nodes and re-run")
+    return changed
+
+
+def _rotate_docker_monitoring_secret(cluster_id, old: str, new: str) -> None:
+    """Rotate the secret in the docker monitoring stack's config files.
+
+    Prometheus scrapes /cluster/metrics with it, and the event log alert data
+    source (present only once `cluster event-alerts` enabled it) queries the
+    API with it. A service whose file changed is restarted to load it.
+    """
+    cluster_docker = utils.get_docker_client(cluster_id)
+    nodes = db_controller.get_mgmt_nodes()
+    for service_name, target, required in (
+            (constants.MONITORING_PROMETHEUS_SERVICE, PROMETHEUS_CONFIG_TARGET, True),
+            (constants.MONITORING_GRAFANA_SERVICE, GRAFANA_EVENT_DATASOURCE_TARGET, False)):
+        try:
+            service = cluster_docker.services.get(service_name)
+        except docker.errors.NotFound as e:
+            raise MonitoringConfigError(
+                f"Service {service_name} not found: the monitoring stack is not deployed") from e
+
+        source = _service_mount_source(service, target)
+        if not source:
+            if required:
+                raise MonitoringConfigError(f"Service {service_name} has no bind mount at {target}")
+            continue
+
+        if _rotate_secret_on_all_managers(nodes, source, old, new):
+            logger.info(f"Restarting {service_name} to load the rotated secret...")
+            service.force_update()
 
 
 def set_event_alerts(cluster_id, enabled=True, log_limit=None, interval=None, pending_period=None,
