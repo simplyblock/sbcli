@@ -134,3 +134,8 @@ class NodeTransitionInProgress(Exception):
     """Raised when a node is mid-transition (e.g. its shutdown has not
     finished) and the request can only be served once it lands. Retryable:
     the v2 API answers 503."""
+
+
+class MonitoringConfigError(Exception):
+    """A monitoring component (Grafana, Prometheus) refused a configuration
+    change or could not be reached to apply it."""
