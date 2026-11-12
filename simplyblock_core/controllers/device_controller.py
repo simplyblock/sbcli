@@ -817,7 +817,12 @@ def restart_device(device_id, force=False):
                 if not filename:
                     logger.error(f"No block device path known for {device_id}")
                     return False
-                snode.rpc_client().bdev_aio_create(device_obj.nvme_bdev, filename)
+                # The block size the device was formatted with (0: legacy).
+                block_size = (device_obj.aio_block_size
+                              or utils.recorded_aio_block_size(snode, device_obj.serial_number)
+                              or 0)
+                utils.create_aio_bdev(snode.rpc_client(), device_obj.nvme_bdev,
+                                      filename, block_size)
                 snode.rpc_client().bdev_examine(device_obj.nvme_bdev)
                 snode.rpc_client().bdev_wait_for_examine()
                 snode.rpc_client().bdev_set_qd_sampling_period(
@@ -1655,7 +1660,12 @@ def new_device_from_failed(device_id):
                 if not filename:
                     logger.error(f"No block device path known for {device_id}")
                     return False
-                device_node.rpc_client().bdev_aio_create(device.nvme_bdev, filename)
+                # The block size the device was formatted with (0: legacy).
+                block_size = (device.aio_block_size
+                              or utils.recorded_aio_block_size(device_node, device.serial_number)
+                              or 0)
+                utils.create_aio_bdev(device_node.rpc_client(), device.nvme_bdev,
+                                      filename, block_size)
                 device_node.rpc_client().bdev_examine(device.nvme_bdev)
                 device_node.rpc_client().bdev_wait_for_examine()
                 device_node.rpc_client().bdev_set_qd_sampling_period(

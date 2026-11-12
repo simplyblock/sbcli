@@ -113,6 +113,15 @@ class NVMeDevice(BaseModel):
     # Stable /dev/disk/by-id/... symlink when the device has one; preferred
     # as the AIO bdev filename so udev renames cannot bite mid-flight.
     by_id_path: str = ""
+    # Block size in bytes the AIO base bdev of an lblk device was created
+    # with, and must be re-created with on every restart: alceml's on-disk
+    # layout depends on the base bdev block size, so data written at one
+    # size cannot be read at another. 0 means the bdev was created without a
+    # block size (SPDK used the device's logical block size): every device
+    # created before this field existed, which keeps being created that way.
+    # Also kept in the node's ``lblk_devices`` entries (see
+    # utils.recorded_aio_block_size).
+    aio_block_size: int = 0
     # The latest disk-health assessment an external assessor (the Kubernetes
     # operator) recorded through PUT .../devices/{id}/health-assessment,
     # stored verbatim: {"reporter", "reported_at", "valid_seconds",

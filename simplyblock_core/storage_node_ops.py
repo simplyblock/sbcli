@@ -1757,6 +1757,7 @@ def _create_jm_stack_on_device(rpc_client, nvme, snode: StorageNode, after_resta
         'alceml_name': alceml_name,
         'nvme_bdev': nvme.nvme_bdev,
         "serial_number": nvme.serial_number,
+        'aio_block_size': nvme.aio_block_size,
         "device_data_dict": nvme.to_dict(),
         'jm_bdev': jm_bdev,
         'testing_bdev': test_name,
@@ -8505,6 +8506,11 @@ def _reconcile_discovered_devices(snode, nvme_devs):
                     db_dev.bdev_type = "aio"
                     db_dev.device_path = found_dev.device_path
                     db_dev.by_id_path = found_dev.by_id_path
+                    # Restore a block size a control-plane service that
+                    # predates the field dropped from the record (found_dev
+                    # got it from the node's lblk_devices entry).
+                    if found_dev.aio_block_size and not db_dev.aio_block_size:
+                        db_dev.aio_block_size = found_dev.aio_block_size
                 else:
                     db_dev.nvme_controller = found_dev.nvme_controller
                     db_dev.pcie_address = found_dev.pcie_address

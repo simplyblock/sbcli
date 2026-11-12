@@ -350,6 +350,10 @@ def get_block_devices_info() -> list[dict]:
             serial = "SYN-" + hashlib.sha1(seed.encode()).hexdigest()[:16]
             synthetic = True
         numa_node = int(_read_sysfs(f"/sys/block/{name}/device/numa_node") or -1)
+        # The control plane picks the AIO bdev block size of a new device
+        # from these (utils.choose_aio_block_size): 4096 unless impossible.
+        logical_bs = _logical_block_size(name)
+        physical_bs = _physical_block_size(name)
         devices.append({
             "name": name,
             "device_path": f"/dev/{name}",
@@ -369,6 +373,8 @@ def get_block_devices_info() -> list[dict]:
             "by_id_path": by_id_path,
             "by_id_paths": by_id_paths,
             "numa_node": numa_node,
+            "logical_block_size": logical_bs,
+            "physical_block_size": physical_bs,
         })
         for child in children:
             if child.get("type") != "part":
@@ -405,6 +411,9 @@ def get_block_devices_info() -> list[dict]:
                 "by_id_path": part_paths[0] if part_paths else "",
                 "by_id_paths": part_paths,
                 "numa_node": numa_node,
+                "logical_block_size": logical_bs,
+                "physical_block_size": physical_bs,
+                "start_bytes": _partition_start_bytes(name, part_name),
             })
     logger.debug("function:get_block_devices_info end")
     return devices
@@ -446,6 +455,25 @@ def _logical_block_size(disk_name: str) -> int:
     except ValueError:
         size = 512
     return size if size > 0 else 512
+
+
+def _physical_block_size(disk_name: str) -> int:
+    """Physical sector size of a disk, in bytes (informational: a 512e
+    device reports 512 logical / 4096 physical)."""
+    try:
+        size = int(_read_sysfs(f"/sys/block/{disk_name}/queue/physical_block_size") or 0)
+    except ValueError:
+        size = 0
+    return size if size > 0 else _logical_block_size(disk_name)
+
+
+def _partition_start_bytes(disk_name: str, part_name: str) -> int | None:
+    """Byte offset of a partition on its disk; sysfs counts the start in
+    512-byte units whatever the logical block size. None when unreadable."""
+    try:
+        return int(_read_sysfs(f"/sys/block/{disk_name}/{part_name}/start")) * 512
+    except ValueError:
+        return None
 
 
 def split_partition_partner(part: dict, devices: list[dict]) -> tuple[dict, dict] | None:

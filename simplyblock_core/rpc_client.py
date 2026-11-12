@@ -1460,7 +1460,9 @@ class RPCClient:
         """Create an SPDK AIO bdev over a Linux block device (lblk cluster
         mode). ``filename`` is the device path — prefer the stable
         /dev/disk/by-id symlink. ``block_size`` 0 lets SPDK use the device's
-        logical block size."""
+        logical block size. Callers go through utils.create_aio_bdev, which
+        passes the block size a device was formatted with
+        (NVMeDevice.aio_block_size)."""
         kwargs = {"name": name, "filename": filename}
         if block_size:
             kwargs["block_size"] = block_size

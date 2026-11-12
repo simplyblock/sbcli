@@ -1607,8 +1607,140 @@ def resolve_lblk_entries(configured_entries, host_devices):
             resolved_entry["partuuid"] = live.get("partuuid") or entry.get("partuuid", "")
         if entry.get("journal"):
             resolved_entry["journal"] = True
+        # Block-size inputs for a new device's AIO bdev (choose_aio_block_size).
+        # An agent that predates them sends none; the chooser copes.
+        for key in ("logical_block_size", "physical_block_size", "start_bytes"):
+            if live.get(key) is not None:
+                resolved_entry[key] = live[key]
+        # The block size this device was formatted with, kept on the config
+        # entry as a second copy of NVMeDevice.aio_block_size. Only for the
+        # very same device: a different device in the same slot is new.
+        if entry.get("aio_block_size") and resolved_entry["serial"] == entry.get("serial"):
+            resolved_entry["aio_block_size"] = int(entry["aio_block_size"])
         resolved.append(resolved_entry)
     return resolved, missing
+
+
+def choose_aio_block_size(entry) -> int:
+    """Block size for the AIO bdev of a NEW lblk device (inventory or
+    resolved entry): AIO_DEFAULT_BLOCK_SIZE (4096) whenever the device allows
+    it, the device's logical block size otherwise. 4096 is possible when it is
+    a multiple of the logical block size, the device size is a multiple of it,
+    and, for a partition whose start is known, the start is 4096-aligned.
+
+    An agent that predates ``logical_block_size`` does not send it. 4096 is
+    still chosen then when the size allows it: every logical block size up to
+    4096 divides it, so SPDK accepts it, and addAioDevices retries a new
+    device without a block size if SPDK refuses (logical block size above
+    4096). When 4096 is not possible, 0 (SPDK picks the logical block size) is
+    returned instead of a guessed 512, which SPDK would refuse on a 4Kn
+    device. Never used for a device that already has a record: that one keeps
+    the block size it was formatted with (recorded_aio_block_size)."""
+    target = constants.AIO_DEFAULT_BLOCK_SIZE
+    try:
+        logical = int(entry.get("logical_block_size") or 0)
+    except (TypeError, ValueError):
+        logical = 0
+    fallback = max(0, logical)
+    if logical > target or (logical > 0 and target % logical):
+        return fallback
+    size = int(entry.get("size") or 0)
+    if size <= 0 or size % target:
+        return fallback
+    start = entry.get("start_bytes")
+    if start is not None and int(start) % target:
+        return fallback
+    return target
+
+
+def recorded_aio_block_size(snode, serial):
+    """The block size the AIO bdev of the device with this serial was created
+    with, from what the control plane recorded about it: its NVMeDevice
+    record, the node's journal device record, and the node's ``lblk_devices``
+    config entry (a plain dict, which a control-plane service that predates
+    NVMeDevice.aio_block_size keeps intact on a read-modify-write of the
+    node, while it drops the unknown model field).
+
+    Returns the recorded size, 0 for a device recorded before block sizes were
+    (legacy: create without a block size, as it was formatted), or None when
+    nothing is recorded: a new device, which gets choose_aio_block_size."""
+    known = False
+    sizes = []
+    devices = getattr(snode, "nvme_devices", None)
+    for dev in devices if isinstance(devices, list) else []:
+        if getattr(dev, "serial_number", None) == serial:
+            known = True
+            sizes.append(int(getattr(dev, "aio_block_size", 0) or 0))
+    jm = getattr(snode, "jm_device", None)
+    if jm is not None:
+        data = getattr(jm, "device_data_dict", None)
+        data = data if isinstance(data, dict) else {}
+        if data.get("serial_number") == serial or getattr(jm, "serial_number", None) == serial:
+            known = True
+            sizes.append(int(data.get("aio_block_size") or 0))
+            sizes.append(int(getattr(jm, "aio_block_size", 0) or 0))
+    entries = getattr(snode, "lblk_devices", None)
+    for entry in entries if isinstance(entries, list) else []:
+        if isinstance(entry, dict) and entry.get("serial") == serial:
+            sizes.append(int(entry.get("aio_block_size") or 0))
+    recorded = next((s for s in sizes if s > 0), 0)
+    if recorded:
+        conflicting = sorted({s for s in sizes if s > 0 and s != recorded})
+        if conflicting:
+            logger.warning(f"Device {serial}: conflicting recorded AIO block sizes "
+                           f"{[recorded] + conflicting}; using {recorded}")
+        return recorded
+    return 0 if known else None
+
+
+def remember_aio_block_size(snode, serial, block_size):
+    """Store the block size of a device's AIO bdev on the node's
+    ``lblk_devices`` entry, next to NVMeDevice.aio_block_size (see
+    recorded_aio_block_size). 0 (legacy) is never written."""
+    entries = getattr(snode, "lblk_devices", None)
+    if not block_size or not isinstance(entries, list):
+        return
+    for entry in entries:
+        if isinstance(entry, dict) and entry.get("serial") == serial:
+            entry["aio_block_size"] = int(block_size)
+
+
+def check_aio_block_size(name, bdev, block_size):
+    """Raise when the AIO bdev does not have the expected (non-zero) block
+    size. A bdev that reports no block size is not checked."""
+    if not block_size or not isinstance(bdev, dict):
+        return
+    actual = bdev.get("block_size")
+    if isinstance(actual, int) and actual != block_size:
+        raise Exception(f"AIO bdev {name} has block size {actual}, expected "
+                        f"{block_size}; refusing to use it as storage")
+
+
+def create_aio_bdev(rpc_client, name, filename, block_size=0, new_device=False,
+                    verify=True):
+    """bdev_aio_create with ``block_size`` (0: none, SPDK uses the logical
+    block size), then (``verify``) check that the bdev has that block size;
+    a caller that reads the bdev anyway passes verify=False and runs
+    check_aio_block_size itself. Returns the block size requested. Raises
+    when the bdev cannot be created or its block size differs from the one
+    requested: building alceml over a bdev of another block size would make
+    the device's data unreadable. Only for a ``new_device`` (nothing
+    formatted on it yet) a refused block size is retried without one."""
+    if block_size:
+        ret = rpc_client.bdev_aio_create(name, filename, block_size=block_size)
+        if not ret and new_device:
+            logger.warning(f"bdev_aio_create {name} ({filename}) with block size "
+                           f"{block_size} failed on {rpc_client.host}; retrying with "
+                           f"the device's logical block size")
+            block_size = 0
+            ret = rpc_client.bdev_aio_create(name, filename)
+    else:
+        ret = rpc_client.bdev_aio_create(name, filename)
+    if not ret:
+        raise Exception(f"bdev_aio_create failed for {name} ({filename}) on {rpc_client.host}")
+    if verify:
+        check_aio_block_size(name, rpc_client.bdev_get(name), block_size)
+    return block_size
 
 
 def addAioDevices(rpc_client, snode, blk_entries):
@@ -1621,27 +1753,40 @@ def addAioDevices(rpc_client, snode, blk_entries):
     next_physical_label = snode.physical_label
     for entry in blk_entries:
         bdev_name = aio_bdev_name_for_serial(entry["serial"])
+        # A device the cluster knows is re-created with the block size it was
+        # formatted with (0: legacy, none); only a new one gets the default.
+        recorded = recorded_aio_block_size(snode, entry["serial"])
+        if recorded is None and entry.get("aio_block_size"):
+            recorded = int(entry["aio_block_size"])
         ret = rpc_client.bdev_get(bdev_name)
         if not ret:
             # A path the caller selected the device by is opened as given.
             # Otherwise prefer the by-id path as the filename so a udev rename
             # between resolution and create cannot swap devices under us.
             filename = entry.get("path") or entry.get("by_id") or entry["current_path"]
-            ret = rpc_client.bdev_aio_create(bdev_name, filename)
-            if not ret:
-                raise Exception(
-                    f"bdev_aio_create failed for {bdev_name} ({filename}) "
-                    f"on {rpc_client.host}")
+            if recorded is None:
+                expected = create_aio_bdev(rpc_client, bdev_name, filename,
+                                           choose_aio_block_size(entry),
+                                           new_device=True, verify=False)
+            else:
+                expected = create_aio_bdev(rpc_client, bdev_name, filename,
+                                           recorded, verify=False)
+        else:
+            expected = recorded
         rpc_client.bdev_examine(bdev_name)
         rpc_client.bdev_wait_for_examine()
 
         bdev = rpc_client.bdev_get(bdev_name)
         if not bdev:
             raise Exception(f"AIO bdev {bdev_name} not found after create on {rpc_client.host}")
+        check_aio_block_size(bdev_name, bdev, expected)
         total_size = bdev['block_size'] * bdev['num_blocks']
         if total_size == 0:
             logger.warning(f"Skipping zero-size block device {entry['name']} ({bdev_name})")
             continue
+        # A new device is formatted at the block size its bdev has now.
+        aio_block_size = int(bdev['block_size']) if recorded is None else recorded
+        remember_aio_block_size(snode, entry["serial"], aio_block_size)
 
         # Queue-depth sampling feeds the control-plane hung-IO watchdog
         # (AIO has no bdev_nvme-style timeout/action_on_timeout).
@@ -1663,6 +1808,7 @@ def addAioDevices(rpc_client, snode, blk_entries):
                 'nvme_bdev': bdev_name,
                 'nvme_controller': "",
                 'bdev_type': "aio",
+                'aio_block_size': aio_block_size,
                 'device_path': entry["current_path"],
                 'by_id_path': entry.get("path") or entry.get("by_id", ""),
                 'node_id': snode.get_id(),
