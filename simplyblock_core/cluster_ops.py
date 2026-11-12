@@ -2567,7 +2567,9 @@ def set_secret(cluster_id, secret: SecretStr) -> None:
         raise ValueError("Secret must be at least 20 char")
     secret = SecretStr(plain)
 
-    _create_update_user(cluster_id, cluster.grafana_endpoint, cluster.grafana_secret, secret, update_secret=True)
+    # A cluster created without monitoring has no Grafana to hold the user.
+    if not cluster.disable_monitoring:
+        _create_update_user(cluster_id, cluster.grafana_endpoint, cluster.grafana_secret, secret, update_secret=True)
 
     cluster.secret = secret
     cluster.write_to_db(db_controller.kv_store)
