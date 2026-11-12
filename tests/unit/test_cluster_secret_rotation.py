@@ -13,6 +13,7 @@ from pydantic import SecretStr
 
 from simplyblock_core import cluster_ops, utils
 from simplyblock_core.exceptions import MonitoringConfigError
+from simplyblock_core.models.cluster import Cluster
 
 OLD = "oldsupersecret1234567891012"
 NEW = "newsupersecret1234567891012"
@@ -153,3 +154,28 @@ class TestRotateOnAllManagers:
                           side_effect=cluster_ops.DockerException("connection refused")):
             with pytest.raises(MonitoringConfigError, match="10.0.0.1"):
                 cluster_ops._rotate_secret_on_all_managers(nodes, "/x/prometheus.yml", OLD, NEW)
+
+
+class TestAddGrafanaUserOrDisableMonitoring:
+    """A new cluster is created even when Grafana cannot take its user."""
+
+    def _cluster(self):
+        cluster = Cluster()
+        cluster.uuid = "c1"
+        cluster.grafana_endpoint = URL
+        cluster.secret = SecretStr(NEW)
+        return cluster
+
+    def test_success_keeps_monitoring_enabled(self):
+        cluster = self._cluster()
+        with patch.object(cluster_ops, "_sync_grafana_user") as sync:
+            cluster_ops._add_grafana_user_or_disable_monitoring(cluster, SecretStr("admin-pass"))
+        sync.assert_called_once()
+        assert cluster.disable_monitoring is False
+
+    def test_failure_disables_monitoring_instead_of_raising(self):
+        cluster = self._cluster()
+        with patch.object(cluster_ops, "_sync_grafana_user",
+                          side_effect=MonitoringConfigError("Grafana is unreachable")):
+            cluster_ops._add_grafana_user_or_disable_monitoring(cluster, SecretStr("admin-pass"))
+        assert cluster.disable_monitoring is True

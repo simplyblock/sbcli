@@ -198,6 +198,24 @@ def _sync_grafana_user(cluster_id, grafana_url, grafana_secret: SecretStr, user_
     logger.debug(f"Grafana user {cluster_id} in sync")
 
 
+def _add_grafana_user_or_disable_monitoring(cluster: Cluster, grafana_secret: SecretStr) -> None:
+    """Create Grafana's user for a cluster being created; on failure, create it without monitoring.
+
+    A cluster is usable without its dashboards, so an unreachable or refusing
+    Grafana does not fail the create. The cluster is marked
+    ``disable_monitoring`` instead, so nothing later (``update-secret``)
+    expects a Grafana user that does not exist. Must run before the cluster
+    record is first written.
+    """
+    try:
+        _sync_grafana_user(cluster.uuid, cluster.grafana_endpoint, grafana_secret, cluster.secret)
+    except MonitoringConfigError as e:
+        logger.warning(
+            f"Could not create the Grafana user for cluster {cluster.uuid}: {e}. "
+            f"Continuing with monitoring disabled for this cluster")
+        cluster.disable_monitoring = True
+
+
 def _add_graylog_input(cluster_ip, password: SecretStr):
     base_url = f"{cluster_ip}/api"
     input_url = f"{base_url}/system/inputs"
@@ -667,7 +685,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     if not disable_monitoring:
         _set_max_result_window(os_endpoint)
         _add_graylog_input(graylog_endpoint, monitoring_secret)
-        _sync_grafana_user(cluster.uuid, cluster.grafana_endpoint, monitoring_secret, cluster.secret)
+        _add_grafana_user_or_disable_monitoring(cluster, monitoring_secret)
 
     cluster.db_connection = db_connection  # type: ignore[assignment]
     cluster.status = Cluster.STATUS_UNREADY
@@ -912,7 +930,7 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
         cfg.write_to_db()
 
     if not cluster.disable_monitoring:
-        _sync_grafana_user(cluster.uuid, cluster.grafana_endpoint, cluster.grafana_secret, cluster.secret)
+        _add_grafana_user_or_disable_monitoring(cluster, cluster.grafana_secret)
 
     if cluster.mode == "kubernetes":
         utils.patch_prometheus_configmap(cluster.uuid, cluster.secret.get_secret_value())
