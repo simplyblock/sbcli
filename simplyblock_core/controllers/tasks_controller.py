@@ -1578,9 +1578,17 @@ def add_group_backup_commit_task(group_backup):
     )
 
 
-def add_backup_restore_task(cluster_id, node_id, backup_id, lvol_name, chain_ids,
-                            lvol_id="", s3_config=None):
+def add_backup_restore_task(source_lvol_id, cluster_id, node_id, backup_id, lvol_name,
+                            chain_ids, lvol_id="", s3_config=None):
     """Create the task that restores an S3 backup chain into a new lvol.
+
+    Unlike every other task type, this does not go through ``_add_task``: its
+    creation has to be atomic with checking that no backup of the SOURCE
+    chain (``source_lvol_id`` -- the volume the backup was taken from, not
+    ``lvol_id``, the new volume being restored into) is already
+    ``MERGING``/``DELETING``, so a delete or merge cannot slip into the gap
+    between that check and the task actually existing. See
+    ``DBController.create_backup_restore_task_if_chain_clear``.
 
     Args:
         s3_config: set when the backup lives in a bucket that is not the
@@ -1589,13 +1597,12 @@ def add_backup_restore_task(cluster_id, node_id, backup_id, lvol_name, chain_ids
             and deletes it -- scrubbing this field -- once the restore reaches
             a terminal state. Unset, the restore reads through the device the
             node already has for the cluster's own bucket.
+
+    Returns the task uuid, or ``False`` if the source chain is being merged
+    or deleted.
     """
-    return _add_task(
-        JobSchedule.FN_BACKUP_RESTORE,
-        cluster_id,
-        node_id,
-        "",
-        max_retry=constants.BACKUP_MAX_RETRIES,
+    task, reason = db.create_backup_restore_task_if_chain_clear(
+        source_lvol_id, cluster_id, node_id,
         function_params={
             "backup_id": backup_id,
             "lvol_name": lvol_name,
@@ -1603,7 +1610,13 @@ def add_backup_restore_task(cluster_id, node_id, backup_id, lvol_name, chain_ids
             "chain_ids": chain_ids,
             "s3_config": s3_config,
         },
+        max_retry=constants.BACKUP_MAX_RETRIES,
     )
+    if task is None:
+        logger.info(f"Cannot create restore task: {reason}")
+        return False
+    tasks_events.task_create(task)
+    return task.uuid
 
 
 def add_backup_merge_task(cluster_id, node_id, keep_backup_id, old_backup_id):
