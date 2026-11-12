@@ -31,7 +31,6 @@ from simplyblock_core.peer.client import (
     peer_for_target,
 )
 from simplyblock_core.peer.protocol import (
-    AllowedHost,
     ChainCheck,
     ChainRequest,
     DescribeRequest,
@@ -39,6 +38,7 @@ from simplyblock_core.peer.protocol import (
     FinishRequest,
     LandingRequest,
     SourceGroup,
+    SourceHostAccess,
     SourceSnapshot,
     SourceVolume,
 )
@@ -1948,7 +1948,7 @@ def _source_volume(snapshot):
         return None
     record = lvol.to_dict()
     hosts = record.pop("allowed_hosts", None) or []
-    return SourceVolume(record=record, allowed_hosts=[AllowedHost(**h) for h in hosts])
+    return SourceVolume(record=record, allowed_hosts=[SourceHostAccess(**h) for h in hosts])
 
 
 def _source_group(snapshot):

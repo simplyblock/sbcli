@@ -207,7 +207,7 @@ class ChainResponse(BaseModel):
     reason: str = ""
 
 
-class AllowedHost(BaseModel):
+class SourceHostAccess(BaseModel):
     """A host allowed on the source volume's subsystem, with its keys."""
 
     nqn: str
@@ -238,7 +238,7 @@ class SourceVolume(BaseModel):
 
     #: ``LVol.to_dict()`` of the snapshot's embedded volume, without ``allowed_hosts``.
     record: dict
-    allowed_hosts: list[AllowedHost] = Field(default_factory=list)
+    allowed_hosts: list[SourceHostAccess] = Field(default_factory=list)
 
 
 class SourceGroup(BaseModel):

@@ -12,9 +12,9 @@ from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.peer import service as peer_service
 from simplyblock_core.peer.protocol import (
     CAPABILITIES,
-    AllowedHost,
     FinishRequest,
     SourceGroup,
+    SourceHostAccess,
     SourceSnapshot,
     SourceVolume,
 )
@@ -44,13 +44,13 @@ def _snapshot(group_id="", group_seq=0):
 
 
 def test_host_keys_are_masked_in_python_and_clear_on_the_wire():
-    host = AllowedHost(nqn="nqn.host:a", dhchap_key=SecretStr(KEY))
+    host = SourceHostAccess(nqn="nqn.host:a", dhchap_key=SecretStr(KEY))
     assert KEY not in repr(host)
     assert KEY not in str(host.model_dump())
     wire = host.model_dump(mode="json")
     assert wire["dhchap_key"] == KEY
     # The receiving side parses the wire form back into a secret.
-    parsed = AllowedHost.model_validate(wire).dhchap_key
+    parsed = SourceHostAccess.model_validate(wire).dhchap_key
     assert parsed is not None and parsed.get_secret_value() == KEY
 
 
@@ -122,7 +122,7 @@ def _record(source):
 
 def test_the_copy_records_the_source_volume_and_group():
     volume = SourceVolume(record={"uuid": "LV1", "nqn": "nqn.x"},
-                          allowed_hosts=[AllowedHost(nqn="nqn.host:a", dhchap_key=SecretStr(KEY))])
+                          allowed_hosts=[SourceHostAccess(nqn="nqn.host:a", dhchap_key=SecretStr(KEY))])
     group = SourceGroup(group_name="gitea", policy_id="SRC/P1", members=["LV1", "LV2"])
     copy = _record(SourceSnapshot(snapshot_id="S1", snap_name="s", size=1,
                                   group_id="SRC/G1", group_seq=4, volume=volume, group=group))
