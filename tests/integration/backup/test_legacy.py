@@ -708,7 +708,7 @@ class TestRestoreBackup(unittest.TestCase):
 
         self.assertEqual(result, "lvol-new")
         # s3_id integers reach the data plane, not backup UUIDs.
-        self.assertEqual(mock_tasks.add_backup_restore_task.call_args[0][4], [5])
+        self.assertEqual(mock_tasks.add_backup_restore_task.call_args[0][5], [5])
         self.assertEqual(self.db.get_lvol_by_id("lvol-new").status, LVol.STATUS_RESTORING)
 
     def test_backup_not_found(self):
