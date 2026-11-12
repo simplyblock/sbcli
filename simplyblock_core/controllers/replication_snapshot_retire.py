@@ -21,6 +21,7 @@ import time
 
 from simplyblock_core import utils
 from simplyblock_core.controllers import replication_recovery_points
+from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.snapshot import SnapShot, SnapShotMini
 from simplyblock_core.models.storage_node import StorageNode
 
@@ -154,6 +155,150 @@ def retire_orphan_copies(db, cluster_id, now=None):
         logger.info("Retiring %d orphaned replication snapshot(s) on cluster %s: %s",
                     len(retired), cluster_id, ", ".join(retired))
     return retired
+
+
+#: How far collapse_migrated_chains follows a chain down from a clone base.
+_COLLAPSE_WALK_LIMIT = 64
+#: Ancestor deletes collapse_migrated_chains issues per cluster and pass: one
+#: per volume at most, and the whole pass bounded on top.
+COLLAPSE_PER_PASS = 8
+
+
+def collapse_migrated_chains(db, cluster_id):
+    """Merge away the landing history under the volumes migrated to *cluster_id*.
+
+    A migrated (or failed-over) volume is a clone of the newest landing copy,
+    and that copy sits on every older copy of its chain: the volume's own
+    earlier rounds, and the chain ancestors earlier legs sent with it. Nothing
+    collapses those -- retention prunes only a live volume's OWN pairs, and
+    the reaper and the orphan sweep only take leaves -- so each round trip
+    added its history as further layers (bed bf21 2026-11-10: depth up to 7
+    after five rounds, each layer pinning data the client had since
+    overwritten; 93-99 % device use, client EIO).
+
+    Per pass and volume this deletes at most ONE ancestor below the volume's
+    clone base, through the ordinary snapshot delete: an ancestor with exactly
+    one child swap-merges into it, so the volume reads the same data and the
+    chain is one layer shorter. Over a few passes the volume is left on its
+    base alone -- the newest replicated copy, which is the delta base of a
+    migration back and is never touched. An ancestor is merged away only when
+    it is a replication snapshot (never a user snapshot: the walk stops at
+    one) whose volume record is gone, no volume is cloned from it, exactly one
+    snapshot chains onto it in the DB and SPDK reports exactly one clone, it
+    is not a group recovery point, and its source on the other cluster does
+    not belong to a live volume (that pair is the live volume's retention's).
+    A chain with a delete in flight, a snapshot in replication or a live
+    replication task on any of its members is left for a later pass.
+    Returns the number of deletes issued."""
+    from simplyblock_core.controllers import snapshot_controller
+    minis = db.get_mini_snapshots()
+    lvols = db.get_mini_lvols()
+    lvol_ids = {lv.get_id() for lv in lvols}
+    cloned_from = {lv.cloned_from_snap for lv in lvols if lv.cloned_from_snap}
+    children: dict = {}
+    for m in minis:
+        if m.prev_snap_uuid:
+            children.setdefault(m.prev_snap_uuid, []).append(m.get_id())
+    busy = _snapshots_in_transfer(db, cluster_id)
+    if busy is None:
+        return 0
+    issued = 0
+    for lv in lvols:
+        if issued >= COLLAPSE_PER_PASS:
+            break
+        if not lv.cloned_from_snap or lv.status == LVol.STATUS_IN_DELETION \
+                or (getattr(lv, "lvol_name", "") or "").startswith("REP_"):
+            continue
+        try:
+            base = db.get_snapshot_by_id(lv.cloned_from_snap)
+        except KeyError:
+            continue
+        if base.cluster_id != cluster_id or not is_replication_snapshot(base):
+            continue
+        chain = _chain_below(db, base)
+        if not chain or not _chain_idle(db, [base] + chain, busy, lvol_ids):
+            continue
+        child = base
+        for snap in chain:
+            if not is_replication_snapshot(snap):
+                break                                       # never past a user snapshot
+            if _collapsible(db, snap, child, lvol_ids, cloned_from, children):
+                logger.info("Merging landing history %s (%s) of migrated volume %s into %s",
+                            snap.get_id(), snap.snap_bdev, lv.get_id(), child.get_id())
+                fresh = db.atomic_update(snap, _retire)
+                if fresh is not None:
+                    _sync_mini(db, fresh)
+                    _unlink_from_source(db, fresh)
+                if snapshot_controller.delete(snap.get_id()):
+                    issued += 1
+                break
+            child = snap
+    if issued:
+        logger.info("Collapsing migrated chains on cluster %s: %d ancestor delete(s) issued",
+                    cluster_id, issued)
+    return issued
+
+
+def _chain_below(db, base):
+    """The snapshots under *base* through prev_snap_uuid, nearest first."""
+    chain: list = []
+    node = base
+    while node.prev_snap_uuid and len(chain) < _COLLAPSE_WALK_LIMIT:
+        try:
+            node = db.get_snapshot_by_id(node.prev_snap_uuid)
+        except KeyError:
+            break
+        chain.append(node)
+    return chain
+
+
+def _chain_idle(db, chain, busy, lvol_ids):
+    """Whether nothing else works on *chain*: no delete in flight (deletes of
+    one chain swap-merge into each other), nothing in replication or with a
+    live replication task (a transfer reads the cluster map a merge changes),
+    and no member still owned by a live volume's retention (its own snapshot,
+    or the copy of one)."""
+    for s in chain:
+        if s.status in (SnapShot.STATUS_IN_DELETION, SnapShot.STATUS_IN_REPLICATION) \
+                or s.get_id() in busy:
+            return False
+        if s.lvol and s.lvol.get_id() in lvol_ids:
+            return False
+        if _source_is_live(db, s, lvol_ids):
+            return False
+    return True
+
+
+def _collapsible(db, snap, child, lvol_ids, cloned_from, children):
+    """Whether deleting *snap* merges it into *child* and nothing else."""
+    uuid = snap.get_id()
+    if snap.status != SnapShot.STATUS_ONLINE or uuid in cloned_from:
+        return False
+    if snap.lvol and snap.lvol.get_id() in lvol_ids:
+        return False
+    if children.get(uuid, []) != [child.get_id()]:
+        return False
+    group = getattr(snap, "group_id", "") or ""
+    if group and uuid in replication_recovery_points.group_recovery_point_ids({group}, db=db):
+        return False
+    # SPDK is the authority on what the delete merges into: its one clone
+    # must be the child the DB names.
+    clones = _spdk_clones(db, snap)
+    return (clones is not None and len(clones) == 1
+            and str(clones[0]).split("/")[-1] == (child.snap_bdev or "").split("/")[-1])
+
+
+def _snapshots_in_transfer(db, cluster_id):
+    """Ids of the snapshots with a live replication task on *cluster_id*, or
+    None when the tasks cannot be read."""
+    from simplyblock_core.models.job_schedule import JobSchedule
+    try:
+        tasks = db.get_job_tasks_by_function(cluster_id, JobSchedule.FN_SNAPSHOT_REPLICATION)
+    except Exception as e:                                  # noqa: BLE001
+        logger.warning("Cannot read replication tasks of cluster %s: %s", cluster_id, e)
+        return None
+    return {(t.function_params or {}).get("snapshot_id") for t in tasks
+            if t.status != JobSchedule.STATUS_DONE and not t.canceled}
 
 
 def _source_is_live(db, snap, lvol_ids):

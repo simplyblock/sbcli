@@ -727,6 +727,14 @@ def process_snap_replicate_start(task, snapshot):
         task.write_to_db()
         logger.info("Holding replication of %s: %s", snapshot.get_id(), hold)
         return False
+    # The chain must never grow: a volume whose earlier copies the target has
+    # not merged away yet sends no further layer (bed bf21 2026-11-10, see
+    # REPL_MAX_UNMERGED_LANDING_LAYERS). Waiting, like the lvstore hold above.
+    hold = _merge_behind_hold(task, snapshot)
+    if hold:
+        task.function_result = f"held: {hold}"
+        task.write_to_db()
+        return False
     # Drive the transfer from the first online member of the SOURCE lvstore
     # that holds the snapshot -- primary, else secondary, else tertiary. The
     # snapshot exists on every member and leadership does not matter for a
@@ -1215,9 +1223,16 @@ def _counterpart_on_destination(snapshot, remote_node):
     lvstore = getattr(remote_node, "lvstore", "")
     if not snapshot.data_uuid or not lvstore:
         return None
+    # A retired snapshot (deleted: the lineage of a migrated-away volume) is
+    # on its way out: the reaper deletes it once it is a leaf, and a chain
+    # built on it in between either loses it under the new copy or, chained,
+    # pins it for good where neither the reaper nor the orphan sweep reaches
+    # it (bed bf21 2026-11-10: 25 such snapshots of earlier rounds in live
+    # chains on one cluster). Such a snapshot is sent again instead.
     for cand in db.get_snapshots(remote_node.cluster_id):
         if (cand.get_id() != snapshot.get_id()
                 and cand.data_uuid == snapshot.data_uuid
+                and not getattr(cand, "deleted", False)
                 and cand.status != SnapShot.STATUS_IN_DELETION
                 and cand.lvol and cand.lvol.lvs_name == lvstore):
             return cand
@@ -1743,6 +1758,175 @@ def prune_async(source_lvol, keep=None):
     return True
 
 
+def _retention_plan(source_lvol, replicated_internal, after_cutover=False, keep=None):
+    """(keep, schedule, candidates) of retention for *replicated_internal*
+    (oldest first): the (index, snapshot) pairs retention would prune."""
+    # After a cutover there is no next delta to chain: one pair is enough.
+    if keep is None:
+        keep = 1 if after_cutover else _keep_replicated_for(source_lvol)
+    # A retention SCHEDULE, when the policy defines one, decides which older
+    # snapshots survive; without it retention stays the flat "newest N".
+    # Either way the newest `keep` are protected, because deleting a snapshot
+    # swap-merges its segments into the successor chained to it.
+    schedule = [] if (after_cutover or keep == 1) else _retention_schedule_for(source_lvol)
+    if schedule:
+        retained_ts = snapshot_retention.select_retained(
+            [s.created_at for s in replicated_internal], schedule,
+            now=time.time(), always_keep_newest=keep)
+        candidates = [(i, s) for i, s in enumerate(replicated_internal)
+                      if s.created_at not in retained_ts]
+    elif len(replicated_internal) <= keep:
+        candidates = []
+    else:
+        candidates = list(enumerate(replicated_internal))[:-keep]
+    return keep, schedule, candidates
+
+
+#: How far merge_backlog follows a copy chain down on the target.
+_MERGE_WALK_LIMIT = 64
+
+
+def merge_backlog(source_lvol, cluster_id, exclude_snapshot_id=""):
+    """How many of *source_lvol*'s layers on the target are not merged away
+    yet, and what they are: (count, detail, prunable) -- prunable is how many
+    of them retention has yet to start on (the rest are merging already).
+
+    Every transfer leaves one layer on the target: its landing copy,
+    converted into a snapshot on top of the previous copy. Retention merges
+    the oldest away (_prune_internal_snapshots: the delete swap-merges it into
+    its successor), so a volume that keeps up sits on its retained pairs plus
+    at most the one being merged. Counted here, beyond those:
+
+      * replicated pairs retention would prune but has not started on (a
+        group's recovery point and a copy a volume is cloned from are held on
+        purpose and not counted -- retention never removes them);
+      * copies being deleted, i.e. swap-merging, on the target -- found
+        through the source's links and by walking the newest copy's chain,
+        which still holds a copy whose source record is gone already;
+      * landing copies whose transfer is done and that still merge with their
+        base (bdev_lvol_merge_base) before the convert.
+
+    Bed bf21 2026-11-10: none of this held replication back, chains reached
+    depth 7 and the clusters 93-99 % (REPL_MAX_UNMERGED_LANDING_LAYERS).
+    """
+    snaps = db.get_snapshots_by_lvol_id(source_lvol.get_id())
+    replicated = sorted(
+        (s for s in snaps
+         if s.snap_type == SnapShot.TYPE_INTERNAL and s.status == SnapShot.STATUS_ONLINE
+         and s.target_replicated_snap_uuid),
+        key=lambda s: s.created_at)
+    _keep, _schedule, candidates = _retention_plan(source_lvol, replicated)
+    group_keep = replication_recovery_points.group_recovery_point_ids(
+        {getattr(s, "group_id", "") for s in replicated}, db=db) if candidates else set()
+    pending = [s for _, s in candidates
+               if s.get_id() not in group_keep
+               and s.target_replicated_snap_uuid not in group_keep
+               and not _has_dependent_clone(s.target_replicated_snap_uuid)]
+
+    replicated_ids = {s.get_id() for s in replicated}
+    merging = set()
+    newest_copy = None
+    for s in snaps:
+        if not s.target_replicated_snap_uuid:
+            continue
+        try:
+            copy = db.get_snapshot_by_id(s.target_replicated_snap_uuid)
+        except KeyError:
+            continue
+        if copy.status == SnapShot.STATUS_IN_DELETION:
+            merging.add(copy.get_id())
+        elif s.get_id() in replicated_ids and (newest_copy is None or s.created_at > newest_copy[0]):
+            newest_copy = (s.created_at, copy)
+    if newest_copy is not None:
+        node, steps = newest_copy[1], 0
+        while node.prev_snap_uuid and steps < _MERGE_WALK_LIMIT:
+            steps += 1
+            try:
+                node = db.get_snapshot_by_id(node.prev_snap_uuid)
+            except KeyError:
+                break
+            if node.status == SnapShot.STATUS_IN_DELETION:
+                merging.add(node.get_id())
+
+    snap_ids = {s.get_id() for s in snaps} - {exclude_snapshot_id}
+    landing = 0
+    for t in db.get_job_tasks_by_function(cluster_id, JobSchedule.FN_SNAPSHOT_REPLICATION):
+        p = t.function_params or {}
+        if (t.status != JobSchedule.STATUS_DONE and not t.canceled
+                and p.get("snapshot_id") in snap_ids and p.get("transfer_done")):
+            landing += 1
+    count = len(pending) + len(merging) + landing
+    return count, (f"{len(pending)} beyond retention, {len(merging)} being merged, "
+                   f"{landing} landing copies merging"), len(pending)
+
+
+def _hold_progress(hold, value, now):
+    """The hold record after a sample of a backlog that is over its limit:
+    (hold, expired). The clock restarts whenever the backlog shrank; a hold
+    that saw no progress for REPL_MERGE_HOLD_MAX_SEC has expired (pure)."""
+    if not hold or value < hold.get("value", value + 1):
+        return {"since": now, "value": value}, False
+    return hold, now - float(hold["since"]) >= constants.REPL_MERGE_HOLD_MAX_SEC
+
+
+def _merge_behind_hold(task, snapshot):
+    """Why this volume's next transfer waits for the target to merge, or "".
+
+    Replication phase only: a converging cutover's rounds run under their own
+    bound (REPL_CUTOVER_MAX_SHRINK_ROUNDS), and a chain-ancestor snapshot or a
+    fail-back transfer has no retention of its own to wait for. While held,
+    the volume's retention is (re)started, so the merge it waits for runs --
+    a finish whose prune was dropped (prune_async, one per volume) otherwise
+    leaves the backlog untouched until the next finish, which the hold stops.
+    Never holds on an error: a guard that cannot measure must not stop
+    replication."""
+    params = task.function_params
+    try:
+        if (snapshot.snap_type != SnapShot.TYPE_INTERNAL
+                or params.get("replicate_to_source") or params.get("transfer_done")):
+            return ""
+        lvol = db.get_lvol_by_id(snapshot.lvol.get_id())
+        layers, detail, prunable = merge_backlog(lvol, task.cluster_id,
+                                                 exclude_snapshot_id=snapshot.get_id())
+        # (read only when over the limit: it scans the task table)
+        if (layers > constants.REPL_MAX_UNMERGED_LANDING_LAYERS
+                and _cutover_owns(lvol.get_id(), task.cluster_id)):
+            layers = 0
+    except Exception as e:                                # noqa: BLE001
+        logger.debug("No merge backlog reading for %s: %s", snapshot.get_id(), e)
+        return ""
+    hold = params.get("merge_hold")
+    if layers <= constants.REPL_MAX_UNMERGED_LANDING_LAYERS:
+        if hold:
+            params.pop("merge_hold", None)
+            logger.info("Replication of %s resumes: the target merged its backlog (%s)",
+                        snapshot.get_id(), detail)
+            xfer_timing.stamp("replication_resumed", snap=snapshot.get_id(),
+                              lvol=lvol.get_id(), layers=layers)
+        return ""
+    new_hold, expired = _hold_progress(hold, layers, time.time())
+    if expired:
+        params.pop("merge_hold", None)
+        logger.error("Replication of %s was held for %ds without the target merging "
+                     "any of its backlog (%s); transferring anyway -- investigate the "
+                     "retention of lvol %s", snapshot.get_id(),
+                     constants.REPL_MERGE_HOLD_MAX_SEC, detail, lvol.get_id())
+        xfer_timing.stamp("replication_hold_expired", snap=snapshot.get_id(),
+                          lvol=lvol.get_id(), layers=layers)
+        return ""
+    params["merge_hold"] = new_hold
+    why = (f"merge behind: {layers} unmerged landing layers of lvol {lvol.get_id()[:8]} "
+           f"on the target (limit {constants.REPL_MAX_UNMERGED_LANDING_LAYERS}: {detail})")
+    if not hold:
+        logger.warning("Replication held for %s: %s", snapshot.get_id(), why)
+        xfer_timing.stamp("replication_held_merge_behind", snap=snapshot.get_id(),
+                          lvol=lvol.get_id(), layers=layers)
+    if prunable:
+        # (not for copies already merging: retention would only rescan)
+        prune_async(lvol)
+    return why
+
+
 def _prune_internal_snapshots(source_lvol, after_cutover=False, keep=None):
     """Retention for replication-driven internal snapshots.
 
@@ -1770,16 +1954,9 @@ def _prune_internal_snapshots(source_lvol, after_cutover=False, keep=None):
         and s.status == SnapShot.STATUS_ONLINE
         and s.target_replicated_snap_uuid
     ]
-    # After a cutover there is no next delta to chain: one pair is enough.
-    if keep is None:
-        keep = 1 if after_cutover else _keep_replicated_for(source_lvol)
     replicated_internal.sort(key=lambda s: s.created_at)
-
-    # A retention SCHEDULE, when the policy defines one, decides which older
-    # snapshots survive; without it retention stays the flat "newest N".
-    # Either way the newest `keep` are protected, because deleting a snapshot
-    # swap-merges its segments into the successor chained to it.
-    schedule = [] if (after_cutover or keep == 1) else _retention_schedule_for(source_lvol)
+    keep, schedule, candidates = _retention_plan(
+        source_lvol, replicated_internal, after_cutover=after_cutover, keep=keep)
     # Say which retention is in force, every time it prunes. Soak run
     # 20260827_224741 ended with 2 snapshots at consecutive cadence ticks after
     # 124 minutes under `5m:15m,7m:30m,10m:1h` -- which is exactly what the FLAT
@@ -1792,18 +1969,8 @@ def _prune_internal_snapshots(source_lvol, after_cutover=False, keep=None):
         ("schedule %s" % snapshot_retention.describe(schedule)) if schedule
         else "FLAT keep-newest (no schedule on the policy)",
         len(replicated_internal), keep)
-    if schedule:
-        retained_ts = snapshot_retention.select_retained(
-            [s.created_at for s in replicated_internal], schedule,
-            now=time.time(), always_keep_newest=keep)
-        candidates = [(i, s) for i, s in enumerate(replicated_internal)
-                      if s.created_at not in retained_ts]
-        if not candidates:
-            return
-    else:
-        if len(replicated_internal) <= keep:
-            return
-        candidates = list(enumerate(replicated_internal))[:-keep]
+    if not candidates:
+        return
     # Keep the newest TWO replicated internal snapshots, not just one.
     #
     # A replicated snapshot holds only its own clusters; the rest of the data

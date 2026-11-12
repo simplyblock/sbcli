@@ -60,7 +60,7 @@ def _run(backlog):
             patch.object(sm, "_cadence_capacity_hold", return_value=None), \
             patch.object(sm, "_due_for_internal_snapshot", return_value=True), \
             patch.object(sm, "_outstanding_internal_snapshot", return_value=None), \
-            patch.object(sm, "_deletion_backlog", return_value=backlog), \
+            patch.object(sm, "_deletion_backlog", return_value=backlog),             patch.object(sm, "_merge_behind_hold", return_value=""), \
             patch.object(sm.replication_delta, "add_snapshot", return_value=("S", None)) as add:
         sm.take_due_internal_snapshots("CL", 1000)
     return add

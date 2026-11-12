@@ -280,6 +280,7 @@ def _record_cutover_done(task):
 
     _restore_source_throttle(task)
     _stop_source_replication(task)
+    _discard_source_spare(task)
     _delete_direct_rounds(task)
     _prune_endgame_snapshots(task)
     _delete_source_if_requested(task)
@@ -310,6 +311,25 @@ def _stop_source_replication(task):
     except Exception as e:
         logger.error(f"Could not stop replication on the source after "
                      f"cutover: {e}")
+
+
+def _discard_source_spare(task):
+    """The source no longer replicates: its cadence spare (replication_spare)
+    on the target is unused for good. The discard before the freeze
+    (_discard_spare_landing) can be undone by a cadence transfer that drains
+    after it and pre-stages a new one; with --delete-source nothing named
+    after the volume was ever cleaned up again (bed bf21 2026-11-10: 15-21
+    REP_spare_* per cluster for 8 volumes). Runs after the cadence stopped,
+    so the pre-stage's own re-check keeps it from coming back."""
+    lvol_id = (task.function_params or {}).get("lvol_id")
+    if not lvol_id:
+        return
+    try:
+        from simplyblock_core import replication_spare
+        replication_spare.discard(lvol_id)
+    except Exception as e:                                # noqa: BLE001
+        logger.warning("Could not discard the cadence spare of %s after the cutover: %s",
+                       lvol_id, e)
 
 
 def _prune_endgame_snapshots(task):
@@ -1463,7 +1483,10 @@ def _direct_round_done(task, lvol):
             return False, task
         state = str(st.get("transfer_state"))
         if state == "Done":
-            return True, _record(task, direct_done_snap=snap_id)
+            landed_before = params.get("direct_done_snap")
+            task = _record(task, direct_done_snap=snap_id)
+            _drop_landed_round(lvol, landed_before, snap_id)
+            return True, task
         if state == "In progress":
             return False, task
     if int(params.get("direct_submits") or 0) >= constants.REPL_CUTOVER_DIRECT_ROUND_SUBMITS:
@@ -1496,21 +1519,56 @@ def _direct_round_snapshots(lvol_id):
             and s.status == SnapShot.STATUS_ONLINE]
 
 
+def _drop_landed_round(lvol, landed_before, landed_now):
+    """Delete the round that landed before *landed_now*: once a round is in the
+    clone, the one before it serves nothing. The next round's delta base is
+    *landed_now* (_direct_round_base), and the delete swap-merges the older
+    round INTO it -- below that base, so no later round's delta changes, and
+    the surviving snapshot keeps its blob. The first round's base is the
+    clone's base copy (not a round) and is never deleted here.
+
+    bf23 (2026-11-11): rounds were kept until the endgame ended; an endgame
+    runs up to REPL_CUTOVER_MAX_SHRINK_ROUNDS of them, every one pinning what
+    the volume rewrote since the round before, and attempts that failed while
+    the target cluster had a node down stacked theirs on top: cluster A held
+    ~50 round snapshots, chains 8-10 deep, and went read-only (all devices
+    cannot_allocate) under heavy rewrite load."""
+    if not landed_before or landed_before == landed_now:
+        return
+    try:
+        snap = db.get_snapshot_by_id(landed_before)
+    except KeyError:
+        return
+    if not (snap.snap_name or "").startswith(DIRECT_ROUND_PREFIX) \
+            or snap.target_replicated_snap_uuid \
+            or snap.status != SnapShot.STATUS_ONLINE:
+        return
+    from simplyblock_core.controllers import snapshot_controller
+    try:
+        if snapshot_controller.delete(landed_before):
+            logger.info("cutover for lvol %s: round snapshot %s superseded by %s; deleted",
+                        lvol.get_id(), landed_before, landed_now)
+    except Exception as e:                                # noqa: BLE001
+        # best effort: the endgame's end deletes whatever is left
+        logger.warning("cutover for lvol %s: could not delete superseded round "
+                       "snapshot %s: %s", lvol.get_id(), landed_before, e)
+
+
 def _requeue_direct_rounds(task):
     """An endgame that ends without a cutover leaves its direct rounds'
-    snapshots on the source, sent only into the clone it discards. They
-    replicate the ordinary way (the chain-ancestor rule orders them); left
-    alone they would sit unreplicated and close the backlog gate for good."""
-    from simplyblock_core.controllers import tasks_controller
-    if not (task.function_params or {}).get("direct_rounds_used"):
-        return
-    for s in _direct_round_snapshots(task.function_params.get("lvol_id")):
-        try:
-            tasks_controller.add_snapshot_replication_task(s.cluster_id, s.lvol.node_id, s.get_id())
-        except Exception as e:                            # noqa: BLE001
-            logger.error("Could not queue the replication of round snapshot %s: %s",
-                         s.get_id(), e)
-    drop_params(task, "direct_rounds_used")
+    snapshots on the source, sent only into the clone it discards. They are
+    deleted, not replicated: each delete swap-merges a round into its
+    successor, the newest into the live volume, so their data stays in the
+    volume and the next ordinary cadence snapshot carries it, as a delta
+    against the last snapshot that did replicate (the clone's base copy).
+
+    Until bf23 they were each queued for ordinary replication. A failed
+    attempt so left up to REPL_CUTOVER_MAX_SHRINK_ROUNDS snapshots that had to
+    replicate one by one before the next endgame, and every further failed
+    attempt (a target node down) stacked another set on top: the source
+    cluster filled up and went read-only (2026-11-11, R3). Deleted, they
+    neither pin space nor close the backlog gate."""
+    _delete_direct_rounds(task)
 
 
 def _delete_direct_rounds(task):

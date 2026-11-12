@@ -567,6 +567,25 @@ REPL_CUTOVER_MAX_SHRINK_ROUNDS = 12
 # deletion (in deletion, or replicated beyond what retention keeps). Sized to
 # match the endgame's round bound (2026-11-04).
 REPL_MAX_DELETION_BACKLOG = REPL_CUTOVER_MAX_SHRINK_ROUNDS
+# Bounded chains in the replication phase (not the final cutover, whose rounds
+# have their own bound above). Every transfer adds a layer on the target (its
+# landing copy, converted into a snapshot) and retention merges the oldest one
+# away by deleting it (swap-merge into its successor). When that merge falls
+# behind, each further layer pins every page the client rewrites since: bed
+# bf21 2026-11-10 reached blob-chain depth 7 under rewrite load and 93-99 %
+# device use (cannot_allocate, client EIO). So a volume's next transfer and its
+# next cadence snapshot wait while more than this many of its target layers
+# are not merged yet (beyond retention, being deleted, or a landing copy still
+# merging with its base) -- replication slows to the speed of the merge.
+REPL_MAX_UNMERGED_LANDING_LAYERS = 1
+# The same bound on the source side: no cadence snapshot while more than this
+# many of the volume's replication snapshots are unreplicated or replicated
+# but not pruned yet (beyond retention, or being deleted).
+REPL_MAX_PENDING_SOURCE_SNAPSHOTS = 2
+# A hold that sees no progress (the backlog does not shrink) for this long is
+# released once, loudly: a merge that never completes (a prune deferred for
+# good) must not turn into a silent replication stop.
+REPL_MERGE_HOLD_MAX_SEC = 1800
 # Hard limit SPDK puts on bdev_lvol_transfer_final_step: the final step's
 # terminate_timeout is armed when it starts and fails the transfer ("Task
 # transfer terminate timeout ...", transfer_state 'Failed') once it passes.
