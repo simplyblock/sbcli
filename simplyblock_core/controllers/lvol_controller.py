@@ -6588,7 +6588,8 @@ def failover_from_replicated_copy(template, copy, source_cluster_id):
         try:
             from simplyblock_core.controllers import consistency_group_controller
             consistency_group_controller.reconstitute_group_after_handoff(
-                template, new_lvol, target_node.cluster_id)
+                template, new_lvol, target_node.cluster_id,
+                group_name=(getattr(copy, "source_group", None) or {}).get("group_name", ""))
         except Exception as e:                               # noqa: BLE001
             logger.warning("Group reconstitution after fail-over of %s failed: %s",
                            template.get_id(), e)

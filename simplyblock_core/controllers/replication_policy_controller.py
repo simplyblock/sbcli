@@ -24,7 +24,11 @@ from simplyblock_core.controllers import (
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol, LVolReplication
 from simplyblock_core.models.pool import Pool
-from simplyblock_core.models.replication import ReplicationPolicy, ReplicationTarget
+from simplyblock_core.models.replication import (
+    ConsistencyGroup,
+    ReplicationPolicy,
+    ReplicationTarget,
+)
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.peer.client import HttpPeerClient, PeerError, peer_for_target
 from simplyblock_core.peer.protocol import PEER_API_VERSION, REPLICATION_CAPABILITIES
@@ -1064,15 +1068,24 @@ def resolve_group(group):
     }
 
 
-def _failover_group_from_target_copies(group):
+def _failover_group_from_target_copies(group, on_cluster="", source_cut_off=False):
     """Fail *group* over from its newest complete replicated generation, cloning
     every member from its copy on the peer (replication_recovery_points). The
     template of each clone is the volume record embedded in the member's source
     snapshot, so the clone keeps the volume's identity; when that snapshot is
-    gone too, the copy's own record stands in. Idempotent: a member whose copy
-    already has a live clone reports that clone."""
+    gone, the source volume's record the copy carries stands in, and failing
+    that the copy's own record. Idempotent: a member whose copy already has a
+    live clone reports that clone.
+
+    *on_cluster* limits the copies to that cluster. *source_cut_off* is the
+    fail-over ordered on the target with the source cluster unreachable
+    (failover_replicated_group): no source snapshot is readable there, and a
+    copy that carries no source volume is refused rather than cloned as its
+    landing volume, which would give the clone the wrong name and NQN."""
     seq, origins, copies = replication_recovery_points.newest_group_generation(group.get_id(), db=db)
     copies = [c for c in copies if getattr(c, "cluster_id", "") != group.cluster_id]
+    if on_cluster:
+        copies = [c for c in copies if getattr(c, "cluster_id", "") == on_cluster]
     if not copies:
         logger.error("Fail-over of consistency group %s: no complete replicated generation "
                      "on a peer cluster to fail over from", group.group_name)
@@ -1099,7 +1112,18 @@ def _failover_group_from_target_copies(group):
                 origin = db.get_snapshot_by_id(copy.source_replicated_snap_uuid)
             except KeyError:
                 origin = None
-        template = origin.lvol if origin is not None and origin.lvol else copy.lvol
+        if origin is not None and origin.lvol:
+            template = origin.lvol
+        elif getattr(copy, "source_volume", None):
+            template = LVol().from_dict(copy.source_volume)
+        elif source_cut_off:
+            results.append({"lvol_id": copy.get_id(), "status": "failed",
+                            "detail": f"replicated copy {copy.get_id()} carries no source volume "
+                                      "record; the source cluster sent none, so the clone's "
+                                      "identity is unknown here"})
+            continue
+        else:
+            template = copy.lvol
         if template is None:
             results.append({"lvol_id": copy.get_id(), "status": "failed",
                             "detail": "replicated copy names no volume"})
@@ -1120,6 +1144,34 @@ def _failover_group_from_target_copies(group):
             continue
         results.append(_clone_result(template.get_id(), ret))
     return results
+
+
+def failover_replicated_group(cluster_id, group_id):
+    """Fail the source cluster's consistency group *group_id*
+    (``<source cluster>/<group>``) over on *cluster_id*, from the copies here.
+
+    The manual fail-over with the source cluster cut off, on a split control
+    plane: this cluster's database holds no record of the source volumes, their
+    snapshots, or the group, only the copies and the metadata each carries
+    (``source_volume``, ``source_group``). The newest generation with a copy of
+    every member is cloned, each clone keeping its source volume's identity, and
+    the clones rejoin a group of the same name here.
+
+    Whether to fail over is not decided here: the caller (the DR hub through
+    the operator, or a person) ordered it, and fencing the old source when it
+    returns is the hub's work. Returns per-member result dicts; empty when no
+    complete generation is on this cluster. Idempotent: a member already cloned
+    reports its clone.
+
+    Raises:
+        ValueError: *group_id* does not name the source cluster.
+    """
+    source_cluster_id, _, gid = group_id.rpartition("/")
+    if not source_cluster_id or not gid:
+        raise ValueError(f"group id {group_id!r} must be <source cluster>/<group>")
+    group = ConsistencyGroup()
+    group.uuid, group.cluster_id, group.group_name = gid, source_cluster_id, gid
+    return _failover_group_from_target_copies(group, on_cluster=cluster_id, source_cut_off=True)
 
 
 def _failback_group(group, policy, peer=None):

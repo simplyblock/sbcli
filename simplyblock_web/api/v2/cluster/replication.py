@@ -1,3 +1,4 @@
+import logging
 from typing import Annotated
 from uuid import UUID
 
@@ -280,7 +281,45 @@ def get_latest_replicated_generation(cluster: Cluster,
     )
 
 
+replicated_groups_api = APIRouter()
+logger = logging.getLogger(__name__)
+
+
+@replicated_groups_api.post('/{source_cluster_id}/{group_id}/failover',
+                            name='clusters:replication:replicated-groups:failover')
+def failover_replicated_group(cluster: Cluster, source_cluster_id: UUID, group_id: UUID) -> dict:
+    """Fail the source cluster's consistency group over onto this cluster, from
+    the copies here, with the source cluster cut off (control-plane split).
+
+    Unlike ``consistency-groups/{id}/replication/failover`` this needs no record
+    of the group, its volumes, or the source cluster in this control plane:
+    every copy carries what its clone needs. The response matches that
+    endpoint: ``{"members": [...]}``; 409 when no generation with a copy of
+    every member is here, or when a member failed (retryable).
+    """
+    members = replication_policy_controller.failover_replicated_group(
+        cluster.get_id(), f"{source_cluster_id}/{group_id}")
+    if not members:
+        raise HTTPException(
+            409, f'no complete replicated generation of group {source_cluster_id}/{group_id} '
+                 f'on cluster {cluster.get_id()}')
+    failed = [m for m in members if m.get("status") == "failed"]
+    if failed:
+        # The member details may name internal topology: log identifiers only.
+        logger.error("replicated group fail-over incomplete for %s/%s: failed_members=%d lvol_ids=%s",
+                     source_cluster_id, group_id, len(failed), [m.get("lvol_id") for m in failed])
+        raise HTTPException(409, 'replicated group fail-over incomplete; retry')
+    return {"members": [{
+        "lvol_id": m.get("lvol_id", ""),
+        "status": m.get("status", ""),
+        "target_lvol_id": m.get("target_lvol_id", ""),
+        "connection_strings": m.get("connection_strings", []),
+        "warnings": m.get("warnings", []),
+    } for m in members]}
+
+
 targets_api.include_router(target_instance_api)
 policies_api.include_router(policy_instance_api)
 api.include_router(targets_api, prefix='/targets')
 api.include_router(policies_api, prefix='/policies')
+api.include_router(replicated_groups_api, prefix='/replicated-groups')

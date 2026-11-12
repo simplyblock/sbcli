@@ -33,6 +33,23 @@ def _gid(group_id):
     return (group_id or "").split("/")[-1]
 
 
+def _covers_named_members(copies):
+    """With no origin snapshot of a generation on this cluster, whether its
+    copies hold one for every member the source named for it (the
+    ``source_group`` members the copies carry since control-plane split step 3).
+    On a split control plane the origins are on the other cluster, and without
+    this a generation missing a member's copy would pass for complete. Copies
+    that name no members (recorded before the source sent them) stand as they
+    are, which is what a relocate back relies on once the origins are deleted.
+    """
+    named = next((c.source_group["members"] for c in copies
+                  if (getattr(c, "source_group", None) or {}).get("members")), None)
+    if named is None:
+        return True
+    have = {(getattr(c, "source_volume", None) or {}).get("uuid") for c in copies}
+    return set(named) <= have
+
+
 def newest_group_generation(group_id, db=None):
     """``(seq, origin_snapshots, copies)`` of the newest complete replicated
     generation of *group_id*, or ``(0, [], [])`` when there is none."""
@@ -65,6 +82,8 @@ def newest_group_generation(group_id, db=None):
         origin_ids = {s.get_id() for s in origins}
         copies = [s for s in members if s.get_id() not in origin_ids]
         if not copies:
+            continue
+        if not origins and not _covers_named_members(copies):
             continue
         copy_ids = {s.get_id() for s in copies}
         if all(_partner_id(o) in by_id and _partner_id(o) in copy_ids for o in origins):

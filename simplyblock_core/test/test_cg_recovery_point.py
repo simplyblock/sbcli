@@ -305,7 +305,7 @@ def test_failover_from_a_copy_records_the_relationship_and_rejoins_the_group(mon
     monkeypatch.setattr(LVolReplication, "write_to_db", lambda self, kv=None: written.append(self))
     monkeypatch.setattr(lvol_controller, "connect_lvol", lambda lid: ([], None))
     monkeypatch.setattr(cgc, "reconstitute_group_after_handoff",
-                        lambda s, d, c: rejoined.append((s.get_id(), d.get_id(), c)))
+                        lambda s, d, c, **kw: rejoined.append((s.get_id(), d.get_id(), c)))
     ret = lvol_controller.failover_from_replicated_copy(src, copy, SRC)
     assert ret["lvol_id"] == "CLONE"
     rep = written[0]

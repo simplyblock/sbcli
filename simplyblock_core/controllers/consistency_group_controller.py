@@ -306,7 +306,7 @@ def add_member(policy, lvol):
     return add_member_to_group(group, lvol)
 
 
-def reconstitute_group_after_handoff(source_lvol, dest_lvol, dest_cluster_id):
+def reconstitute_group_after_handoff(source_lvol, dest_lvol, dest_cluster_id, group_name=""):
     """Re-form the consistency group on the destination cluster after a
     fail-over / fail-back / migration hand-off, so the group stays crash-
     consistent across it (design-csi-addons-replication.md §14.4).
@@ -328,6 +328,10 @@ def reconstitute_group_after_handoff(source_lvol, dest_lvol, dest_cluster_id):
     one replication node, and delta fail-back lands on the original node), which
     satisfies ``add_member_to_group``'s single-LVS pin.
 
+    *group_name* names the group when the source group's record is not readable
+    here: on a split control plane it lives on the source cluster, and the
+    replicated copy carries its name.
+
     No-op when the source is not a group member. The caller invokes this
     best-effort: a failure here must never undo the promote/cutover that already
     succeeded.
@@ -336,20 +340,21 @@ def reconstitute_group_after_handoff(source_lvol, dest_lvol, dest_cluster_id):
     if not src_group_id:
         return None
     try:
-        src_group = db.get_consistency_group_by_id(src_group_id)
+        group_name = db.get_consistency_group_by_id(src_group_id).group_name
     except KeyError:
-        logger.warning(
-            "Group reconstitution skipped: source group %s of %s not found",
-            src_group_id, dest_lvol.get_id())
-        return None
-    group = ensure_group(dest_cluster_id, src_group.group_name)
+        if not group_name:
+            logger.warning(
+                "Group reconstitution skipped: source group %s of %s not found",
+                src_group_id, dest_lvol.get_id())
+            return None
+    group = ensure_group(dest_cluster_id, group_name)
     add_member_to_group(group, dest_lvol)
     dest_lvol.group_id = group.get_id()
     dest_lvol.write_to_db(db.kv_store)
     logger.info(
         "Consistency group %s (%s) reconstituted on cluster %s: %s rejoined so "
         "the group stays crash-consistent across the hand-off",
-        group.uuid[:8], src_group.group_name, dest_cluster_id, dest_lvol.get_id())
+        group.uuid[:8], group_name, dest_cluster_id, dest_lvol.get_id())
     return group
 
 
