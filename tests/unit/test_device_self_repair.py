@@ -146,8 +146,9 @@ class TestBudgetReset:
         assert '"last_repair_tsc": device.last_repair_tsc' in src
 
     def test_exhaustion_is_recorded_on_the_device(self):
-        src = inspect.getsource(device_controller.device_repair)
+        src = inspect.getsource(device_controller._count_failed_repair)
         assert "retries_exhausted = True" in src
+        assert "_count_failed_repair(" in _body(device_controller.device_repair)
 
 
 class TestTrigger:

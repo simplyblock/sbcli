@@ -35,7 +35,11 @@ from simplyblock_core.controllers.backup.manifest import (
     parse_export,
     parse_group_export,
 )
-from simplyblock_core.exceptions import MigrationConflictError, PreconditionError
+from simplyblock_core.exceptions import (
+    MigrationConflictError,
+    PreconditionError,
+    PromoteIncompleteError,
+)
 from simplyblock_core.models.backup_config import BackupConfig, S3Credentials
 from simplyblock_core.models.cluster import Cluster, HashicorpVaultSettings
 from simplyblock_core.models.pool import Pool
@@ -570,7 +574,11 @@ class CLIWrapperBase:
 
     def storage_node__make_primary(self, sub_command, args):
         node_id = args.node_id
-        return storage_ops.make_sec_new_primary(node_id)
+        try:
+            return storage_ops.make_sec_new_primary(node_id)
+        except PromoteIncompleteError as e:
+            print(e)
+            return False
 
     def storage_node__dump_lvstore(self, sub_command, args):
         node_id = args.node_id

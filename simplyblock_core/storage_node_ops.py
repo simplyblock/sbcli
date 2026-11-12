@@ -67,6 +67,7 @@ from simplyblock_core.db_controller import DBController
 from simplyblock_core.distr_controller import DistribHomeSiteError
 from simplyblock_core.exceptions import (
     PreconditionError,
+    PromoteIncompleteError,
     SyncReplicationUnsupportedError,
     reject_on_sync_replication,
 )
@@ -20011,6 +20012,27 @@ def get_cluster_map(node_id):
 
 
 def make_sec_new_primary(node_id):
+    """Finish a node's relocation onto another host: activate the devices
+    the restart found there (``new``) and retire the ones it did not
+    (``removed``), whose data the retirement migrates off them, then re-point
+    the node's own addresses and its volumes.
+
+    The devices are the point of no return, and the record, re-read after the
+    calls, is the verdict: a device still new or still removed is one the
+    promote did not finish, whatever the calls answered. It raises
+    PromoteIncompleteError then, naming them, instead of returning True over
+    a node whose old devices stay in the cluster map as live. (Talos lab
+    2026-11-12: a relocated node's three origin devices had been set back
+    online by the self-repair, device_set_failed refused each with "must be
+    in removed status" and logged it, the promote returned True, the
+    operator's Migrate reported Succeeded, and the volume on the node was
+    corrupt.) The caller calls again once what blocked it is gone; the
+    promote is idempotent.
+
+    The re-point is done either way: the node is on the new host whether or
+    not its devices are settled, and a volume that names the old host is
+    wrong on every retry.
+    """
     db_controller = DBController()
     try:
         snode = db_controller.get_storage_node_by_id(node_id)
@@ -20018,14 +20040,17 @@ def make_sec_new_primary(node_id):
         logger.exception("snode not found")
         return False
 
+    refused = []
     for dev in snode.nvme_devices:
         if dev.status == NVMeDevice.STATUS_NEW:
-            device_controller.add_device(dev.get_id(), add_migration_task=False)
+            if not device_controller.add_device(dev.get_id(), add_migration_task=False):
+                refused.append(f"add_device({dev.get_id()})")
 
     time.sleep(5)
     for dev in snode.nvme_devices:
         if dev.status == NVMeDevice.STATUS_REMOVED:
-            device_controller.device_set_failed(dev.get_id())
+            if not device_controller.device_set_failed(dev.get_id()):
+                refused.append(f"device_set_failed({dev.get_id()})")
 
     snode = db_controller.get_storage_node_by_id(node_id)
     snode.primary_ip = snode.mgmt_ip
@@ -20034,6 +20059,21 @@ def make_sec_new_primary(node_id):
     for lvol in db_controller.get_lvols_by_node_id(node_id):
         lvol.hostname = snode.hostname
         lvol.write_to_db()
+
+    still_new = [d.get_id() for d in snode.nvme_devices if d.status == NVMeDevice.STATUS_NEW]
+    still_removed = [d.get_id() for d in snode.nvme_devices if d.status == NVMeDevice.STATUS_REMOVED]
+    if still_new or still_removed:
+        parts = []
+        if still_new:
+            parts.append(f"devices of the new host still new, not activated: {', '.join(still_new)}")
+        if still_removed:
+            parts.append("devices of the old host still removed, their data not migrated off them: "
+                         + ", ".join(still_removed))
+        if refused:
+            parts.append("refused: " + ", ".join(refused))
+        raise PromoteIncompleteError(
+            f"the promote of node {node_id} on {snode.hostname} did not finish: " + "; ".join(parts),
+            still_new=still_new, still_removed=still_removed)
 
     return True
 
