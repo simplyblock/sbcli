@@ -5,6 +5,7 @@ import logging
 import os.path
 import struct
 import time
+import uuid
 from typing import Any, ClassVar
 
 import fdb
@@ -1453,6 +1454,148 @@ class DBController(metaclass=Singleton):
         ordered_snapshot_ids = sorted(set(snapshot_ids))
         transactional = fdb.transactional(DBController._release_backup_chain_locks_tx)
         transactional(self, self.kv_store, ordered_snapshot_ids)
+
+    # ---- Backup chain operation guard (Single FDB Transaction) ----
+    #
+    # Mutual exclusion between a delete, a merge and a restore on the same
+    # volume's backup chain. Unlike acquire_backup_chain_locks above (which
+    # only protects the creation-time enqueue window), this guards the whole
+    # of a destructive operation -- but it does so WITHOUT holding anything
+    # open: the chain is bounded (constants.BACKUP_MAX_CHAIN_LENGTH), so
+    # reading every sibling and flipping the target(s) fits in one
+    # transaction, and FDB's serializable isolation is what makes two
+    # concurrent claims over the same chain mutually exclusive (see
+    # simplyblock_core/AGENTS.md: a critical section that fits in one
+    # transaction needs no separate lock, distributed or otherwise). The
+    # status this writes -- MERGING or DELETING -- IS the lock for everything
+    # after the claim: every other caller refuses to touch a chain holding
+    # either, which is what makes a long-running merge/delete task safe
+    # without this transaction, or anything else, staying open for its
+    # duration.
+
+    def _claim_backup_chain_op_tx(self, tr, lvol_id, target_ids, new_status):
+        idx = indices.get_index(Backup, 'lvol_id')
+        sibling_ids = [
+            idx.entry_id(Backup, bytes(key), bytes(value))
+            for key, value in tr.get_range_startswith(idx.prefix(Backup, (lvol_id,)))
+        ]
+        siblings = {}
+        for sibling_id in sibling_ids:
+            rows = Backup().read_from_db(tr, id=sibling_id)
+            if rows:
+                siblings[sibling_id] = rows[0]
+
+        blocking = next((b for b in siblings.values()
+                         if b.status in (Backup.STATUS_MERGING, Backup.STATUS_DELETING)), None)
+        if blocking is not None:
+            return False, f"backup {blocking.uuid} of this chain is already {blocking.status}"
+
+        restore_idx = indices.get_index(JobSchedule, 'restore_chain_s3_id')
+        for backup in siblings.values():
+            restoring = any(True for _ in tr.get_range_startswith(
+                restore_idx.prefix(JobSchedule, (backup.s3_id,)), limit=1))
+            if restoring:
+                return False, f"backup {backup.uuid} is being read by an active restore"
+
+        missing = [t for t in target_ids if t not in siblings]
+        if missing:
+            return False, (f"backup(s) {', '.join(missing)} not found in volume "
+                           f"{lvol_id}'s chain")
+
+        index_list = Backup.active_indexes(tr)
+        for target_id in target_ids:
+            target = siblings[target_id]
+            old_keys = BaseModel.index_keys(Backup, index_list, target)
+            target.status = new_status
+            target.updated_at = str(datetime.datetime.now(datetime.UTC))
+            if index_list:
+                BaseModel._apply_index_diff(tr, Backup, index_list, old_keys, target)
+            tr[target.get_db_id().encode()] = json.dumps(target.to_dict(unwrap_secrets=True)).encode()
+            scope = target.watch_scope()
+            tr.add(watches.watch_index_rollup_key(Backup, scope), watches.ONE_LE64)
+            tr.add(watches.watch_index_version_key(Backup, scope, target.get_id()), watches.ONE_LE64)
+
+        return True, None
+
+    def claim_backup_chain_op(self, lvol_id, target_ids, new_status):
+        """Atomically claim one or more backups of ``lvol_id``'s chain for a
+        destructive operation (merge or delete).
+
+        Refuses, as ``(False, reason)``, if any backup anywhere in the chain --
+        not only the targets -- is already ``MERGING``/``DELETING``, or is named
+        by an active restore's chain (``JobSchedule.restore_chain_s3_id``). On
+        success, every id in ``target_ids`` is flipped to ``new_status`` and
+        ``(True, None)`` is returned.
+
+        Assumes ``Backup``'s ``lvol_id`` index is ready, which it already is in
+        any deployment old enough to run this: an index still ``building`` would
+        make this read incomplete rather than merely slow, so this does not fall
+        back to a scan the way a read through ``query()`` would.
+        """
+        if not self.kv_store or not target_ids:
+            return False, "No DB connection" if not self.kv_store else "No targets given"
+        transactional = fdb.transactional(DBController._claim_backup_chain_op_tx)
+        return transactional(self, self.kv_store, lvol_id, list(target_ids), new_status)
+
+    def _create_backup_restore_task_tx(self, tr, source_lvol_id, cluster_id, node_id,
+                                       function_params, max_retry, task_uuid, task_date):
+        idx = indices.get_index(Backup, 'lvol_id')
+        sibling_ids = [
+            idx.entry_id(Backup, bytes(key), bytes(value))
+            for key, value in tr.get_range_startswith(idx.prefix(Backup, (source_lvol_id,)))
+        ]
+        for sibling_id in sibling_ids:
+            rows = Backup().read_from_db(tr, id=sibling_id)
+            if rows and rows[0].status in (Backup.STATUS_MERGING, Backup.STATUS_DELETING):
+                return None, f"backup {rows[0].uuid} of this chain is {rows[0].status}"
+
+        task_obj = JobSchedule()
+        task_obj.uuid = task_uuid
+        task_obj.cluster_id = cluster_id
+        task_obj.node_id = node_id
+        task_obj.date = task_date
+        task_obj.function_name = JobSchedule.FN_BACKUP_RESTORE
+        task_obj.function_params = function_params
+        task_obj.max_retry = max_retry
+        task_obj.status = JobSchedule.STATUS_NEW
+
+        index_list = JobSchedule.active_indexes(tr)
+        if index_list:
+            BaseModel._apply_index_diff(
+                tr, JobSchedule, index_list, BaseModel.index_keys(JobSchedule, index_list, None),
+                task_obj)
+        tr[task_obj.get_db_id().encode()] = json.dumps(task_obj.to_dict(unwrap_secrets=True)).encode()
+        scope = task_obj.watch_scope()
+        tr.add(watches.watch_index_rollup_key(JobSchedule, scope), watches.ONE_LE64)
+        tr.add(watches.watch_index_version_key(JobSchedule, scope, task_obj.get_id()), watches.ONE_LE64)
+
+        return task_obj, None
+
+    def create_backup_restore_task_if_chain_clear(self, source_lvol_id, cluster_id, node_id,
+                                                   function_params, max_retry):
+        """Create the FN_BACKUP_RESTORE task that drives a restore, atomically
+        with checking that no backup of ``source_lvol_id``'s chain is already
+        ``MERGING``/``DELETING``.
+
+        Joining the check and the task's creation in one transaction is what
+        closes the gap a plain ``chain.require_restorable()`` followed by a
+        separate ``write_to_db()`` would leave open: without it, a delete or
+        merge could claim the chain (``claim_backup_chain_op``) in between,
+        and this task would start reading objects that operation is about to
+        remove. The task itself, once created, is what ``claim_backup_chain_op``
+        then sees (via the ``restore_chain_s3_id`` index) and refuses to let a
+        later delete or merge touch -- see that method and the index's
+        declaration on ``JobSchedule``.
+
+        Returns ``(task, None)`` on success, or ``(None, reason)`` if refused.
+        """
+        if not self.kv_store:
+            return None, "No DB connection"
+        task_uuid = str(uuid.uuid4())
+        task_date = int(time.time())
+        transactional = fdb.transactional(DBController._create_backup_restore_task_tx)
+        return transactional(self, self.kv_store, source_lvol_id, cluster_id, node_id,
+                             function_params, max_retry, task_uuid, task_date)
 
     # ---- Per-lvstore snapshot-mutation lock (Single FDB Transaction) ----
 

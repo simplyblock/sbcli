@@ -917,10 +917,11 @@ def restore_backup(backup_id: str, lvol_name: str, pool_id_or_name: str,
     bdev_name = f"{lvol.lvs_name}/{lvol.lvol_bdev}"
 
     if not tasks_controller.add_backup_restore_task(
-            pool.cluster_id, lvol.node_id, backup_id, bdev_name,
+            backup.lvol_id, pool.cluster_id, lvol.node_id, backup_id, bdev_name,
             chain.s3_ids_newest_first(), lvol_id=lvol_id,
             s3_config=s3_config.model_dump(exclude_none=True) if s3_config is not None else None):
-        raise RuntimeError("Failed to create restore task")
+        raise PreconditionError(
+            "Failed to create restore task: the source chain is being merged or deleted")
 
     return lvol_id
 
