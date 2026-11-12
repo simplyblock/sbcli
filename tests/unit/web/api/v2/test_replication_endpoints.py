@@ -591,3 +591,37 @@ class TestFailoverReplicatedGroup:
 
         assert response.status_code == 422
         replication_policy_controller.failover_replicated_group.assert_not_called()
+
+
+class TestResolveReplicatedGroup:
+    """Where a source cluster's group lives now, answered by this control plane
+    from its own records, for a VolumeGroupReplication that keeps the source's
+    group handle after a fail-over with the source cut off."""
+
+    def test_returns_the_group_here_and_each_members_volume(self, client, db, cluster,
+                                                           replication_policy_controller):
+        source_cluster, group = SOURCE_GROUP.split('/')
+        replication_policy_controller.resolve_replicated_group.return_value = {
+            "active_cluster_id": CLUSTER_ID, "active_group_id": "GB",
+            "members": [{"origin_handle": f"{source_cluster}:P:M1",
+                         "active_handle": f"{CLUSTER_ID}:P:C1"}]}
+
+        response = client.get(REPLICATED_GROUPS_URL + f'{SOURCE_GROUP}/resolution')
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "cluster_id": source_cluster, "group_id": group,
+            "active_cluster_id": CLUSTER_ID, "active_group_id": "GB",
+            "members": [{"origin_handle": f"{source_cluster}:P:M1",
+                         "active_handle": f"{CLUSTER_ID}:P:C1"}]}
+        replication_policy_controller.resolve_replicated_group.assert_called_once_with(SOURCE_GROUP)
+
+    def test_a_group_not_failed_over_here_is_not_a_404(self, client, db, cluster,
+                                                       replication_policy_controller):
+        replication_policy_controller.resolve_replicated_group.return_value = {
+            "active_cluster_id": "", "active_group_id": "", "members": []}
+
+        response = client.get(REPLICATED_GROUPS_URL + f'{SOURCE_GROUP}/resolution')
+
+        assert response.status_code == 200
+        assert response.json()["active_group_id"] == ""

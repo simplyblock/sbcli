@@ -160,3 +160,47 @@ def test_the_clone_rejoins_a_group_of_the_copys_group_name(monkeypatch):
     lvol_controller.failover_from_replicated_copy(template, copy, SRC)
     assert rejoined == [(TGT, "gitea")]
     assert clone.group_id == f"{TGT}/GB"
+
+
+# ------------------------------------------------------------------ resolution
+
+def _failed_over(monkeypatch):
+    """Site B after the fail-over of M1: its clone in group gitea here, and the
+    relationship the fail-over recorded, from the source volume the copy named."""
+    db, landing = _site_b(monkeypatch)
+    _copy(db, landing, "M1", 15, 1000, ["M1"])
+    node = StorageNode()
+    node.uuid, node.status, node.cluster_id = "NB", StorageNode.STATUS_ONLINE, TGT
+    db._nodes.append(node)
+    group = ConsistencyGroup()
+    group.uuid, group.cluster_id, group.group_name = "GB", TGT, "gitea"
+    db._groups.append(group)
+    clone = _vol("CLONE", TGT, node="NB", group=group.get_id())
+    db._lvols.append(clone)
+    source = LVol().from_dict(dict(_source_volume("M1"), pool_uuid="POOL_A"))
+    rel = LVolReplication()
+    rel.uuid, rel.source_lvol, rel.target_lvol = "R1", source, clone
+    rel.source_cluster_id, rel.target_cluster_id = SRC, TGT
+    rel.state = LVolReplication.STATE_FAILED_OVER
+    db._replications.append(rel)
+    return db
+
+
+def test_a_failed_over_group_resolves_to_its_group_here(monkeypatch):
+    """The CSI driver asks this site where the cut-off source's group lives now:
+    the status of the VolumeGroupReplication, which keeps the source's group
+    handle, comes from the group the fail-over made here."""
+    _failed_over(monkeypatch)
+    res = rpc.resolve_replicated_group(GROUP)
+    assert (res["active_cluster_id"], res["active_group_id"]) == (TGT, "GB")
+    assert res["members"] == [{"origin_handle": f"{SRC}:POOL_A:M1",
+                               "active_handle": f"{TGT}:POOL_{TGT}:CLONE"}]
+
+
+def test_a_group_not_failed_over_here_resolves_to_nothing(monkeypatch):
+    """Copies but no fail-over yet: the source's control plane still serves the
+    group, and the caller asks it."""
+    db, landing = _site_b(monkeypatch)
+    _copy(db, landing, "M1", 15, 1000, ["M1"])
+    res = rpc.resolve_replicated_group(GROUP)
+    assert (res["active_cluster_id"], res["active_group_id"], res["members"]) == ("", "", [])

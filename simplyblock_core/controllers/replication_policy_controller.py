@@ -1174,6 +1174,31 @@ def failover_replicated_group(cluster_id, group_id):
     return _failover_group_from_target_copies(group, on_cluster=cluster_id, source_cut_off=True)
 
 
+def resolve_replicated_group(group_id):
+    """resolve_group for the source cluster's group *group_id*
+    (``<source cluster>/<group>``) on a control plane that holds only its
+    copies (control-plane split). After failover_replicated_group, the group
+    lives here as the clones' group of the same name, and each clone's
+    relationship leads back to its source volume. Before that, nothing here
+    serves the group: ``active_group_id`` is empty and the source's own control
+    plane is the one to ask.
+
+    The group's name comes from the metadata its copies carry; with no copy of
+    the group here, nothing resolves."""
+    source_cluster_id, _, gid = group_id.rpartition("/")
+    name = ""
+    for snap in db.get_snapshots():
+        if (getattr(snap, "group_id", "") or "").split("/")[-1] == gid:
+            name = (getattr(snap, "source_group", None) or {}).get("group_name", "")
+            if name:
+                break
+    if not (source_cluster_id and gid and name):
+        return {"active_cluster_id": "", "active_group_id": "", "members": []}
+    group = ConsistencyGroup()
+    group.uuid, group.cluster_id, group.group_name = gid, source_cluster_id, name
+    return resolve_group(group)
+
+
 def _failback_group(group, policy, peer=None):
     """Clone the members of *group* home from the peer group that holds them after
     a fail-over. Returns per-member result dicts (empty when no peer group or peer

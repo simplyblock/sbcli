@@ -17,6 +17,8 @@ from simplyblock_core.peer.client import PeerError
 from .. import util
 from .._dependencies import Cluster, ReplicationPolicy, ReplicationTarget
 from .._dtos import (
+    ConsistencyGroupLineageMemberDTO,
+    ConsistencyGroupResolutionDTO,
     FailoverResultDTO,
     ReplicatedGenerationDTO,
     ReplicatedSnapshotDTO,
@@ -317,6 +319,27 @@ def failover_replicated_group(cluster: Cluster, source_cluster_id: UUID, group_i
         "warnings": m.get("warnings", []),
     } for m in members]}
 
+
+@replicated_groups_api.get('/{source_cluster_id}/{group_id}/resolution',
+                           name='clusters:replication:replicated-groups:resolution',
+                           response_model=ConsistencyGroupResolutionDTO)
+def resolve_replicated_group(cluster: Cluster, source_cluster_id: UUID,
+                             group_id: UUID) -> ConsistencyGroupResolutionDTO:
+    """Where the source cluster's consistency group lives now, from this
+    control plane's own records (control-plane split): the group a fail-over
+    made here from the copies, and each protected volume's original handle with
+    the clone serving it. The same shape as
+    ``consistency-groups/{id}/replication/resolution``, which needs the group
+    record and so is answered only by the source's control plane, which may be
+    cut off. ``active_group_id`` is empty while the group was not failed over
+    here: the source's control plane still serves it.
+    """
+    res = replication_policy_controller.resolve_replicated_group(f"{source_cluster_id}/{group_id}")
+    return ConsistencyGroupResolutionDTO(
+        cluster_id=str(source_cluster_id), group_id=str(group_id),
+        active_cluster_id=res["active_cluster_id"], active_group_id=res["active_group_id"],
+        members=[ConsistencyGroupLineageMemberDTO(**m) for m in res["members"]],
+    )
 
 targets_api.include_router(target_instance_api)
 policies_api.include_router(policy_instance_api)
