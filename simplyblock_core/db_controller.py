@@ -1777,11 +1777,12 @@ class DBController(metaclass=Singleton):
             # node keeps its block (its record still exists).
             alloc = {nid: b for nid, b in alloc.items() if nid in live_node_ids}
             used = {int(b) for b in alloc.values()}
-            block = next((i for i in range(max_blocks) if i not in used), None)
-            if block is None:
+            free = next((i for i in range(max_blocks) if i not in used), None)
+            if free is None:
                 raise ValueError(
                     f"no free controller-ID block: a multi-attach cluster supports "
                     f"at most {max_blocks} storage nodes")
+            block = free
             alloc[node_id] = block
             tr.set(alloc_key, json.dumps(alloc, sort_keys=True).encode())
 

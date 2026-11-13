@@ -463,15 +463,13 @@ class TestHelpers(unittest.TestCase):
     def test_entry_point_loading(self):
         ep = MagicMock(value="pkg:Cls")
         ep.load.return_value = FakeArrayPlugin
-        eps = MagicMock()
-        eps.select.return_value = [ep]
-        with patch.object(array.metadata, "entry_points", return_value=eps):
+        with patch.object(array.metadata, "entry_points", return_value=[ep]) as eps:
             plugin = array.load_plugin("vendor", "https://array", {"pool": "p"})
-        eps.select.assert_called_once_with(group=array.ENTRY_POINT_GROUP, name="vendor")
+        eps.assert_called_once_with(group=array.ENTRY_POINT_GROUP, name="vendor")
         self.assertIsInstance(plugin, FakeArrayPlugin)
         self.assertEqual((plugin.endpoint, plugin.options), ("https://array", {"pool": "p"}))
         ep.load.return_value = object
-        with patch.object(array.metadata, "entry_points", return_value=eps):
+        with patch.object(array.metadata, "entry_points", return_value=[ep]):
             with self.assertRaises(array.ArrayError):
                 array.load_plugin("vendor")
 

@@ -108,7 +108,7 @@ def _wrap_credentials(credentials) -> dict:
 def _managed_devices(nodes):
     """``(owner, device)`` of every LUN the array plugin created."""
     return [(n, d) for n in nodes for d in (n.nvme_devices or [])
-            if multi_attach.is_multi_attach(d) and getattr(d, "array_lun_id", "")]
+            if multi_attach.is_multi_attach(d) and d.array_lun_id]
 
 
 def array_view(cluster, capabilities=None) -> dict:
@@ -393,12 +393,12 @@ def _lun_path_on(node, dev, timeout):
         except Exception as e:                          # noqa: BLE001
             logger.warning("lun_info on %s: %s", node.get_id(), e)
             entries = None
-        for e in entries or []:
-            if owner_path and (owner_path in (e.get("by_id_paths") or []) or owner_path == e.get("by_id_path")):
+        for entry in entries or []:
+            if owner_path and (owner_path in (entry.get("by_id_paths") or []) or owner_path == entry.get("by_id_path")):
                 return owner_path
         if entries:
-            e = entries[0]
-            return e.get("by_id_path") or e.get("device_path") or ""
+            first = entries[0]
+            return first.get("by_id_path") or first.get("device_path") or ""
         if time.monotonic() >= deadline:
             return ""
         _sleep(POLL_SEC)
@@ -669,7 +669,7 @@ def release_node_luns(node) -> None:
         if not array_configured(cluster):
             return
         nodes = db.get_storage_nodes_by_cluster_id(node.cluster_id)
-        work = []
+        work: list[tuple] = []
         node_host = getattr(node, "array_host_id", "") or ""
         for owner, dev in _managed_devices(nodes):
             if owner.get_id() == node.get_id():

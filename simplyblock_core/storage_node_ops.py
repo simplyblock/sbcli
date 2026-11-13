@@ -2575,7 +2575,7 @@ def _connect_to_remote_devs(
                 continue
             node_devices = own_loopback
         elif node.status not in allowed_node_statuses:
-            node_devices = taken_over.get(node.get_id())
+            node_devices = taken_over.get(node.get_id()) or []
             if not node_devices:
                 continue
         else:
@@ -2694,7 +2694,7 @@ def _connect_to_remote_devs(
                 continue
             node_devices = own_loopback
         elif node.status not in allowed_node_statuses:
-            node_devices = taken_over.get(node.get_id())
+            node_devices = taken_over.get(node.get_id()) or []
             if not node_devices:
                 continue
         else:

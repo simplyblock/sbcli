@@ -211,11 +211,7 @@ def unregister_plugin(name: str) -> None:
 
 
 def _entry_point(name: str):
-    eps = metadata.entry_points()
-    if hasattr(eps, "select"):
-        found = list(eps.select(group=ENTRY_POINT_GROUP, name=name))
-    else:  # pragma: no cover - Python < 3.10
-        found = [ep for ep in eps.get(ENTRY_POINT_GROUP, []) if ep.name == name]
+    found = list(metadata.entry_points(group=ENTRY_POINT_GROUP, name=name))
     return found[0] if found else None
 
 
