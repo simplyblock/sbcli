@@ -81,7 +81,7 @@ def test_attach_links_a_plain_policy_and_starts_each_member(db, monkeypatch):
     group = _seed_group(db, ["v1", "v2"])
     started = []
     monkeypatch.setattr(rpc, "start_member_replication",
-                        lambda lvol_id, pol, target: started.append(lvol_id))
+                        lambda lvol_id, pol, target, **kw: started.append(lvol_id))
 
     cgc.attach_group_policy(group, policy.get_id())
 
