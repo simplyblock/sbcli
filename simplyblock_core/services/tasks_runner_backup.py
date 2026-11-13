@@ -424,9 +424,13 @@ def _run_delete(task):
     of this same task already retired it, or (the group-backup path) a
     different caller did.
 
-    Single-cycle, unlike backup/restore/merge: ``bdev_lvol_s3_delete`` has no
-    paired stat RPC to poll in ``rpc_client.py``, so it is treated as
-    synchronous, exactly as its one existing client method already models it.
+    No data-plane RPC: there is no ``bdev_lvol_s3_delete`` and none is
+    planned, so the control plane removes the objects itself, the same way it
+    removes a manifest. This handler is only ever reached for a backup nothing
+    chains against -- one with a successor is folded into it by
+    ``_run_merge`` instead, which is where the data plane stays involved
+    (``bdev_lvol_s3_merge``). Single-cycle like the RPC path it replaces: S3
+    delete is synchronous from the caller's side, with nothing to poll.
     """
     backup_ids = task.function_params.get("backup_ids") or []
     if not backup_ids:
@@ -446,16 +450,11 @@ def _run_delete(task):
         set_result(task, "Nothing left to delete")
         return
 
-    snode = _online_node(backups[0].node_id)
-    rpc_client = snode.rpc_client(timeout=30)
-
-    try:
-        ret = rpc_client.bdev_lvol_s3_delete([b.s3_id for b in backups])
-    except RPCException as e:
-        _defer_if_busy(e)
-        raise TaskRetry(f"RPC error: {e}")
-    if not ret:
-        raise TaskRetry("bdev_lvol_s3_delete RPC failed")
+    for backup in backups:
+        try:
+            backup_controller.delete_backup_data(backup)
+        except (ManifestError, PreconditionError) as e:
+            raise TaskRetry(f"S3 data delete failed: {e}")
 
     # The data is confirmed gone: metadata follows data on the way out, the
     # reverse of how the claim marked intent before any of this ran.
@@ -623,7 +622,7 @@ def finalize_resource(task):
     elif task.function_name == JobSchedule.FN_BACKUP_DELETE:
         # The delete did not finish (timeout, retry ceiling, abort,
         # cancellation): every backup this task still finds DELETING had its
-        # S3 objects left untouched -- the RPC either never ran or never
+        # S3 objects left untouched -- the delete either never ran or never
         # confirmed success, and _run_delete only removes a manifest/record
         # after it has -- so each is reverted to COMPLETED, record and
         # manifest both, the same way an unfinished merge leaves its old
