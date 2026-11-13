@@ -624,13 +624,19 @@ def _config_for_deleting(db, group_backup):
 
 
 def _members_touched(db, group_backup) -> bool:
-    """Whether retiring a member has begun: a member deleted, merging, or merged."""
+    """Whether retiring a member has begun: a member deleted, merging,
+    merged, or claimed for deletion (DELETING -- not yet actually gone, but
+    its own FN_BACKUP_DELETE task may already be destroying its S3 objects,
+    which is exactly the in-flight state a restore back to COMPLETED must
+    not paper over).
+    """
     for backup_id in group_backup.member_backup_ids:
         try:
             member = db.get_backup_by_id(backup_id)
         except KeyError:
             return True
-        if member.status in (Backup.STATUS_MERGING, Backup.STATUS_MERGED):
+        if member.status in (Backup.STATUS_MERGING, Backup.STATUS_MERGED,
+                             Backup.STATUS_DELETING):
             return True
     return False
 
@@ -652,6 +658,13 @@ def _retire_members(db, group_backup) -> bool:
             continue                    # deleted
         if member.status == Backup.STATUS_MERGED:
             continue
+        if member.status == Backup.STATUS_DELETING:
+            # Already claimed by an earlier pass; its own FN_BACKUP_DELETE
+            # task is retiring it. Not retired until that task actually
+            # removes the record (the KeyError branch above, on a later
+            # pass) -- re-claiming it here would needlessly re-queue the task.
+            retired = False
+            continue
         chain = db.get_backups_by_lvol_id(member.lvol_id)
         successor = next((b for b in chain if b.prev_backup_id == member.uuid), None)
         busy = (member.status in (Backup.STATUS_PENDING, Backup.STATUS_IN_PROGRESS)
@@ -661,16 +674,34 @@ def _retire_members(db, group_backup) -> bool:
                 backup_controller.delete_backup(member.uuid)
             except KeyError:
                 pass                    # deleted concurrently
-            logger.info("Group backup %s: member %s deleted, nothing chains against it",
-                        group_backup.uuid, member.uuid[:8])
+            # A FAILED member is removed synchronously (nothing was ever
+            # uploaded for it, so there is no manifest or task to wait on);
+            # a COMPLETED one is only claimed -- DELETING now, actually gone
+            # once its own FN_BACKUP_DELETE task finishes. Checked rather
+            # than branched on the member's status before the call, so this
+            # reads the one fact that actually answers it either way.
+            try:
+                db.get_backup_by_id(member.uuid)
+            except KeyError:
+                logger.info("Group backup %s: member %s deleted, nothing "
+                            "chains against it", group_backup.uuid, member.uuid[:8])
+            else:
+                logger.info("Group backup %s: member %s claimed for deletion, "
+                            "nothing chains against it",
+                            group_backup.uuid, member.uuid[:8])
+                retired = False
             continue
         retired = False
         if (successor is not None and not busy
                 and member.status == Backup.STATUS_COMPLETED
                 and successor.status == Backup.STATUS_COMPLETED):
-            backup_controller.trigger_merge(successor, member)
-            logger.info("Group backup %s: member %s merging into its successor %s",
-                        group_backup.uuid, member.uuid[:8], successor.uuid[:8])
+            ok, reason = backup_controller.trigger_merge(successor, member)
+            if ok:
+                logger.info("Group backup %s: member %s merging into its successor %s",
+                            group_backup.uuid, member.uuid[:8], successor.uuid[:8])
+            else:
+                logger.info("Group backup %s: member %s not merged into %s yet: %s",
+                            group_backup.uuid, member.uuid[:8], successor.uuid[:8], reason)
     return retired
 
 

@@ -218,7 +218,9 @@ class TestRetireMembers:
         state = group_backup.advance_group_backup_delete(gb.get_id())
 
         assert state == group_backup.DeleteState.PENDING
-        assert _status(db, leaf) is None
+        # Claimed, not yet actually gone: leaf's own FN_BACKUP_DELETE task
+        # removes it once it confirms the S3 objects are gone.
+        assert _status(db, leaf) == Backup.STATUS_DELETING
         assert _status(db, base) == Backup.STATUS_MERGING
         assert db.get_group_backup_by_id(gb.get_id()).status == GroupBackup.STATUS_DELETING
         assert bucket[GEN_7].state == GroupManifestState.DELETING
@@ -230,6 +232,9 @@ class TestRetireMembers:
         merged = db.get_backup_by_id(base.get_id())
         merged.status = Backup.STATUS_MERGED      # the merge task finished
         merged.write_to_db(db.kv_store)
+        # leaf's own FN_BACKUP_DELETE task finished too: it confirmed the S3
+        # objects were gone and removed the record.
+        db.get_backup_by_id(leaf.get_id()).remove(db.kv_store)
 
         state = group_backup.advance_group_backup_delete(gb.get_id())
 

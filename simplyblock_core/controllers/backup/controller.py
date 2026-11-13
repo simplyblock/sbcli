@@ -1119,6 +1119,15 @@ def delete_backup(backup_id):
         tasks_controller.add_backup_delete_task(backup.cluster_id, backup.node_id, [backup.uuid])
         return
 
+    if backup.status == Backup.STATUS_FAILED:
+        # Uploaded nothing restorable, so there is no manifest and nothing
+        # in S3 to claim or wait on -- the same direct removal
+        # delete_backups gives every FAILED backup of a volume.
+        cleanup_backup_kms_keys([backup])
+        backup_events.backup_deleted(backup.cluster_id, backup.node_id, backup)
+        backup.remove(db_controller.kv_store)
+        return
+
     dependents = [b for b in db_controller.get_backups_by_lvol_id(backup.lvol_id)
                   if b.prev_backup_id == backup.uuid]
     if dependents:
@@ -1456,8 +1465,7 @@ def check_backups(cluster_id=None, repair=False) -> bool:
                 problems += 1
                 logger.error("Backup %s (%s) has no manifest in %s",
                             backup.uuid, backup.status, config.bucket_name)
-                if repair:
-                    _rewrite_manifest_from_record(backup)
+                if repair and _rewrite_manifest_from_record(backup):
                     repaired += 1
                 continue
 
@@ -1477,8 +1485,7 @@ def check_backups(cluster_id=None, repair=False) -> bool:
             problems += 1
             logger.error("Backup %s manifest disagrees with its record: %s",
                         backup.uuid, "; ".join(disagreements))
-            if repair:
-                _rewrite_manifest_from_record(backup)
+            if repair and _rewrite_manifest_from_record(backup):
                 repaired += 1
 
         try:
@@ -1506,17 +1513,28 @@ def check_backups(cluster_id=None, repair=False) -> bool:
     return (problems - repaired) == 0 and orphans == 0
 
 
-def _rewrite_manifest_from_record(backup: Backup) -> None:
+def _rewrite_manifest_from_record(backup: Backup) -> bool:
     """Rewrite ``backup``'s manifest from its FDB record: ACTIVE, then
     DELETING again if that is what the record says. Two steps because
     ``write_manifest`` always writes ACTIVE (it is what a freshly completed
     backup's manifest has never not been), and only a second, explicit mark
     turns that into DELETING -- the same two calls ``_start_backup_delete``
     itself would have made, in the same order.
+
+    Never raises: a record this cannot rebuild from (an unreadable location,
+    a missing encryption descriptor, an unreachable bucket) is one
+    ``check_backups`` has to report and move on from, not one that aborts
+    the whole run over a single bad backup. Returns whether it succeeded.
     """
-    write_manifest(backup)
-    if backup.status == Backup.STATUS_DELETING:
-        mark_manifest_deleting(backup)
+    try:
+        write_manifest(backup)
+        if backup.status == Backup.STATUS_DELETING:
+            mark_manifest_deleting(backup)
+    except (ValueError, backup_manifest.ManifestError, PreconditionError, KeyError) as e:
+        logger.error("Could not rewrite the manifest of backup %s from its "
+                    "record: %s", backup.uuid, e)
+        return False
+    return True
 
 
 def trigger_merge(keep_backup, old_backup):

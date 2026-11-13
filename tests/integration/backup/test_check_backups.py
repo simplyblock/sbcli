@@ -90,10 +90,15 @@ def bucket(monkeypatch):
     return b
 
 
-def _manifest(backup_id: str, prev: str = "", state=BackupManifestState.ACTIVE) -> BackupManifest:
+def _manifest(backup_id: str, prev: str = "", state=BackupManifestState.ACTIVE,
+              s3_id: int | None = None) -> BackupManifest:
+    # s3_id defaults to a value derived from backup_id itself -- fine for an
+    # orphan manifest naming no real backup, but a manifest meant to describe
+    # a real one MUST pass that backup's own s3_id: a Backup's s3_id is
+    # whatever was assigned at creation, not derivable from its uuid.
     return BackupManifest(
         backup_id=UUID(backup_id),
-        s3_id=zlib.crc32(backup_id.encode()) % 1000,
+        s3_id=s3_id if s3_id is not None else zlib.crc32(backup_id.encode()) % 1000,
         created_at=100,
         completed_at=200,
         size=4096,
@@ -112,7 +117,13 @@ def _backup(db, name, prev="", status=Backup.STATUS_COMPLETED, cluster_id=CLUSTE
     b.uuid = _uuid(name)
     b.cluster_id = cluster_id
     b.lvol_id = LVOL
+    b.lvol_name = "vol"
+    # build_manifest (the --repair path) needs a valid snapshot_id: a real
+    # COMPLETED backup always has one.
+    b.snapshot_id = _uuid(f"snap-{name}")
+    b.snapshot_name = "snap"
     b.node_id = NODE
+    b.size = 4096
     b.s3_id = zlib.crc32(name.encode()) % 1000
     b.prev_backup_id = _uuid(prev) if prev else ""
     b.status = status
@@ -123,7 +134,7 @@ def _backup(db, name, prev="", status=Backup.STATUS_COMPLETED, cluster_id=CLUSTE
 
 def test_a_consistent_completed_backup_passes(db, bucket):
     b = _backup(db, "leaf")
-    backup_manifest.write(_config(), _manifest(b.uuid))
+    backup_manifest.write(_config(), _manifest(b.uuid, s3_id=b.s3_id))
 
     assert backup_controller.check_backups(cluster_id=CLUSTER) is True
 
@@ -143,7 +154,7 @@ def test_a_disagreeing_manifest_fails_and_repairs(db, bucket):
     b = _backup(db, "leaf", prev="base")
     # Wrong prev_backup_id in the manifest -- as if a merge updated the
     # record but not (yet) the bucket.
-    backup_manifest.write(_config(), _manifest(b.uuid, prev=""))
+    backup_manifest.write(_config(), _manifest(b.uuid, prev="", s3_id=b.s3_id))
 
     assert backup_controller.check_backups(cluster_id=CLUSTER) is False
 
@@ -153,7 +164,7 @@ def test_a_disagreeing_manifest_fails_and_repairs(db, bucket):
 
 def test_a_deleting_backup_with_an_active_manifest_fails_and_repairs(db, bucket):
     b = _backup(db, "leaf", status=Backup.STATUS_DELETING)
-    backup_manifest.write(_config(), _manifest(b.uuid, state=BackupManifestState.ACTIVE))
+    backup_manifest.write(_config(), _manifest(b.uuid, state=BackupManifestState.ACTIVE, s3_id=b.s3_id))
 
     assert backup_controller.check_backups(cluster_id=CLUSTER) is False
 
@@ -174,14 +185,14 @@ def test_a_merged_backups_leftover_manifest_is_not_flagged(db, bucket):
     state, so a leftover manifest here is a known gap, not this check's to
     report."""
     b = _backup(db, "old", status=Backup.STATUS_MERGED)
-    backup_manifest.write(_config(), _manifest(b.uuid))
+    backup_manifest.write(_config(), _manifest(b.uuid, s3_id=b.s3_id))
 
     assert backup_controller.check_backups(cluster_id=CLUSTER) is True
 
 
 def test_scoping_to_one_cluster_ignores_another_clusters_problems(db, bucket):
-    _backup(db, "leaf", cluster_id=CLUSTER)
-    backup_manifest.write(_config(), _manifest(_uuid("leaf")))
+    b = _backup(db, "leaf", cluster_id=CLUSTER)
+    backup_manifest.write(_config(), _manifest(b.uuid, s3_id=b.s3_id))
     # No manifest for this one -- a real problem, but in a different cluster.
     _backup(db, "other-leaf", cluster_id=OTHER_CLUSTER)
 
