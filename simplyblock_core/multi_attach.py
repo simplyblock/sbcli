@@ -71,6 +71,24 @@ def namespace_uuid(device) -> str:
     return str(uuid_mod.uuid5(_LUN_NS_UUID_NAMESPACE, device.get_id()))
 
 
+def namespace_nguid(device):
+    """The NGUID a multi-attach device's namespace is exported with: the
+    namespace UUID's 32 hex digits. None for a regular device (SPDK then
+    derives it from the bdev, as before).
+
+    Without it SPDK fills the NGUID from the exported PT bdev's UUID, and the
+    host side registers its namespace bdev under that NGUID. The ptnonexcl PT
+    bdev's UUID is derived from its name (bdev_ptnonexcl.c), the same name on
+    every node, so on any node that both holds the PT bdev and consumes the
+    LUN (the owner's loopback, a takeover node) the consumer bdev's UUID
+    collides with the PT bdev's and SPDK refuses to register it (found on the
+    multi-attach bed: "Unable to add uuid:<pt uuid> alias for bdev
+    remote_alceml_<id>n1")."""
+    if not is_multi_attach(device):
+        return None
+    return uuid_mod.UUID(namespace_uuid(device)).hex.upper()
+
+
 def cntlid_range(block: int) -> tuple[int, int]:
     """``(min_cntlid, max_cntlid)`` of controller-ID block ``block``.
 

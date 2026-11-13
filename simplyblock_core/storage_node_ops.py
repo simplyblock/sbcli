@@ -2095,7 +2095,8 @@ def _create_storage_device_stack(rpc_client, nvme, snode: StorageNode, after_res
             ip_list.append(iface.ip4_address)
 
     logger.info(f"add {pt_name} to subsystem")
-    ret = rpc_client.nvmf_subsystem_add_ns(subsystem_nqn, pt_name, multi_attach.namespace_uuid(nvme))
+    ns_extra = {"nguid": multi_attach.namespace_nguid(nvme)} if multi_attach.is_multi_attach(nvme) else {}
+    ret = rpc_client.nvmf_subsystem_add_ns(subsystem_nqn, pt_name, multi_attach.namespace_uuid(nvme), **ns_extra)
     if not ret:
         logger.error(f"Failed to add: {pt_name} to the subsystem: {subsystem_nqn}")
         return None

@@ -446,7 +446,8 @@ class TestStorageDeviceStack(unittest.TestCase):
         nqn = f"{constants.CLUSTER_NQN}:lun:{DEV_ID}"
         rpc.subsystem_create.assert_called_once_with(nqn, "sbcli-cn", DEV_ID, min_cntlid=129, max_cntlid=192)
         rpc.nvmf_subsystem_add_ns.assert_called_once_with(nqn, f"alceml_{DEV_ID}_PT",
-                                                          multi_attach.namespace_uuid(dev))
+                                                          multi_attach.namespace_uuid(dev),
+                                                          nguid=multi_attach.namespace_nguid(dev))
         self.assertEqual(snode.create_alceml.call_args.kwargs["stuck_io_timeout_ms"], 60000)
         self.assertEqual(dev.nvmf_nqn, nqn)
 
@@ -481,7 +482,8 @@ class TestDeviceControllerStack(unittest.TestCase):
         nqn = f"{constants.CLUSTER_NQN}:lun:{DEV_ID}"
         rpc.subsystem_create.assert_called_once_with(nqn, "sbcli-cn", DEV_ID, min_cntlid=129, max_cntlid=192)
         rpc.nvmf_subsystem_add_ns.assert_called_once_with(nqn, f"alceml_{DEV_ID}_PT",
-                                                          multi_attach.namespace_uuid(dev))
+                                                          multi_attach.namespace_uuid(dev),
+                                                          nguid=multi_attach.namespace_nguid(dev))
         self.assertEqual(snode.create_alceml.call_args.kwargs["stuck_io_timeout_ms"], 60000)
         self.assertEqual(dev.nvmf_nqn, nqn)
 
@@ -619,3 +621,26 @@ class TestOwnerLoopback(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestNamespaceNguid(unittest.TestCase):
+    """The NGUID of a multi-attach namespace is set explicitly: SPDK would
+    otherwise fill it from the PT bdev's name-derived UUID, which collides on
+    any node that also consumes the LUN."""
+
+    def test_regular_device_has_none(self):
+        self.assertIsNone(multi_attach.namespace_nguid(_device()))
+
+    def test_multi_attach_nguid_is_the_namespace_uuid(self):
+        import uuid as uuid_mod
+        dev = _device(multi=True)
+        nguid = multi_attach.namespace_nguid(dev)
+        self.assertEqual(nguid, uuid_mod.UUID(multi_attach.namespace_uuid(dev)).hex.upper())
+        self.assertEqual(len(nguid), 32)
+
+    def test_differs_from_the_pt_bdev_uuid(self):
+        # bdev_ptnonexcl.c: uuid5(7e25812e-...-000000000001, "<alceml>_PT").
+        import uuid as uuid_mod
+        dev = _device(multi=True)
+        pt = uuid_mod.uuid5(uuid_mod.UUID("7e25812e-c8c0-4d3f-8599-000000000001"), f"alceml_{DEV_ID}_PT")
+        self.assertNotEqual(multi_attach.namespace_nguid(dev), pt.hex.upper())

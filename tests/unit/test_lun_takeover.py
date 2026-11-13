@@ -84,10 +84,10 @@ class FakeSpdk:
         self.subsystems[nqn]["listen_addresses"].append({"traddr": traddr})
         return True
 
-    def nvmf_subsystem_add_ns(self, nqn, pt, uuid=None):
+    def nvmf_subsystem_add_ns(self, nqn, pt, uuid=None, nguid=None):
         if not self._rec("nvmf_subsystem_add_ns", nqn, pt, uuid):
             return None
-        self.subsystems[nqn]["namespaces"].append({"name": pt, "uuid": uuid})
+        self.subsystems[nqn]["namespaces"].append({"name": pt, "uuid": uuid, "nguid": nguid})
         return 1
 
     def alceml_set_qos_weights(self, weights):

@@ -441,7 +441,8 @@ def _export_on_standby(db, cluster, standby, dev, path, deadline) -> dict:
         if not ips:
             raise TakeoverError(f"node {sid} has no data IP to export the LUN on")
         if not any(ns.get("name") == pt for ns in (subsys.get("namespaces") or [])):
-            if not rpc.nvmf_subsystem_add_ns(nqn, pt, multi_attach.namespace_uuid(dev)):
+            if not rpc.nvmf_subsystem_add_ns(nqn, pt, multi_attach.namespace_uuid(dev),
+                                             nguid=multi_attach.namespace_nguid(dev)):
                 raise TakeoverError(f"namespace {pt} not added to {nqn} on {sid}")
     except Exception:
         _teardown(rpc, sid, created)

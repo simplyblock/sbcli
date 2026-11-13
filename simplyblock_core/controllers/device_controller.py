@@ -847,7 +847,8 @@ def _def_create_device_stack(device_obj, snode, force=False, clear_data=False):
             # Every node that exports the LUN must use the same namespace
             # UUID: SPDK multipath joins paths by namespace identity.
             ret = rpc_client.nvmf_subsystem_add_ns(
-                subsystem_nqn, pt_name, multi_attach.namespace_uuid(device_obj))
+                subsystem_nqn, pt_name, multi_attach.namespace_uuid(device_obj),
+                nguid=multi_attach.namespace_nguid(device_obj))
         else:
             ret = rpc_client.nvmf_subsystem_add_ns(subsystem_nqn, pt_name)
     else:
