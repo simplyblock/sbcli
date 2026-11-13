@@ -63,8 +63,8 @@ def db():
 
 
 class _Bucket:
-    """An in-memory S3 bucket, behind the three object calls the manifest
-    functions make."""
+    """An in-memory S3 bucket, behind the manifest calls and the data-object
+    listing/deletion calls ``backup_manifest.delete_data_objects`` makes."""
 
     def __init__(self):
         self.objects: dict = {}
@@ -79,6 +79,19 @@ class _Bucket:
 
     def delete_object(self, Bucket, Key):
         self.objects.pop(Key, None)
+
+    def get_paginator(self, _name):
+        objects = self.objects
+
+        class _Paginator:
+            def paginate(self, Bucket, Prefix):
+                yield {"Contents": [{"Key": k} for k in objects if k.startswith(Prefix)]}
+        return _Paginator()
+
+    def delete_objects(self, Bucket, Delete):
+        for entry in Delete["Objects"]:
+            self.objects.pop(entry["Key"], None)
+        return {}
 
 
 @pytest.fixture
@@ -337,3 +350,70 @@ def test_delete_backups_is_a_noop_resume_once_everything_is_already_deleting(db,
     ok, err = backup_controller.delete_backups(LVOL)
 
     assert ok, err
+
+
+def _seed_data_objects(bucket, backup):
+    """Fake data the data plane would have written under this backup's
+    ``s3_id`` -- a metadata object (``mid=1``) and one data cluster
+    (``mid=0``), per ``ManifestDataPlane.key_format``."""
+    bucket.objects[f"{backup.s3_id}/1/0"] = b"metadata"
+    bucket.objects[f"{backup.s3_id}/0/0"] = b"cluster-0"
+
+
+class TestDeleteTask:
+    """``FN_BACKUP_DELETE`` (``tasks_runner_backup._run_delete``): the task
+    ``backup_controller.delete_backup``/``delete_backups`` queue after
+    claiming a backup, which removes its S3 objects itself -- there is no
+    data-plane RPC for this and none is planned. A backup with a successor is
+    never reached here: that goes through a merge instead
+    (``trigger_merge``/``_run_merge``), which is where the data plane stays
+    involved.
+    """
+
+    def _task(self, db, backup_id):
+        return _delete_tasks(db, backup_id)[0]
+
+    def test_deleting_removes_data_objects_manifest_and_record(self, db, bucket):
+        from simplyblock_core.services import tasks_runner_backup as runner
+        leaf = _backup(db, bucket, "leaf")
+        _seed_data_objects(bucket, leaf)
+        backup_controller.delete_backup(leaf.uuid)
+
+        runner._run_delete(self._task(db, leaf.uuid))
+
+        assert not any(k.startswith(f"{leaf.s3_id}/") for k in bucket.objects)
+        assert backup_manifest.manifest_key(UUID(leaf.uuid)) not in bucket.objects
+        assert not _exists(db, leaf)
+
+    def test_a_backup_no_longer_deleting_is_skipped(self, db, bucket):
+        """A prior cycle of this same task (or, for a group member, a
+        different caller) already retired it -- resuming must not re-delete
+        objects out from under whatever claimed it next."""
+        from simplyblock_core.services import tasks_runner_backup as runner
+        leaf = _backup(db, bucket, "leaf")
+        backup_controller.delete_backup(leaf.uuid)
+        task = self._task(db, leaf.uuid)
+        db.atomic_update(leaf, lambda b: setattr(b, "status", Backup.STATUS_COMPLETED))
+
+        runner._run_delete(task)
+
+        assert _status(db, leaf) == Backup.STATUS_COMPLETED
+
+    def test_a_bucket_failure_retries_without_touching_the_manifest_or_record(
+            self, db, bucket, monkeypatch):
+        from simplyblock_core.services import tasks_runner_backup as runner
+        from simplyblock_core.services.task_runner_base import TaskRetry
+        leaf = _backup(db, bucket, "leaf")
+        _seed_data_objects(bucket, leaf)
+        backup_controller.delete_backup(leaf.uuid)
+
+        def unreachable(_name):
+            raise ClientError({"Error": {"Code": "500"}}, "ListObjectsV2")
+        monkeypatch.setattr(bucket, "get_paginator", unreachable)
+
+        with pytest.raises(TaskRetry):
+            runner._run_delete(self._task(db, leaf.uuid))
+
+        assert _status(db, leaf) == Backup.STATUS_DELETING
+        assert _manifest_state(bucket, leaf) == BackupManifestState.DELETING
+        assert any(k.startswith(f"{leaf.s3_id}/") for k in bucket.objects)

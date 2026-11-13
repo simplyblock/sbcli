@@ -452,6 +452,46 @@ def delete(config: BackupConfig, backup_id: UUID) -> None:
         raise ManifestError(f"Failed to delete manifest for backup {backup_id}") from e
 
 
+def delete_data_objects(config: BackupConfig, s3_id: int) -> None:
+    """Remove every object a backup's ``s3_id`` owns under ``key_format``
+    (``{s3_id}/{mid}/{extent}``) -- its data clusters and its metadata object.
+
+    Only for a backup whose deletion needs no data-plane involvement: a tip
+    delete or a whole-chain delete, where nothing else names these objects.
+    A backup something still chains against is folded into its successor by
+    the data plane instead (``bdev_lvol_s3_merge``), which removes the old
+    backup's objects itself as part of the merge -- this function is never
+    called for that case.
+
+    Idempotent: an ``s3_id`` prefix with nothing left under it lists empty and
+    this is a no-op, so retrying after a partial failure costs one empty list
+    call and nothing else.
+
+    Raises:
+        ManifestError: the bucket could not be listed, or an object under this
+            prefix could not be removed.
+    """
+    client = s3_client(config)
+    prefix = f"{s3_id}/"
+    try:
+        pages = client.get_paginator("list_objects_v2").paginate(
+            Bucket=config.bucket_name, Prefix=prefix)
+        for page in pages:
+            keys = [{"Key": entry["Key"]} for entry in page.get("Contents", [])]
+            if not keys:
+                continue
+            resp = client.delete_objects(
+                Bucket=config.bucket_name, Delete={"Objects": keys, "Quiet": True})
+            errors = resp.get("Errors") or []
+            if errors:
+                raise ManifestError(
+                    f"Failed to delete {len(errors)} object(s) under {prefix} in "
+                    f"{config.bucket_name}: {errors[0].get('Message')}")
+    except (BotoCoreError, ClientError) as e:
+        raise ManifestError(
+            f"Failed to delete data objects under {prefix} in {config.bucket_name}") from e
+
+
 def read_if_present(config: BackupConfig, backup_id: UUID) -> BackupManifest | None:
     """:func:`read`, but ``None`` for a manifest the bucket does not hold."""
     try:

@@ -2053,9 +2053,10 @@ class DBController(metaclass=Singleton):
     # old allocator was max-plus-one over the local cluster's Backup records,
     # which had three problems: it raced (two concurrent backups got the same
     # id), it recycled the id of a deleted backup whose objects may still exist
-    # (nothing reclaims them -- bdev_lvol_s3_delete does not exist on the data
-    # plane), and after an import it counted foreign backups it should not have.
-    # A monotonic sequence makes reuse impossible by construction.
+    # (deletion removes them, but not atomically with the record disappearing,
+    # so a window exists where the old id's objects are still reachable), and
+    # after an import it counted foreign backups it should not have. A
+    # monotonic sequence makes reuse impossible by construction.
     #
     # Unlike vuid this space is NOT unbounded: the data plane packs s3_id into
     # 30 bits and masks rather than validates, so callers must check

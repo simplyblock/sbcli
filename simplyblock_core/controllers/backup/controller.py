@@ -375,6 +375,25 @@ def delete_manifest(backup: Backup) -> None:
     backup_manifest.delete(_config_for(backup), UUID(backup.uuid))
 
 
+def delete_backup_data(backup: Backup) -> None:
+    """Remove a backup's S3 data objects directly, with no data-plane RPC.
+
+    There is no data-plane RPC for this and none is planned -- a bucket's data
+    objects can be removed the same way a manifest is, by the control plane
+    talking to S3 itself. This is only for a backup whose delete needs no
+    data-plane involvement (a tip delete, or a whole-chain delete): a backup
+    something still chains against is folded into its successor by
+    ``trigger_merge`` instead, which is where the data plane's own
+    ``bdev_lvol_s3_merge`` remains the only way to remove such a backup's
+    objects without breaking its descendant.
+
+    Raises:
+        ManifestError: the objects could not be listed or removed.
+        PreconditionError: the backup's bucket is not the cluster's own.
+    """
+    backup_manifest.delete_data_objects(_config_for(backup), backup.s3_id)
+
+
 def mark_manifest_deleting(backup: Backup) -> None:
     """Mark a backup's manifest DELETING, before any of its S3 objects are
     touched. See ``manifest.mark_deleting``.

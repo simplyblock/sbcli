@@ -1203,9 +1203,14 @@ class TestRPCClientBackupMethods(unittest.TestCase):
         from simplyblock_core.rpc_client import RPCClient
         self.assertTrue(hasattr(RPCClient, 'bdev_lvol_s3_recovery'))
 
-    def test_bdev_lvol_s3_delete_exists(self):
+    def test_bdev_lvol_s3_delete_is_gone(self):
+        """There is no data-plane RPC for deleting a backup's S3 objects, and
+        none is planned -- the control plane removes them itself
+        (backup_manifest.delete_data_objects), the same way it removes a
+        manifest. A backup that still has a successor goes through
+        bdev_lvol_s3_merge instead."""
         from simplyblock_core.rpc_client import RPCClient
-        self.assertTrue(hasattr(RPCClient, 'bdev_lvol_s3_delete'))
+        self.assertFalse(hasattr(RPCClient, 'bdev_lvol_s3_delete'))
 
 
 # ===========================================================================
