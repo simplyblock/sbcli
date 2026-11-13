@@ -61,6 +61,7 @@ def add_cluster():
     rpc_base_port = cl_data.get('rpc_base_port', 8080)
     snode_api_port = cl_data.get('snode_api_port', 50001)
     backup_config = cl_data.get('backup_config')
+    lvol_geometry_enabled = cl_data.get('lvol_geometry_enabled', True)
 
     return utils.get_response(cluster_ops.add_cluster(
         blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
@@ -77,6 +78,7 @@ def add_cluster():
             if (raw_vault := cl_data.get('hashicorp_vault_settings')) is not None
             else None
         ),
+        lvol_geometry_enabled=lvol_geometry_enabled,
     ))
 
 

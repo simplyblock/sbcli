@@ -344,6 +344,11 @@ class Cluster(BaseModel):
     # Deploy-time only — set at cluster create/add, never toggled at runtime;
     # an existing cluster must be redeployed to gain the feature.
     enable_failure_domain: bool = False
+    # LVol geometry: new lvols inherit distr_ndcs/distr_npcs (or the values
+    # passed at create). When False every new lvol is created with
+    # ndcs=npcs=0, i.e. the distrib's own layout. Toggled at runtime with
+    # `cluster set-lvol-geometry`; existing lvols keep their geometry.
+    lvol_geometry_enabled: bool = True
     # Site-level synchronous replication (two sites, one cluster). Deploy-time
     # only, like enable_failure_domain: set at cluster create, never toggled.
     # Every storage node then carries a `site`, and every LVS is replicated to

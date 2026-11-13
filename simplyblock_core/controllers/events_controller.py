@@ -27,6 +27,9 @@ EVENT_FENCE_LOOP = "FENCE_LOOP"
 EVENT_LUN_TAKEOVER = "LUN_TAKEOVER"
 # Multi-attach array LUN lifecycle (controllers/array_controller).
 EVENT_ARRAY_LUN = "ARRAY_LUN"
+#: A replication step on the target keeps failing (e.g. the landing merge
+#: cannot get memory); the control plane backs off and keeps retrying.
+EVENT_REPLICATION_STALLED = "REPLICATION_STALLED"
 
 DOMAIN_CLUSTER = "cluster"
 DOMAIN_MANAGEMENT = "management"

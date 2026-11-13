@@ -194,6 +194,7 @@ class TestRunnerPass(unittest.TestCase):
         db = _TaskDB([_repl("R0", "S0"), cut, _repl("R1", "S1")])
         order: list = []
         with patch.object(sr, "db", db), \
+                patch.object(sr.constants, "REPL_RUNNER_WORKERS", 0), \
                 patch.object(sr, "task_runner",
                              side_effect=lambda t: _add(order, t.uuid, True)), \
                 patch.object(sr.time, "sleep", side_effect=_Stop()):

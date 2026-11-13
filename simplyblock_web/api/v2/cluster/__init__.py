@@ -106,6 +106,7 @@ class ClusterParams(BaseModel):
     backup_config: UnresolvedBackupConfigDTO | None = None
     hashicorp_vault_settings: HashicorpVaultSettings | None = None
     enable_failure_domain: bool = False
+    lvol_geometry_enabled: bool = True
     sync_replication: bool = False
     #: Stretched sync replication: the site whose operator leads the cluster
     #: (Cluster.leader_site); only with sync_replication, "" = unset. Not

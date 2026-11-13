@@ -205,6 +205,7 @@ class ClusterDTO(BaseModel):
     node_affinity: bool
     anti_affinity: bool
     enable_failure_domain: bool
+    lvol_geometry_enabled: bool
     device_mode: str
     inline_checksum: bool
     atomic_4k: bool
@@ -258,6 +259,7 @@ class ClusterDTO(BaseModel):
             node_affinity=model.enable_node_affinity,
             anti_affinity=model.strict_node_anti_affinity,
             enable_failure_domain=model.enable_failure_domain,
+            lvol_geometry_enabled=model.lvol_geometry_enabled,
             device_mode=model.device_mode,
             inline_checksum=model.inline_checksum,
             atomic_4k=model.atomic_4k,

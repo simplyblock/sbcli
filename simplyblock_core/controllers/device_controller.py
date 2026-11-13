@@ -421,6 +421,63 @@ def device_set_online(device_id, cause=CAUSE_OTHER, connect_peers=True):
     return ret
 
 
+#: What drive_identity found under a device record's namespace bdev name.
+DRIVE_SAME = "same"
+DRIVE_OTHER = "other"
+DRIVE_ABSENT = "absent"
+
+
+def drive_identity(device_obj, snode, rpc_client=None):
+    """Say whether the bdev SPDK holds under a device record's name is the
+    drive the record describes.
+
+    Returns ``(verdict, serial)``: DRIVE_SAME when the namespace bdev exists and
+    its serial is the record's, DRIVE_OTHER when it exists with another serial,
+    DRIVE_ABSENT when no such bdev exists. ``serial`` is what SPDK reported,
+    or None.
+
+    A record identifies its drive by serial. Its bdev and controller names are
+    derived from the PCI address, and a PCI address names a slot, not a disk:
+    the same addresses recur on every host built alike, and a node relocated
+    onto such a host (StorageNodeOps Migrate) finds controllers of the right
+    NAME holding drives it has never seen. Anything that rebuilds a device
+    stack from the names alone then puts a second alceml on a namespace that
+    another device already owns, and two stacks writing one disk is data
+    corruption (Talos lab 2026-11-12: a relocated node's three origin devices
+    were "repaired" onto the target's drives and a verifying client read back
+    bad blocks).
+
+    A record without a serial (an AIO device) or a bdev that is not an NVMe
+    namespace has nothing to compare and answers DRIVE_SAME.
+    """
+    rpc_client = rpc_client or snode.rpc_client()
+    if device_obj.bdev_type == "aio" or not device_obj.serial_number:
+        return DRIVE_SAME, None
+    name = device_obj.nvme_bdev or f"{device_obj.nvme_controller}n1"
+    if not name:
+        return DRIVE_SAME, None
+    bdev = rpc_client.bdev_get(name)
+    if not bdev:
+        return DRIVE_ABSENT, None
+    nvme = (bdev.get("driver_specific") or {}).get("nvme") or []
+    if not nvme or "ctrlr_data" not in nvme[0]:
+        return DRIVE_SAME, None
+    found = utils.nvme_namespace_serial(nvme[0], snode.id_device_by_nqn)
+    if found == device_obj.serial_number:
+        return DRIVE_SAME, found
+    return DRIVE_OTHER, found
+
+
+def _refuse_foreign_drive(device_obj, snode, found, doing):
+    logger.error(
+        "Device %s: %s on node %s holds a drive with serial %s, and this device "
+        "is the drive with serial %s. That is another disk, in the slot this "
+        "device had on another host; %s would put a second stack on a drive "
+        "another device owns. Not touching it.",
+        device_obj.get_id(), device_obj.nvme_bdev or device_obj.nvme_controller,
+        snode.get_id(), found, device_obj.serial_number, doing)
+
+
 def probe_device_stack(device_obj, snode, rpc_client=None):
     """Report which layers of a device's stack are present, bottom-up.
 
@@ -522,6 +579,14 @@ def device_repair(device_id, force=False):
         return False
 
     rpc_client = snode.rpc_client()
+    verdict, found = drive_identity(device_obj, snode, rpc_client)
+    if verdict == DRIVE_OTHER:
+        # Not a repair attempt that failed: the drive is not here. The budget
+        # still counts it, so the message repeats on the backoff schedule and
+        # then stops, instead of on every monitor cycle.
+        _refuse_foreign_drive(device_obj, snode, found, "repairing it")
+        return _count_failed_repair(db_controller, snode, device_id, device.repair_attempts)
+
     present, missing = probe_device_stack(device_obj, snode, rpc_client)
     logger.info("Device %s repair probe: present=%s missing=%s",
                 device_id, present, missing)
@@ -565,6 +630,19 @@ def device_repair(device_id, force=False):
             logger.error("Device %s: re-attaching the nvme controller failed: %s",
                          device_id, e)
             ok = False
+        if ok:
+            # The slot was re-attached by address; only now is there a serial
+            # to read. A foreign drive is detached again so nothing of it is
+            # left under this device's names.
+            verdict, found = drive_identity(device_obj, snode, rpc_client)
+            if verdict == DRIVE_OTHER:
+                _refuse_foreign_drive(device_obj, snode, found, "rebuilding its stack")
+                try:
+                    rpc_client.bdev_nvme_detach_controller(device_obj.nvme_controller)
+                except Exception as e:
+                    logger.error("Device %s: detaching the foreign controller %s failed: %s",
+                                 device_id, device_obj.nvme_controller, e)
+                return _count_failed_repair(db_controller, snode, device_id, attempts)
 
     if ok:
         try:
@@ -587,7 +665,12 @@ def device_repair(device_id, force=False):
         device_set_online(device_id, cause=CAUSE_DEVICE_RESTART, connect_peers=True)
         return True
 
-    # Count the failed attempt and arm the next backoff step.
+    return _count_failed_repair(db_controller, snode, device_id, attempts)
+
+
+def _count_failed_repair(db_controller, snode, device_id, attempts):
+    """Count a failed repair attempt and arm the next backoff step. Always
+    returns False, so an exit can ``return`` it."""
     attempts += 1
     exhausted = attempts >= len(constants.DEVICE_REPAIR_BACKOFF_SEC)
 
@@ -649,6 +732,14 @@ def _def_create_device_stack(device_obj, snode, force=False, clear_data=False):
     db_controller = DBController()
 
     rpc_client = snode.rpc_client(timeout=600)
+
+    # Every path that builds a device's stack comes through here, so this is
+    # where a record is held to the drive it describes. force forgives a layer
+    # that fails to build; it does not make another disk this device.
+    verdict, found = drive_identity(device_obj, snode, rpc_client)
+    if verdict == DRIVE_OTHER:
+        _refuse_foreign_drive(device_obj, snode, found, "building its stack")
+        return False
 
     nvme_bdev = device_obj.nvme_bdev
     if snode.enable_test_device:

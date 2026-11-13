@@ -176,7 +176,35 @@ def execute_expand_plan(
         cluster.write_to_db()
 
     cluster.expand_state = expand_state_complete(state)
+    _register_activated_node(cluster, state["new_node_id"])
     cluster.write_to_db()
     logger.info(
         f"expansion complete: new_node_id={state['new_node_id']} "
         f"({len(state['moves'])} moves)")
+
+
+def _register_activated_node(cluster, node_id: str) -> None:
+    """Add the node the expansion just integrated to
+    ``cluster.activated_node_ids``, the node set re-activation holds the
+    cluster to.
+
+    ``cluster_ops._cluster_activate`` refuses to activate a cluster whose
+    current nodes exceed that set ("re-activation must not grow a cluster"),
+    and it has no ``--force`` escape by design. The set is written at
+    activation; an expansion is the one other way a node becomes part of the
+    cluster, so it has to extend the set, or every activation after it --
+    including the cluster monitor's own resume from ``suspended`` -- is
+    refused for the rest of the cluster's life (seen 2026-11-11: four nodes
+    online, cluster suspended for good).
+
+    Registered in the same write as the completed phase, so a crash between
+    the two cannot leave a completed expansion the guard still refuses.
+
+    An empty set is left empty: it belongs to a cluster activated before
+    the set existed, for which the guard is off, and registering the one new
+    node there would switch the guard on against every original node.
+    """
+    activated = list(cluster.activated_node_ids or [])
+    if not activated or node_id in activated:
+        return
+    cluster.activated_node_ids = activated + [node_id]

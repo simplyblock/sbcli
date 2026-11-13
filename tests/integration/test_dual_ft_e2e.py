@@ -487,6 +487,7 @@ _CLUSTER_DISPATCH = {
     'bdev_nvme_set_options':                 _bdev_nvme_set_options,
     'bdev_PT_NoExcl_create':                 _bdev_PT_NoExcl_create,
     'alceml_set_qos_weights':                _alceml_set_qos_weights,
+    'bdev_distrib_set_qos_weights':          _alceml_set_qos_weights,
     'jc_get_jm_status':                      _jc_get_jm_status,
     'nvmf_get_blocked_ports_rdma':           _nvmf_get_blocked_ports_rdma,
     'bdev_distrib_force_to_non_leader':      _bdev_distrib_force_to_non_leader,

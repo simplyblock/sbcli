@@ -411,6 +411,7 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             self.init_cluster__set(subparser)
         self.init_cluster__set_shared_placement(subparser)
+        self.init_cluster__set_lvol_geometry(subparser)
         self.init_cluster__event_alerts(subparser)
         self.init_cluster__switch_write_protection(subparser)
         self.init_cluster__change_name(subparser)
@@ -474,6 +475,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--multi-attach', help='Multi-attach array LUN mode. Every data device is a LUN of an external array that already protects it and presents it to several storage nodes. The cluster runs 1+0 erasure coding (the data-chunks and parity-chunks settings are overridden); on a node failure the LUN is reopened on a standby node and reached over an additional NVMe-oF path. Requires --raid-devices, --ftt and --ha-type ha. Cannot be changed after cluster creation.', dest='multi_attach', action='store_true')
         subcommand.add_argument('--ftt', help='Node failures to tolerate in multi-attach mode (1 or 2; 2 adds a tertiary LVS node and needs at least 3 storage nodes). Required with --multi-attach, refused without it.', type=int, dest='ftt', choices=[1,2,])
         subcommand.add_argument('--enable-failure-domain', help='Enable failure-domain anti-affinity. Each storage node must then be added with a --failure-domain tag (rack/cabinet/DC); data, journal and secondary/tertiary copies are spread across distinct failure domains (best-effort). Deploy-time only: a cluster cannot be upgraded into this feature, it must be redeployed.', dest='enable_failure_domain', action='store_true')
+        subcommand.add_argument('--disable-lvol-geometry', help='Create new logical volumes with ndcs=npcs=0 instead of the cluster\'s erasure coding geometry. Enabled by default; can be changed later with `cluster set-lvol-geometry`.', dest='disable_lvol_geometry', action='store_true')
         subcommand.add_argument('--sync-replication', help='Enable site-level synchronous replication over exactly two sites. Each storage node must then be added with --site; every lvstore is replicated to the other site. Requires --ha-type ha. Deploy-time only: a cluster cannot be upgraded into this feature, it must be redeployed.', dest='sync_replication', action='store_true')
         subcommand.add_argument('--device-mode', help='Storage-device mode for the whole cluster. \'nvme\' (default): NVMe PCIe devices auto-detected and attached via the SPDK nvme driver. \'lblk\': arbitrary Linux block devices wrapped in SPDK AIO bdevs; devices are selected at \'sn configure\' by name or serial number. Deploy-time only; inter-node fabric (nvme-tcp/rdma) is unaffected.', type=str, default='nvme', dest='device_mode', choices=['nvme','lblk',])
         subcommand.add_argument('--enable-inline-checksum', help='Enable inline CRC checksum validation on every IO for silent-data-error protection. Cannot be enabled or disabled after cluster creation. Per-device alceml mode (md-on-device vs fallback) is auto-detected at add-node.', dest='inline_checksum', action='store_true')
@@ -524,6 +526,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--multi-attach', help='Multi-attach array LUN mode. Every data device is a LUN of an external array that already protects it and presents it to several storage nodes. The cluster runs 1+0 erasure coding (the data-chunks and parity-chunks settings are overridden); on a node failure the LUN is reopened on a standby node and reached over an additional NVMe-oF path. Requires --raid-devices, --ftt and --ha-type ha. Cannot be changed after cluster creation.', dest='multi_attach', action='store_true')
         subcommand.add_argument('--ftt', help='Node failures to tolerate in multi-attach mode (1 or 2; 2 adds a tertiary LVS node and needs at least 3 storage nodes). Required with --multi-attach, refused without it.', type=int, dest='ftt', choices=[1,2,])
         subcommand.add_argument('--enable-failure-domain', help='Enable failure-domain anti-affinity. Each storage node must then be added with a --failure-domain tag (rack/cabinet/DC); data, journal and secondary/tertiary copies are spread across distinct failure domains (best-effort). Deploy-time only: a cluster cannot be upgraded into this feature, it must be redeployed.', dest='enable_failure_domain', action='store_true')
+        subcommand.add_argument('--disable-lvol-geometry', help='Create new logical volumes with ndcs=npcs=0 instead of the cluster\'s erasure coding geometry. Enabled by default; can be changed later with `cluster set-lvol-geometry`.', dest='disable_lvol_geometry', action='store_true')
         subcommand.add_argument('--sync-replication', help='Enable site-level synchronous replication over exactly two sites. Each storage node must then be added with --site; every lvstore is replicated to the other site. Requires --ha-type ha. Deploy-time only: a cluster cannot be upgraded into this feature, it must be redeployed.', dest='sync_replication', action='store_true')
         subcommand.add_argument('--device-mode', help='Storage-device mode for the whole cluster. \'nvme\' (default): NVMe PCIe devices auto-detected and attached via the SPDK nvme driver. \'lblk\': arbitrary Linux block devices wrapped in SPDK AIO bdevs; devices are selected at \'sn configure\' by name or serial number. Deploy-time only; inter-node fabric (nvme-tcp/rdma) is unaffected.', type=str, default='nvme', dest='device_mode', choices=['nvme','lblk',])
         subcommand.add_argument('--enable-inline-checksum', help='Enable inline CRC checksum validation on every IO for silent-data-error protection. Cannot be enabled or disabled after cluster creation.', dest='inline_checksum', action='store_true')
@@ -708,6 +711,11 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('cluster_id', help='The cluster id.', type=str).completer = self._completer_get_cluster_list
         subcommand.add_argument('--disable', help='Reverse transition (per-chunk -> per-page). Debug only; only safe on a balanced or empty bdev. Requires --force.', dest='disable', action='store_true')
         subcommand.add_argument('--force', help='Bypass the rebalancing / non-online-node guards. Required when --disable is passed.', dest='force', action='store_true')
+
+    def init_cluster__set_lvol_geometry(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'set-lvol-geometry', 'Enable or disable LVol geometry on the cluster.')
+        subcommand.add_argument('cluster_id', help='The cluster id.', type=str).completer = self._completer_get_cluster_list
+        subcommand.add_argument('--disable', help='Disable LVol geometry (default action is to enable it).', dest='disable', action='store_true')
 
     def init_cluster__event_alerts(self, subparser):
         subcommand = self.add_sub_command(subparser, 'event-alerts', 'Provisions the Grafana alert rules read from the cluster event log.')
@@ -1804,6 +1812,8 @@ class CLIWrapper(CLIWrapperBase):
                         ret = self.cluster__set(sub_command, args)
                 elif sub_command in ['set-shared-placement']:
                     ret = self.cluster__set_shared_placement(sub_command, args)
+                elif sub_command in ['set-lvol-geometry']:
+                    ret = self.cluster__set_lvol_geometry(sub_command, args)
                 elif sub_command in ['event-alerts']:
                     ret = self.cluster__event_alerts(sub_command, args)
                 elif sub_command in ['switch-write-protection']:
