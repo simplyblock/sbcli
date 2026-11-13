@@ -2714,6 +2714,22 @@ def previous_lblk_dedicated_journal_serials(config_paths=None) -> set:
     return serials
 
 
+def lblk_journal_only_layout(lblk_entries, socket=0):
+    """``sn configure --lblk-journal-only``: the node's one selected whole
+    disk becomes its journal, flagged, and is never partitioned. The node
+    then has no local data device: on a multi-attach cluster whose array
+    plugin creates each node's data LUN at add-node, that LUN is its data
+    device. Raises ValueError unless exactly one whole disk is selected."""
+    if len(lblk_entries) != 1:
+        raise ValueError(
+            f"--lblk-journal-only needs exactly one disk for the node on socket {socket}; "
+            f"selected: {sorted(lblk_entries)}")
+    name, entry = next(iter(lblk_entries.items()))
+    if entry.get("type") == "part":
+        raise ValueError(f"--lblk-journal-only needs a whole disk, {name} is a partition")
+    return {name: dict(entry, journal=True)}
+
+
 def lblk_node_journal_layout(lblk_entries, jm_percent=3, journal_device=False,
                              keep_serials=()):
     """Give one storage node's devices their journal.
@@ -3340,11 +3356,15 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
                         entry.pop("_pair", None)
                         node_entries[dev_name] = entry
                 try:
-                    node_entries = lblk_node_journal_layout(
-                        node_entries, jm_percent=jm_percent,
-                        journal_device=bool(lblk_selection.get("journal_device")),
-                        keep_serials=lblk_keep_serials)
-                    if node_entries and len(node_entries) < constants.LBLK_MIN_DEVICES_PER_NODE:
+                    if lblk_selection.get("journal_only"):
+                        node_entries = lblk_journal_only_layout(node_entries, nid)
+                    else:
+                        node_entries = lblk_node_journal_layout(
+                            node_entries, jm_percent=jm_percent,
+                            journal_device=bool(lblk_selection.get("journal_device")),
+                            keep_serials=lblk_keep_serials)
+                    if (node_entries and not lblk_selection.get("journal_only")
+                            and len(node_entries) < constants.LBLK_MIN_DEVICES_PER_NODE):
                         raise ValueError(
                             f"lblk mode requires at least {constants.LBLK_MIN_DEVICES_PER_NODE} "
                             f"partitions or SSDs per node; only {len(node_entries)} unit(s) "

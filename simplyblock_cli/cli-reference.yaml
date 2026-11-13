@@ -107,6 +107,11 @@ commands:
             required: false
             type: str
             default: ""
+          - name: "--lblk-journal-only"
+            help: "With --lblk on a multi-attach cluster whose array plugin creates each node's data LUN at add-node: the one selected whole disk is the node's journal and nothing else. It is never partitioned, and the node has no local data device; its data device is the array LUN. Needs exactly one disk, named with --blk-names or --blk-serials."
+            dest: lblk_journal_only
+            type: bool
+            action: store_true
           - name: "--lblk-journal-device"
             help: "With --lblk and whole disks: dedicate each node's smallest disk to the journal instead of partitioning it into a journal partition and a data partition (the default). Needs at least two disks per node. Partition selections always carry their journal in a split partition."
             dest: lblk_journal_device

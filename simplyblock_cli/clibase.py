@@ -256,6 +256,15 @@ class CLIWrapperBase:
         lblk_journal_device = getattr(args, 'lblk_journal_device', False)
         if lblk_journal_device and not lblk:
             self.parser.error("--lblk-journal-device requires --lblk")
+        lblk_journal_only = getattr(args, 'lblk_journal_only', False)
+        if lblk_journal_only:
+            if not lblk:
+                self.parser.error("--lblk-journal-only requires --lblk")
+            if lblk_journal_device:
+                self.parser.error("--lblk-journal-only and --lblk-journal-device exclude each other")
+            if not (blk_names or blk_serials):
+                self.parser.error("--lblk-journal-only needs the journal disk named with "
+                                  "--blk-names or --blk-serials")
         lblk_selection = None
         if use_lblk:
             if not lblk:
@@ -269,6 +278,7 @@ class CLIWrapperBase:
                 "names_exclude": [str(x) for x in blk_names_exclude.split(',')] if blk_names_exclude else None,
                 "serials": [str(x) for x in blk_serials.split(',')] if blk_serials else None,
                 "journal_device": bool(lblk_journal_device),
+                "journal_only": bool(lblk_journal_only),
             }
         # The core split is decided by the cluster's vcpu-count when the node
         # is added or restarted; here the default heuristic lays out a usable
