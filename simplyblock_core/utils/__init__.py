@@ -1633,6 +1633,9 @@ def resolve_lblk_entries(configured_entries, host_devices):
         }
         if path:
             resolved_entry["path"] = path
+        if live.get("wwn"):
+            # LUN identity of a multi-attach (array LUN) device.
+            resolved_entry["wwn"] = live["wwn"]
         if entry.get("type") == "part" or live.get("type") == "part":
             resolved_entry["type"] = "part"
             resolved_entry["partuuid"] = live.get("partuuid") or entry.get("partuuid", "")

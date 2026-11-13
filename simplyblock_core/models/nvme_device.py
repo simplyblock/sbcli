@@ -112,6 +112,26 @@ class NVMeDevice(BaseModel):
     # does not compute it; alerts_controller turns it into device_slow /
     # device_unhealthy while it is fresh. Empty until first reported.
     health_assessment: dict = default_factory(dict)
+    # Multi-attach array LUN mode (cluster.multi_attach). All "off" by
+    # default, so a device of a regular cluster is unchanged.
+    #: The device is an array LUN presented to several storage nodes; its
+    #: subsystem NQN is host-independent (``<cluster nqn>:lun:<uuid>``) and
+    #: every distrib, the owner's included, reaches it as
+    #: ``remote_alceml_<uuid>n1`` over NVMe-oF.
+    multi_attach: bool = False
+    #: World-wide name (or serial) of the LUN, the same on every node.
+    lun_wwn: str = ""
+    #: Node whose alceml currently serves the LUN; "" means the owner
+    #: (``node_id``).
+    serving_node_id: str = ""
+    #: node_id -> {"path": by-id path of the LUN on that node, "bdev": the
+    #: base bdev name there}. Only the owner's entry is filled so far.
+    node_paths: dict = default_factory(dict)
+
+    def serving_node(self) -> str:
+        """The node whose alceml serves this device now (the owner unless a
+        multi-attach takeover moved it)."""
+        return self.serving_node_id or self.node_id
 
     def weight_size(self) -> int:
         """Bytes the cluster-map weight of this device is derived from: the

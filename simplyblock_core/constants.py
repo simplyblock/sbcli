@@ -1045,6 +1045,29 @@ MIG_PARALLEL_JOBS = 64
 # Flip to True once the ultra feat/affinity-floor data plane is deployed;
 # older data planes reject unknown RPC parameters.
 DISTR_AFFINITY_FLOOR_RPC = False
+
+# Multi-attach array LUN mode (cluster.multi_attach). None of these apply to
+# a regular cluster.
+# Peers' controllers to a multi-attach device hold I/O this long while no
+# path is available (per-controller ctrlr_loss_timeout_sec), so a takeover
+# that adds the LUN's new export as a path within the window resumes I/O
+# instead of failing it. The cluster-wide bdev_nvme defaults (1 s) stay.
+MULTI_ATTACH_HOLD_SEC = 120
+MULTI_ATTACH_RECONNECT_DELAY_SEC = 2
+MULTI_ATTACH_FAST_IO_FAIL_SEC = MULTI_ATTACH_HOLD_SEC
+# The alceml of a multi-attach device fails its pending I/O and unregisters
+# after this long without completion (bdev_alceml_create stuck_io_timeout_ms;
+# the data-plane default is 4000 ms). It must exceed the multipath path
+# failover below the LUN and stay below MULTI_ATTACH_HOLD_SEC, so a stuck
+# owner instance is gone before the peers stop waiting.
+MULTI_ATTACH_ALCEML_STUCK_IO_MS = 60000
+# Controller-ID ranges of multi-attach device subsystems: a node with
+# cntlid_block i exports with cntlids [i*64+1, i*64+64]. SPDK multipath needs
+# distinct cntlids across the paths of one controller, and a LUN may be
+# exported by any node. Valid NVMe cntlids end at 0xFFEF.
+MULTI_ATTACH_CNTLID_BLOCK_SIZE = 64
+MULTI_ATTACH_MAX_CNTLID = 0xFFEF
+MULTI_ATTACH_MAX_NODES = 1022
 MIG_JOB_SIZE = 64
 
 # Sync-replication resync (tasks_runner_sync_resync): the shared task driver

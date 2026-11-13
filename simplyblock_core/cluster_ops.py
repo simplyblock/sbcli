@@ -378,6 +378,43 @@ def _validate_leader_site(sync_replication, leader_site) -> None:
     if leader_site and not sync_replication:
         raise SyncReplicationSiteError(
             "leader_site is only allowed together with sync_replication")
+#: Erasure-coding scheme a multi-attach (array LUN) cluster runs: the array
+#: already protects every LUN, so simplyblock adds no parity.
+MULTI_ATTACH_SCHEME = (1, 0)
+
+
+def _resolve_multi_attach(multi_attach, ftt, raid_devices, ha_type, is_single_node,
+                          distr_ndcs, distr_npcs, max_fault_tolerance):
+    """Validate the multi-attach array LUN options and return the effective
+    ``(distr_ndcs, distr_npcs, max_fault_tolerance)``.
+
+    Without ``multi_attach`` the inputs are returned unchanged (``ftt`` must
+    then be unset). With it the cluster runs 1+0 (the array protects the
+    LUNs) and tolerates ``ftt`` node failures by reopening an owner's LUN on
+    another node, so it needs ``raid_devices``, an HA cluster (the LUN is
+    attached to the LVS secondary/tertiary) and more than one node.
+
+    Raises:
+        ValueError: an inconsistent combination of options.
+    """
+    if not multi_attach:
+        if ftt is not None:
+            raise ValueError("ftt is only valid together with multi_attach")
+        return distr_ndcs, distr_npcs, max_fault_tolerance
+    if not raid_devices:
+        raise ValueError("multi_attach requires raid_devices: the array must protect every LUN")
+    if ftt not in (1, 2):
+        raise ValueError("multi_attach requires ftt 1 or 2")
+    if ha_type != "ha":
+        raise ValueError("multi_attach requires ha_type='ha'")
+    if is_single_node:
+        raise ValueError("multi_attach cannot be used on a single-node cluster")
+    if (distr_ndcs, distr_npcs) != MULTI_ATTACH_SCHEME:
+        logger.info("multi_attach: erasure coding %s+%s overridden by %s+%s",
+                    distr_ndcs, distr_npcs, *MULTI_ATTACH_SCHEME)
+    return MULTI_ATTACH_SCHEME[0], MULTI_ATTACH_SCHEME[1], int(ftt)
+
+
 def _validate_integrity_flags(inline_checksum, atomic_4k):
     """atomic_4k only lifts the data plane's 4K gate on fallback-mode
     checksums, so without inline_checksum it is a setting that does nothing."""
@@ -405,7 +442,12 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    page_copy=False,
                    md_journal=True,
                    raid_devices=False,
+                   multi_attach=False,
+                   ftt=None,
 ) -> str:
+    distr_ndcs, distr_npcs, max_fault_tolerance = _resolve_multi_attach(
+        multi_attach, ftt, raid_devices, ha_type, is_single_node,
+        distr_ndcs, distr_npcs, max_fault_tolerance)
     if (distr_ndcs, distr_npcs) not in SUPPORTED_ERASURE_CODING_SCHEMES:
         raise ValueError("Unsupported erasure coding scheme")
     _validate_integrity_flags(inline_checksum, atomic_4k)
@@ -415,7 +457,9 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     if max_fault_tolerance > 1:
         if ha_type != "ha":
             raise ValueError("max_fault_tolerance > 1 requires ha_type='ha'")
-        if distr_npcs < 2:
+        # Multi-attach runs 1+0: its FTT comes from the array LUN being
+        # reopened on another node, not from parity.
+        if distr_npcs < 2 and not multi_attach:
             raise ValueError("max_fault_tolerance > 1 requires distr_npcs >= 2")
 
     if (hashicorp_vault_settings is not None) and (Settings().tls_connect != "authenticated"):
@@ -570,6 +614,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.page_copy = bool(page_copy)
     cluster.md_journal = bool(md_journal)
     cluster.raid_devices = bool(raid_devices)
+    cluster.multi_attach = bool(multi_attach)
     cluster.client_data_nic = client_data_nic or ""
     cluster.max_fault_tolerance = max_fault_tolerance
     cluster.nvmf_base_port = nvmf_base_port
@@ -688,6 +733,8 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
                 page_copy=False,
                 md_journal=True,
                 raid_devices=False,
+                multi_attach=False,
+                ftt=None,
                 snode_api_service=constants.K8S_SNODE_API_SERVICE,
                 spdk_proxy_service=constants.K8S_SPDK_PROXY_SERVICE,
                 spdk_proxy_tls_secret=constants.K8S_SPDK_PROXY_TLS_SECRET,
@@ -726,6 +773,8 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
         page_copy=page_copy,
         md_journal=md_journal,
         raid_devices=raid_devices,
+        multi_attach=multi_attach,
+        ftt=ftt,
         snode_api_service=snode_api_service,
         spdk_proxy_service=spdk_proxy_service,
         spdk_proxy_tls_secret=spdk_proxy_tls_secret,
@@ -764,6 +813,8 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
                 page_copy=False,
                 md_journal=True,
                 raid_devices=False,
+                multi_attach=False,
+                ftt=None,
                 snode_api_service=constants.K8S_SNODE_API_SERVICE,
                 spdk_proxy_service=constants.K8S_SPDK_PROXY_SERVICE,
                 spdk_proxy_tls_secret=constants.K8S_SPDK_PROXY_TLS_SECRET,
@@ -777,6 +828,9 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
             if existing.cluster_name and existing.cluster_name == name:
                 raise ValueError(f"A cluster with the name '{name}' already exists")
 
+    distr_ndcs, distr_npcs, max_fault_tolerance = _resolve_multi_attach(
+        multi_attach, ftt, raid_devices, ha_type, is_single_node,
+        distr_ndcs, distr_npcs, max_fault_tolerance)
     if (distr_ndcs, distr_npcs) not in SUPPORTED_ERASURE_CODING_SCHEMES:
         raise ValueError("Unsupported erasure coding scheme")
 
@@ -786,7 +840,9 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
     if max_fault_tolerance > 1:
         if ha_type != "ha":
             raise ValueError("max_fault_tolerance > 1 requires ha_type='ha'")
-        if distr_npcs < 2:
+        # Multi-attach runs 1+0: its FTT comes from the array LUN being
+        # reopened on another node, not from parity.
+        if distr_npcs < 2 and not multi_attach:
             raise ValueError("max_fault_tolerance > 1 requires distr_npcs >= 2")
 
     if (hashicorp_vault_settings is not None) and (Settings().tls_connect != "authenticated"):
@@ -909,6 +965,7 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
     cluster.page_copy = bool(page_copy)
     cluster.md_journal = bool(md_journal)
     cluster.raid_devices = bool(raid_devices)
+    cluster.multi_attach = bool(multi_attach)
     cluster.client_data_nic = client_data_nic or ""
     cluster.max_fault_tolerance = max_fault_tolerance
     cluster.nvmf_base_port = nvmf_base_port

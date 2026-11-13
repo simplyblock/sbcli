@@ -7,6 +7,7 @@ from simplyblock_core import (
     constants,
     distr_controller,
     jm_raid,
+    multi_attach,
     storage_node_ops,
     utils,
 )
@@ -665,6 +666,7 @@ def _def_create_device_stack(device_obj, snode, force=False, clear_data=False):
                 checksum_method=checksum_method,
                 cache_size=cache_size,
                 cache_eviction_threshold=cache_eviction_threshold,
+                **multi_attach.alceml_create_kwargs(device_obj),
             )
         except RPCException as e:
             logger.error("Failed to create alceml bdev %s: %s", alceml_name, e)
@@ -685,7 +687,8 @@ def _def_create_device_stack(device_obj, snode, force=False, clear_data=False):
     else:
         logger.info(f"bdev already exists {pt_name}")
 
-    subsystem_nqn = snode.subsystem + ":dev:" + alceml_id
+    # Multi-attach: host-independent NQN (multi_attach.device_subsystem_nqn).
+    subsystem_nqn = multi_attach.device_subsystem_nqn(snode, device_obj, cluster)
     namespace_found = False
     subsys_found = False
     ret = rpc_client.subsystem_get(subsystem_nqn)
@@ -699,7 +702,9 @@ def _def_create_device_stack(device_obj, snode, force=False, clear_data=False):
 
     if not subsys_found:
         logger.info("Creating subsystem %s", subsystem_nqn)
-        ret = rpc_client.subsystem_create(subsystem_nqn, 'sbcli-cn', alceml_id)
+        ret = rpc_client.subsystem_create(
+            subsystem_nqn, 'sbcli-cn', alceml_id,
+            **multi_attach.subsystem_create_kwargs(snode, device_obj, db_controller))
         for iface in snode.data_nics:
             if iface.ip4_address:
                 ret = rpc_client.listeners_create(subsystem_nqn, iface.trtype, iface.listen_address, snode.nvmf_port)
@@ -710,7 +715,13 @@ def _def_create_device_stack(device_obj, snode, force=False, clear_data=False):
 
     if not namespace_found:
         logger.info(f"Adding {pt_name} to the subsystem")
-        ret = rpc_client.nvmf_subsystem_add_ns(subsystem_nqn, pt_name)
+        if multi_attach.is_multi_attach(device_obj):
+            # Every node that exports the LUN must use the same namespace
+            # UUID: SPDK multipath joins paths by namespace identity.
+            ret = rpc_client.nvmf_subsystem_add_ns(
+                subsystem_nqn, pt_name, multi_attach.namespace_uuid(device_obj))
+        else:
+            ret = rpc_client.nvmf_subsystem_add_ns(subsystem_nqn, pt_name)
     else:
         logger.info(f"bdev already added to subsys {pt_name}")
 

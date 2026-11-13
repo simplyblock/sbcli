@@ -477,7 +477,8 @@ class RPCClient:
     def subsystem_delete(self, nqn):
         return self._request("nvmf_delete_subsystem", nqn=nqn)
 
-    def subsystem_create(self, nqn, serial_number, model_number, min_cntlid=1, max_namespaces=32, allow_any_host=True):
+    def subsystem_create(self, nqn, serial_number, model_number, min_cntlid=1, max_namespaces=32, allow_any_host=True,
+                         max_cntlid=None):
         params = {
             "nqn": nqn,
             "serial_number": serial_number,
@@ -486,6 +487,10 @@ class RPCClient:
             "ana_reporting": True,
             "max_namespaces": max_namespaces,
             "model_number": model_number}
+        # Sent only when given (multi-attach device subsystems: a per-node
+        # controller-ID range), so every other call is unchanged.
+        if max_cntlid is not None:
+            params["max_cntlid"] = int(max_cntlid)
         return self._request("nvmf_create_subsystem", **params)
 
     def keyring_file_add_key(self, name: str, path: str, *, allow_existing: bool = False):
@@ -967,7 +972,7 @@ class RPCClient:
                            alceml_cpu_mask="", alceml_worker_cpu_mask="", pba_page_size=2097152,
                            write_protection=False, full_page_unmap=False,
                            checksum_method=0, cache_size=0, cache_eviction_threshold=0,
-                           force_4k_atomic=False):
+                           force_4k_atomic=False, stuck_io_timeout_ms=0):
         params = {
             "name": alceml_name,
             "cntr_path": nvme_name,
@@ -1004,6 +1009,11 @@ class RPCClient:
             # atomicity (cluster.atomic_4k). Tell the data plane to skip its >=4K
             # block-size gate for fallback-mode checksum validation.
             params["cv_ignore_block_size"] = bool(force_4k_atomic)
+        # Fail pending I/O and unregister after this long without completion
+        # (data-plane default 4000 ms). Sent only when non-zero: multi-attach
+        # devices, whose array LUN needs longer than multipath failover.
+        if stuck_io_timeout_ms:
+            params["stuck_io_timeout_ms"] = int(stuck_io_timeout_ms)
         return self._request("bdev_alceml_create", **params)
        
     def bdev_distrib_create(self, name, vuid, ndcs, npcs, num_blocks, block_size, jm_names,

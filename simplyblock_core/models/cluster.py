@@ -188,6 +188,13 @@ class Cluster(BaseModel):
     # no other device is writable (allow_device_colocation on the distribs,
     # affinity_floor "relaxed" on migrations).
     raid_devices: bool = False
+    # Cluster-create-time, immutable: multi-attach array LUN mode. Every data
+    # device is an array LUN presented to several storage nodes; the cluster
+    # runs 1+0 and tolerates max_fault_tolerance node failures by reopening
+    # an owner's LUN on another node and adding it as an extra NVMe-oF path.
+    # Requires raid_devices. Gates every multi-attach path (device NQN,
+    # controller-ID ranges, hold timeouts, owner loopback).
+    multi_attach: bool = False
     tls: bool = False
     tls_config: dict = default_factory(dict)
     is_re_balancing: bool = False

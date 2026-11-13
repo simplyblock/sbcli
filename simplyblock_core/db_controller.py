@@ -1759,6 +1759,64 @@ class DBController(metaclass=Singleton):
             return transactional(self, kv, lvol)
         return lvol.remove(kv)
 
+    # ---- Multi-attach controller-ID block claim (Single FDB Transaction) ----
+
+    CNTLID_BLOCK_ALLOC_PREFIX = "cntlid_block_alloc"
+
+    def _claim_cntlid_block_tx(self, tr, node_key, alloc_key, node_id, live_node_ids,
+                               max_blocks, index_list):
+        # The per-cluster allocation map {node_id: block} is the authority:
+        # every claim reads and rewrites it, so two concurrent claims in one
+        # cluster conflict and the loser retries against the winner's entry.
+        raw = tr.get(alloc_key).wait()
+        alloc = json.loads(bytes(raw).decode()) if raw.present() else {}
+        if node_id in alloc:
+            block = int(alloc[node_id])
+        else:
+            # Entries of nodes whose record is gone are reclaimed; a REMOVED
+            # node keeps its block (its record still exists).
+            alloc = {nid: b for nid, b in alloc.items() if nid in live_node_ids}
+            used = {int(b) for b in alloc.values()}
+            block = next((i for i in range(max_blocks) if i not in used), None)
+            if block is None:
+                raise ValueError(
+                    f"no free controller-ID block: a multi-attach cluster supports "
+                    f"at most {max_blocks} storage nodes")
+            alloc[node_id] = block
+            tr.set(alloc_key, json.dumps(alloc, sort_keys=True).encode())
+
+        def _set(node):
+            if node.cntlid_block == block:
+                return False
+            node.cntlid_block = block
+            return True
+
+        self._atomic_update_tx(tr, node_key, StorageNode, _set, index_list)
+        return block
+
+    def claim_cntlid_block(self, node, max_blocks):
+        """Claim the smallest free controller-ID block of ``node``'s cluster
+        for ``node`` (idempotent: a node that holds one gets it back) and
+        persist it on the node record, in ONE FDB transaction. Returns the
+        block index.
+
+        Raises:
+            ValueError: every block of the cluster is taken.
+        """
+        kv = self.kv_store
+        alloc_key = f"{self.CNTLID_BLOCK_ALLOC_PREFIX}/{node.cluster_id}".encode()
+        node_key = node.get_db_id().encode()
+        live_node_ids = {n.get_id() for n in self.get_storage_nodes_by_cluster_id(node.cluster_id)}
+        live_node_ids.add(node.get_id())
+        index_list = StorageNode.active_indexes(kv)
+        if kv is not None and hasattr(kv, 'create_transaction'):
+            transactional = fdb.transactional(DBController._claim_cntlid_block_tx)
+            return transactional(self, kv, node_key, alloc_key, node.get_id(),
+                                 live_node_ids, max_blocks, index_list)
+        return self._claim_cntlid_block_tx(
+            _NoTxnStore(kv), node_key, alloc_key, node.get_id(), live_node_ids,
+            max_blocks, index_list)
+
     # ---- Generic atomic read-modify-write (Single FDB Transaction) ----
 
     def _atomic_update_tx(self, tr, key, model_cls, mutate_fn, index_list):

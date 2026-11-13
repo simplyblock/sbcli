@@ -88,6 +88,11 @@ class ClusterParams(BaseModel):
     # Every data device is protected below simplyblock (hardware RAID LUN, md
     # or dm RAID): data-device floor n+k instead of n+2k. Immutable.
     raid_devices: bool = False
+    # Multi-attach array LUN mode (1+0, FTT from LUN takeover). Requires
+    # raid_devices, ha_type 'ha' and ftt. Immutable.
+    multi_attach: bool = False
+    #: Node failures to tolerate in multi-attach mode; only with multi_attach.
+    ftt: Literal[1, 2] | None = None
     is_single_node: bool = False
     fabric: str = "tcp"
     cr_name: str = ""

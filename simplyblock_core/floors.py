@@ -20,6 +20,12 @@ migrating, and rebalancing restores the protection.
 Topology overrides: a single-node cluster needs 1 node and n+k data devices;
 a two-node (dual / arbitration) cluster needs 2 nodes.
 
+Multi-attach array LUN clusters (``cluster.multi_attach``, always 1+0 on
+``raid_devices``) replace the node floor by FTT+1 (at least 3 for FTT 2,
+``cluster.max_fault_tolerance`` = FTT): an owner's LUN is reopened on one of
+the surviving nodes. One data LUN per node is the recommended layout; only
+>= 1 is enforced. The topology overrides do not apply to them.
+
 Journal devices and the device model (floor 5)
 ----------------------------------------------
 A node's journal lives in ``StorageNode.jm_device`` (a ``JMDevice``), never in
@@ -71,6 +77,7 @@ class Floors:
     nodes_rule: str = "n+2k"
     data_devices_rule: str = "n+2k"
     failure_domains_rule: str = "n+k"
+    devices_per_node_rule: str = "data devices per node"
 
 
 def _flag(obj, name: str) -> bool:
@@ -125,6 +132,20 @@ def cluster_floors(cluster, uses_failure_domains: bool, member_nodes: int | None
     else:
         data_devices, data_rule = n + 2 * k, "n+2k"
     nodes, nodes_rule = n + 2 * k, "n+2k"
+
+    if _flag(cluster, "multi_attach"):
+        ftt = _int(getattr(cluster, "max_fault_tolerance", 1))
+        ftt = ftt if ftt in (1, 2) else 1
+        return Floors(
+            nodes=max(ftt + 1, 3 if ftt == 2 else 0),
+            devices_per_node=1,
+            data_devices=n + k,
+            failure_domains=(n + k) if uses_failure_domains else None,
+            nodes_rule=f"FTT+1, multi-attach FTT {ftt}",
+            data_devices_rule="n+k, multi-attach",
+            devices_per_node_rule=("data devices per node; multi-attach: exactly one "
+                                   "data LUN per node is recommended"),
+        )
 
     if is_single_node_cluster(cluster, member_nodes):
         nodes, nodes_rule = 1, "single-node cluster"
@@ -194,7 +215,7 @@ def floor_violations(floors: Floors, online_nodes: int, data_devices: int,
         if count < floors.devices_per_node:
             violations.append(
                 f"node {node_id} has {count} online data devices < floor "
-                f"{floors.devices_per_node} (data devices per node)")
+                f"{floors.devices_per_node} ({floors.devices_per_node_rule})")
     if data_devices < floors.data_devices:
         violations.append(
             f"data devices online {data_devices} < floor {floors.data_devices} "

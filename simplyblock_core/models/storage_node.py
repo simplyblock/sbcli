@@ -230,6 +230,10 @@ class StorageNode(BaseNodeObject):
     # placement and emitted verbatim into the distrib cluster map for the data
     # plane.
     failure_domain: int = -1
+    # Multi-attach array LUN clusters only: this node's stable controller-ID
+    # block (multi_attach.cntlid_range). -1 = not assigned; claimed at
+    # add-node or lazily when a multi-attach device subsystem is created.
+    cntlid_block: int = -1
     # Sync-replication site of the node (operator-supplied at add-node).
     # Mandatory on a cluster with sync_replication, empty everywhere else.
     site: str = ""
