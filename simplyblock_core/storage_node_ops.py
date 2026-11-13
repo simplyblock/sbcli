@@ -36,7 +36,9 @@ from simplyblock_core import (
     cluster_ops,
     constants,
     distr_controller,
+    floors,
     jm_raid,
+    multi_attach,
     scripts,
     storage_network,
     utils,
@@ -49,6 +51,7 @@ from simplyblock_core.constants import (
 )
 from simplyblock_core.controllers import (
     activation_gate,
+    array_controller,
     device_controller,
     device_events,
     health_controller,
@@ -1088,6 +1091,16 @@ def _collect_attached_ips(ctrlr_list):
     return attached
 
 
+def _serving_node_id(device) -> str:
+    """The node exporting ``device``: ``serving_node()`` for an NVMeDevice
+    (the owner unless a multi-attach takeover moved its LUN), ``node_id`` for
+    any other device record (JM devices)."""
+    serving = getattr(device, "serving_node", None)
+    if callable(serving) and multi_attach.is_multi_attach(device):
+        return serving()
+    return device.node_id
+
+
 def connect_device(name: str, device: NVMeDevice, node: StorageNode, attach_timeout: float | None = None):
     """Connect snode to device
 
@@ -1107,6 +1120,11 @@ def connect_device(name: str, device: NVMeDevice, node: StorageNode, attach_time
 
     expected_ips = [ip.strip() for ip in (device.nvmf_ip or "").split(",") if ip.strip()]
     is_multipath = bool(device.nvmf_multipath) and len(expected_ips) >= 2
+    # Multi-attach: the controller can hold a dead path of the node that
+    # served the LUN before a takeover while its bdev lives on, so the
+    # controller is always inspected for the serving node's paths.
+    if multi_attach.is_multi_attach(device):
+        is_multipath = True
     rpc_client = node.rpc_client()
 
     # Fast path: bdev already present. Only safe for single-path devices — for
@@ -1170,7 +1188,14 @@ def _connect_device_attach(name, device, node: StorageNode, rpc_client, attach_r
         # the budget, raise so the calling task suspends and retries.
         _TRANSIENT_STATES = ("failed", "resetting", "deleting", "reconnect_is_delayed")
         states: list[str] = []
+        # Multi-attach: a path to the node that served the LUN before a
+        # takeover stays "resetting"/"reconnect_is_delayed" for the whole
+        # hold (MULTI_ATTACH_HOLD_SEC); waiting for it to settle would keep
+        # the new path from being added, which is what ends the hold.
         for _attempt in range(5):
+            if multi_attach.is_multi_attach(device):
+                logger.info(f"Controller found: {name}, multi-attach, not waiting on path states")
+                break
             if not ret:
                 # The module destructed the controller on its own; the
                 # fresh-attach path below takes over.
@@ -1188,7 +1213,9 @@ def _connect_device_attach(name, device, node: StorageNode, rpc_client, attach_r
             raise RuntimeError(f"Controller: {name}, status is {states}")
 
     db_ctrl = DBController()
-    target_node = db_ctrl.get_storage_node_by_id(device.node_id)
+    # The node exporting the device: its owner, or the node a multi-attach
+    # takeover moved its LUN to.
+    target_node = db_ctrl.get_storage_node_by_id(_serving_node_id(device))
     if target_node is not None and target_node.active_rdma:
         tr_type = "RDMA"
     elif target_node is not None and target_node.active_tcp:
@@ -1205,6 +1232,11 @@ def _connect_device_attach(name, device, node: StorageNode, rpc_client, attach_r
     # ``"failover"`` (active-passive) and remote alceml/jm controllers
     # would carry all IO on a single path.
     attach_mode = "multipath" if device.nvmf_multipath else False
+    if multi_attach.is_multi_attach(device):
+        # A multi-attach device's controller must accept a further path (the
+        # LUN's export on a takeover node), which a controller attached with
+        # multipath disabled refuses.
+        attach_mode = "multipath"
 
     final = rpc_client.bdev_nvme_controller_list(name)
     if not final:
@@ -1220,7 +1252,8 @@ def _connect_device_attach(name, device, node: StorageNode, rpc_client, attach_r
             try:
                 resp = attach_rpc_client.bdev_nvme_attach_controller(
                     name, device.nvmf_nqn, ip, device.nvmf_port, tr_type,
-                    multipath=attach_mode)
+                    multipath=attach_mode,
+                    **multi_attach.attach_controller_kwargs(device))
                 if resp:
                     dial_backoff.record_success(ip)
                 else:
@@ -1231,7 +1264,12 @@ def _connect_device_attach(name, device, node: StorageNode, rpc_client, attach_r
                 dial_backoff.record_failure(ip)
                 logger.warning(f"Failed to attach controller {name} via {ip}: {e}")
 
-            if device.nvmf_multipath and bdev_name:
+            if multi_attach.is_multi_attach(device) and bdev_name:
+                # One node serves the LUN at a time; its paths are the only
+                # valid ones (a takeover adds another node's, then drops the
+                # old).
+                rpc_client.bdev_nvme_set_multipath_policy(bdev_name, "active_passive")
+            elif device.nvmf_multipath and bdev_name:
                 rpc_client.bdev_nvme_set_multipath_policy(bdev_name, "active_active")
 
         if not bdev_name:
@@ -1275,7 +1313,8 @@ def _connect_device_attach(name, device, node: StorageNode, rpc_client, attach_r
                 try:
                     if attach_rpc_client.bdev_nvme_attach_controller(
                             name, device.nvmf_nqn, ip, device.nvmf_port, tr_type,
-                            multipath=attach_mode):
+                            multipath=attach_mode,
+                            **multi_attach.attach_controller_kwargs(device)):
                         dial_backoff.record_success(ip)
                     else:
                         dial_backoff.record_failure(ip)
@@ -1318,7 +1357,10 @@ def repair_multipath_controller(name: str, device, node: StorageNode):
     (i.e. the source NVMeDevice / JMDevice on the target node — NOT a
     ``RemoteJMDevice``, which strips those fields).
     """
-    if not getattr(device, 'nvmf_multipath', False):
+    # Multi-attach: a single-path controller too can lack the path to the
+    # node a takeover moved the LUN to.
+    ma = multi_attach.is_multi_attach(device)
+    if not getattr(device, 'nvmf_multipath', False) and not ma:
         return True
 
     nvmf_ip = getattr(device, 'nvmf_ip', None)
@@ -1332,7 +1374,7 @@ def repair_multipath_controller(name: str, device, node: StorageNode):
         return False
 
     expected_ips = {ip.strip() for ip in nvmf_ip.split(",") if ip.strip()}
-    if len(expected_ips) < 2:
+    if len(expected_ips) < 2 and not ma:
         return True  # not actually multipath
 
     rpc_client = node.rpc_client()
@@ -1341,7 +1383,7 @@ def repair_multipath_controller(name: str, device, node: StorageNode):
         return True  # controller gone, connect_device will handle full reconnect
 
     db_ctrl = DBController()
-    target_node = db_ctrl.get_storage_node_by_id(device.node_id)
+    target_node = db_ctrl.get_storage_node_by_id(_serving_node_id(device))
     if target_node is None:
         return False
     if target_node.active_rdma:
@@ -1411,7 +1453,8 @@ def _repair_multipath_controller_locked(node, name, device, rpc_client, ret,
             # the 2026-08-20 soak, all of them "-5 Input/output error".
             if not rpc_client.bdev_nvme_attach_controller(
                     name, device.nvmf_nqn, ip, device.nvmf_port,
-                    tr_type, multipath="multipath"):
+                    tr_type, multipath="multipath",
+                    **multi_attach.attach_controller_kwargs(device)):
                 dial_backoff.record_failure(ip)
                 logger.warning(
                     "Re-attach of path %s on controller %s was rejected by the "
@@ -1445,7 +1488,8 @@ def cluster_growth_ratios(db_controller, cluster_id):
     """Growth of the data devices relative to their placement weight, as
     ``(uniform, min_ratio, max_ratio)``. Journal, new, and failed devices are
     ignored. A ratio above 1 means the device grew after it was placed (see
-    device_controller.resize_device)."""
+    device_controller.grow_cluster_devices, which grows all of them by the
+    same factor)."""
     ratios = []
     for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
         if node.is_secondary_node:
@@ -1471,8 +1515,8 @@ def scaled_placement_size(db_controller, cluster_id, size):
     a common factor f, their weights still stand for their original sizes, so
     a new device is weighted as size / f; weighting it by its full size would
     give it f times its share of the data. Returns 0 (weight = size) when the
-    cluster has not grown, or has grown unevenly (then the next
-    grow-devices run sets every weight to its size anyway)."""
+    cluster has not grown. Growth is uniform by construction; should the
+    ratios ever disagree, the device keeps its full size as weight."""
     uniform, lo, hi = cluster_growth_ratios(db_controller, cluster_id)
     factor = (lo + hi) / 2
     if not uniform or factor <= 1.0 + GROWTH_UNIFORM_TOLERANCE or not size:
@@ -1970,6 +2014,8 @@ def _create_jm_stack_on_device(rpc_client, nvme, snode: StorageNode, after_resta
         'alceml_name': alceml_name,
         'nvme_bdev': nvme.nvme_bdev,
         "serial_number": nvme.serial_number,
+        'aio_block_size': nvme.aio_block_size,
+        'lblk_io_engine': nvme.lblk_io_engine,
         "device_data_dict": nvme.to_dict(),
         'jm_bdev': jm_bdev,
         'testing_bdev': test_name,
@@ -2015,6 +2061,7 @@ def _create_storage_device_stack(rpc_client, nvme, snode: StorageNode, after_res
         cache_size=cache_size,
         cache_eviction_threshold=cache_eviction_threshold,
         force_4k_atomic=getattr(cluster, 'atomic_4k', False),
+        **multi_attach.alceml_create_kwargs(nvme),
     )
 
     if not ret:
@@ -2034,9 +2081,12 @@ def _create_storage_device_stack(rpc_client, nvme, snode: StorageNode, after_res
         logger.error(f"Failed to read back pt bdev: {pt_name}")
         return None
     pt_spdk_uuid = pt_bdev_info["aliases"][0]
-    subsystem_nqn = snode.subsystem + ":dev:" + alceml_id
+    # Multi-attach: host-independent NQN and this node's cntlid range, so the
+    # LUN's export on another node can join the same controller as a path.
+    subsystem_nqn = multi_attach.device_subsystem_nqn(snode, nvme, cluster)
     logger.info("creating subsystem %s", subsystem_nqn)
-    ret = rpc_client.subsystem_create(subsystem_nqn, 'sbcli-cn', alceml_id)
+    ret = rpc_client.subsystem_create(subsystem_nqn, 'sbcli-cn', alceml_id,
+                                      **multi_attach.subsystem_create_kwargs(snode, nvme, db_controller))
     ip_list = []
     for iface in snode.data_nics:
         if iface.ip4_address:
@@ -2045,7 +2095,8 @@ def _create_storage_device_stack(rpc_client, nvme, snode: StorageNode, after_res
             ip_list.append(iface.ip4_address)
 
     logger.info(f"add {pt_name} to subsystem")
-    ret = rpc_client.nvmf_subsystem_add_ns(subsystem_nqn, pt_name, alceml_id)
+    ns_extra = {"nguid": multi_attach.namespace_nguid(nvme)} if multi_attach.is_multi_attach(nvme) else {}
+    ret = rpc_client.nvmf_subsystem_add_ns(subsystem_nqn, pt_name, multi_attach.namespace_uuid(nvme), **ns_extra)
     if not ret:
         logger.error(f"Failed to add: {pt_name} to the subsystem: {subsystem_nqn}")
         return None
@@ -2288,6 +2339,19 @@ def _prepare_cluster_devices_on_restart(snode: StorageNode, clear_data=False):
             logger.debug(f"Device is skipped: {nvme.get_id()}, status: {nvme.status}")
             continue
 
+        if multi_attach.not_servable_here(nvme, snode.get_id()):
+            # Multi-attach: another node took the LUN over and serves it. This
+            # node keeps the record and reaches the LUN through its loopback
+            # controller to the serving node; opening a second alceml on the
+            # LUN here would make two writers. No failback in this phase.
+            # Or this node is still fenced from the LUN (a takeover after its
+            # failure did not complete): the LUN cannot be opened until an
+            # operator unfences it.
+            logger.info(f"Device {nvme.get_id()} is not served by this node (serving node "
+                        f"{nvme.serving_node()}, fenced: {multi_attach.fenced_from(nvme, snode.get_id())}); "
+                        f"not building its stack here")
+            continue
+
         jobs.append((nvme, _create_storage_device_stack, (rpc_client, nvme, snode, not clear_data,)))
 
     # Every device that reaches this point was found on the node and is
@@ -2500,14 +2564,31 @@ def _connect_to_remote_devs(
     devices_to_connect = []
     connect_threads = []
     nodes = db_controller.get_storage_nodes_by_cluster_id(this_node.cluster_id)
+    # Multi-attach clusters: the node's own array-LUN devices are reached by
+    # its distribs through a loopback controller (remote_alceml_<uuid>n1) like
+    # every peer's, so they are connected here too. Empty on other clusters.
+    own_loopback = multi_attach.own_multi_attach_devices(this_node, allowed_dev_statuses)
+    # Multi-attach clusters: a down owner's LUNs that another node took over
+    # are reachable through that node. Empty on other clusters.
+    nodes_by_id = {n.get_id(): n for n in nodes}
+    taken_over = {n.get_id(): multi_attach.served_by_online_node(n, nodes_by_id)
+                  for n in nodes if n.status not in allowed_node_statuses}
     # connect to remote devs
     for node_index, node in enumerate(nodes):
-        if node.get_id() == this_node.get_id() or node.status not in allowed_node_statuses:
-            continue
+        if node.get_id() == this_node.get_id():
+            if not own_loopback:
+                continue
+            node_devices = own_loopback
+        elif node.status not in allowed_node_statuses:
+            node_devices = taken_over.get(node.get_id()) or []
+            if not node_devices:
+                continue
+        else:
+            node_devices = node.nvme_devices
         if only_node_id and node.get_id() != only_node_id:
             continue
         logger.info(f"Connecting to node {node.get_id()}")
-        for index, dev in enumerate(node.nvme_devices):
+        for index, dev in enumerate(node_devices):
 
             if dev.status not in allowed_dev_statuses:
                 logger.debug(f"Device is not online: {dev.get_id()}, status: {dev.status}")
@@ -2613,8 +2694,16 @@ def _connect_to_remote_devs(
     # to per-device probes.
     _sweep_bdev_names = _fetch_bdev_name_set(rpc_client)
     for node in nodes:
-        if node.get_id() == this_node.get_id() or node.status not in allowed_node_statuses:
-            continue
+        if node.get_id() == this_node.get_id():
+            if not own_loopback:
+                continue
+            node_devices = own_loopback
+        elif node.status not in allowed_node_statuses:
+            node_devices = taken_over.get(node.get_id()) or []
+            if not node_devices:
+                continue
+        else:
+            node_devices = node.nvme_devices
         if only_node_id and node.get_id() != only_node_id:
             # DELTA mode: records for every other node were carried over
             # untouched above — probing their bdevs anyway made each delta
@@ -2623,7 +2712,7 @@ def _connect_to_remote_devs(
             # ~25 min, 2026-07-13 validation run). Verify only the delta
             # owner's devices.
             continue
-        for dev in node.nvme_devices:
+        for dev in node_devices:
             if dev.get_id() in remote_device_ids:
                 continue
             if dev.status not in allowed_dev_statuses:
@@ -2764,6 +2853,12 @@ def _verify_online_device_coverage(snode: StorageNode, repair: bool = True):
             if not dev.alceml_bdev:
                 continue
             expected[f"remote_{dev.alceml_bdev}n1"] = dev
+    # Multi-attach clusters: the node's own array LUNs are mapped through its
+    # loopback controller, so they need one too (empty on other clusters).
+    for dev in multi_attach.own_multi_attach_devices(
+            snode, (NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY,
+                    NVMeDevice.STATUS_CANNOT_ALLOCATE)):
+        expected[f"remote_{dev.alceml_bdev}n1"] = dev
 
     if fd_recovery and excluded_fd_devs:
         # Never a silent relaxation — degraded recovery must be visible in logs.
@@ -2834,12 +2929,24 @@ def sync_remote_devices_from_spdk(this_node: StorageNode):
     # device (O(cluster devices) per call). None -> per-device fallback.
     _sweep_bdev_names = _fetch_bdev_name_set(rpc_client)
 
-    for peer in db_controller.get_storage_nodes_by_cluster_id(fresh_node.cluster_id):
+    peers = db_controller.get_storage_nodes_by_cluster_id(fresh_node.cluster_id)
+    peers_by_id = {p.get_id(): p for p in peers}
+    for peer in peers:
         if peer.get_id() == fresh_node.get_id():
-            continue
-        if peer.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN, StorageNode.STATUS_RESTARTING]:
-            continue
-        for dev in peer.nvme_devices:
+            # Multi-attach clusters: own array LUNs (loopback controllers).
+            peer_devices = multi_attach.own_multi_attach_devices(
+                fresh_node, (NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY,
+                             NVMeDevice.STATUS_CANNOT_ALLOCATE))
+            if not peer_devices:
+                continue
+        elif peer.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN, StorageNode.STATUS_RESTARTING]:
+            # Multi-attach: its LUNs another node took over (empty otherwise).
+            peer_devices = multi_attach.served_by_online_node(peer, peers_by_id)
+            if not peer_devices:
+                continue
+        else:
+            peer_devices = peer.nvme_devices
+        for dev in peer_devices:
             if dev.status not in [
                 NVMeDevice.STATUS_ONLINE,
                 NVMeDevice.STATUS_READONLY,
@@ -2914,13 +3021,25 @@ def reconnect_dropped_remote_devs(this_node: StorageNode):
     changed = False
     all_ok = True
 
-    for peer in db_controller.get_storage_nodes_by_cluster_id(fresh_node.cluster_id):
+    peers = db_controller.get_storage_nodes_by_cluster_id(fresh_node.cluster_id)
+    peers_by_id = {p.get_id(): p for p in peers}
+    for peer in peers:
         if peer.get_id() == fresh_node.get_id():
-            continue
-        if peer.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN,
-                               StorageNode.STATUS_UNREACHABLE]:
-            continue
-        for dev in peer.nvme_devices:
+            # Multi-attach clusters: own array LUNs (loopback controllers).
+            peer_devices = multi_attach.own_multi_attach_devices(
+                fresh_node, (NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY,
+                             NVMeDevice.STATUS_CANNOT_ALLOCATE))
+            if not peer_devices:
+                continue
+        elif peer.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN,
+                                 StorageNode.STATUS_UNREACHABLE]:
+            # Multi-attach: its LUNs another node took over (empty otherwise).
+            peer_devices = multi_attach.served_by_online_node(peer, peers_by_id)
+            if not peer_devices:
+                continue
+        else:
+            peer_devices = peer.nvme_devices
+        for dev in peer_devices:
             if dev.get_id() in known_ids:
                 continue
             if dev.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY,
@@ -4312,6 +4431,26 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         lblk_configured = node_config.get("lblk_devices") or []
 
         lblk_mode = cluster.device_mode == constants.DEVICE_MODE_LBLK
+        # Multi-attach cluster with a registered array and a LUN size: the
+        # node's data LUN is created and presented here (the host's own
+        # config names the journal device only), then added like any
+        # configured lblk device. No-op on every other cluster.
+        array_host_id = ""
+        if lblk_mode and array_controller.provisions_luns(cluster):
+            if not lblk_configured:
+                logger.error(
+                    "This cluster creates each node's LUN on its array, but the node "
+                    "config carries no 'lblk_devices' for the journal; run "
+                    "'sn configure --lblk <journal device>' first.")
+                return False
+            try:
+                lun_entry, array_host_id = array_controller.provision_node_lun(
+                    cluster, snode_api, node_info, node_config, lblk_configured,
+                    node_ip=node_addr.split(":")[0])
+            except array_controller.ArrayLifecycleError as e:
+                logger.error(f"Could not provision the node's array LUN: {e}")
+                return False
+            lblk_configured = array_controller.add_lun_to_config(lblk_configured, lun_entry)
         if lblk_mode:
             if not lblk_configured:
                 logger.error(
@@ -4743,6 +4882,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         # lblk mode: persist the configured selection (with serial identity)
         # so restart can re-resolve devices without the host config file.
         snode.lblk_devices = lblk_configured if lblk_mode else []
+        snode.array_host_id = array_host_id
         snode.hostname = hostname
         snode.k8s_node_name = node_info['hostname']
         snode.host_nqn = subsystem_nqn
@@ -4867,6 +5007,10 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
             return False
 
         snode.write_to_db(kv_store)
+        if multi_attach.is_multi_attach(cluster):
+            # Stable controller-ID block of this node for its multi-attach
+            # device subsystems (smallest free index of the cluster).
+            multi_attach.ensure_cntlid_block(snode, db_controller)
 
         try:
             rpc_client.nvmf_set_max_subsystems(constants.NVMF_MAX_SUBSYSTEMS)
@@ -4980,6 +5124,11 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         # discover devices
         if lblk_mode:
             nvme_devs = utils.addAioDevices(rpc_client, snode, lblk_resolved)
+            # Multi-attach clusters only: flag the array LUNs (no-op otherwise).
+            multi_attach.mark_lun_devices(cluster, snode, nvme_devs, lblk_resolved)
+            if multi_attach.is_multi_attach(cluster):
+                # Another node's LUN is never a device of this node.
+                nvme_devs = drop_foreign_luns(snode, nvme_devs)
         else:
             if not snode.ssd_pcie:
                 node_info, _ = snode_api.info()
@@ -5229,6 +5378,9 @@ def delete_storage_node(node_id, force=False):
     if snode.pod_network:
         # The Service held the node's address; with the record gone nothing names it.
         _delete_spdk_service(snode, snode.rpc_port, snode.cluster_id)
+    # Multi-attach cluster with an array: detach the node's LUNs from every
+    # host and other LUNs from its host (nothing is deleted; no-op otherwise).
+    array_controller.release_node_luns(snode)
     snode.remove(db_controller.kv_store)
 
     for node in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
@@ -9035,6 +9187,37 @@ def _new_restart_claim_token():
     return f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
 
 
+def _foreign_lun_keys(snode):
+    """LUN identities of the other nodes' multi-attach devices, on a
+    multi-attach cluster; an empty set otherwise (no DB read)."""
+    db_controller = DBController()
+    try:
+        cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+    except KeyError:
+        return set()
+    if not multi_attach.is_multi_attach(cluster):
+        return set()
+    return multi_attach.foreign_lun_keys(
+        db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id), snode.get_id())
+
+
+def drop_foreign_luns(snode, nvme_devs):
+    """``nvme_devs`` without the multi-attach LUNs of other nodes (add-node
+    discovery: they must never become devices of ``snode``, which would
+    format them). Unchanged on any other cluster."""
+    foreign = _foreign_lun_keys(snode)
+    if not foreign:
+        return nvme_devs
+    kept = []
+    for dev in nvme_devs:
+        if multi_attach.is_foreign_lun(dev, foreign):
+            logger.warning(f"Block device {dev.device_path or dev.device_name} (serial "
+                           f"{dev.serial_number}) is another node's multi-attach LUN; skipped")
+            continue
+        kept.append(dev)
+    return kept
+
+
 def _reconcile_discovered_devices(snode, nvme_devs):
     """Match the devices just discovered on the host (`nvme_devs`, from
     addNvmeDevices/addAioDevices) against this node's known NVMeDevice
@@ -9059,6 +9242,10 @@ def _reconcile_discovered_devices(snode, nvme_devs):
     known_devices_sn = []
     admin_removed_sn = set()
     devices_sn_dict = {d.serial_number: d for d in nvme_devs}
+    # Multi-attach clusters: every LUN is presented to every node. A LUN of
+    # another node's device is never a new device here (it would be
+    # formatted). Empty on any other cluster.
+    foreign_luns = _foreign_lun_keys(snode)
     for db_dev in snode.nvme_devices:
         if db_dev.admin_removed:
             admin_removed_sn.add(db_dev.serial_number)
@@ -9080,6 +9267,14 @@ def _reconcile_discovered_devices(snode, nvme_devs):
                     db_dev.bdev_type = "aio"
                     db_dev.device_path = found_dev.device_path
                     db_dev.by_id_path = found_dev.by_id_path
+                    # Restore a block size a control-plane service that
+                    # predates the field dropped from the record (found_dev
+                    # got it from the node's lblk_devices entry).
+                    if found_dev.aio_block_size and not db_dev.aio_block_size:
+                        db_dev.aio_block_size = found_dev.aio_block_size
+                    # The I/O engine found_dev was created with (the recorded
+                    # one, or uring for a device-mapper node).
+                    db_dev.lblk_io_engine = found_dev.lblk_io_engine
                 else:
                     db_dev.nvme_controller = found_dev.nvme_controller
                     db_dev.pcie_address = found_dev.pcie_address
@@ -9087,6 +9282,13 @@ def _reconcile_discovered_devices(snode, nvme_devs):
             db_dev.md_size = found_dev.md_size
             db_dev.md_supported = found_dev.md_supported
 
+            active_devices.append(db_dev)
+        elif multi_attach.not_servable_here(db_dev, snode.get_id()):
+            # Multi-attach: the LUN is served by the node that took it over,
+            # or this node is fenced from it at the array; not seeing it does
+            # not mean it is gone. The record stays as it is.
+            logger.info(f"Device not found: {db_dev.get_id()}, served by node "
+                        f"{db_dev.serving_node()}; record kept")
             active_devices.append(db_dev)
         else:
             logger.info(f"Device not found: {db_dev.get_id()}")
@@ -9105,6 +9307,11 @@ def _reconcile_discovered_devices(snode, nvme_devs):
         if dev.serial_number == jm_dev_sn:
             logger.info(f"JM device found: {snode.jm_device.get_id()}")
             snode.jm_device.nvme_bdev = dev.nvme_bdev
+
+        elif dev.serial_number not in known_devices_sn and multi_attach.is_foreign_lun(dev, foreign_luns):
+            logger.warning(f"Block device {dev.device_path or dev.device_name} (serial "
+                           f"{dev.serial_number}) is another node's multi-attach LUN; "
+                           f"not added (never formatted)")
 
         elif dev.serial_number not in known_devices_sn:
             if dev.serial_number in admin_removed_sn:
@@ -9715,6 +9922,9 @@ def _restart_storage_node_impl(
         if not nvme_devs:
             logger.error("No eligible block devices were found!")
             return False
+        # Multi-attach clusters only: a device first seen on this restart
+        # (new host) is an array LUN too. Existing records keep their flags.
+        multi_attach.mark_lun_devices(cluster, snode, nvme_devs, lblk_resolved)
     else:
         if not snode.ssd_pcie:
             ssds = node_info['spdk_pcie_list']
@@ -9818,6 +10028,10 @@ def _restart_storage_node_impl(
 
     snode = db_controller.get_storage_node_by_id(snode.get_id())
     for db_dev in snode.nvme_devices:
+        if multi_attach.not_servable_here(db_dev, snode.get_id()):
+            # Multi-attach: its state follows the node serving it, not this
+            # restart (this node built nothing for it).
+            continue
         if db_dev.status in [NVMeDevice.STATUS_UNAVAILABLE, NVMeDevice.STATUS_ONLINE,
                              NVMeDevice.STATUS_CANNOT_ALLOCATE, NVMeDevice.STATUS_READONLY]:
             db_dev.status = NVMeDevice.STATUS_ONLINE
@@ -10281,29 +10495,6 @@ def _check_ftt_allows_node_removal(node_id, db_controller):
         if node.status not in [StorageNode.STATUS_IN_CREATION, StorageNode.STATUS_REMOVED]
     )
 
-    # Block suspend/shutdown during rebalancing based on node headroom.
-    # A cluster needs ndcs+npcs nodes minimum. During rebalancing:
-    #   - With exactly ndcs+npcs nodes: no shutdowns allowed (no headroom)
-    #   - With ndcs+npcs+1 nodes: one shutdown allowed (one spare)
-    #   - With ndcs+npcs+2+ nodes: two shutdowns allowed, etc.
-    # The number of allowed shutdowns during rebalancing is:
-    #   total_active_nodes - (ndcs + npcs)
-    # This must be greater than the number of already-not-online nodes.
-    if cluster.is_re_balancing:
-        not_online_already = sum(
-            1 for node in snodes
-            if node.get_id() != node_id
-            and node.status != StorageNode.STATUS_ONLINE
-            and node.status not in [StorageNode.STATUS_IN_CREATION, StorageNode.STATUS_REMOVED]
-        )
-        headroom = total_active_nodes - (ndcs + npcs)
-        if headroom <= not_online_already:
-            return False, (
-                f"Cluster is rebalancing with {total_active_nodes} active nodes "
-                f"({not_online_already} already not online, "
-                f"need >{ndcs + npcs} for ndcs={ndcs}, npcs={npcs}). "
-                f"Wait for rebalancing to complete before removing a node."
-            )
 
     # Count nodes that are not online (excluding the node being removed,
     # and excluding nodes in creation or already removed).
@@ -10479,6 +10670,21 @@ def _check_ftt_allows_node_removal(node_id, db_controller):
                     f"(status: {not_online_node.status})"
                 )
 
+    # Resource floors (simplyblock_core.floors): the cluster AFTER losing
+    # this node -- its online nodes, their data devices and, when used, its
+    # failure domains -- must stay at or above every floor. This replaces
+    # the former "rebalancing headroom" formula (active nodes - (ndcs+npcs)):
+    # the node floor is n+2k whether or not a rebalance is running. Judged
+    # last: the FTT / pair / domain refusals above name the concrete node
+    # the operator has to wait for, which is the more actionable reason.
+    floor_violations = floors.evaluate(cluster, snodes, exclude_node_id=node_id)
+    if floor_violations:
+        return False, (
+            f"removing node {node_id} would take the cluster below the resource floors "
+            f"for the {ndcs}+{npcs} scheme ({total_active_nodes} active nodes): "
+            + "; ".join(floor_violations)
+            + ". Bring the other nodes online or add resources first."
+        )
     return True, ""
 
 
@@ -10535,6 +10741,10 @@ def _detach_remote_controllers_from_peers(snode: StorageNode, db_controller):
     """
     shutting_down_id = snode.get_id()
     all_peers = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
+    # Multi-attach: controllers to this node's LUNs that another node serves
+    # lead to that node, not to this one; they stay.
+    served_elsewhere_ids = {d.get_id() for d in snode.nvme_devices
+                            if multi_attach.served_elsewhere(d, shutting_down_id)}
     peers = [
         p for p in all_peers
         if p.get_id() != shutting_down_id
@@ -10559,6 +10769,8 @@ def _detach_remote_controllers_from_peers(snode: StorageNode, db_controller):
         ctrl_names = []
         for rem_dev in (peer.remote_devices or []):
             if rem_dev.node_id != shutting_down_id:
+                continue
+            if rem_dev.get_id() in served_elsewhere_ids:
                 continue
             bdev_name = rem_dev.remote_bdev or ""
             if bdev_name.endswith("n1"):
@@ -10642,6 +10854,27 @@ def check_node_shutdown_preconditions(node_id, force=False, current_restart_task
                       f"claim is released or expires")
             logger.error(reason)
             return False, reason
+
+    # Resource floors (simplyblock_core.floors): a planned shutdown is refused
+    # when the cluster without this node would be below a floor (nodes, data
+    # devices per node and cluster-wide, failure domains). force keeps
+    # overriding, as it does for every guard below.
+    if snode.status == StorageNode.STATUS_ONLINE:
+        try:
+            _floor_cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+        except KeyError:
+            _floor_cluster = None
+        if _floor_cluster is not None:
+            _floor_violations = floors.evaluate(
+                _floor_cluster, db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id),
+                exclude_node_id=node_id)
+            if _floor_violations:
+                reason = (f"shutting down node {node_id} would take the cluster below the "
+                          f"resource floors: " + "; ".join(_floor_violations))
+                if force is False:
+                    logger.error(reason)
+                    return False, reason
+                logger.warning("%s — proceeding with force", reason)
 
     # Guard: no concurrent shutdown + restart (design: mutual exclusion)
     for peer in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
@@ -10748,6 +10981,10 @@ def _broadcast_devices_unavailable(snode):
             NVMeDevice.STATUS_CANNOT_ALLOCATE,
             NVMeDevice.STATUS_READONLY,
         ]:
+            continue
+        if multi_attach.served_elsewhere(dev, snode.get_id()):
+            # Multi-attach: another node serves this LUN; it is not lost
+            # with this node.
             continue
         try:
             # Default cause (CAUSE_OTHER): a node-driven shutdown
@@ -19235,6 +19472,12 @@ def create_lvstore(snode: StorageNode, ndcs, npcs, distr_bs, distr_chunk_bs, pag
         # creation, persisted per stack entry for the same reason.
         if cluster.page_copy:
             distrib_params["page_copy"] = True
+        # raid_devices: every data device is protected below simplyblock, so
+        # the distrib may put several chunks of a stripe on one device when no
+        # other device is writable. Persisted like the flags above; the RPC
+        # sends it only while constants.DISTR_AFFINITY_FLOOR_RPC is on.
+        if getattr(cluster, "raid_devices", False) is True:
+            distrib_params["allow_device_colocation"] = True
         # Failure-domain placement is activated implicitly via the per-node
         # failure_domain id (>= 0) in the distrib cluster map sent by
         # distr_send_cluster_map / distr_add_nodes (see get_distr_cluster_map);

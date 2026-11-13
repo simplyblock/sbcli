@@ -190,6 +190,39 @@ class Cluster(BaseModel):
     node_label_suffix: str = ""
     disable_monitoring: bool = False
     strict_node_anti_affinity: bool = False
+    # Cluster-create-time, immutable declaration that every data device is
+    # protected below simplyblock (hardware RAID LUN, md or dm RAID). Lowers
+    # the data-device floor from n+2k to n+k (simplyblock_core.floors) and
+    # lets the data plane place several chunks of a stripe on one device when
+    # no other device is writable (allow_device_colocation on the distribs,
+    # affinity_floor "relaxed" on migrations).
+    raid_devices: bool = False
+    # Cluster-create-time, immutable: multi-attach array LUN mode. Every data
+    # device is an array LUN presented to several storage nodes; the cluster
+    # runs 1+0 and tolerates max_fault_tolerance node failures by reopening
+    # an owner's LUN on another node and adding it as an extra NVMe-oF path.
+    # Requires raid_devices. Gates every multi-attach path (device NQN,
+    # controller-ID ranges, hold timeouts, owner loopback).
+    multi_attach: bool = False
+    # Multi-attach clusters: the storage array the LUNs live on. A LUN is
+    # taken over by another node only after its serving node is fenced at the
+    # array, through the plugin named here (entry point in the group
+    # simplyblock.array_plugins, see simplyblock_core.array). Empty = no
+    # plugin: a takeover is refused (never reopen a LUN unfenced). The array
+    # is registered through controllers/array_controller (POST
+    # /clusters/{id}/arrays); its credentials live in the KMS at
+    # cluster/<id>/array/<array_id>, never here.
+    array_plugin: str = ""
+    array_endpoint: str = ""
+    array_options: dict = default_factory(dict)
+    # Id of the registered array ("" = none, or configured before arrays were
+    # registered) and whether credentials were stored for it in the KMS.
+    array_id: str = ""
+    array_has_credentials: bool = False
+    # Size in bytes of the LUN created for each node added to the cluster
+    # while an array is registered; 0 = node adds create no LUN (the LUNs are
+    # presented by the operator, as in phase 2/3).
+    array_lun_size: int = 0
     tls: bool = False
     tls_config: dict = default_factory(dict)
     is_re_balancing: bool = False
@@ -410,11 +443,6 @@ class Cluster(BaseModel):
     # ``simplyblock_core.controllers.cluster_expansion.planner``. See the feature plan
     # ``single_node_expansion_plan.md`` for the schema.
     expand_state: dict = default_factory(dict)
-    # Set while new device weights (placement sizes after an uneven growth of
-    # lblk devices) are written but not yet pushed to every node and handed to
-    # a rebalance. A re-run of `cluster grow-devices` finishes the job. See
-    # device_controller.rebalance_after_growth.
-    reweight_pending: bool = False
     # State owned by release-specific upgrade plug-ins (see
     # simplyblock_core/release_upgrades/). Keys are plugin STATE_KEYs; a key
     # is set by the plugin's pre_update step (first thing `cluster update`

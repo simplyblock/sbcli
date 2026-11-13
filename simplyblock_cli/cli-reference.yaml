@@ -107,6 +107,11 @@ commands:
             required: false
             type: str
             default: ""
+          - name: "--lblk-journal-only"
+            help: "With --lblk on a multi-attach cluster whose array plugin creates each node's data LUN at add-node: the one selected whole disk is the node's journal and nothing else. It is never partitioned, and the node has no local data device; its data device is the array LUN. Needs exactly one disk, named with --blk-names or --blk-serials."
+            dest: lblk_journal_only
+            type: bool
+            action: store_true
           - name: "--lblk-journal-device"
             help: "With --lblk and whole disks: dedicate each node's smallest disk to the journal instead of partitioning it into a journal partition and a data partition (the default). Needs at least two disks per node. Partition selections always carry their journal in a split partition."
             dest: lblk_journal_device
@@ -570,19 +575,6 @@ commands:
             dest: force
             type: bool
             action: store_true
-      - name: resize-device
-        help: "Grows a Linux block device (lblk) online to the size of its block device."
-        usage: >
-          Re-reads the size of the device's block device on the storage node's host, for example, after its LUN was
-          grown on the storage array, and grows the storage device online without interrupting I/O. Shrinking is
-          refused. The placement weight of the device keeps its original size, so the added capacity is only fully
-          usable once all data devices of the cluster have grown by the same factor, or after cluster grow-devices
-          has updated the weights of unevenly grown devices and rebalanced the cluster.
-        arguments:
-          - name: "device_id"
-            help: "The storage device id."
-            dest: device_id
-            type: str
       - name: add-device
         help: "Adds a new storage device."
         usage: >
@@ -1032,11 +1024,39 @@ commands:
             private: true
           - name: "--strict-node-anti-affinity"
             help: >
-              Enable strict node anti affinity for storage nodes. Never more than one chunk is placed on a node. This
-              requires a minimum of _data-chunks-in-stripe + parity-chunks-in-stripe + 1_ nodes in the cluster.
+              Enable strict node anti affinity for storage nodes. Never more than one chunk is placed on a node. The
+              cluster needs the same node floor as every cluster (_data-chunks-per-stripe + 2 x parity-chunks-per-stripe_
+              nodes); the flag only affects status reporting.
             dest: strict_node_anti_affinity
             type: bool
             action: store_true
+          - name: "--raid-devices"
+            help: >
+              Declare that every data device is protected below simplyblock (hardware RAID LUN, md or dm RAID). Lowers
+              the data-device floor from n+2k to n+k and allows a stripe to place several chunks on one device when no
+              other device is writable. Cannot be changed after cluster creation.
+            dest: raid_devices
+            type: bool
+            action: store_true
+          - name: "--multi-attach"
+            help: >
+              Multi-attach array LUN mode. Every data device is a LUN of an external array that already protects it
+              and presents it to several storage nodes. The cluster runs 1+0 erasure coding (the data-chunks and
+              parity-chunks settings are overridden); on a node failure the LUN is reopened on a standby node and
+              reached over an additional NVMe-oF path. Requires --raid-devices, --ftt and --ha-type ha. Cannot be
+              changed after cluster creation.
+            dest: multi_attach
+            type: bool
+            action: store_true
+          - name: "--ftt"
+            help: >
+              Node failures to tolerate in multi-attach mode (1 or 2; 2 adds a tertiary LVS node and needs at least
+              3 storage nodes). Required with --multi-attach, refused without it.
+            dest: ftt
+            type: int
+            choices:
+              - 1
+              - 2
           - name: "--enable-failure-domain"
             help: "Enable failure-domain anti-affinity. Each storage node must then be added with a --failure-domain tag (rack/cabinet/DC); data, journal and secondary/tertiary copies are spread across distinct failure domains (best-effort). Deploy-time only: a cluster cannot be upgraded into this feature, it must be redeployed."
             dest: enable_failure_domain
@@ -1309,11 +1329,39 @@ commands:
             private: true
           - name: "--strict-node-anti-affinity"
             help: >
-              Enable strict node anti affinity for storage nodes. Never more than one chunk is placed on a node.
-              This requires a minimum of _data-chunks-in-stripe + parity-chunks-in-stripe + 1_ nodes in the cluster."
+              Enable strict node anti affinity for storage nodes. Never more than one chunk is placed on a node. The
+              cluster needs the same node floor as every cluster (_data-chunks-per-stripe + 2 x parity-chunks-per-stripe_
+              nodes); the flag only affects status reporting.
             dest: strict_node_anti_affinity
             type: bool
             action: store_true
+          - name: "--raid-devices"
+            help: >
+              Declare that every data device is protected below simplyblock (hardware RAID LUN, md or dm RAID). Lowers
+              the data-device floor from n+2k to n+k and allows a stripe to place several chunks on one device when no
+              other device is writable. Cannot be changed after cluster creation.
+            dest: raid_devices
+            type: bool
+            action: store_true
+          - name: "--multi-attach"
+            help: >
+              Multi-attach array LUN mode. Every data device is a LUN of an external array that already protects it
+              and presents it to several storage nodes. The cluster runs 1+0 erasure coding (the data-chunks and
+              parity-chunks settings are overridden); on a node failure the LUN is reopened on a standby node and
+              reached over an additional NVMe-oF path. Requires --raid-devices, --ftt and --ha-type ha. Cannot be
+              changed after cluster creation.
+            dest: multi_attach
+            type: bool
+            action: store_true
+          - name: "--ftt"
+            help: >
+              Node failures to tolerate in multi-attach mode (1 or 2; 2 adds a tertiary LVS node and needs at least
+              3 storage nodes). Required with --multi-attach, refused without it.
+            dest: ftt
+            type: int
+            choices:
+              - 1
+              - 2
           - name: "--enable-failure-domain"
             help: "Enable failure-domain anti-affinity. Each storage node must then be added with a --failure-domain tag (rack/cabinet/DC); data, journal and secondary/tertiary copies are spread across distinct failure domains (best-effort). Deploy-time only: a cluster cannot be upgraded into this feature, it must be redeployed."
             dest: enable_failure_domain
@@ -1496,23 +1544,87 @@ commands:
             type: str
             completer: _completer_get_cluster_list
       - name: grow-devices
-        help: "Grows every Linux block device (lblk) of the cluster online to the size of its block device."
+        help: "Grows all Linux block devices (lblk) of the cluster online by the same factor."
         usage: >
-          Re-reads the size of every online data device of an lblk cluster and grows the devices whose block device
-          has grown, one at a time. Used after the LUNs of the cluster were grown on the storage array. When all
-          devices have grown by the same factor, nothing else changes. When they have grown unevenly, the device
-          weights are set to the new sizes and the cluster is rebalanced, which re-places a large part of the data
-          in the background; this needs an active cluster with all nodes and devices online and no running
-          migration. Grow all LUNs on the array first, then run this command once.
+          Re-reads the size of the block device of every data device of an lblk cluster, for example, after the
+          LUNs were grown on the storage array, and grows every device online by the same factor: the smallest
+          growth of any of the block devices. With three LUNs grown by 1.5 and three by 2.0, every device grows by
+          1.5 and the rest stays unused. If one block device did not grow, nothing grows. Device weights and data
+          placement never change. All data devices and their nodes must be online. A block device smaller than its
+          device is refused and raises an alert. Grow all LUNs on the array first, then run this command once.
         arguments:
           - name: "cluster_id"
             help: "The cluster id."
             dest: cluster_id
             type: str
             completer: _completer_get_cluster_list
-          - name: "--no-rebalance"
-            help: "Keep the device weights after an uneven growth and do not rebalance the cluster."
-            dest: no_rebalance
+          - name: "--lun-factor"
+            help: >
+              Multi-attach cluster with a registered array only: first grow every LUN the array plugin created by
+              this factor (greater than 1, e.g. 1.5) at the array and wait until every node sees the new size.
+            dest: lun_factor
+            type: str
+      - name: set-array
+        help: "Registers the storage array of a multi-attach cluster (or updates it, e.g. to rotate credentials)."
+        usage: >
+          simplyblock creates, multi-attaches, grows, fences and deletes the LUNs of a multi-attach cluster through
+          the array plugin registered here. The plugin is loaded and connected with the credentials before anything
+          is saved. The credentials are stored in the cluster's KMS, never in the cluster record. With --lun-size,
+          every node added afterwards gets a LUN of that size created and attached on the array.
+        arguments:
+          - name: "cluster_id"
+            help: "The cluster id."
+            dest: cluster_id
+            type: str
+            completer: _completer_get_cluster_list
+          - name: "--plugin"
+            help: "The array plugin, e.g. `aws-ebs`."
+            dest: plugin
+            type: str
+            required: true
+          - name: "--endpoint"
+            help: "The array's management endpoint (for aws-ebs: an EC2 endpoint URL override, usually empty)."
+            dest: endpoint
+            type: str
+            default: ""
+          - name: "--options"
+            help: 'Plugin options as a JSON object, e.g. `{"az": "us-east-1a", "iops": 6000}`.'
+            dest: options
+            type: str
+          - name: "--credentials-file"
+            help: >
+              A JSON file with the array credentials as an object of strings (for aws-ebs: aws_access_key_id,
+              aws_secret_access_key; omit to use the instance role).
+            dest: credentials_file
+            type: str
+          - name: "--lun-size"
+            help: "Size of the LUN created for each node added to the cluster, e.g. `1T`. Default: none."
+            dest: lun_size
+            type: size
+            default: "0"
+      - name: get-array
+        help: "Shows the storage array registered for a multi-attach cluster (without its credentials)."
+        arguments:
+          - name: "cluster_id"
+            help: "The cluster id."
+            dest: cluster_id
+            type: str
+            completer: _completer_get_cluster_list
+      - name: remove-array
+        help: "Removes the storage array registration of a multi-attach cluster and its credentials."
+        arguments:
+          - name: "cluster_id"
+            help: "The cluster id."
+            dest: cluster_id
+            type: str
+            completer: _completer_get_cluster_list
+          - name: "array_id"
+            help: "The array id."
+            dest: array_id
+            type: str
+          - name: "--force"
+            help: "Remove it even though LUNs created through it exist (they can then no longer be fenced)."
+            dest: force
             type: bool
             default: false
             action: store_true

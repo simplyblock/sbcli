@@ -5,7 +5,7 @@ from pydantic import SecretStr
 
 from simplyblock_core.utils import generate_hex_string
 
-from ._base import KMS
+from ._base import KMS, secret_plaintext, secret_wrapped
 from ._exceptions import KMSException
 
 if TYPE_CHECKING:
@@ -28,6 +28,12 @@ class LocalKMS(KMS):
     @staticmethod
     def _key(path: str) -> bytes:
         return f"keys/{path}".encode()
+
+    @staticmethod
+    def _secret_key(path: str) -> bytes:
+        # A prefix of its own: a generic secret never shares a key with a DEK
+        # pair stored at the same path.
+        return f"secrets/{path}".encode()
 
     def create_data_encryption_keys(self, path: str, kek_name: str) -> None:
         self.import_data_encryption_keys(
@@ -60,3 +66,16 @@ class LocalKMS(KMS):
 
     def delete_key_encryption_key(self, name: str) -> None:
         pass
+
+    def put_secret(self, path: str, data: dict) -> None:
+        # The persistence boundary, like import_data_encryption_keys.
+        self._kv_store.set(self._secret_key(path), json.dumps(secret_plaintext(data)).encode())
+
+    def get_secret(self, path: str) -> dict:
+        raw = self._kv_store.get(self._secret_key(path))
+        if not raw:
+            raise KMSException(f"No secret found at {path}")
+        return secret_wrapped(json.loads(raw))
+
+    def delete_secret(self, path: str) -> None:
+        self._kv_store.clear(self._secret_key(path))

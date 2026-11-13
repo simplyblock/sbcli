@@ -21,6 +21,10 @@ def _cluster(status=Cluster.STATUS_SUSPENDED, activated=()):
     cluster = MagicMock()
     cluster.status = status
     cluster.activated_node_ids = list(activated)
+    # Model defaults: as child mocks these read truthy and steer activation
+    # into the sync-replication / failure-domain branches.
+    cluster.sync_replication = False
+    cluster.enable_failure_domain = False
     cluster.get_id.return_value = "cl-1"
     return cluster
 
@@ -37,9 +41,12 @@ def _nodes(*ids):
 class TestActivationRefusesAddedNodes(unittest.TestCase):
 
     def _activate(self, cluster, nodes):
-        """Run only far enough to hit (or pass) the growth guard."""
+        """Run only far enough to hit (or pass) the growth guard. The resource
+        floors are not what these mock nodes model (test_cluster_floors covers
+        them), so they are patched out."""
         with patch.object(cluster_ops, "db_controller") as db, \
                 patch.object(cluster_ops, "set_cluster_status"), \
+                patch.object(cluster_ops.floors, "evaluate", return_value=[]), \
                 patch.object(cluster_ops, "logger"):
             db.get_cluster_by_id.return_value = cluster
             db.get_storage_nodes_by_cluster_id.return_value = nodes

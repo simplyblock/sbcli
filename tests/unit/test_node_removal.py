@@ -19,12 +19,24 @@ import logging
 import unittest
 from unittest.mock import DEFAULT, MagicMock, call, patch
 
+import pytest
+
 from simplyblock_core import storage_node_ops
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.nvme_device import JMDevice, NVMeDevice, RemoteJMDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCConnectionError, RPCException, RPCRemoteError
 from tests._mocks import unique_ip
+
+
+@pytest.fixture(autouse=True)
+def _floors_out_of_the_removal_tests():
+    """These fixtures (one to four nodes, no devices) model the removal
+    mechanics, not the resource floors (simplyblock_core.floors), which would
+    refuse every removal here; the floors have their own tests
+    (test_ftt_protection.TestFloorGate, test_cluster_floors)."""
+    with patch.object(storage_node_ops.floors, "evaluate", return_value=[]):
+        yield
 
 # ---------------------------------------------------------------------------
 # Fixtures

@@ -129,6 +129,29 @@ LBLK_PCI_ALLOWED_PLACEHOLDER = "0000:00:00.0"
 # Queue-depth sampling period enabled on every AIO base bdev so
 # bdev_get_iostat reports queue_depth (feeds the hung-IO watchdog).
 AIO_QD_SAMPLING_PERIOD_US = 100000  # 100 ms
+# Block size of the AIO base bdev of a NEW lblk device. 512e devices (512
+# logical / 4096 physical, e.g. EBS and most array LUNs) would otherwise get
+# 512-byte bdevs, which costs read-modify-write cycles in the device. The
+# logical block size is used only when 4096 is not possible (see
+# utils.choose_aio_block_size). An existing device always keeps the block
+# size it was formatted with (NVMeDevice.aio_block_size): alceml's on-disk
+# layout depends on it.
+AIO_DEFAULT_BLOCK_SIZE = 4096
+# I/O engine of an lblk device's base bdev (NVMeDevice.lblk_io_engine).
+# SPDK's bdev_aio submits every I/O on a block device with RWF_NOWAIT so
+# io_submit never blocks the reactor. device-mapper honours RWF_NOWAIT only
+# when every target in the table does; dm-multipath does not, so every AIO
+# submit to a multipath map fails with EOPNOTSUPP. Device-mapper devices are
+# therefore served by SPDK's io_uring bdev (bdev_uring_create), everything
+# else (whole disks, sd/nvme partitions, md arrays) by bdev_aio. The bdev
+# NAME (aio_<serial>) and NVMeDevice.bdev_type "aio" are the same for both.
+LBLK_IO_ENGINE_AIO = "aio"
+LBLK_IO_ENGINE_URING = "uring"
+LBLK_IO_ENGINES = (LBLK_IO_ENGINE_AIO, LBLK_IO_ENGINE_URING)
+# lsblk TYPE values of device-mapper nodes (multipath map, LVM volume,
+# dm-crypt, other dm). A partition mapped from a multipath map (kpartx) has
+# TYPE "part" but a dm-* kernel name.
+LBLK_DM_TYPES = ("mpath", "lvm", "crypt", "dm")
 # Hung-IO watchdog: consecutive device_monitor polls (DEV_MONITOR_INTERVAL_SEC
 # apart) with queue_depth > 0 and zero completion progress before the device
 # is declared stalled (3 x 10s = 30s — deliberately above kernel SCSI/NVMe
@@ -1157,6 +1180,51 @@ QOS_REPLICATION_WIRE_CLASS = QOS_REPLICATION_CLASS_ID + 1
 qos_class_replication_weight_percent = 10
 
 MIG_PARALLEL_JOBS = 64
+# Send the placement anti-affinity floor to the data plane (affinity_floor on
+# distr_migration_*_start, allow_device_colocation on bdev_distrib_create).
+# Flip to True once the ultra feat/affinity-floor data plane is deployed;
+# older data planes reject unknown RPC parameters.
+DISTR_AFFINITY_FLOOR_RPC = False
+
+# Multi-attach array LUN mode (cluster.multi_attach). None of these apply to
+# a regular cluster.
+# Peers' controllers to a multi-attach device hold I/O this long while no
+# path is available (per-controller ctrlr_loss_timeout_sec), so a takeover
+# that adds the LUN's new export as a path within the window resumes I/O
+# instead of failing it. The cluster-wide bdev_nvme defaults (1 s) stay.
+# It must cover: detecting the owner unreachable (~20 s), the
+# MULTI_ATTACH_UNREACHABLE_TAKEOVER_SEC confirmation, and the takeover up to
+# its MULTI_ATTACH_TAKEOVER_DEADLINE_SEC.
+MULTI_ATTACH_HOLD_SEC = 150
+MULTI_ATTACH_RECONNECT_DELAY_SEC = 2
+MULTI_ATTACH_FAST_IO_FAIL_SEC = MULTI_ATTACH_HOLD_SEC
+# The alceml of a multi-attach device fails its pending I/O and unregisters
+# after this long without completion (bdev_alceml_create stuck_io_timeout_ms;
+# the data-plane default is 4000 ms). It must exceed the multipath path
+# failover below the LUN and stay below MULTI_ATTACH_HOLD_SEC, so a stuck
+# owner instance is gone before the peers stop waiting.
+MULTI_ATTACH_ALCEML_STUCK_IO_MS = 60000
+# Controller-ID ranges of multi-attach device subsystems: a node with
+# cntlid_block i exports with cntlids [i*64+1, i*64+64]. SPDK multipath needs
+# distinct cntlids across the paths of one controller, and a LUN may be
+# exported by any node. Valid NVMe cntlids end at 0xFFEF.
+MULTI_ATTACH_CNTLID_BLOCK_SIZE = 64
+MULTI_ATTACH_MAX_CNTLID = 0xFFEF
+MULTI_ATTACH_MAX_NODES = 1022
+# A LUN takeover (controllers/lun_takeover) must finish well inside the
+# peers' hold, or their I/O fails before the new path exists; it gives up at
+# this deadline (seconds from its start) and the device goes unavailable.
+MULTI_ATTACH_TAKEOVER_DEADLINE_SEC = 90
+# The takeover of a node's LUNs starts once the node has been UNREACHABLE
+# this long, not when it is declared OFFLINE: the OFFLINE verdict waits for
+# every online peer to see the node's journal disconnected, which took about
+# six minutes on the multi-attach bed, far past the peers' hold. The fence
+# comes first, so a takeover of a node that is alive behind a management
+# network fault is safe; it costs a short I/O pause on that LUN.
+MULTI_ATTACH_UNREACHABLE_TAKEOVER_SEC = 15
+# Lease of a running takeover (one per LUN, in FDB): a holder older than this
+# is presumed dead.
+MULTI_ATTACH_TAKEOVER_LOCK_TTL_SEC = 2 * MULTI_ATTACH_TAKEOVER_DEADLINE_SEC
 MIG_JOB_SIZE = 64
 
 # Sync-replication resync (tasks_runner_sync_resync): the shared task driver

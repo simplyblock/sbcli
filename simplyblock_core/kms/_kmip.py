@@ -181,3 +181,22 @@ class KMIPClient(KMS):
 
     def delete_data_encryption_keys(self, path: str) -> None:
         self._kv_store().clear(self._dek_key(path))
+
+    # Generic secrets (the array credentials of a multi-attach cluster,
+    # simplyblock_core.controllers.array_controller). Not supported on KMIP
+    # yet: KMIP keeps keys, and storing secrets would mean wrapping them with
+    # an appliance KEK the way the DEKs above are, which has not been tested
+    # against a KMIP appliance. Refused explicitly rather than half-done.
+    _NO_SECRETS = ("The KMIP key management backend does not store array credentials yet; "
+                   "use HashiCorp Vault / OpenBao or the local KMS for a multi-attach cluster "
+                   "with array credentials, or register the array without credentials "
+                   "(e.g. aws-ebs with an instance role)")
+
+    def put_secret(self, path: str, data: dict) -> None:
+        raise KMSException(self._NO_SECRETS)
+
+    def get_secret(self, path: str) -> dict:
+        raise KMSException(self._NO_SECRETS)
+
+    def delete_secret(self, path: str) -> None:
+        raise KMSException(self._NO_SECRETS)

@@ -32,6 +32,7 @@ from .._dtos import (
 from .._sse import WATCH_RESPONSES, WatchParam, sse_response
 from .alert import api as alert_api
 from .arbitration import api as arbitration_api
+from .array import api as array_api
 from .backup import api as backup_api
 from .consistency_group import api as consistency_group_api
 from .group_backup import api as group_backup_api
@@ -77,6 +78,14 @@ class ClusterParams(BaseModel):
     inflight_io_threshold: int = 4
     enable_node_affinity: bool = False
     strict_node_anti_affinity: bool = False
+    # Every data device is protected below simplyblock (hardware RAID LUN, md
+    # or dm RAID): data-device floor n+k instead of n+2k. Immutable.
+    raid_devices: bool = False
+    # Multi-attach array LUN mode (1+0, FTT from LUN takeover). Requires
+    # raid_devices, ha_type 'ha' and ftt. Immutable.
+    multi_attach: bool = False
+    #: Node failures to tolerate in multi-attach mode; only with multi_attach.
+    ftt: Literal[1, 2] | None = None
     is_single_node: bool = False
     fabric: str = "tcp"
     cr_name: str = ""
@@ -400,33 +409,51 @@ def rebalance_cluster( cluster: Cluster) -> Response:
     return Response(status_code=204)
 
 
-class DeviceRebalanceDTO(BaseModel):
-    weights_updated: bool
-    started: bool
-    reason: str
+class DeviceGrowthEntryDTO(BaseModel):
+    device_id: str
+    old_size: int
+    new_size: int
+    backend_size: int
+    unused_size: int
+    placement_size: int
 
 
 class DeviceGrowthDTO(BaseModel):
-    devices: builtins.list[dict]
+    grown: bool
+    factor: float
+    devices: builtins.list[DeviceGrowthEntryDTO]
     errors: dict[str, str]
-    uniform: bool
-    rebalance: DeviceRebalanceDTO | None = None
+    reason: str
+    shrunk: builtins.list[str] = []
+    luns: dict[str, dict] | None = None
 
 
 @instance_api.post('/grow-devices', name='clusters:grow_devices', response_model=DeviceGrowthDTO)
-def grow_devices(cluster: Cluster, rebalance: bool = True) -> DeviceGrowthDTO:
-    """Grow every online lblk data device of the cluster to the size of its
-    block device, one device at a time. Used after the LUNs of the cluster
-    were grown on the storage array. If they have grown unevenly, the device
-    weights are set to the new sizes and the cluster is rebalanced, unless
-    ``rebalance`` is false."""
+def grow_devices(cluster: Cluster,
+                 lun_factor: Annotated[float | None, Query(gt=1)] = None) -> DeviceGrowthDTO:
+    """Grow all lblk data devices of the cluster online by the same factor.
+
+    Every block device is rescanned (for example, after its LUN was grown on
+    the storage array), and every device grows by the smallest growth factor
+    of all of them; the rest of a larger block device stays unused
+    (`unused_size`). If one block device did not grow, nothing grows
+    (`grown` false, `reason`). Device weights and data placement never change.
+    A block device smaller than its device is refused, listed in `shrunk`
+    and `errors`, and raises the device_shrunk alert.
+    """
     if cluster.device_mode != constants.DEVICE_MODE_LBLK:
         raise HTTPException(409, 'Online device growth needs a cluster in lblk device mode')
-    return DeviceGrowthDTO(**device_controller.grow_cluster_devices(cluster.get_id(), rebalance=rebalance))
+    extra = {"lun_factor": lun_factor} if lun_factor is not None else {}
+    try:
+        result = device_controller.grow_cluster_devices(cluster.get_id(), **extra)
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+    return DeviceGrowthDTO(**result)
 
 
 instance_api.include_router(alert_api, prefix='/alerts')
 instance_api.include_router(arbitration_api, prefix='/arbitration')
+instance_api.include_router(array_api, prefix='/arrays')
 instance_api.include_router(storage_node_api, prefix='/storage-nodes')
 instance_api.include_router(task_api, prefix='/tasks')
 instance_api.include_router(pool_api, prefix='/storage-pools')

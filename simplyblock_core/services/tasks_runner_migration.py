@@ -108,6 +108,7 @@ def task_runner(task):
             task.function_params["distr_name"], mig.qos_high_priority(snode.cluster_id),
             job_size=constants.MIG_JOB_SIZE, jobs=constants.MIG_PARALLEL_JOBS,
             relaxed_mode=mig.migration_relaxed(snode.cluster_id),
+            affinity_floor=mig.migration_affinity_floor(snode.cluster_id),
             keep_placed=bool(getattr(db.get_cluster_by_id(snode.cluster_id), "page_copy", False))),
             migration_devices=_online_device_count(task.cluster_id))
         if started is None:

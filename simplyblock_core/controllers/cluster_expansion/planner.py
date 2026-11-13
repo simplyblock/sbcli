@@ -503,10 +503,23 @@ def fd_balance_violation(
     return None
 
 
+def fd_activation_min_domains(npcs: int, ndcs: int = 0) -> int:
+    """The failure domains a fresh activation needs: the rotation's spare
+    rule (npcs+2, see fd_activation_domain_count_violation) and the EC floor
+    of ndcs+npcs domains (simplyblock_core.floors, floor 3), whichever is
+    higher."""
+    return max(npcs + 2, ndcs + npcs)
+
+
 def fd_activation_domain_count_violation(
-    npcs: int, distinct_domain_count: int,
+    npcs: int, distinct_domain_count: int, ndcs: int = 0,
 ) -> str | None:
     """Validate the number of distinct failure domains for fresh activation.
+
+    Two rules, the higher one binds (``fd_activation_min_domains``): the EC
+    floor of ``ndcs+npcs`` domains -- a stripe's chunks must each have a
+    domain of their own when failure domains are used at all -- and the
+    rotation-spare rule below.
 
     A 2-FD layout can never absorb a second independent failure once one
     domain is fully down (confirmed with the backend team), so it is not
@@ -533,12 +546,13 @@ def fd_activation_domain_count_violation(
     human-readable reason on violation, ``None`` when the count is
     acceptable.
     """
-    min_domains = npcs + 2
+    min_domains = fd_activation_min_domains(npcs, ndcs)
     if distinct_domain_count < min_domains:
+        rule = ("n+k" if ndcs + npcs >= npcs + 2 else "k+2")
         return (
-            f"failure domains are enabled with npcs={npcs}, which requires at "
-            f"least {min_domains} distinct failure domains (2 domains is not "
-            f"supported at any npcs level); currently have "
+            f"failure domains are enabled with ndcs={ndcs}, npcs={npcs}, which "
+            f"requires at least {min_domains} distinct failure domains ({rule}; "
+            f"2 domains is not supported at any npcs level); currently have "
             f"{distinct_domain_count}. Add hosts in additional domains, or "
             f"disable failure domains, then activate.")
     return None

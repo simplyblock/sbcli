@@ -252,6 +252,12 @@ class SNodeClient:
         return self._request("POST", "wipe_block_device",
                              {"device_name": device_name})
 
+    def lun_info(self, wwn):
+        """Multi-attach: the local disks carrying LUN ``wwn``, each with
+        ``has_alceml_signature`` (block 0 read, nothing written).
+        Returns ``(result, error)``."""
+        return self._request("POST", "lun_info", {"wwn": wwn})
+
     def rescan_block_device(self, device_path):
         """Re-read the size of a grown whole-disk block device (lblk).
 

@@ -7,7 +7,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from simplyblock_core import constants, index_ops, utils
+from simplyblock_core import constants, floors, index_ops, utils
 from simplyblock_core.controllers import (
     activation_gate,
     events_controller,
@@ -1043,11 +1043,17 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
         logger.error(mgs)
         return False, mgs
 
-    if ndcs or npcs:
-        if ndcs+npcs > len(online_nodes):
-            mgs = f"Online storage nodes: {len(online_nodes)} are less than the required LVol geometry: {(ndcs+npcs)}"
-            logger.error(mgs)
-            return False, mgs
+    # Resource floors (simplyblock_core.floors) for the volume's effective
+    # scheme -- its own ndcs/npcs when given, the cluster's otherwise --
+    # judged on the ONLINE nodes, their data devices and (when used) failure
+    # domains. The refusal names the violated floor.
+    floor_violations = floors.evaluate(cl, snodes, ndcs=ndcs, npcs=npcs, online_nodes=online_nodes)
+    if floor_violations:
+        eff_ndcs, eff_npcs = floors.scheme(cl, ndcs, npcs)
+        mgs = (f"Cannot create the volume: the cluster is below the resource floors for the "
+               f"{eff_ndcs}+{eff_npcs} scheme: " + "; ".join(floor_violations))
+        logger.error(mgs)
+        return False, mgs
 
     if cluster_size_total <= 0:
         # Every online device reported zero usable capacity: no meaningful

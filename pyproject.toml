@@ -51,6 +51,11 @@ sbcli-dev = "simplyblock_cli.cli:main"
 simplyblock-service = "simplyblock_core.services.__main__:main"
 simplyblock-task-runner = "simplyblock_core.services.task_runners:main"
 
+# Storage-array plugins of the multi-attach array LUN mode
+# (simplyblock_core.array); the name is the value of Cluster.array_plugin.
+[project.entry-points."simplyblock.array_plugins"]
+aws-ebs = "simplyblock_core.array.aws_ebs:AwsEbsPlugin"
+
 [dependency-groups]
 test = [
     "mock",

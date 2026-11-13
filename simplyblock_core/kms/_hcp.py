@@ -6,7 +6,7 @@ import hvac
 import hvac.exceptions
 from pydantic import SecretStr
 
-from ._base import KMS
+from ._base import KMS, secret_plaintext, secret_wrapped
 from ._exceptions import KMSException
 
 logger = logging.getLogger(__name__)
@@ -135,5 +135,38 @@ class HCPClient(KMS):
     def delete_key_encryption_key(self, name: str) -> None:
         try:
             self.client.secrets.transit.delete_key(name=name, mount_point=self.transit_mount)
+        except hvac.exceptions.VaultError as e:
+            raise KMSException("Request failed") from e
+
+    # Generic secrets live in the kv v2 mount under the path itself (DEKs use
+    # the same mount, under cluster/<id>/lvol|backup/...; array credentials
+    # under cluster/<id>/array/<array id>, so the two never collide).
+
+    def put_secret(self, path: str, data: dict) -> None:
+        try:
+            self.client.secrets.kv.v2.create_or_update_secret(
+                path=path, secret=secret_plaintext(data), mount_point=self.kv_mount,
+            )
+        except hvac.exceptions.VaultError as e:
+            raise KMSException("Request failed") from e
+
+    def get_secret(self, path: str) -> dict:
+        try:
+            data = self.client.secrets.kv.v2.read_secret_version(
+                path=path, mount_point=self.kv_mount, raise_on_deleted_version=True,
+            )['data']['data']
+        except hvac.exceptions.InvalidPath as e:
+            raise KMSException(f"No secret found at {path}") from e
+        except hvac.exceptions.VaultError as e:
+            raise KMSException("Request failed") from e
+        return secret_wrapped(data)
+
+    def delete_secret(self, path: str) -> None:
+        try:
+            self.client.secrets.kv.v2.delete_metadata_and_all_versions(
+                path=path, mount_point=self.kv_mount,
+            )
+        except hvac.exceptions.InvalidPath:
+            return
         except hvac.exceptions.VaultError as e:
             raise KMSException("Request failed") from e

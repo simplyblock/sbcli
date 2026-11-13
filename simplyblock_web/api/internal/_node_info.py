@@ -158,16 +158,23 @@ def _google_info() -> dict | None:
 
 
 def _amazon_info() -> dict | None:
+    # IMDSv2 directly: ec2_metadata.EC2Metadata no longer takes a session
+    # (TypeError, so this returned None on every AWS instance).
     try:
-        import ec2_metadata
-        session = requests.session()
-        data = ec2_metadata.EC2Metadata(session=session).instance_identity_document  # type: ignore[call-arg]
+        token = requests.put("http://169.254.169.254/latest/api/token", timeout=2,
+                             headers={"X-aws-ec2-metadata-token-ttl-seconds": "60"}).text
+        data = requests.get("http://169.254.169.254/latest/dynamic/instance-identity/document",
+                            timeout=2, headers={"X-aws-ec2-metadata-token": token}).json()
         return {
             "id": data["instanceId"],
             "type": data["instanceType"],
             "cloud": "amazon",
             "ip": data["privateIp"],
             "public_ip": "",
+            # Multi-attach clusters on EBS (simplyblock_core.array.aws_ebs):
+            # volumes attach only within their zone.
+            "availability_zone": data.get("availabilityZone", ""),
+            "region": data.get("region", ""),
         }
     except Exception:
         return None

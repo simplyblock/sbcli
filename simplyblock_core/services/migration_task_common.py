@@ -9,7 +9,7 @@ migrate and when they are allowed to start.
 import errno
 from datetime import UTC, datetime
 
-from simplyblock_core import db_controller, storage_node_ops, utils
+from simplyblock_core import db_controller, floors, storage_node_ops, utils
 from simplyblock_core.controllers import (
     activation_gate,
     sync_replication_controller,
@@ -491,13 +491,26 @@ def needs_relaxed_placement(member_nodes, ndcs, npcs):
     """Whether a migration on a cluster of ``member_nodes`` must run relaxed.
 
     Strict placement puts every chunk of a stripe on a different node. A
-    1- or 2-node cluster, or one with fewer nodes than chunks per stripe,
-    has no such placement, so a strict migration has nowhere to move data
-    and never completes; relocation then needs a third node. ultra already
-    relaxes writes in that case on its own, but migrations only relax when
-    asked (``relaxed_mode``, default false).
+    1- or 2-node cluster, or one with no more nodes than chunks per stripe,
+    has no such placement with a node to move to: with EXACTLY ndcs+npcs
+    member nodes every node already holds a chunk of every stripe, so a
+    strict migration away from one of them has nowhere to put the chunk
+    and never completes (a dead end once a node is down -- hence ``<=``, not
+    ``<``). ultra already relaxes writes in that case on its own, but
+    migrations only relax when asked (``relaxed_mode``, default false).
     """
-    return member_nodes <= 2 or member_nodes < ndcs + npcs
+    return member_nodes <= 2 or member_nodes <= ndcs + npcs
+
+
+def migration_affinity_floor(cluster):
+    """The data plane's placement anti-affinity floor for a migration on
+    ``cluster`` (a cluster record or its id): ``"relaxed"`` when its data
+    devices are protected below simplyblock (``raid_devices``), ``"device"``
+    otherwise. Sent as ``affinity_floor`` beside ``relaxed_mode`` once
+    constants.DISTR_AFFINITY_FLOOR_RPC is on."""
+    if isinstance(cluster, str):
+        cluster = db.get_cluster_by_id(cluster)
+    return floors.migration_affinity_floor(cluster)
 
 
 def migration_relaxed(cluster_id):

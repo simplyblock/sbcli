@@ -51,6 +51,9 @@ def add_cluster():
     max_queue_size = cl_data.get('max_queue_size', 128)
     inflight_io_threshold = cl_data.get('inflight_io_threshold', 4)
     strict_node_anti_affinity = cl_data.get('strict_node_anti_affinity', False)
+    raid_devices = bool(cl_data.get('raid_devices', False))
+    multi_attach = bool(cl_data.get('multi_attach', False))
+    ftt = cl_data.get('ftt')
     is_single_node = cl_data.get('is_single_node', False)
     client_data_nic = cl_data.get('client_data_nic', "")
     max_fault_tolerance = min(distr_npcs, 2) if distr_npcs >= 1 else 1
@@ -67,6 +70,9 @@ def add_cluster():
         cr_name, cr_namespace, cr_plural, fabric, client_data_nic=client_data_nic,
         max_fault_tolerance=max_fault_tolerance, backup_config=backup_config,
         nvmf_base_port=nvmf_base_port, rpc_base_port=rpc_base_port, snode_api_port=snode_api_port,
+        raid_devices=raid_devices,
+        multi_attach=multi_attach,
+        ftt=ftt,
         kms_settings=cl_data.get('kms_settings'),
         lvol_geometry_enabled=lvol_geometry_enabled,
     ))

@@ -8,11 +8,14 @@ import time
 from pathlib import Path
 from typing import Any
 
+from pydantic import SecretStr
+
 from simplyblock_cli.alerting_config_parser import parse_alerting_config
 from simplyblock_core import cluster_ops, constants, db_controller, utils
 from simplyblock_core import mgmt_node_ops as mgmt_ops
 from simplyblock_core import storage_node_ops as storage_ops
 from simplyblock_core.controllers import (
+    array_controller,
     device_controller,
     fdb_backup_controller,
     health_controller,
@@ -267,6 +270,15 @@ class CLIWrapperBase:
         lblk_journal_device = getattr(args, 'lblk_journal_device', False)
         if lblk_journal_device and not lblk:
             self.parser.error("--lblk-journal-device requires --lblk")
+        lblk_journal_only = getattr(args, 'lblk_journal_only', False)
+        if lblk_journal_only:
+            if not lblk:
+                self.parser.error("--lblk-journal-only requires --lblk")
+            if lblk_journal_device:
+                self.parser.error("--lblk-journal-only and --lblk-journal-device exclude each other")
+            if not (blk_names or blk_serials):
+                self.parser.error("--lblk-journal-only needs the journal disk named with "
+                                  "--blk-names or --blk-serials")
         lblk_selection = None
         if use_lblk:
             if not lblk:
@@ -280,6 +292,7 @@ class CLIWrapperBase:
                 "names_exclude": [str(x) for x in blk_names_exclude.split(',')] if blk_names_exclude else None,
                 "serials": [str(x) for x in blk_serials.split(',')] if blk_serials else None,
                 "journal_device": bool(lblk_journal_device),
+                "journal_only": bool(lblk_journal_only),
             }
         # The core split is decided by the cluster's vcpu-count when the node
         # is added or restarted; here the default heuristic lays out a usable
@@ -502,20 +515,6 @@ class CLIWrapperBase:
 
     def storage_node__restart_device(self, sub_command, args):
         return device_controller.restart_device(args.device_id, args.force)
-
-    def storage_node__resize_device(self, sub_command, args):
-        try:
-            result = device_controller.resize_device(args.device_id)
-        except ValueError as e:
-            print(e)
-            return False
-        if not result["resized"]:
-            return f"Device size unchanged: {utils.humanbytes(result['new_size'])}"
-        out = (f"Device grown from {utils.humanbytes(result['old_size'])} "
-               f"to {utils.humanbytes(result['new_size'])}")
-        if result["warning"]:
-            out += f"\nWarning: {result['warning']}"
-        return out
 
     def storage_node__add_device(self, sub_command, args):
         return device_controller.add_device(args.device_id)
@@ -830,25 +829,68 @@ class CLIWrapperBase:
         return True
 
     def cluster__grow_devices(self, sub_command, args):
-        result = device_controller.grow_cluster_devices(
-            args.cluster_id, rebalance=not getattr(args, 'no_rebalance', False))
-        lines = [f"{r['device_id']}: {utils.humanbytes(r['old_size'])} -> {utils.humanbytes(r['new_size'])}"
-                 for r in result["devices"] if r["resized"]]
-        lines += [f"{dev_id}: failed: {err}" for dev_id, err in result["errors"].items()]
-        rebalance = result.get("rebalance")
-        if rebalance and rebalance["started"]:
-            lines.append("The devices have grown unevenly: device weights set to the new sizes, "
-                         "cluster rebalancing started.")
-        elif rebalance and rebalance["weights_updated"]:
-            lines.append(f"The devices have grown unevenly: device weights set to the new sizes. "
-                         f"{rebalance['reason']}")
-        elif rebalance:
-            lines.append(f"Warning: the devices have grown unevenly. {rebalance['reason']}")
-        elif not result["uniform"]:
-            lines.append("Warning: the data devices of the cluster have grown unevenly; the added capacity is "
-                         "only fully usable once all of them have grown by the same factor, or after "
-                         "grow-devices without --no-rebalance has updated the weights.")
-        return "\n".join(lines) or "No device has grown"
+        lun_factor = getattr(args, 'lun_factor', None)
+        if lun_factor is not None:
+            try:
+                lun_factor = float(lun_factor)
+            except ValueError:
+                print(f"--lun-factor must be a number, not {lun_factor!r}")
+                return False
+        extra = {"lun_factor": lun_factor} if lun_factor is not None else {}
+        try:
+            result = device_controller.grow_cluster_devices(args.cluster_id, **extra)
+        except ValueError as e:
+            print(e)
+            return False
+        lines = [f"LUN {r['lun_id']} of {dev_id}: {utils.humanbytes(r['old_size'])} -> "
+                 f"{utils.humanbytes(r['new_size'])} at the array"
+                 for dev_id, r in (result.get("luns") or {}).items()]
+        lines += [f"{dev_id}: {err}" for dev_id, err in result["errors"].items()]
+        if not result["grown"]:
+            lines.append(result["reason"])
+            return "\n".join(lines)
+        lines.append(f"All data devices grown by factor {result['factor']:.4f}:")
+        for r in result["devices"]:
+            line = f"{r['device_id']}: {utils.humanbytes(r['old_size'])} -> {utils.humanbytes(r['new_size'])}"
+            if r["unused_size"]:
+                line += f" ({utils.humanbytes(r['unused_size'])} of the block device unused)"
+            lines.append(line)
+        return "\n".join(lines)
+
+    def cluster__set_array(self, sub_command, args):
+        options = {}
+        if args.options:
+            try:
+                options = json.loads(args.options)
+            except json.JSONDecodeError as e:
+                raise ValueError(f"--options is not valid JSON: {e}")
+            if not isinstance(options, dict):
+                raise ValueError("--options must be a JSON object")
+        credentials = {}
+        if args.credentials_file:
+            try:
+                raw = json.loads(Path(args.credentials_file).read_text())
+            except (OSError, json.JSONDecodeError) as e:
+                # Never the file content: it is the secret.
+                raise ValueError(f"--credentials-file could not be read as JSON: {type(e).__name__}")
+            if not isinstance(raw, dict) or not all(isinstance(v, str) for v in raw.values()):
+                raise ValueError("--credentials-file must hold a JSON object of strings")
+            # Wrapped at the boundary; unwrapped only by the KMS and the plugin.
+            credentials = {str(k): SecretStr(v) for k, v in raw.items()}
+        view = array_controller.register_array(
+            args.cluster_id, args.plugin, args.endpoint or "", options, credentials,
+            int(args.lun_size or 0))
+        return _format_result([view], json=getattr(args, "json", False))
+
+    def cluster__get_array(self, sub_command, args):
+        arrays = array_controller.get_arrays(args.cluster_id)
+        if not arrays:
+            return "No array registered"
+        return _format_result(arrays, json=getattr(args, "json", False))
+
+    def cluster__remove_array(self, sub_command, args):
+        array_controller.delete_array(args.cluster_id, args.array_id, force=args.force)
+        return True
 
     def cluster__complete_expand(self, sub_command, args):
         cluster_ops.cluster_expand(args.cluster_id)
@@ -1963,6 +2005,9 @@ class CLIWrapperBase:
         max_queue_size = args.max_queue_size
         inflight_io_threshold = args.inflight_io_threshold
         strict_node_anti_affinity = args.strict_node_anti_affinity
+        raid_devices = getattr(args, 'raid_devices', False)
+        multi_attach = getattr(args, 'multi_attach', False)
+        ftt = getattr(args, 'ftt', None)
         is_single_node = args.is_single_node
         client_data_nic = args.client_data_nic
         enable_failure_domain = getattr(args, 'enable_failure_domain', False)
@@ -1994,6 +2039,9 @@ class CLIWrapperBase:
             sync_replication=getattr(args, 'sync_replication', False),
             page_copy=getattr(args, 'page_copy', False),
             md_journal=md_journal,
+            raid_devices=raid_devices,
+            multi_attach=multi_attach,
+            ftt=ftt,
         )
 
     def cluster_create(self, args):
@@ -2023,6 +2071,9 @@ class CLIWrapperBase:
         inflight_io_threshold = args.inflight_io_threshold
         disable_monitoring = args.disable_monitoring
         strict_node_anti_affinity = args.strict_node_anti_affinity
+        raid_devices = getattr(args, 'raid_devices', False)
+        multi_attach = getattr(args, 'multi_attach', False)
+        ftt = getattr(args, 'ftt', None)
         name = args.name
         tls_secret = args.tls_secret
         ingress_host_source = args.ingress_host_source
@@ -2073,6 +2124,9 @@ class CLIWrapperBase:
             sync_replication=getattr(args, 'sync_replication', False),
             page_copy=getattr(args, 'page_copy', False),
             md_journal=md_journal,
+            raid_devices=raid_devices,
+            multi_attach=multi_attach,
+            ftt=ftt,
         )
 
     def query_yes_no(self, question, default="yes"):

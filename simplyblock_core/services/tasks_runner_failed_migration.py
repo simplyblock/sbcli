@@ -45,7 +45,8 @@ def task_runner(task):
             task.function_params["distr_name"], device.cluster_device_order,
             mig.qos_high_priority(snode.cluster_id),
             job_size=constants.MIG_JOB_SIZE, jobs=constants.MIG_PARALLEL_JOBS,
-            relaxed_mode=mig.migration_relaxed(snode.cluster_id)))
+            relaxed_mode=mig.migration_relaxed(snode.cluster_id),
+            affinity_floor=mig.migration_affinity_floor(snode.cluster_id)))
         if started is None:
             raise TaskAbort("canceled while starting migration")
         task = started

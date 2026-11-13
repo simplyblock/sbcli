@@ -317,7 +317,7 @@ def get_block_devices_info() -> list[dict]:
 
     logger.debug("function:get_block_devices_info start")
     out, err, rc = shell_utils.run_command(
-        "lsblk -J -b -o NAME,TYPE,SIZE,SERIAL,WWN,MOUNTPOINT,MODEL,ROTA,RO,VENDOR,PKNAME,PARTUUID")
+        "lsblk -J -b -o NAME,KNAME,TYPE,SIZE,SERIAL,WWN,MOUNTPOINT,MODEL,ROTA,RO,VENDOR,PKNAME,PARTUUID")
     if rc != 0:
         logger.error("Error running lsblk: %s", err)
         return []
@@ -350,8 +350,16 @@ def get_block_devices_info() -> list[dict]:
             serial = "SYN-" + hashlib.sha1(seed.encode()).hexdigest()[:16]
             synthetic = True
         numa_node = int(_read_sysfs(f"/sys/block/{name}/device/numa_node") or -1)
+        # The control plane picks the AIO bdev block size of a new device
+        # from these (utils.choose_aio_block_size): 4096 unless impossible.
+        logical_bs = _logical_block_size(name)
+        physical_bs = _physical_block_size(name)
         devices.append({
             "name": name,
+            # Kernel name (dm-N for a device-mapper node, whose NAME is the
+            # map name) and TYPE: the control plane serves device-mapper
+            # nodes through bdev_uring (utils.lblk_io_engine_for).
+            "kname": dev.get("kname") or name,
             "device_path": f"/dev/{name}",
             "type": dev.get("type"),
             "size": int(dev.get("size") or 0),
@@ -369,6 +377,8 @@ def get_block_devices_info() -> list[dict]:
             "by_id_path": by_id_path,
             "by_id_paths": by_id_paths,
             "numa_node": numa_node,
+            "logical_block_size": logical_bs,
+            "physical_block_size": physical_bs,
         })
         for child in children:
             if child.get("type") != "part":
@@ -385,6 +395,7 @@ def get_block_devices_info() -> list[dict]:
                 part_synthetic = True
             devices.append({
                 "name": part_name,
+                "kname": child.get("kname") or part_name,
                 "device_path": f"/dev/{part_name}",
                 "type": "part",
                 "size": int(child.get("size") or 0),
@@ -405,6 +416,9 @@ def get_block_devices_info() -> list[dict]:
                 "by_id_path": part_paths[0] if part_paths else "",
                 "by_id_paths": part_paths,
                 "numa_node": numa_node,
+                "logical_block_size": logical_bs,
+                "physical_block_size": physical_bs,
+                "start_bytes": _partition_start_bytes(name, part_name),
             })
     logger.debug("function:get_block_devices_info end")
     return devices
@@ -438,6 +452,43 @@ def simplyblock_data_signature(device_name: str) -> bool | None:
     return head.startswith(ALCEML_STORAGE_SIGNATURE)
 
 
+def _normalize_wwn(value: str) -> str:
+    v = (value or "").strip().lower()
+    return v.removeprefix("0x")
+
+
+def find_lun_devices(wwn: str) -> list[dict]:
+    """The whole disks of this host that carry LUN ``wwn`` (multi-attach array
+    LUN mode): every lsblk disk whose WWN, or serial (the inventory falls back
+    to the WWN for it), matches, case-insensitive and with or without ``0x``.
+
+    One dict per match: ``name``, ``device_path``, ``by_id_path``,
+    ``by_id_paths``, ``size`` (bytes), ``ro`` and ``has_alceml_signature`` --
+    True when block 0 carries the alceml storage signature, False when it was
+    read and does not, None when it could not be read (a fenced or failed
+    path). Read-only: nothing is written to the device. Several matches mean
+    several host paths to the LUN; the caller chooses."""
+    want = _normalize_wwn(wwn)
+    if not want:
+        return []
+    found = []
+    for dev in get_block_devices_info():
+        if dev.get("type") != "disk":
+            continue
+        if want not in (_normalize_wwn(dev.get("wwn", "")), _normalize_wwn(dev.get("serial", ""))):
+            continue
+        found.append({
+            "name": dev["name"],
+            "device_path": dev["device_path"],
+            "by_id_path": dev.get("by_id_path", ""),
+            "by_id_paths": dev.get("by_id_paths", []),
+            "size": dev.get("size", 0),
+            "ro": dev.get("ro", False),
+            "has_alceml_signature": simplyblock_data_signature(dev["name"]),
+        })
+    return found
+
+
 def _logical_block_size(disk_name: str) -> int:
     """Logical sector size of a disk, in bytes: the unit sgdisk counts in.
     sysfs reports partition start and size in 512-byte units regardless."""
@@ -446,6 +497,25 @@ def _logical_block_size(disk_name: str) -> int:
     except ValueError:
         size = 512
     return size if size > 0 else 512
+
+
+def _physical_block_size(disk_name: str) -> int:
+    """Physical sector size of a disk, in bytes (informational: a 512e
+    device reports 512 logical / 4096 physical)."""
+    try:
+        size = int(_read_sysfs(f"/sys/block/{disk_name}/queue/physical_block_size") or 0)
+    except ValueError:
+        size = 0
+    return size if size > 0 else _logical_block_size(disk_name)
+
+
+def _partition_start_bytes(disk_name: str, part_name: str) -> int | None:
+    """Byte offset of a partition on its disk; sysfs counts the start in
+    512-byte units whatever the logical block size. None when unreadable."""
+    try:
+        return int(_read_sysfs(f"/sys/block/{disk_name}/{part_name}/start")) * 512
+    except ValueError:
+        return None
 
 
 def split_partition_partner(part: dict, devices: list[dict]) -> tuple[dict, dict] | None:
@@ -784,7 +854,9 @@ def rescan_block_device(device_path: str) -> dict:
     SCSI disks (FC, iSCSI, SAS) are rescanned through
     ``/sys/block/<dev>/device/rescan``; NVMe namespaces through
     ``rescan_controller`` of every controller that reaches them, which also
-    covers the head device of native NVMe multipathing. Other devices, such
+    covers the head device of native NVMe multipathing. A dm-multipath map
+    (``dm-N`` with an ``mpath-`` uuid) has each of its path devices
+    rescanned, then ``multipathd resize map``. Other devices, such
     as virtio-blk, pick up a resize on their own, so their size is just
     read. Partitions are refused: growing one is a partition-table change,
     not a rescan.
@@ -806,19 +878,39 @@ def rescan_block_device(device_path: str) -> dict:
         raise ValueError(f"{name} is a partition, which cannot be resized online")
 
     rescanned: list[str] = []
-    if _re.match(r"^nvme\d+n\d+$", name):
-        # A plain namespace links device -> its controller; the head device
-        # of native multipathing links device -> the subsystem, whose
-        # controllers are its nvme* children.
-        candidates = [f"{sys_dev}/device/rescan_controller"]
-        candidates += sorted(_glob.glob(f"{sys_dev}/device/nvme*/rescan_controller"))
-        for path in candidates:
-            if os.path.exists(path):
-                _write_sysfs(path, "1")
-                rescanned.append(path)
-    elif os.path.exists(f"{sys_dev}/device/rescan"):
-        _write_sysfs(f"{sys_dev}/device/rescan", "1")
-        rescanned.append(f"{sys_dev}/device/rescan")
+
+    def _rescan_disk(disk: str, sys_disk: str) -> None:
+        if _re.match(r"^nvme\d+n\d+$", disk):
+            # A plain namespace links device -> its controller; the head
+            # device of native multipathing links device -> the subsystem,
+            # whose controllers are its nvme* children.
+            candidates = [f"{sys_disk}/device/rescan_controller"]
+            candidates += sorted(_glob.glob(f"{sys_disk}/device/nvme*/rescan_controller"))
+            for path in candidates:
+                if os.path.exists(path):
+                    _write_sysfs(path, "1")
+                    rescanned.append(path)
+        elif os.path.exists(f"{sys_disk}/device/rescan"):
+            _write_sysfs(f"{sys_disk}/device/rescan", "1")
+            rescanned.append(f"{sys_disk}/device/rescan")
+
+    if _re.match(r"^dm-\d+$", name):
+        # A dm-multipath map (array LUN over several paths): every path
+        # device is rescanned first, then multipathd resizes the map, which
+        # only grows once all its paths report the new size.
+        slaves = sorted(os.listdir(f"{sys_dev}/slaves")) if os.path.isdir(f"{sys_dev}/slaves") else []
+        for slave in slaves:
+            if _re.match(r"^[a-zA-Z0-9_\-]+$", slave):
+                _rescan_disk(slave, f"/sys/class/block/{slave}")
+        map_name = _read_sysfs(f"{sys_dev}/dm/name")
+        uuid = _read_sysfs(f"{sys_dev}/dm/uuid")
+        if map_name and uuid.startswith("mpath-") and _re.match(r"^[A-Za-z0-9_.\-]+$", map_name):
+            out, err, rc = shell_utils.run_command(f"multipathd resize map {map_name}")
+            if rc != 0 or "fail" in (out or "").lower():
+                raise ValueError(f"multipathd resize map {map_name} failed: {err or out}")
+            rescanned.append(f"multipathd:{map_name}")
+    else:
+        _rescan_disk(name, sys_dev)
 
     sectors = _read_sysfs(f"{sys_dev}/size")
     if not sectors:
