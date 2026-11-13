@@ -1,0 +1,36 @@
+name: OpenAPI schema
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    name: Export v2 OpenAPI schema
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Set up Python
+      uses: actions/setup-python@v7
+      with:
+        python-version: '3.11'
+        cache: 'pip'
+
+    - name: Install tox
+      run: pip install tox tox-uv
+
+    - name: Export schema
+      run: tox run -e openapi
+
+    - name: Upload schema
+      uses: actions/upload-artifact@v4
+      with:
+        name: openapi-${{ github.sha }}
+        path: openapi.json
+        retention-days: 90
