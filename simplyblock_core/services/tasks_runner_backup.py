@@ -414,6 +414,67 @@ def _run_merge(task):
     raise TaskDefer("Merge in progress")
 
 
+def _run_delete(task):
+    """Delete the backups named by ``function_params["backup_ids"]``: remove
+    their S3 objects, then their manifests, then their records -- the reverse
+    of the order ``backup_controller._start_backup_delete`` claimed them in
+    (record marked DELETING, then manifest marked DELETING, then this task).
+
+    A backup already gone, or no longer DELETING, is skipped: a prior cycle
+    of this same task already retired it, or (the group-backup path) a
+    different caller did.
+
+    Single-cycle, unlike backup/restore/merge: ``bdev_lvol_s3_delete`` has no
+    paired stat RPC to poll in ``rpc_client.py``, so it is treated as
+    synchronous, exactly as its one existing client method already models it.
+    """
+    backup_ids = task.function_params.get("backup_ids") or []
+    if not backup_ids:
+        raise TaskAbort("Missing backup_ids")
+
+    backups = []
+    for backup_id in backup_ids:
+        try:
+            backup = db.get_backup_by_id(backup_id)
+        except KeyError:
+            continue
+        if backup.status != Backup.STATUS_DELETING:
+            continue
+        backups.append(backup)
+
+    if not backups:
+        set_result(task, "Nothing left to delete")
+        return
+
+    snode = _online_node(backups[0].node_id)
+    rpc_client = snode.rpc_client(timeout=30)
+
+    try:
+        ret = rpc_client.bdev_lvol_s3_delete([b.s3_id for b in backups])
+    except RPCException as e:
+        _defer_if_busy(e)
+        raise TaskRetry(f"RPC error: {e}")
+    if not ret:
+        raise TaskRetry("bdev_lvol_s3_delete RPC failed")
+
+    # The data is confirmed gone: metadata follows data on the way out, the
+    # reverse of how the claim marked intent before any of this ran.
+    for backup in backups:
+        try:
+            backup_controller.delete_manifest(backup)
+        except (ManifestError, PreconditionError) as e:
+            # The S3 delete already happened and is not reversible, so the
+            # task cannot be aborted here -- retry the manifest/record cleanup.
+            raise TaskRetry(f"Delete done, manifest cleanup failed: {e}")
+
+        backup_controller.cleanup_backup_kms_keys([backup])
+        backup_events.backup_deleted(backup.cluster_id, backup.node_id, backup)
+        backup.remove(db.kv_store)
+
+    set_result(task, "Backups deleted")
+    logger.info(f"Deleted backups: {', '.join(b.uuid for b in backups)}")
+
+
 def _run_group_backup_commit(task):
     """Commit a consistency-group backup once its members are done.
 
@@ -468,6 +529,7 @@ _HANDLERS = {
     JobSchedule.FN_BACKUP: _run_backup,
     JobSchedule.FN_BACKUP_RESTORE: _run_restore,
     JobSchedule.FN_BACKUP_MERGE: _run_merge,
+    JobSchedule.FN_BACKUP_DELETE: _run_delete,
     JobSchedule.FN_GROUP_BACKUP_COMMIT: _run_group_backup_commit,
     JobSchedule.FN_GROUP_BACKUP_DELETE: _run_group_backup_delete,
 }
@@ -558,6 +620,31 @@ def finalize_resource(task):
             gb.error_message = reason
             gb.write_to_db()
 
+    elif task.function_name == JobSchedule.FN_BACKUP_DELETE:
+        # The delete did not finish (timeout, retry ceiling, abort,
+        # cancellation): every backup this task still finds DELETING had its
+        # S3 objects left untouched -- the RPC either never ran or never
+        # confirmed success, and _run_delete only removes a manifest/record
+        # after it has -- so each is reverted to COMPLETED, record and
+        # manifest both, the same way an unfinished merge leaves its old
+        # backup intact.
+        for backup_id in task.function_params.get("backup_ids") or []:
+            try:
+                backup = db.get_backup_by_id(backup_id)
+            except KeyError:
+                continue
+            if backup.status != Backup.STATUS_DELETING:
+                continue
+            try:
+                backup_controller.revert_manifest_deleting(backup)
+            except (ManifestError, PreconditionError, KeyError) as e:
+                logger.error(
+                    f"Backup {backup.uuid} reverted to COMPLETED, but its "
+                    f"manifest could not be marked active and still says "
+                    f"deleting: {e}")
+            backup.status = Backup.STATUS_COMPLETED
+            backup.write_to_db()
+
     elif task.function_name == JobSchedule.FN_GROUP_BACKUP_DELETE:
         group_backup_id = task.function_params.get("group_backup_id")
         if not group_backup_id:
@@ -582,7 +669,8 @@ SPEC = RunnerSpec(
 #: "max retry reached (8/8)" and would end any other task older than the
 #: backup timeout (2026-09-29).
 BACKUP_FUNCTIONS = (JobSchedule.FN_BACKUP, JobSchedule.FN_BACKUP_RESTORE,
-                    JobSchedule.FN_BACKUP_MERGE, JobSchedule.FN_GROUP_BACKUP_COMMIT,
+                    JobSchedule.FN_BACKUP_MERGE, JobSchedule.FN_BACKUP_DELETE,
+                    JobSchedule.FN_GROUP_BACKUP_COMMIT,
                     JobSchedule.FN_GROUP_BACKUP_DELETE)
 
 
