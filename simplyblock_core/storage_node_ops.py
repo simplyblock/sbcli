@@ -4718,9 +4718,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                                 cluster_mode=cluster.mode)
             return False
 
-        hostname = node_info['hostname'] + f"_{rpc_port}"
         BASE_NQN = cluster.nqn.split(":")[0]
-        subsystem_nqn = f"{BASE_NQN}:{hostname}"
         # creating storage node object
         snode = StorageNode()
         snode.uuid = node_uuid
@@ -4743,20 +4741,18 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         # lblk mode: persist the configured selection (with serial identity)
         # so restart can re-resolve devices without the host config file.
         snode.lblk_devices = lblk_configured if lblk_mode else []
-        snode.hostname = hostname
-        snode.k8s_node_name = node_info['hostname']
-        snode.host_nqn = subsystem_nqn
-        snode.subsystem = subsystem_nqn
         snode.data_nics = data_nics
         snode.networks = list(networks or [])
-        snode.mgmt_ip = mgmt_ip
-        snode.primary_ip = mgmt_ip
         snode.rpc_port = rpc_port
+        # The host identity, from the one place a relocation gets it too.
+        record_host(snode, node_addr, node_info, iface_names=iface_name)
+        snode.primary_ip = snode.mgmt_ip
+        snode.host_nqn = f"{BASE_NQN}:{snode.hostname}"
+        snode.subsystem = snode.host_nqn
         snode.rpc_username = rpc_user
         snode.rpc_password = rpc_pass
         snode.cluster_id = cluster_id
         snode.site = site
-        snode.api_endpoint = node_addr
         snode.host_secret = SecretStr(utils.generate_string(20))
         snode.ctrl_secret = SecretStr(utils.generate_string(20))
         snode.number_of_distribs = number_of_distribs
@@ -9123,15 +9119,18 @@ def _reconcile_discovered_devices(snode, nvme_devs):
     return new_devices
 
 
-def record_host(snode, node_address, node_info):
+def record_host(snode, node_address, node_info, iface_names=()):
     """Point the node's record at the host whose agent answers at ``node_address``.
 
-    The same identity the add gives a node: ``api_endpoint`` is the agent's
-    stable name, ``mgmt_ip`` the worker's address, ``hostname`` the worker's
-    name with the RPC port suffix and ``k8s_node_name`` the worker's name. An
-    agent off the host network (attached networks, pod network) cannot see the
-    worker's interfaces and reports the worker's address itself (``host_ip``);
-    on the host network its own address is the worker's.
+    The one place a record gets its host identity, for the add and for a
+    relocation alike: ``api_endpoint`` is the agent's stable name, ``mgmt_ip``
+    the worker's address, ``hostname`` the worker's name with the RPC port
+    suffix and ``k8s_node_name`` the worker's name. An agent off the host
+    network (attached networks, pod network) cannot see the worker's
+    interfaces and reports the worker's address itself (``host_ip``). On the
+    host network the worker's address is that of the first of ``iface_names``
+    with an address, the management interface(s) the add was given; a
+    relocation has only the new address and takes what it resolves to.
 
     A relocation (StorageNodeOps Migrate) restarts the node with another
     host's address. Until 2026-11-12 the restart stored whatever that address
@@ -9142,10 +9141,11 @@ def record_host(snode, node_address, node_info):
     host of its own. The hostname lost its port suffix the same way.
     """
     snode.api_endpoint = node_address
-    if snode.on_pod_network:
-        ip_iface = utils.get_mgmt_ip(node_info, [], snode.networks, snode.pod_network)
+    if snode.on_pod_network or iface_names:
+        ip_iface = utils.get_mgmt_ip(node_info, iface_names, snode.networks, snode.pod_network)
         if not ip_iface:
-            raise ValueError(f"the agent at {node_address} reports no host address")
+            where = (f" on {iface_names}" if iface_names and not snode.on_pod_network else "")
+            raise ValueError(f"the agent at {node_address} reports no host address{where}")
         snode.mgmt_ip = ip_iface[0]
     else:
         snode.mgmt_ip = utils.resolve_address(node_address)
