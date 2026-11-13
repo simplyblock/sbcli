@@ -646,7 +646,7 @@ def aggregate_group_replication_info(member_infos):
     }
 
 
-def attach_group_policy(group, policy_id):
+def attach_group_policy(group, policy_id, defer_peer_placement=False):
     """Attach a standalone consistency group to a group replication policy so the
     whole group replicates as one unit (design-csi-addons-replication.md §14.4).
 
@@ -658,6 +658,8 @@ def attach_group_policy(group, policy_id):
     membership is what makes the group crash-consistent, so the snapshot monitor
     ships one GROUP snapshot per interval for its members regardless of a policy
     flag.
+
+    ``defer_peer_placement`` is passed to each member's replication_start.
     """
     from simplyblock_core.controllers import replication_policy_controller
     try:
@@ -676,7 +678,7 @@ def attach_group_policy(group, policy_id):
     open_members = [m for m in list_members(group) if not m.get("removed_seq")]
     for member in open_members:
         replication_policy_controller.start_member_replication(
-            member["lvol_id"], pol, target)
+            member["lvol_id"], pol, target, defer_peer_placement=defer_peer_placement)
     logger.info("Consistency group %s attached to replication policy %s "
                 "(%d member(s) replicating)", group.uuid[:8], pol.policy_name,
                 len(open_members))
@@ -744,7 +746,9 @@ def attach_reverse_replication(group, toward_cluster_id, former_policy_name=""):
                        group.group_name, group.cluster_id, toward_cluster_id)
         return None
     try:
-        attach_group_policy(group, pol.get_id())
+        # A promote does not wait on the peer, which after a fail-over is
+        # likely still cut off: the members' replication tasks place them.
+        attach_group_policy(group, pol.get_id(), defer_peer_placement=True)
     except Exception as e:                          # noqa: BLE001 -- the promote stands
         logger.error("Consistency group %s promoted, but attaching it to %s failed: %s",
                      group.group_name, pol.policy_name, e)

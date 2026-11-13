@@ -347,7 +347,7 @@ def _refuse_encrypted(lvol):
             lvol_controller.ENCRYPTED_REPLICATION_REFUSAL.format(lvol.get_id()))
 
 
-def start_member_replication(lvol_id, pol, target):
+def start_member_replication(lvol_id, pol, target, defer_peer_placement=False):
     """Point one volume at *pol* and start replicating to *target*, WITHOUT
     touching consistency-group membership.
 
@@ -358,6 +358,8 @@ def start_member_replication(lvol_id, pol, target):
     calls this for members that ALREADY belong to the group, so re-adding them
     would reset their generation epochs (``add_member_to_group`` stamps a fresh
     ``joined_seq``) and tear the group's snapshot history.
+
+    ``defer_peer_placement`` is passed to replication_start.
     """
     lvol = db.get_lvol_by_id(lvol_id)
     _refuse_encrypted(lvol)
@@ -369,6 +371,7 @@ def start_member_replication(lvol_id, pol, target):
         mode=pol.mode,
         interval_min=pol.interval_min,
         from_policy=True,
+        defer_peer_placement=defer_peer_placement,
     )
     if not ret:
         fresh = db.get_lvol_by_id(lvol_id)

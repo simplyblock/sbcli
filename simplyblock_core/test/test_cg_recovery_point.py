@@ -367,7 +367,7 @@ def _clone_into(db, peer):
 def _record_attach(monkeypatch):
     attached: list[tuple[str, str]] = []
 
-    def attach(group, policy_id):
+    def attach(group, policy_id, defer_peer_placement=False):
         attached.append((group.get_id(), policy_id))
         return group
     monkeypatch.setattr(cgc, "attach_group_policy", attach)

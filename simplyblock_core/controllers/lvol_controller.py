@@ -50,7 +50,7 @@ from simplyblock_core.models.lvol_model import LVol, LVolReplication
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.peer.client import PeerError, peer_for_target
+from simplyblock_core.peer.client import PeerError, PeerUnreachableError, peer_for_target
 from simplyblock_core.peer.protocol import DescribeRequest, PlaceRequest
 from simplyblock_core.prom_client import PromClient
 from simplyblock_core.rpc_client import RPCException, RPCRemoteError
@@ -5028,8 +5028,47 @@ def _place_on_peer(db_controller, lvol, peer, preferred_node):
     return answer.node_id
 
 
+def _place_on_peer_preferring(db_controller, lvol, peer):
+    """_place_on_peer, preferring the co-location this cluster can see: a
+    subsystem sibling or a group member already replicating. The peer keeps
+    that node when it is online.
+
+    Raises:
+        PeerError: as _place_on_peer.
+    """
+    snode = db_controller.get_storage_node_by_id(lvol.node_id)
+    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+    preferred = (_sibling_replication_node(lvol, cluster)
+                 or _group_replication_node_for(lvol, db_controller))
+    return _place_on_peer(db_controller, lvol, peer, preferred)
+
+
+def place_on_peer_destination(lvol):
+    """Place *lvol* on its peer destination, when it replicates there but has
+    no node yet (replication_start deferred the placement). Returns the volume
+    with its node set, or None when it is not such a volume.
+
+    Raises:
+        PeerUnreachableError: the peer still does not answer.
+        PeerError: the peer answers but cannot place the volume.
+    """
+    if lvol.replication_node_id or not lvol.do_replicate:
+        return None
+    db_controller = DBController()
+    peer = _destination_peer(db_controller, lvol, _policy_target_cluster(db_controller, lvol))
+    if peer is None:
+        return None
+    node_id = _place_on_peer_preferring(db_controller, lvol, peer)
+    fresh = db_controller.get_lvol_by_id(lvol.get_id())
+    fresh.replication_node_id = node_id
+    fresh.write_to_db()
+    logger.info("LVol %s placed on node %s of its peer destination", lvol.get_id(), node_id)
+    return fresh
+
+
 def replication_start(lvol_id, replication_cluster_id=None, mode=None, interval_min=None,
-                      from_policy=False, replication_pool_id=None, placement_load=None):
+                      from_policy=False, replication_pool_id=None, placement_load=None,
+                      defer_peer_placement=False):
     """Enable replication for a volume and pick its destination node.
 
     This is the step a replication POLICY performs for you: attaching a policy
@@ -5040,6 +5079,11 @@ def replication_start(lvol_id, replication_cluster_id=None, mode=None, interval_
 
     ``placement_load`` is a _replication_node_load map shared by a batch (a
     migration plan): each pick is reserved in it, so the batch spreads.
+
+    A destination on a peer control plane that does not answer does not fail
+    the start: the volume's first replication task places it once the peer
+    answers. ``defer_peer_placement`` skips asking the peer here at all, for
+    a caller that must not wait on it (the reverse attach of a fail-over).
     """
     db_controller = DBController()
     try:
@@ -5095,16 +5139,19 @@ def replication_start(lvol_id, replication_cluster_id=None, mode=None, interval_
     peer = _destination_peer(db_controller, lvol, replication_cluster_id)
     if not lvol.replication_node_id and peer is not None:
         # The destination's members are on a peer control plane, so the peer
-        # picks one by the same rules (peer.service.place). The co-location
-        # this cluster can see -- a subsystem sibling or a group member already
-        # replicating -- goes along as the preferred node; the peer keeps it
-        # when it is online.
-        snode = db_controller.get_storage_node_by_id(lvol.node_id)
-        cluster = db_controller.get_cluster_by_id(snode.cluster_id)
-        preferred = (_sibling_replication_node(lvol, cluster)
-                     or _group_replication_node_for(lvol, db_controller))
+        # picks one (peer.service.place). Until it has, the volume replicates
+        # with no node: its first replication task places it
+        # (place_on_peer_destination), and waits while the peer does not answer.
+        if defer_peer_placement:
+            logger.info("LVol %s replicates to the peer destination %s; its first "
+                        "replication task places it there", lvol.get_id(), replication_cluster_id)
+            return True
         try:
-            lvol.replication_node_id = _place_on_peer(db_controller, lvol, peer, preferred)
+            lvol.replication_node_id = _place_on_peer_preferring(db_controller, lvol, peer)
+        except PeerUnreachableError as e:
+            logger.warning("The peer destination of lvol %s does not answer (%s); its "
+                           "replication task places it once the peer does", lvol.get_id(), e)
+            return True
         except PeerError as e:
             logger.error("Replication node not found for lvol %s on the peer destination: %s",
                          lvol.get_id(), e)

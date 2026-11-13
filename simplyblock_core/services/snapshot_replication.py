@@ -26,8 +26,10 @@ from simplyblock_core.peer import service as peer_service
 from simplyblock_core.peer.client import (
     LocalPeerClient,
     PeerClient,
+    PeerError,
     PeerNotFoundError,
     PeerRefusedError,
+    PeerUnreachableError,
     peer_for_target,
 )
 from simplyblock_core.peer.protocol import (
@@ -849,6 +851,22 @@ def process_snap_replicate_start(task, snapshot):
                 if descendant is not None:
                     dest_lvol = descendant
                     task.function_params["dest_lvol_id"] = descendant.get_id()
+            if not dest_lvol.replication_node_id:
+                # A volume replicating to a peer control plane that did not
+                # answer when its replication started: place it now, or wait.
+                try:
+                    placed = lvol_controller.place_on_peer_destination(dest_lvol)
+                except PeerUnreachableError as e:
+                    _suspend_for_retry(task, f"the peer destination of {dest_lvol.get_id()} "
+                                             f"does not answer yet ({e}), retrying",
+                                       backoff=True, count=False)
+                    return
+                except PeerError as e:
+                    _suspend_for_retry(task, f"the peer destination cannot place "
+                                             f"{dest_lvol.get_id()}: {e}", backoff=True)
+                    return
+                if placed is not None:
+                    dest_lvol = placed
             if not dest_lvol.replication_node_id:
                 msg = (f"LVol {snapshot.lvol.get_id()} has no replication destination; "
                        f"dropping replication task for snapshot {snapshot.get_id()}")
