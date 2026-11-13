@@ -15,6 +15,7 @@ target paths → non_optimized, all source paths → inaccessible).
 import uuid as uuid_lib
 
 from simplyblock_core import constants, db_controller, utils, xfer_timing
+from simplyblock_core.controllers import replica_chain
 from simplyblock_core.models.hublvol import HubLVol
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCException
@@ -68,16 +69,6 @@ def _lvs_members(primary_node):
         except KeyError:
             continue
     return members
-
-
-def _online_peers(primary_node, lead=None):
-    """Return the online members of *primary_node*'s lvstore other than *lead*
-    (the primary by default). Membership is always read from the PRIMARY: an
-    acting leader's own secondary/tertiary fields describe the lvstore IT is
-    primary of, not this one."""
-    lead_id = (lead or primary_node).get_id()
-    return [m for m in _lvs_members(primary_node)
-            if m.get_id() != lead_id and m.status == StorageNode.STATUS_ONLINE]
 
 
 def _path_entry(node, lvstore):
@@ -490,20 +481,22 @@ def run_cutover(src_node, tgt_node, lvol, tgt_lvol_composite, tgt_map_id,
 
     # Link the final lvol to its predecessor snapshot on the target peers.
     # bdev_lvol_transfer_final_step handles the receiving member internally;
-    # the other online members need an explicit add_clone. Non-fatal — a
-    # missing peer link self-heals on rejoin.
-    for peer in _online_peers(tgt_node, lead=tgt_exec):
-      with xfer_timing.phase("final_peer_add_clone", lvol=lvol.get_id(),
-                             peer=peer.get_id()):
-        try:
-            add_clone_ok = peer.rpc_client().bdev_lvol_add_clone(tgt_lvol_composite, tgt_snap_composite)
-        except RPCException as e:
-            logger.warning(
-                f"add_clone on peer {peer.get_id()[:8]} failed for final lvol (non-fatal): {e}")
+    # every other member that can be reached -- whatever its DB status -- needs
+    # an explicit add_clone to register the link in its in-memory tree
+    # (replica_chain). Non-fatal: IO is about to go live on the target.
+    for peer in _lvs_members(tgt_node):
+        if peer.get_id() == tgt_exec.get_id() or peer.status == StorageNode.STATUS_REMOVED:
             continue
-        if not add_clone_ok:
-            logger.warning(
-                f"add_clone on peer {peer.get_id()[:8]} failed for final lvol (non-fatal)")
+        with xfer_timing.phase("final_peer_add_clone", lvol=lvol.get_id(),
+                               peer=peer.get_id()):
+            try:
+                outcome, err = replica_chain.add_clone_on(
+                    peer, "peer", tgt_lvol_composite, tgt_snap_composite)
+            except Exception as e:  # noqa: BLE001 -- non-fatal past the cutover
+                outcome, err = replica_chain.FAILED, str(e)
+        if outcome == replica_chain.FAILED:
+            logger.error(f"add_clone of the final lvol failed on peer {peer.get_id()[:8]} "
+                         f"(non-fatal): {err}")
 
     # Light the target: queued client IO drains here.
     with xfer_timing.phase("enable_target_paths", lvol=lvol.get_id()):

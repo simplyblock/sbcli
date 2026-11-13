@@ -102,6 +102,7 @@ from simplyblock_core.controllers import (
     migration_controller,
     migration_events,
     qos_controller,
+    replica_chain,
     snapshot_controller,
     tasks_controller,
     tasks_events,
@@ -1214,20 +1215,14 @@ def _post_process_snap(snap: SnapShot, tgt_node: StorageNode, tgt_rpc: RPCClient
         logger.warning(
             f"{tgt_composite} is already an immutable snapshot on the target primary "
             f"(converted by an earlier attempt); resuming at the replicas")
-    sec_present, sec_immutable = (False, False)
-    if tgt_sec and sec_rpc:
-        sec_present, sec_immutable = _replica_bdev_state(sec_rpc, tgt_composite)
-        if not sec_present:
-            logger.warning(
-                f"{tgt_composite} is not registered on the target secondary "
-                f"{tgt_sec.get_id()[:8]}; nothing to link or convert there")
-    ter_present, ter_immutable = (False, False)
-    if tgt_ter and ter_rpc:
-        ter_present, ter_immutable = _replica_bdev_state(ter_rpc, tgt_composite)
-        if not ter_present:
-            logger.warning(
-                f"{tgt_composite} is not registered on the target tertiary "
-                f"{tgt_ter.get_id()[:8]}; nothing to link or convert there")
+    # The target lvstore's secondary and tertiary get add_clone and convert
+    # whenever they can be reached, whatever their DB status: each keeps its own
+    # in-memory snapshot tree and learns of the change only from these calls
+    # (replica_chain). tgt_sec/tgt_ter, resolved by status for the transfer
+    # set-up, are not used for this. A replica that does not hold the bdev (the
+    # migration source doubling as the target's replica, or one skipped at
+    # registration) has nothing to link or convert and is skipped by the
+    # helpers, as _replica_bdev_state did.
 
     # Link to predecessor snapshot in target's ancestry chain.
     # add_clone must succeed on BOTH primary and secondary before we convert
@@ -1278,14 +1273,9 @@ def _post_process_snap(snap: SnapShot, tgt_node: StorageNode, tgt_rpc: RPCClient
                 ret = tgt_rpc.bdev_lvol_add_clone(tgt_composite, pred_composite)
                 if not ret:
                     return False, f"bdev_lvol_add_clone failed for {snap_uuid}"
-            if tgt_sec and sec_rpc and sec_present and not sec_immutable:
-                ret_sec = sec_rpc.bdev_lvol_add_clone(tgt_composite, pred_composite)
-                if not ret_sec:
-                    return False, f"bdev_lvol_add_clone on secondary failed for {snap_uuid}"
-            if tgt_ter and ter_rpc and ter_present and not ter_immutable:
-                ret_ter = ter_rpc.bdev_lvol_add_clone(tgt_composite, pred_composite)
-                if not ret_ter:
-                    return False, f"bdev_lvol_add_clone on tertiary failed for {snap_uuid}"
+            err = replica_chain.add_clone_on_replicas(tgt_node, tgt_composite, pred_composite, db=db)
+            if err:
+                return False, f"add_clone on a replica failed for {snap_uuid}: {err}"
         except KeyError:
             logger.warning(f"Predecessor snap {pred_uuid} not found; skipping add_clone")
 
@@ -1303,14 +1293,9 @@ def _post_process_snap(snap: SnapShot, tgt_node: StorageNode, tgt_rpc: RPCClient
         if not ret:
             return False, f"bdev_lvol_convert failed for {snap_uuid}"
 
-    if tgt_sec and sec_rpc and sec_present and not sec_immutable:
-        ret_sec = sec_rpc.bdev_lvol_convert(tgt_composite)
-        if not ret_sec:
-            return False, f"bdev_lvol_convert on secondary failed for {snap_uuid}"
-    if tgt_ter and ter_rpc and ter_present and not ter_immutable:
-        ret_ter = ter_rpc.bdev_lvol_convert(tgt_composite)
-        if not ret_ter:
-            return False, f"bdev_lvol_convert on tertiary failed for {snap_uuid}"
+    err = replica_chain.convert_on_replicas(tgt_node, tgt_composite, db=db)
+    if err:
+        return False, f"convert on a replica failed for {snap_uuid}: {err}"
 
     # Early partial DB update: route health-check and delete to the target node
     # immediately after convert.  snap_bdev keeps its source path here; the full
@@ -2347,21 +2332,16 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc, primar
         # its predecessor snapshot in their ancestry chain.
         # bdev_lvol_final_migration handles this on the primary internally;
         # non-primary nodes need an explicit call.
+        # Every reachable replica, whatever its DB status (replica_chain). Still
+        # non-fatal: IO is live on the target, so this step cannot be retried.
         _clone_tgt_composite = f"{tgt_node.lvstore}/{tgt_lvol_bdev}"
-        for _extra_node in filter(None, [
-            _get_target_secondary_node(tgt_node, src_node.get_id())[0],
-            _get_target_tertiary_node(tgt_node, src_node.get_id())[0],
-        ]):
-            try:
-                _ret = _make_rpc(_extra_node).bdev_lvol_add_clone(
-                    _clone_tgt_composite, tgt_snap_composite)
-            except RPCException as e:
-                logger.warning(
-                    f"add_clone on {_extra_node.get_id()[:8]} failed for final lvol (non-fatal): {e}")
-                continue
-            if not _ret:
-                logger.warning(
-                    f"add_clone on {_extra_node.get_id()[:8]} failed for final lvol (non-fatal)")
+        try:
+            _err = replica_chain.add_clone_on_replicas(
+                tgt_node, _clone_tgt_composite, tgt_snap_composite, db=db)
+        except Exception as e:  # noqa: BLE001 -- non-fatal past the cutover
+            _err = str(e)
+        if _err:
+            logger.error(f"add_clone of the final lvol failed on a replica (non-fatal): {_err}")
 
         migration.current_job_id = ""
         # Save crash recovery anchor before Done handler so a mid-handler crash

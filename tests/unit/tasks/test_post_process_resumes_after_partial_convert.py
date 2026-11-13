@@ -57,13 +57,21 @@ def _migration():
 
 
 def _post_process(tgt_rpc, sec_rpc=None):
+    # The replicas come from the target lvstore's topology (replica_chain), not
+    # from the tgt_sec/sec_rpc the caller resolved by status.
     snap = _snap()
     tgt_node = _node("tgt", "LVS_10")
+    tgt_node.secondary_node_id = "sec" if sec_rpc is not None else None
+    tgt_node.tertiary_node_id = None
     tgt_sec = _node("sec", "LVS_10") if sec_rpc is not None else None
+    if tgt_sec is not None:
+        tgt_sec.status = "online"
+        tgt_sec.rpc_client.return_value = sec_rpc
     transfer = {"snap_uuid": snap.uuid, "snap_short": "SNAP_46m", "snap_index": 0,
                 "transfer_done": True, "post_done": False}
     mock_db = MagicMock()
     mock_db.get_snapshot_by_id.side_effect = KeyError("not in db")
+    mock_db.get_storage_node_by_id.side_effect = lambda nid: {"sec": tgt_sec}[nid]
     with patch.object(runner, "db", mock_db), \
          patch.object(runner.migration_controller, "get_snapshot_chain", return_value=[snap.uuid]), \
          patch.object(runner.migration_events, "migration_snap_copied"), \

@@ -86,7 +86,7 @@ class _Node:
     def get_id(self):
         return self.uuid
 
-    def rpc_client(self):
+    def rpc_client(self, **kwargs):
         return self._rpc
 
     def get_lvol_subsys_port(self, lvstore):
