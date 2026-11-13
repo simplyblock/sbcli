@@ -17,6 +17,7 @@ from simplyblock_core.controllers import (
     lvol_controller,
     lvol_events,
     qos_controller,
+    replica_chain,
     replication_delta,
     replication_recovery_points,
     snapshot_controller,
@@ -2611,68 +2612,50 @@ def process_snap_replicate_finish(task, snapshot):
             return False
         _mark_converted(remote_snode)
 
-    # chain snaps on secondary; a single-node cluster's node has none
-    sec_node = (db.get_storage_node_by_id(remote_snode.secondary_node_id)
-                if remote_snode.secondary_node_id else None)
-    if sec_node is None:
-        pass
-    elif sec_node.status == StorageNode.STATUS_ONLINE and sec_node.get_id() in converted:
-        logger.info("Landing volume %s is already converted on %s; skipping "
-                    "its chain and convert", remote_lv.top_bdev, sec_node.get_id())
-    elif sec_node.status == StorageNode.STATUS_ONLINE:
-        if (target_prev_snap and sec_node.get_id() not in _prechained
-                and _chained_onto(sec_node, remote_lv.top_bdev, target_prev_snap['snap_bdev'])):
-            # A landing volume chained on the primary after its transfer can
-            # reach the secondary through the lvstore's metadata sync while
-            # its merge runs; add_clone then fails with "File exists" for ever
-            # (bed run 5, 2026-10-24: one volume stuck for 16 min).
-            logger.info("Landing volume %s already reads through %s on %s; skipping "
-                        "the add_clone", remote_lv.top_bdev, target_prev_snap['snap_bdev'],
-                        sec_node.get_id())
-        elif target_prev_snap and sec_node.get_id() not in _prechained:
-            logger.info(f"Chaining replicated lvol: {remote_lv.top_bdev} to snap: {target_prev_snap['snap_bdev']}")
-            with xfer_timing.phase("chain_add_clone", snap=snapshot.get_id(),
-                                   lvol=snapshot.lvol.get_id(), node="secondary"):
-                ret = _rpc_or_none(sec_node.rpc_client().bdev_lvol_add_clone,
-                                   remote_lv.top_bdev, target_prev_snap['snap_bdev'])
-            if not ret:
-                if _secondary_lacks_bdev(sec_node, target_prev_snap['snap_bdev']) or                         _secondary_lacks_bdev(sec_node, remote_lv.top_bdev):
-                    # The secondary does not hold the base (-19 No such
-                    # device): its view of the chain is already behind, and
-                    # failing here only re-runs the finish until the task
-                    # gives up, then re-transfers into a converted landing
-                    # (2026-10-02, LVS_1 site A: 8 retries, a duplicate
-                    # landing, a write into a snapshot). The primary's
-                    # convert made the copy; the secondary is repaired by
-                    # the lvstore sync, not by this task.
-                    logger.warning("Secondary %s does not hold %s or %s; the chain is "
-                                   "not repeated there", sec_node.get_id(),
-                                   target_prev_snap['snap_bdev'], remote_lv.top_bdev)
-                else:
-                    logger.error("Failed to chain replicated snapshot on secondary node")
+    # Chain and convert on the other members of the destination lvstore: the
+    # secondary AND the tertiary, whenever they can be reached, whatever their
+    # DB status. Each keeps its own in-memory snapshot tree and learns of the
+    # change only from these calls; one that misses them acts on a stale tree
+    # once it leads (bf23 2026-11-12, LVS_16: a tertiary that never saw a
+    # clone link deleted the parent's data). Unreachable members are skipped
+    # (they load the tree from disk); members that do not hold the landing
+    # volume or its base are skipped as before -- the lvstore sync repairs
+    # them, and failing here only re-ran the finish until the task gave up
+    # (2026-10-02, LVS_1/LVS_2). See replica_chain.
+    for role, peer in replica_chain.lvstore_replicas(remote_snode, db=db):
+        if peer.get_id() in converted:
+            logger.info("Landing volume %s is already converted on %s; skipping "
+                        "its chain and convert", remote_lv.top_bdev, peer.get_id())
+            continue
+        if target_prev_snap and peer.get_id() not in _prechained:
+            if _secondary_lacks_bdev(peer, target_prev_snap['snap_bdev']):
+                logger.warning("%s %s does not hold %s; the chain is not repeated there",
+                               role, peer.get_id(), target_prev_snap['snap_bdev'])
+            else:
+                logger.info(f"Chaining replicated lvol: {remote_lv.top_bdev} to snap: "
+                            f"{target_prev_snap['snap_bdev']} on {role}")
+                with xfer_timing.phase("chain_add_clone", snap=snapshot.get_id(),
+                                       lvol=snapshot.lvol.get_id(), node=role):
+                    outcome, err = replica_chain.add_clone_on(
+                        peer, role, remote_lv.top_bdev, target_prev_snap['snap_bdev'])
+                if outcome == replica_chain.FAILED:
+                    logger.error("Failed to chain replicated snapshot on %s: %s", role, err)
                     return False
         elif target_prev_snap:
             logger.info("Landing volume %s was already chained to %s on %s "
                         "before the transfer; skipping the redundant add_clone",
                         remote_lv.top_bdev, target_prev_snap['snap_bdev'],
-                        sec_node.get_id())
+                        peer.get_id())
 
-        # convert to snapshot on secondary
         with xfer_timing.phase("chain_convert", snap=snapshot.get_id(),
-                               lvol=snapshot.lvol.get_id(), node="secondary"):
-            ret = _rpc_or_none(sec_node.rpc_client().bdev_lvol_convert, remote_lv.top_bdev)
-        if not ret:
-            if _secondary_lacks_bdev(sec_node, remote_lv.top_bdev):
-                # The landing volume never reached the secondary (its
-                # registration there failed while the site recovered); the
-                # primary's convert is the copy, and the lvstore sync, not
-                # this task, repairs the secondary (2026-10-02, LVS_2 on B).
-                logger.warning("Secondary %s does not hold %s; nothing to convert there",
-                               sec_node.get_id(), remote_lv.top_bdev)
-            else:
-                logger.error("Failed to convert to snapshot on secondary node")
-                return False
-        _mark_converted(sec_node)
+                               lvol=snapshot.lvol.get_id(), node=role):
+            outcome, err = replica_chain.convert_on(peer, role, remote_lv.top_bdev)
+        if outcome == replica_chain.FAILED:
+            logger.error("Failed to convert to snapshot on %s: %s", role, err)
+            return False
+        if outcome == replica_chain.DONE:
+            # a skipped member (unreachable) is tried again by a later pass
+            _mark_converted(peer)
 
     # The landing volume is a snapshot now and will back fail-over and
     # test-failover clones: drop the replication class from it.

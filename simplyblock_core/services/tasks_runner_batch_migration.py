@@ -45,6 +45,7 @@ from simplyblock_core import db_controller as db_mod
 from simplyblock_core.controllers import (
     migration_controller,
     migration_events,
+    replica_chain,
     tasks_controller,
     tasks_events,
 )
@@ -59,7 +60,6 @@ from simplyblock_core.services.tasks_runner_lvol_migration import (
     _build_paths,
     _ensure_and_prune_target_paths,
     _get_source_tertiary_node,
-    _get_target_secondary_node,
     _get_target_tertiary_node,
     _lvol_tgt_bdev_name,
     _make_rpc,
@@ -101,10 +101,8 @@ def _reconstruct_snap_tree(group, member_migrations, tgt_node, tgt_rpc) -> str |
 
     Returns None on success, or an error string on failure.
     """
-    tgt_sec, _ = _get_target_secondary_node(tgt_node, "")
-    sec_rpc = _make_rpc(tgt_sec) if tgt_sec else None
-    tgt_ter, _ = _get_target_tertiary_node(tgt_node, "")
-    ter_rpc = _make_rpc(tgt_ter) if tgt_ter else None
+    # Replicas get add_clone/convert through replica_chain: every reachable
+    # secondary/tertiary, whatever its status.
 
     # A member's snaps_preexisting_on_target (set at create_batch_migration_continue
     # time) conflates two very different things: snaps truly already on the
@@ -197,12 +195,10 @@ def _reconstruct_snap_tree(group, member_migrations, tgt_node, tgt_rpc) -> str |
                     pred_composite = f"{tgt_node.lvstore}/{pred_short}"
                     if not tgt_rpc.bdev_lvol_add_clone(tgt_composite, pred_composite):
                         return f"bdev_lvol_add_clone failed: {snap_uuid} → {pred_uuid}"
-                    if sec_rpc:
-                        if not sec_rpc.bdev_lvol_add_clone(tgt_composite, pred_composite):
-                            return f"bdev_lvol_add_clone on secondary failed: {snap_uuid} → {pred_uuid}"
-                    if ter_rpc:
-                        if not ter_rpc.bdev_lvol_add_clone(tgt_composite, pred_composite):
-                            return f"bdev_lvol_add_clone on tertiary failed: {snap_uuid} → {pred_uuid}"
+                    # every reachable replica, whatever its status (replica_chain)
+                    _err = replica_chain.add_clone_on_replicas(tgt_node, tgt_composite, pred_composite, db=db)
+                    if _err:
+                        return f"add_clone on a replica failed: {snap_uuid} → {pred_uuid}: {_err}"
                 except KeyError:
                     logger.warning(f"Predecessor {pred_uuid} not found; skipping add_clone")
 
@@ -212,12 +208,9 @@ def _reconstruct_snap_tree(group, member_migrations, tgt_node, tgt_rpc) -> str |
                 return f"target node not LVS leader for convert of {snap_uuid}, retrying"
             if not tgt_rpc.bdev_lvol_convert(tgt_composite):
                 return f"bdev_lvol_convert failed for {snap_uuid}"
-            if sec_rpc:
-                if not sec_rpc.bdev_lvol_convert(tgt_composite):
-                    return f"bdev_lvol_convert on secondary failed for {snap_uuid}"
-            if ter_rpc:
-                if not ter_rpc.bdev_lvol_convert(tgt_composite):
-                    return f"bdev_lvol_convert on tertiary failed for {snap_uuid}"
+            _err = replica_chain.convert_on_replicas(tgt_node, tgt_composite, db=db)
+            if _err:
+                return f"convert on a replica failed for {snap_uuid}: {_err}"
 
             # Early partial DB update: route health-check/delete to the target
             # node right away rather than waiting for apply_migration_to_db()
@@ -416,10 +409,7 @@ def _commit_intermediate_snapshot_chain(group, member_migrations, tgt_node, tgt_
     _reconstruct_snap_tree's own add_clone-on-all-replicas-then-convert
     ordering. Returns None on success, or an error string.
     """
-    tgt_sec_node, _ = _get_target_secondary_node(tgt_node, "")
-    sec_rpc = _make_rpc(tgt_sec_node) if tgt_sec_node else None
-    tgt_ter_node, _ = _get_target_tertiary_node(tgt_node, "")
-    ter_rpc = _make_rpc(tgt_ter_node) if tgt_ter_node else None
+    # Replicas: replica_chain (every reachable secondary/tertiary).
     from simplyblock_core.controllers import lvol_controller as _lc
 
     for m in member_migrations:
@@ -477,19 +467,17 @@ def _commit_intermediate_snapshot_chain(group, member_migrations, tgt_node, tgt_
             if pred_composite:
                 if not tgt_rpc.bdev_lvol_add_clone(tgt_composite, pred_composite):
                     return f"bdev_lvol_add_clone failed for intermediate snap {snap_uuid}"
-                if sec_rpc and not sec_rpc.bdev_lvol_add_clone(tgt_composite, pred_composite):
-                    return f"bdev_lvol_add_clone on secondary failed for intermediate snap {snap_uuid}"
-                if ter_rpc and not ter_rpc.bdev_lvol_add_clone(tgt_composite, pred_composite):
-                    return f"bdev_lvol_add_clone on tertiary failed for intermediate snap {snap_uuid}"
+                _err = replica_chain.add_clone_on_replicas(tgt_node, tgt_composite, pred_composite, db=db)
+                if _err:
+                    return f"add_clone on a replica failed for intermediate snap {snap_uuid}: {_err}"
 
             if not _lc.is_node_leader(tgt_node, tgt_composite.split("/")[0]):
                 return f"target node not LVS leader for convert of intermediate snap {snap_uuid}, retrying"
             if not tgt_rpc.bdev_lvol_convert(tgt_composite):
                 return f"bdev_lvol_convert failed for intermediate snap {snap_uuid}"
-            if sec_rpc and not sec_rpc.bdev_lvol_convert(tgt_composite):
-                return f"bdev_lvol_convert on secondary failed for intermediate snap {snap_uuid}"
-            if ter_rpc and not ter_rpc.bdev_lvol_convert(tgt_composite):
-                return f"bdev_lvol_convert on tertiary failed for intermediate snap {snap_uuid}"
+            _err = replica_chain.convert_on_replicas(tgt_node, tgt_composite, db=db)
+            if _err:
+                return f"convert on a replica failed for intermediate snap {snap_uuid}: {_err}"
 
             logger.info(
                 f"Group {group.uuid[:8]}: committed intermediate snap {snap_uuid[:8]} "
@@ -913,38 +901,29 @@ def _handle_intermediate_barrier(group, member_migrations, src_node, tgt_node, s
         # bdev_lvol_batch_final_step handles add_clone on the primary internally.
         # Secondary and tertiary nodes need an explicit add_clone call for each member's
         # final migrated bdev, linking it to the last intermediate snapshot.
-        sec_node, _ = _get_target_secondary_node(tgt_node, src_node.get_id())
-        ter_node, _ = _get_target_tertiary_node(tgt_node, src_node.get_id())
-        if sec_node or ter_node:
-            sec_rpc_extra = _make_rpc(sec_node) if sec_node else None
-            ter_rpc_extra = _make_rpc(ter_node) if ter_node else None
-            _reordered_ids = group.ordered_migration_ids()
-            snap_by_migration_id = dict(zip(_reordered_ids, snapshot_names))
-            for m in member_migrations:
-                snap_composite = snap_by_migration_id.get(m.uuid, "")
-                if not snap_composite:
-                    continue
-                try:
-                    lvol = db.get_lvol_by_id(m.lvol_id)
-                    tgt_bdev_composite = f"{tgt_node.lvstore}/{_lvol_tgt_bdev_name(lvol.lvol_bdev)}"
-                    for extra_rpc, extra_label in [
-                        (sec_rpc_extra, "secondary"),
-                        (ter_rpc_extra, "tertiary"),
-                    ]:
-                        if not extra_rpc:
-                            continue
-                        ret = extra_rpc.bdev_lvol_add_clone(tgt_bdev_composite, snap_composite)
-                        if not ret:
-                            logger.warning(
-                                f"Group {group.uuid[:8]}: add_clone on {extra_label} "
-                                f"failed for {tgt_bdev_composite} (non-fatal)")
-                        else:
-                            logger.info(
-                                f"Group {group.uuid[:8]}: add_clone on {extra_label} "
-                                f"OK: {tgt_bdev_composite} → {snap_composite}")
-                except Exception as e:
-                    logger.warning(
-                        f"Group {group.uuid[:8]}: add_clone for member {m.uuid[:8]} (non-fatal): {e}")
+        # Every reachable replica, whatever its DB status (replica_chain);
+        # non-fatal, IO is already live on the target.
+        _reordered_ids = group.ordered_migration_ids()
+        snap_by_migration_id = dict(zip(_reordered_ids, snapshot_names))
+        for m in member_migrations:
+            snap_composite = snap_by_migration_id.get(m.uuid, "")
+            if not snap_composite:
+                continue
+            try:
+                lvol = db.get_lvol_by_id(m.lvol_id)
+            except KeyError as e:
+                logger.warning(
+                    f"Group {group.uuid[:8]}: add_clone for member {m.uuid[:8]} (non-fatal): {e}")
+                continue
+            tgt_bdev_composite = f"{tgt_node.lvstore}/{_lvol_tgt_bdev_name(lvol.lvol_bdev)}"
+            try:
+                _err = replica_chain.add_clone_on_replicas(tgt_node, tgt_bdev_composite, snap_composite, db=db)
+            except Exception as e:  # noqa: BLE001 -- non-fatal past the cutover
+                _err = str(e)
+            if _err:
+                logger.error(
+                    f"Group {group.uuid[:8]}: add_clone of {tgt_bdev_composite} failed on a "
+                    f"replica (non-fatal): {_err}")
 
         _flip_ana_to_optimized(group, member_migrations, src_node, src_rpc, tgt_node, tgt_rpc,
                                primary_src_node=primary_src_node)
