@@ -101,6 +101,19 @@ def snode_restart_failed(node):
         node_id=node.get_id())
 
 
+def sync_site_returned(cluster, site, caused_by=ec.CAUSED_BY_MONITOR):
+    """Sync replication: the site activation of ``site`` built its LVS, cleared
+    its lost-site record and opened its paths."""
+    ec.log_event_cluster(
+        cluster_id=cluster.get_id(),
+        domain=ec.DOMAIN_CLUSTER,
+        event=ec.EVENT_STATUS_CHANGE,
+        db_object=cluster,
+        caused_by=caused_by,
+        event_level=EventObj.LEVEL_WARN,
+        message=f"Site {site} returned")
+
+
 def snode_removal_aborted_fenced_secondary(node, secondary, port, caused_by=ec.CAUSED_BY_CLI):
     """The removal of ``node`` is refused for good: SPDK fenced ``port`` on its
     ``secondary`` after the node went down, and only the primary's return can

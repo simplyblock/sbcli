@@ -46,15 +46,34 @@ def _parallel_restart_allowed(node):
     return storage_node_ops.fd_dead_recovery_allowed(db, node)
 
 
+def _deferred_by_drain(cluster, task) -> bool:
+    """Whether a queued node restart waits for a drain: a SUSPENDED cluster
+    still being drained to all-offline, or - sync replication - the node's site
+    being drained or any site being activated
+    (tasks_controller.is_auto_restart_paused). A node no longer in the
+    database is judged by the cluster-wide pause alone."""
+    try:
+        node = db.get_storage_node_by_id(task.node_id)
+    except KeyError:
+        node = None
+    if not tasks_controller.is_auto_restart_paused(cluster, node):
+        return False
+    logger.info("Cluster %s: a drain or a site activation is running (cluster suspended, "
+                "the node's site draining, or a site being activated); deferring "
+                "node-restart task %s", cluster.get_id(), task.uuid)
+    return True
+
+
 def _is_eligible(task, cluster):
     """Suspend recovery: while a SUSPENDED cluster is still being drained to
     all-offline, pause node restarts. Executing one now would fight the
     auto-shutdown and re-create the wedged half-restarted state we are fixing.
     The task re-polls without consuming a retry and runs once the drain
-    completes."""
+    completes. The same for a node of a sync-replication site being drained,
+    and for every node while a site activation runs (_deferred_by_drain)."""
     if task.function_name != JobSchedule.FN_NODE_RESTART:
         return True
-    return not tasks_controller.is_auto_restart_paused(db.get_cluster_by_id(cluster.get_id()))
+    return not _deferred_by_drain(db.get_cluster_by_id(cluster.get_id()), task)
 
 
 def _serialize(task, cluster):

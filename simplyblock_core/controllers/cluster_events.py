@@ -30,6 +30,16 @@ def cluster_name_change(cluster, new_name, old_name):
         message=f"Cluster name changed {cluster.get_id()}: {old_name} -> {new_name}")
 
 
+def cluster_leader_site_change(cluster, new_site, old_site):
+    ec.log_event_cluster(
+        cluster_id=cluster.get_id(),
+        domain=ec.DOMAIN_CLUSTER,
+        event=ec.EVENT_STATUS_CHANGE,
+        db_object=cluster,
+        caused_by=ec.CAUSED_BY_API,
+        message=f"Cluster leader site changed {cluster.get_id()}: {old_site or '-'} -> {new_site}")
+
+
 def cluster_status_change(cluster, new_state, old_status):
     ec.log_event_cluster(
         cluster_id=cluster.get_id(),

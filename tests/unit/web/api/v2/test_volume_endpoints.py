@@ -1,6 +1,13 @@
 """Unit tests for /api/v2/.../volumes endpoints (lvol/snapshot controllers mocked)."""
 
+import pytest
+
 from simplyblock_core import utils as core_utils
+from simplyblock_core.exceptions import (
+    SyncReplicationSiteError,
+    SyncReplicationUnsupportedError,
+    SyncSiteConflictError,
+)
 from simplyblock_core.models.lvol_model import LVol
 from tests.unit.web.api.v2._factories import (
     CLUSTER_ID,
@@ -62,6 +69,7 @@ class TestCreateVolume:
             replication_cluster_id=None,
             replication_policy=None,
             consistency_group=None,
+            site=None,
         )
         assert response.headers['Location'].endswith(f'/volumes/{VOLUME_ID}/')
 
@@ -114,6 +122,68 @@ class TestCreateVolume:
         response = client.post(f'{BASE}/', json={'name': 'volume-1', 'size': '10G'})
 
         assert response.status_code == 409
+        lvol_controller.add_lvol_ha.assert_not_called()
+
+
+class TestCreateVolumeSite:
+    """``site`` on the create body (stretched sync replication, design
+    §9.5): forwarded to add_lvol_ha, which restricts the owner-node choice to
+    that site; its refusals answer as the other sync-replication refusals do."""
+
+    def test_site_is_forwarded(self, client, db, pool, lvol_controller):
+        db.get_lvol_by_name.side_effect = KeyError('LVol not found')
+        lvol_controller.add_lvol_ha.return_value = (VOLUME_ID, None)
+
+        response = client.post(f'{BASE}/', json={'name': 'volume-1', 'size': '10G', 'site': 'site-a'})
+
+        assert response.status_code == 201
+        assert lvol_controller.add_lvol_ha.call_args.kwargs['site'] == 'site-a'
+
+    def test_an_empty_site_is_no_site(self, client, db, pool, lvol_controller):
+        db.get_lvol_by_name.side_effect = KeyError('LVol not found')
+        lvol_controller.add_lvol_ha.return_value = (VOLUME_ID, None)
+
+        response = client.post(f'{BASE}/', json={'name': 'volume-1', 'size': '10G', 'site': ''})
+
+        assert response.status_code == 201
+        assert lvol_controller.add_lvol_ha.call_args.kwargs['site'] is None
+
+    @pytest.mark.parametrize('error', [
+        SyncReplicationSiteError("site 'site-x' is not a site of cluster c (sites: ['site-a', 'site-b'])"),
+        SyncReplicationUnsupportedError('cluster c is not a sync-replication cluster; a site applies only there'),
+    ], ids=['unknown-site', 'not-a-sync-cluster'])
+    def test_a_bad_site_is_400(self, client, db, pool, lvol_controller, error):
+        db.get_lvol_by_name.side_effect = KeyError('LVol not found')
+        lvol_controller.add_lvol_ha.side_effect = error
+
+        response = client.post(f'{BASE}/', json={'name': 'volume-1', 'size': '10G', 'site': 'site-x'})
+
+        assert response.status_code == 400
+        assert response.json()['detail']['message'] == str(error)
+
+    def test_a_host_on_another_site_is_409_naming_both(self, client, db, pool, lvol_controller):
+        db.get_lvol_by_name.side_effect = KeyError('LVol not found')
+        lvol_controller.add_lvol_ha.side_effect = SyncSiteConflictError(
+            'storage node n1 is on site site-b, the volume was requested on site site-a',
+            node_id='n1', node_site='site-b', site='site-a')
+
+        response = client.post(f'{BASE}/', json={
+            'name': 'volume-1', 'size': '10G', 'site': 'site-a', 'host_id': 'n1'})
+
+        assert response.status_code == 409
+        detail = response.json()['detail']
+        assert detail['node_id'] == 'n1'
+        assert detail['node_site'] == 'site-b'
+        assert detail['site'] == 'site-a'
+        assert 'site-b' in detail['message'] and 'site-a' in detail['message']
+
+    def test_an_existing_name_ignores_the_site(self, client, db, pool, volume, lvol_controller):
+        db.get_lvol_by_name.return_value = volume
+
+        response = client.post(f'{BASE}/', json={'name': 'volume-1', 'size': '10G', 'site': 'site-x'})
+
+        assert response.status_code == 409
+        assert response.json()['detail'] == 'Volume volume-1 exists'
         lvol_controller.add_lvol_ha.assert_not_called()
 
 

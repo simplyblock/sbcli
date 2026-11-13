@@ -1,0 +1,173 @@
+# FoundationDB tier of the `app` stack, plus HAProxy, the log sink everything
+# in the stack logs through. deploy_stack.sh deploys it on its own
+# first, waits for it, configures the database, and only then deploys it
+# together with docker-compose-swarm.yml: the simplyblock services exit on an
+# unconfigured database, so they must not start before the configure step.
+# Both files are deployed under the stack name `app`, so service names
+# (app_fdb-server, ...) and volumes (app_fdb_server_1_data, ...) are unchanged.
+version: '3.8'
+
+x-service-base: &service-base
+  logging:
+    driver: gelf
+    options:
+      gelf-address: "tcp://127.0.0.1:12202"
+      mode: "non-blocking"
+      max-buffer-size: "40m"
+
+
+services:
+
+  # The log sink: every service here and in docker-compose-swarm.yml logs
+  # through the gelf driver to 127.0.0.1:12202, which is this proxy's
+  # forward to graylog. Docker cannot create a container whose log driver
+  # has nowhere to connect, so it must be up before anything that logs
+  # through it -- the FDB servers included. It needs no database.
+  HAProxy:
+    image: "${IMAGE_PREFIX}haproxytech/haproxy-debian:latest"
+    deploy:
+      mode: global
+      placement:
+        constraints: [node.role == manager]
+    ports:
+      - 80:80
+      - 12202:12202
+      - 9200:9200
+      - 9090:9090
+    networks:
+      - localnet
+      - monitoring-net
+    volumes:
+      - "$DIR/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg"
+    environment:
+      SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+
+  fdb-server:
+    <<: *service-base
+    image: "${IMAGE_PREFIX}foundationdb/foundationdb:7.3.63"
+    networks:
+      - hostnet
+    environment:
+      SIMPLYBLOCK_LOG_LEVEL: '$LOG_LEVEL'
+      FDB_CLUSTER_FILE_CONTENTS: '$FDB_CLUSTER_FILE_CONTENTS'
+      FDB_NETWORKING_MODE: 'container'
+      FDB_CLUSTER_FILE: '/etc/foundationdb/fdb.cluster'
+    volumes:
+      - "/etc/foundationdb:/etc/foundationdb"
+      - "/etc/foundationdb/data:/var/fdb/data"
+      - "/etc/foundationdb/logs:/var/fdb/logs"
+
+    deploy:
+      mode: global
+      placement:
+        constraints: [ node.role == manager ]
+      resources:
+        reservations:
+          memory: 4g
+
+  fdb-server1:
+    <<: *service-base
+    image: "${IMAGE_PREFIX}foundationdb/foundationdb:7.3.63"
+    networks:
+      - hostnet
+    environment:
+      FDB_CLUSTER_FILE_CONTENTS: '$FDB_CLUSTER_FILE_CONTENTS'
+      FDB_NETWORKING_MODE: 'container'
+      FDB_PORT: 4501
+    volumes:
+      - "fdb_server_1_data:/var/fdb/data"
+      - "fdb_server_1_logs:/var/fdb/logs"
+    deploy:
+      mode: global
+      placement:
+        constraints: [ node.role == manager ]
+
+  fdb-server2:
+    <<: *service-base
+    image: "${IMAGE_PREFIX}foundationdb/foundationdb:7.3.63"
+    networks:
+      - hostnet
+    environment:
+      FDB_CLUSTER_FILE_CONTENTS: '$FDB_CLUSTER_FILE_CONTENTS'
+      FDB_NETWORKING_MODE: 'container'
+      FDB_PORT: 4502
+    volumes:
+      - "fdb_server_2_data:/var/fdb/data"
+      - "fdb_server_2_logs:/var/fdb/logs"
+    deploy:
+      mode: global
+      placement:
+        constraints: [ node.role == manager ]
+
+  fdb-server3:
+    <<: *service-base
+    image: "${IMAGE_PREFIX}foundationdb/foundationdb:7.3.63"
+    networks:
+      - hostnet
+    environment:
+      FDB_CLUSTER_FILE_CONTENTS: '$FDB_CLUSTER_FILE_CONTENTS'
+      FDB_NETWORKING_MODE: 'container'
+      FDB_PORT: 4503
+    volumes:
+      - "fdb_server_3_data:/var/fdb/data"
+      - "fdb_server_3_logs:/var/fdb/logs"
+    deploy:
+      mode: global
+      placement:
+        constraints: [ node.role == manager ]
+
+  fdb-server4:
+    <<: *service-base
+    image: "${IMAGE_PREFIX}foundationdb/foundationdb:7.3.63"
+    networks:
+      - hostnet
+    environment:
+      FDB_CLUSTER_FILE_CONTENTS: '$FDB_CLUSTER_FILE_CONTENTS'
+      FDB_NETWORKING_MODE: 'container'
+      FDB_PORT: 4504
+    volumes:
+      - "fdb_server_4_data:/var/fdb/data"
+      - "fdb_server_4_logs:/var/fdb/logs"
+    deploy:
+      mode: global
+      placement:
+        constraints: [ node.role == manager ]
+
+
+  fdb-backup-agent:
+    <<: *service-base
+    image: "${IMAGE_PREFIX}foundationdb/foundationdb:7.3.63"
+    entrypoint: "/usr/bin/backup_agent -C  /etc/foundationdb/fdb.cluster"
+    networks:
+      - hostnet
+    environment:
+      FDB_CLUSTER_FILE: '/etc/foundationdb/fdb.cluster'
+    volumes:
+      - "/etc/foundationdb:/etc/foundationdb"
+    deploy:
+      placement:
+        constraints: [ node.role == manager ]
+
+networks:
+  monitoring-net:
+    external: true
+
+  hostnet:
+    external: true
+    name: host
+
+  localnet:
+    driver: overlay
+    ipam:
+      config:
+        - subnet: 192.168.1.0/24
+
+volumes:
+  fdb_server_1_data:
+  fdb_server_1_logs:
+  fdb_server_2_data:
+  fdb_server_2_logs:
+  fdb_server_3_data:
+  fdb_server_3_logs:
+  fdb_server_4_data:
+  fdb_server_4_logs:

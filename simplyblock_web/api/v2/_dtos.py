@@ -13,6 +13,14 @@ from simplyblock_core.controllers.backup.manifest import (
     GroupBackupExport,
     GroupBackupManifest,
 )
+from simplyblock_core.controllers.health_controller import NodeReachability
+from simplyblock_core.controllers.sync_replication_controller import (
+    ROLE_PRIMARY,
+    STATE_HEALTHY,
+    GroupSyncStatus,
+    SiteRecord,
+    VolumeSyncStatus,
+)
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.backup import Backup, BackupPolicy, GroupBackup
 from simplyblock_core.models.backup_config import (
@@ -108,6 +116,13 @@ ReplicationHealthState = Literal[
     "in_sync", "replicating", "lagging", "degraded", "error", "not_replicating",
 ]
 
+#: Sync replication: the role of a volume / group on the site it is queried
+#: from - ``primary`` where it is served.
+SyncReplicationRole = Literal["primary", "secondary"]
+
+#: Sync replication: the cluster-wide state, the worst over every LVS.
+SyncReplicationState = Literal["healthy", "degraded", "resyncing"]
+
 # Every value of JobSchedule's FN_* constants: the /tasks endpoints serialize a
 # task of any type the scheduler can persist, so an omission here is not a
 # narrower API -- it is a 500 (pydantic literal_error) the moment such a task
@@ -139,6 +154,9 @@ TaskFunctionName = Literal[
     "cluster_expand",
     "replication_final",
     "fdb_backup",
+    "sync_promote",
+    "sync_resync",
+    "sync_site_fence",
 ]
 
 
@@ -187,14 +205,25 @@ class ClusterDTO(BaseModel):
     node_affinity: bool
     anti_affinity: bool
     enable_failure_domain: bool
+    lvol_geometry_enabled: bool
     device_mode: str
     inline_checksum: bool
     atomic_4k: bool
     page_copy: bool = False
+    md_journal: bool = False
     secret: SecretStr
     tls_enabled: bool
     max_fault_tolerance: int
     backup_enabled: bool
+    # Sync replication: whether the cluster spans two sites, and the site the
+    # storage-node monitor records as out ("" = both in service) with how far
+    # its drain or fence got. Read by the operators of a stretched cluster.
+    sync_replication: bool = False
+    lost_site: str = ""
+    lost_site_state: str = ""
+    # The site whose operator leads the stretched cluster ("" = unset); a
+    # follower's adoption checks the role it was handed against it.
+    leader_site: str = ""
     capacity: CapacityStatDTO
     snode_api_service: str
     spdk_proxy_service: str
@@ -228,14 +257,20 @@ class ClusterDTO(BaseModel):
             node_affinity=model.enable_node_affinity,
             anti_affinity=model.strict_node_anti_affinity,
             enable_failure_domain=model.enable_failure_domain,
+            lvol_geometry_enabled=model.lvol_geometry_enabled,
             device_mode=model.device_mode,
             inline_checksum=model.inline_checksum,
             atomic_4k=model.atomic_4k,
             page_copy=model.page_copy,
+            md_journal=model.md_journal,
             secret=model.secret,
             tls_enabled=model.tls,
             max_fault_tolerance=model.max_fault_tolerance,
             backup_enabled=bool(model.backup_config),
+            sync_replication=model.sync_replication,
+            lost_site=model.lost_site,
+            lost_site_state=model.lost_site_state,
+            leader_site=model.leader_site,
             capacity=CapacityStatDTO.from_model(
                 stat_obj if stat_obj else StatsObject()
             ),
@@ -470,6 +505,8 @@ class StorageNodeDTO(BaseModel):
     device_count: int
     online_device_count: int
     failure_domain: int
+    # Sync replication: the site the node was added to ("" off a sync cluster).
+    site: str = ""
     capacity: CapacityStatDTO
 
     @staticmethod
@@ -501,6 +538,7 @@ class StorageNodeDTO(BaseModel):
             device_count=len(model.nvme_devices),
             online_device_count=len([device for device in model.nvme_devices if device.status == "online" ]),
             failure_domain=model.failure_domain,
+            site=model.site,
             capacity=CapacityStatDTO.from_model(
                 stat_obj if stat_obj else StatsObject()
             ),
@@ -1063,6 +1101,135 @@ class ReplicationStatusDTO(BaseModel):
             resyncing=bool(info.get('resyncing', False)),
         )
 
+    @staticmethod
+    def from_sync_status(status: VolumeSyncStatus) -> 'ReplicationStatusDTO':
+        """A sync-replication volume's status in the async DTO (the
+        csi-addons adapter's existing read)."""
+        return ReplicationStatusDTO(**_sync_health(status))
+
+
+class SyncReplicationStatusDTO(BaseModel):
+    """The sync-replication status of a volume or consistency group seen from
+    one site (``GET .../replication/sync-status?site=``).
+
+    Everything but ``role`` is cluster-wide (the worst over every LVS), so
+    every volume and group answers the same: csi-addons' GetReplicationStatus
+    (``state``, ``last_replicated_at``, ``lag_seconds``, ``bytes_behind``,
+    ``diverged``) and GetSecondaryReadiness (``peer_ready = completed and not
+    degraded and not resyncing``).
+    """
+    site: str
+    role: SyncReplicationRole
+    state: SyncReplicationState
+    #: Now while healthy; else the last known in-sync time (null: not known).
+    last_replicated_at: datetime | None = None
+    lag_seconds: util.OptionalUnsigned = None
+    #: Upper bound: unsynced pages x page size.
+    bytes_behind: util.Unsigned = 0
+    diverged: bool
+    #: Every distrib replicates in mode ``full``.
+    completed: bool
+    degraded: bool
+    resyncing: bool
+    peer_ready: bool
+
+    @staticmethod
+    def from_status(status: VolumeSyncStatus | GroupSyncStatus) -> 'SyncReplicationStatusDTO':
+        cluster = status.cluster
+        return SyncReplicationStatusDTO(
+            site=status.site,
+            role=cast(SyncReplicationRole, status.role),
+            state=cast(SyncReplicationState, cluster.state),
+            last_replicated_at=cluster.last_replicated_at,
+            lag_seconds=cluster.lag_seconds,
+            bytes_behind=cluster.bytes_behind,
+            diverged=cluster.diverged,
+            completed=cluster.completed,
+            degraded=cluster.degraded,
+            resyncing=cluster.resyncing,
+            peer_ready=cluster.peer_ready,
+        )
+
+
+class SyncPromoteResultDTO(BaseModel):
+    """A completed sync-replication promote of one volume: its connection
+    entries on the promoted site (that site's triplet only)."""
+    lvol_id: UUID
+    connection_strings: list[NvmeConnectEntry]
+
+    @staticmethod
+    def from_result(connection_strings: dict) -> list['SyncPromoteResultDTO']:
+        return [SyncPromoteResultDTO(lvol_id=UUID(lvol_id), connection_strings=entries)
+                for lvol_id, entries in connection_strings.items()]
+
+
+class SiteNodeDTO(BaseModel):
+    """A node of a site, as the site record lists it. ``id`` is the storage
+    node's id (``StorageNodeDTO.id``)."""
+    id: str
+    status: StorageNodeStatus
+    mgmt_ip: str
+
+
+class SiteRecordDTO(BaseModel):
+    """What the control plane records about one site of a sync-replication
+    cluster (``GET /clusters/{id}/sites/{site}/status``, and the 200 answers
+    of ``fence`` / ``unfence``): ``lost`` when the cluster records it as its
+    lost site, ``state`` that record's ``lost_site_state`` (``draining`` /
+    ``down`` written by the storage-node monitor, ``fencing`` / ``done``
+    by a fence), the latest site-level fence task, the site's nodes."""
+    site: str
+    lost: bool
+    state: Literal["", "draining", "down", "fencing", "done"]
+    fence_task_id: UUID | None = None
+    nodes: list[SiteNodeDTO]
+
+    @staticmethod
+    def from_record(record: SiteRecord) -> 'SiteRecordDTO':
+        return SiteRecordDTO(
+            site=record.site,
+            lost=record.lost,
+            state=cast(Literal["", "draining", "down", "fencing", "done"], record.state),
+            fence_task_id=UUID(record.fence_task_id) if record.fence_task_id else None,
+            nodes=[SiteNodeDTO(id=n.node_id, status=cast(StorageNodeStatus, n.status), mgmt_ip=n.mgmt_ip)
+                   for n in record.nodes],
+        )
+
+
+class SiteFenceTaskDTO(BaseModel):
+    """A site fence in progress (the 202 answer of ``fence``): the fence task,
+    also readable at ``/clusters/{id}/tasks/{task_id}/``."""
+    task_id: UUID
+
+
+class NodeReachabilityDTO(BaseModel):
+    """One node's answer to the storage-node monitor's management-address
+    probe, run once on demand (``GET /clusters/{id}/reachability``)."""
+    id: str
+    mgmt_ip: str
+    site: str
+    reachable: bool
+
+    @staticmethod
+    def from_model(model: NodeReachability) -> 'NodeReachabilityDTO':
+        return NodeReachabilityDTO(id=model.node_id, mgmt_ip=model.mgmt_ip, site=model.site,
+                                   reachable=model.reachable)
+
+
+def _sync_health(status: VolumeSyncStatus | GroupSyncStatus) -> dict:
+    """The async replication-status fields filled from a sync status: role
+    ``source`` where served, state ``in_sync`` only while healthy (a catch-up
+    in progress is ``degraded`` with ``resyncing`` set)."""
+    cluster = status.cluster
+    return {
+        'role': 'source' if status.role == ROLE_PRIMARY else 'secondary',
+        'state': 'in_sync' if cluster.state == STATE_HEALTHY else 'degraded',
+        'last_replicated_at': cluster.last_replicated_at,
+        'lag_seconds': cluster.lag_seconds,
+        'outstanding_bytes': cluster.bytes_behind,
+        'resyncing': cluster.resyncing,
+    }
+
 
 class ConsistencyGroupReplicationIntentDTO(BaseModel):
     """Request body to enable or disable group replication (design §14.4).
@@ -1128,6 +1295,11 @@ class ConsistencyGroupReplicationStatusDTO(BaseModel):
             outstanding_bytes=info.get('outstanding_bytes', 0),
             resyncing=bool(info.get('resyncing', False)),
         )
+
+    @staticmethod
+    def from_sync_status(status: GroupSyncStatus) -> 'ConsistencyGroupReplicationStatusDTO':
+        return ConsistencyGroupReplicationStatusDTO(
+            member_count=status.member_count, **_sync_health(status))
 
 
 class ReplicatedSnapshotDTO(BaseModel):

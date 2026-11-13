@@ -59,11 +59,19 @@ def test_absent_subsystem():
 @pytest.fixture
 def repair(monkeypatch):
     calls = []
+    # The record names its drive by serial, and the repair first checks that
+    # the drive under the record's bdev name is that drive; the fake answers
+    # with the record's own serial, so the check is satisfied and the repair
+    # goes on to the stack.
     dev = SimpleNamespace(status=NVMeDevice.STATUS_REMOVED, admin_removed=False,
                           retries_exhausted=False, repair_attempts=0, node_id="N1",
-                          get_id=lambda: "d1")
-    node = SimpleNamespace(nvme_devices=[dev], rpc_client=lambda: None,
-                           get_id=lambda: "N1")
+                          bdev_type="nvme", serial_number="SN-d1", nvme_bdev="nvme_1n1",
+                          nvme_controller="nvme_1", get_id=lambda: "d1")
+    rpc = SimpleNamespace(bdev_get=lambda name: {
+        "name": name,
+        "driver_specific": {"nvme": [{"ctrlr_data": {"serial_number": "SN-d1"}}]}})
+    node = SimpleNamespace(nvme_devices=[dev], rpc_client=lambda: rpc,
+                           get_id=lambda: "N1", id_device_by_nqn=False)
 
     class _DB:
         def get_storage_device_by_id(self, _id):

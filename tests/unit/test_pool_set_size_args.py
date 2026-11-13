@@ -53,9 +53,8 @@ class _Ctx:
         db.get_hostnames_by_pool_id.return_value = []  # no QoS RPC fan-out
         db.kv_store = MagicMock()
         # pool_events -> events_controller keeps its OWN module-level
-        # DBController, whose kv_store is None under test. Worse,
-        # BaseModel.write_to_db calls exit(1) when the write fails, so an
-        # unstubbed event turns a failing assertion into SystemExit.
+        # DBController, whose kv_store is None under test, so an unstubbed
+        # event write fails.
         self._events = patch.object(pool_controller, "pool_events", MagicMock())
         self._events.start()
         # unsafe=True: the gate's method is named assert_object_ops_allowed,

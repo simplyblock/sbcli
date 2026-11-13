@@ -22,30 +22,50 @@ ignore:
       name: python
       type: binary
 
-  # tarfile extraction filter bypass: when extracting a link on a system
-  # without link support, tarfile falls back to extracting the member and runs
-  # the extraction filter twice, ignoring one of the results, so a member the
-  # filter should skip can still be written (arbitrary file write).
-  # Fixed in 3.15.0 only; there is no 3.14.x release carrying it, so
-  # `only-fixed` does not filter it out.
-  # The control plane only *creates* tarballs (`tarfile.open(..., "w:gz")` in
-  # scripts/collect_logs.py) and never extracts an archive, so the affected
-  # extraction path is not reachable.
-  - vulnerability: CVE-2026-87910
+  # Chunked/Content-Length response parsing mishandles non-hex or negative
+  # integers, letting HTTP response framing be misinterpreted
+  # (python/cpython#150751). Fixed in 3.16.0 only; there is no 3.14.x release
+  # carrying it, so `only-fixed` does not filter it out.
+  # The control plane never parses an HTTP response through stdlib
+  # http.client or urllib.request: rpc_client.py imports http.client only
+  # for the RemoteDisconnected exception class, and every actual RPC/HTTP
+  # call goes through requests, which parses chunked/length framing via
+  # urllib3, not this code path.
+  - vulnerability: CVE-2026-103995
     package:
       name: python
       type: binary
 
-  # tempfile.TemporaryDirectory cleanup race: an attacker who can modify the
-  # tree while it is being removed can swap a directory for a symlink, so the
-  # cleanup deletes files (or resets permissions/flags) outside the directory.
-  # Fixed in 3.15.0rc3 only (python/cpython#157579); there is no 3.14.x
-  # release carrying it, so `only-fixed` does not filter it out.
-  # We do use TemporaryDirectory (utils/__init__.py, scripts/collect_logs.py),
-  # but only for directories we create ourselves with mkdtemp's 0700 mode, and
-  # nothing else writes into them, so there is no attacker able to modify the
-  # tree during cleanup.
-  - vulnerability: CVE-2026-12345
+  # socket.getaddrinfo() silently truncates a host/port value containing a
+  # null byte instead of rejecting it (python/cpython#160898). Fixed in
+  # 3.16.0 only; there is no 3.14.x release carrying it, so `only-fixed`
+  # does not filter it out.
+  # utils.resolve_address() and tasks_runner_node_add's connectivity probe
+  # do pass a caller-supplied node address into getaddrinfo/create_connection
+  # (storage node add/restart), so this path is reachable -- but only from
+  # an already-authenticated management-plane caller naming a node address
+  # directly, so a truncated host at worst misdirects a connection to an
+  # address that same caller chose, not a path an untrusted party can reach.
+  - vulnerability: CVE-2026-116566
+    package:
+      name: python
+      type: binary
+
+  # Regression in hashlib's FIPS enforcement: usedforsecurity's FIPS check is
+  # inverted in 3.14.10, so hashlib.md5() silently succeeds under FIPS mode
+  # even when called with usedforsecurity=True (python/cpython#161383). Fixed
+  # by PR #161385, merged to the 3.14 branch but not yet in a release -- the
+  # next scheduled 3.14.x is 2027-04-06 per PEP 745, so `only-fixed` does not
+  # filter it out.
+  # The control plane never calls hashlib.md5() -- every hash call here uses
+  # sha1/sha256 (subsystem_access.py, rpc_client.py, storage_node.py,
+  # node_utils.py, utils/__init__.py), none of which this regression touches.
+  # That absence is enforced, not just observed: pyproject.toml's
+  # [tool.ruff.lint.flake8-tidy-imports.banned-api] bans hashlib.md5 project-
+  # wide, so ruff fails first if a new call reintroduces this path. The two
+  # are meant to be read together -- this entry says why today's code is
+  # safe, that rule is what keeps it that way.
+  - vulnerability: CVE-2026-119170
     package:
       name: python
       type: binary

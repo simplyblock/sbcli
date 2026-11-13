@@ -1,5 +1,5 @@
 from simplyblock_core import db_controller, utils
-from simplyblock_core.controllers import tasks_controller
+from simplyblock_core.controllers import activation_gate, tasks_controller
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.storage_node import StorageNode
@@ -18,6 +18,34 @@ logger = utils.get_logger(__name__)
 
 # get DB controller
 db = db_controller.DBController()
+
+
+def _site_activation_holds(cl, task) -> str:
+    """activation_gate.site_activation_blocks for the LVS whose JM group the
+    task resumes - ``function_params["jm_vuid"]``, else the JM of its node, as
+    the resume reads it. That LVS is owned by the node of the cluster whose
+    lvstore carries the jm_vuid; the task's node is only where the RPC goes. An
+    owner that is not found is held like a node-level operation."""
+    if not activation_gate.site_activation_blocks(cl):
+        return ""
+    if "jm_vuid" in task.function_params:
+        jm_vuid = task.function_params["jm_vuid"]
+    else:
+        try:
+            jm_vuid = db.get_storage_node_by_id(task.node_id).jm_vuid
+        except KeyError:
+            return activation_gate.site_activation_blocks(cl)
+    for node in db.get_storage_nodes_by_cluster_id(cl.get_id()):
+        if node.lvstore and node.jm_vuid == jm_vuid:
+            return activation_gate.site_activation_blocks(cl, node)
+    return activation_gate.site_activation_blocks(cl)
+
+
+def _is_eligible(task, cluster):
+    """Left untouched while the cluster is in_activation, or while a site
+    activation holds the LVS the task resumes."""
+    return (cluster.status != Cluster.STATUS_IN_ACTIVATION
+            and not _site_activation_holds(cluster, task))
 
 
 def process_task(task):
@@ -59,7 +87,7 @@ SPEC = RunnerSpec(
     name="tasks-runner-jc-comp",
     function_names=[JobSchedule.FN_JC_COMP_RESUME],
     handler=process_task,
-    is_eligible=lambda task, cluster: cluster.status != Cluster.STATUS_IN_ACTIVATION,
+    is_eligible=_is_eligible,
     interval=60,
 )
 

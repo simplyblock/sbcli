@@ -30,6 +30,7 @@ class _Rec:
 
 class _Cluster:
     cap_warn = 80
+    sync_replication = False
 
     def get_id(self):
         return "CL1"
@@ -41,6 +42,9 @@ def _db(util):
             return [_lvol()]
 
         def get_mini_snapshots(self):
+            return []
+
+        def get_snapshots_by_lvol_id(self, lvol_id):
             return []
 
         def get_replication_policies(self, cluster_id=None):
