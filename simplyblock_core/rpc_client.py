@@ -2763,10 +2763,5 @@ class RPCClient:
         """
         return self._request("bdev_s3_delete", name=name)
 
-    def bdev_lvol_s3_delete(self, s3_ids: list[int]):
-        """Delete all S3 backups for the given IDs (list of uint32)."""
-        # RPC still missing on data plane — use dummy
-        return self._request("bdev_lvol_s3_delete", s3_ids=s3_ids)
-
     def bdev_nvme_get_controller_health_info(self, name):
         return self._request("bdev_nvme_get_controller_health_info", name=name)

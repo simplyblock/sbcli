@@ -398,6 +398,7 @@ class CLIWrapper(CLIWrapperBase):
         self.init_cluster__build_indices(subparser)
         self.init_cluster__index_state(subparser)
         self.init_cluster__check_indices(subparser)
+        self.init_cluster__check_backups(subparser)
         self.init_cluster__graceful_shutdown(subparser)
         self.init_cluster__restart(subparser)
         self.init_cluster__graceful_startup(subparser)
@@ -641,6 +642,11 @@ class CLIWrapper(CLIWrapperBase):
     def init_cluster__check_indices(self, subparser):
         subcommand = self.add_sub_command(subparser, 'check-indices', 'Verifies the database\'s secondary indices.')
         subcommand.add_argument('--repair', help='Write back the entries that can be derived from the records, and clear orphaned ones, instead of only reporting them.', dest='repair', action='store_true')
+
+    def init_cluster__check_backups(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'check-backups', 'Verifies every backup\'s FDB record against its S3 manifest.')
+        subcommand.add_argument('--cluster-id', help='Limit the check to one cluster. Omit to check every cluster.', type=str, dest='cluster_id')
+        subcommand.add_argument('--repair', help='Rewrite manifests that are missing or disagree with their record, instead of only reporting them.', dest='repair', action='store_true')
 
     def init_cluster__graceful_shutdown(self, subparser):
         subcommand = self.add_sub_command(subparser, 'graceful-shutdown', 'Initiates a graceful shutdown of a cluster\'s storage nodes.')
@@ -1307,6 +1313,7 @@ class CLIWrapper(CLIWrapperBase):
         subparser = self.add_command('backup', 'Backup Commands')
         self.init_backup__list(subparser)
         self.init_backup__delete(subparser)
+        self.init_backup__delete_backup(subparser)
         self.init_backup__restore(subparser)
         self.init_backup__export(subparser)
         self.init_backup__discover(subparser)
@@ -1326,6 +1333,10 @@ class CLIWrapper(CLIWrapperBase):
     def init_backup__delete(self, subparser):
         subcommand = self.add_sub_command(subparser, 'delete', 'Delete all backups for a logical volume.')
         subcommand.add_argument('lvol_id', help='The logical volume id.', type=str)
+
+    def init_backup__delete_backup(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'delete-backup', 'Delete one backup. A backup nothing chains against is deleted; one something chains against is merged into that successor instead.')
+        subcommand.add_argument('backup_id', help='The backup id.', type=str)
 
     def init_backup__restore(self, subparser):
         subcommand = self.add_sub_command(subparser, 'restore', 'Restore a backup to a new logical volume.')
@@ -1757,6 +1768,8 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.cluster__index_state(sub_command, args)
                 elif sub_command in ['check-indices']:
                     ret = self.cluster__check_indices(sub_command, args)
+                elif sub_command in ['check-backups']:
+                    ret = self.cluster__check_backups(sub_command, args)
                 elif sub_command in ['graceful-shutdown']:
                     ret = self.cluster__graceful_shutdown(sub_command, args)
                 elif sub_command in ['restart']:
@@ -2014,6 +2027,8 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.backup__list(sub_command, args)
                 elif sub_command in ['delete']:
                     ret = self.backup__delete(sub_command, args)
+                elif sub_command in ['delete-backup']:
+                    ret = self.backup__delete_backup(sub_command, args)
                 elif sub_command in ['restore']:
                     ret = self.backup__restore(sub_command, args)
                 elif sub_command in ['export']:

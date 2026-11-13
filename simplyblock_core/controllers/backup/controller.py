@@ -30,7 +30,6 @@ from simplyblock_core.models.backup_config import (
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.rpc_client import RPCException
 
 logger = logging.getLogger()
 
@@ -376,6 +375,47 @@ def write_manifest(backup: Backup) -> None:
 
 def delete_manifest(backup: Backup) -> None:
     backup_manifest.delete(_config_for(backup), UUID(backup.uuid))
+
+
+def delete_backup_data(backup: Backup) -> None:
+    """Remove a backup's S3 data objects directly, with no data-plane RPC.
+
+    There is no data-plane RPC for this and none is planned -- a bucket's data
+    objects can be removed the same way a manifest is, by the control plane
+    talking to S3 itself. This is only for a backup whose delete needs no
+    data-plane involvement (a tip delete, or a whole-chain delete): a backup
+    something still chains against is folded into its successor by
+    ``trigger_merge`` instead, which is where the data plane's own
+    ``bdev_lvol_s3_merge`` remains the only way to remove such a backup's
+    objects without breaking its descendant.
+
+    Raises:
+        ManifestError: the objects could not be listed or removed.
+        PreconditionError: the backup's bucket is not the cluster's own.
+    """
+    backup_manifest.delete_data_objects(_config_for(backup), backup.s3_id)
+
+
+def mark_manifest_deleting(backup: Backup) -> None:
+    """Mark a backup's manifest DELETING, before any of its S3 objects are
+    touched. See ``manifest.mark_deleting``.
+
+    Raises:
+        ManifestError: the manifest could not be read or rewritten.
+        PreconditionError: the backup's bucket is not the cluster's own.
+    """
+    backup_manifest.mark_deleting(_config_for(backup), UUID(backup.uuid))
+
+
+def revert_manifest_deleting(backup: Backup) -> None:
+    """Revert a backup's manifest to ACTIVE: a delete that did not finish.
+    See ``manifest.mark_active``.
+
+    Raises:
+        ManifestError: the manifest could not be read or rewritten.
+        PreconditionError: the backup's bucket is not the cluster's own.
+    """
+    backup_manifest.mark_active(_config_for(backup), UUID(backup.uuid))
 
 
 def _blob_parent_id(snapshot: SnapShot) -> str | None:
@@ -927,15 +967,16 @@ def restore_backup(backup_id: str, lvol_name: str, pool_id_or_name: str,
     bdev_name = f"{lvol.lvs_name}/{lvol.lvol_bdev}"
 
     if not tasks_controller.add_backup_restore_task(
-            pool.cluster_id, lvol.node_id, backup_id, bdev_name,
+            backup.lvol_id, pool.cluster_id, lvol.node_id, backup_id, bdev_name,
             chain.s3_ids_newest_first(), lvol_id=lvol_id,
             s3_config=s3_config.model_dump(exclude_none=True) if s3_config is not None else None):
-        raise RuntimeError("Failed to create restore task")
+        raise PreconditionError(
+            "Failed to create restore task: the source chain is being merged or deleted")
 
     return lvol_id
 
 
-def _cleanup_backup_kms_keys(backups):
+def cleanup_backup_kms_keys(backups):
     encrypted = [b for b in backups if b.encrypted]
     if not encrypted:
         return
@@ -952,15 +993,75 @@ def _cleanup_backup_kms_keys(backups):
         logger.exception("Failed to clean up backup KMS keys")
 
 
-def delete_backups(lvol_id):
-    """Delete all backups for a given lvol.
+def _revert_backup_claim(backup_id: str) -> None:
+    """Undo a claim made by :func:`_start_backup_delete`/``trigger_merge`` that
+    did not get as far as anything irreversible: put the backup back to
+    COMPLETED.
 
-    Removes the database records, not the objects: bdev_lvol_s3_delete does not
-    exist on the data plane, so the S3 data outlives this call. The manifests
-    are deliberately left in place too -- they are the only thing that can still
-    identify those objects, and deleting them would turn a reclaimable orphan
-    set into anonymous bucket weight. `backup discover` therefore keeps showing
-    them, which is the honest answer about what the bucket contains.
+    A no-op if the backup is gone (improbable here -- nothing between the
+    claim and this has removed it) or has moved past DELETING on its own.
+    """
+    try:
+        fresh = db_controller.get_backup_by_id(backup_id)
+    except KeyError:
+        return
+    if fresh.status != Backup.STATUS_DELETING:
+        return
+    db_controller.atomic_update(fresh, lambda b: setattr(b, "status", Backup.STATUS_COMPLETED))
+
+
+def _start_backup_delete(backups: list[Backup]):
+    """Claim every backup in ``backups`` -- all COMPLETED, all belonging to one
+    volume's chain -- for deletion, mark their manifests DELETING, and queue
+    the task that removes their S3 objects.
+
+    All-or-nothing: the chain claim (``DBController.claim_backup_chain_op``)
+    is one transaction already, and if marking any manifest afterwards fails,
+    every claim just taken is reverted back to COMPLETED before this returns
+    -- so a partial failure here never leaves a backup DELETING with an
+    ACTIVE manifest, or a manifest DELETING with no FDB record to match it
+    (the manifest write only happens after the claim, never before).
+
+    Returns ``(True, None)`` once the delete task is queued (or an equivalent
+    one already was -- ``add_backup_delete_task`` dedupes), or
+    ``(False, reason)``.
+    """
+    if not backups:
+        return True, None
+    lvol_id = backups[0].lvol_id
+    ids = [b.uuid for b in backups]
+
+    ok, reason = db_controller.claim_backup_chain_op(lvol_id, ids, Backup.STATUS_DELETING)
+    if not ok:
+        return False, reason
+
+    try:
+        for b in backups:
+            mark_manifest_deleting(b)
+    except (backup_manifest.ManifestError, PreconditionError, ValueError, KeyError) as e:
+        # KeyError: _config_for's own cluster lookup, inside
+        # mark_manifest_deleting. Everything here ran after the claim already
+        # committed, so every target is reverted -- there is nothing partial
+        # to distinguish.
+        for backup_id in ids:
+            _revert_backup_claim(backup_id)
+        return False, str(e)
+
+    tasks_controller.add_backup_delete_task(backups[0].cluster_id, backups[0].node_id, ids)
+    return True, None
+
+
+def delete_backups(lvol_id):
+    """Delete every backup of a volume.
+
+    All of them go directly to deletion, never a merge: nothing outside this
+    call survives to chain against any of them, so there is nothing to fold
+    one into. Refuses outright if any backup of the volume is still being
+    created (PENDING/IN_PROGRESS) -- deleting mid-upload would remove the very
+    backup a running upload's own ``prev_backup_id`` depends on -- or if any
+    is a live member of a group backup, or already MERGING (someone else's
+    merge of a backup this call would otherwise also claim). A backup already
+    DELETING is tolerated: this call resuming one that did not finish.
 
     Returns (success, error_message).
     """
@@ -968,65 +1069,66 @@ def delete_backups(lvol_id):
     if not backups:
         return False, f"No backups found for lvol {lvol_id}"
 
-    _cleanup_backup_kms_keys(backups)
+    in_flight = [b for b in backups
+                if b.status in (Backup.STATUS_PENDING, Backup.STATUS_IN_PROGRESS)]
+    if in_flight:
+        return False, (f"backup(s) {', '.join(b.uuid[:8] for b in in_flight)} of volume "
+                       f"{lvol_id} are still being created")
 
-    # Find node to run delete RPC on
-    completed = [b for b in backups if b.status == Backup.STATUS_COMPLETED]
-    if not completed:
-        # Just remove from DB
-        for b in backups:
-            b.remove(db_controller.kv_store)
-        return True, None
+    merging = [b for b in backups if b.status == Backup.STATUS_MERGING]
+    if merging:
+        return False, (f"backup(s) {', '.join(b.uuid[:8] for b in merging)} of volume "
+                       f"{lvol_id} are already being merged")
 
-    node_id = completed[0].node_id
-    try:
-        snode = db_controller.get_storage_node_by_id(node_id)
-    except KeyError:
-        # Node gone, just clean up DB
-        for b in backups:
-            b.remove(db_controller.kv_store)
-        return True, None
-
-    # Call S3 delete RPC (dummy for now)
-    if snode.status == StorageNode.STATUS_ONLINE:
-        rpc_client = snode.rpc_client()
-        s3_ids = [b.s3_id for b in completed]
-        try:
-            rpc_client.bdev_lvol_s3_delete(s3_ids)
-        except Exception as e:
-            logger.error(f"Error deleting S3 backups: {e}")
-
-    cluster_id = completed[0].cluster_id
     for b in backups:
-        backup_events.backup_deleted(cluster_id, node_id, b)
+        if not b.group_backup_id:
+            continue
+        try:
+            owner = db_controller.get_group_backup_by_id(b.group_backup_id)
+        except KeyError:
+            continue    # its group backup is gone: an orphaned member copy
+        if owner.status != GroupBackup.STATUS_DELETING:
+            return False, (f"backup {b.uuid} belongs to group backup "
+                           f"{b.group_backup_id}, which still exists; delete the "
+                           "group backup instead")
+
+    completed = [b for b in backups if b.status == Backup.STATUS_COMPLETED]
+    if completed:
+        ok, reason = _start_backup_delete(completed)
+        if not ok:
+            return False, f"Cannot delete backups of volume {lvol_id}: {reason}"
+
+    # A FAILED backup uploaded nothing restorable and has no manifest: remove
+    # its record directly. COMPLETED backups are left for the task just
+    # queued above to retire; a backup already DELETING is being retired by
+    # that task or an earlier one.
+    for b in backups:
+        if b.status != Backup.STATUS_FAILED:
+            continue
+        cleanup_backup_kms_keys([b])
+        backup_events.backup_deleted(b.cluster_id, b.node_id, b)
         b.remove(db_controller.kv_store)
 
     return True, None
 
 
 def delete_backup(backup_id):
-    """Delete ONE backup: its record, its KMS keys and, best effort, its S3
-    objects -- the single-record form of :func:`delete_backups`, for a backup
-    that nothing chains against any more, such as a deleted group backup's
-    member that is the last link of its volume's chain.
+    """Delete ONE backup: start deleting it if nothing chains against it, or
+    fold it into its completed successor if something does -- deleting a
+    backup with a successor and merging it into that successor are the same
+    request; see :func:`trigger_merge`.
 
     Raises:
         KeyError: no backup has this id.
-        PreconditionError: another backup names this one as its predecessor,
-            so deleting it would make every descendant unrestorable -- merge it
-            into its successor instead (``trigger_merge``), after which it is
-            MERGED, not deleted, and its objects are the survivor's; or it is a
-            member of a group backup that still exists, which deleting it would
-            tear.
+        PreconditionError: it is the predecessor of a backup that is not yet
+            completed (nothing to merge it into yet); it is a member of a
+            group backup that still exists (delete the group backup
+            instead); it is not completed itself; or the chain it belongs to
+            is already claimed by another merge, delete, or an active
+            restore (``DBController.claim_backup_chain_op``).
     """
     backup = db_controller.get_backup_by_id(backup_id)
-    dependents = [b.uuid for b in db_controller.get_backups_by_lvol_id(backup.lvol_id)
-                  if b.prev_backup_id == backup.uuid]
-    if dependents:
-        raise PreconditionError(
-            f"backup {backup.uuid} is the predecessor of "
-            f"{', '.join(d[:8] for d in dependents)}; merge it into its "
-            "successor instead of deleting it")
+
     if backup.group_backup_id:
         try:
             owner = db_controller.get_group_backup_by_id(backup.group_backup_id)
@@ -1038,21 +1140,43 @@ def delete_backup(backup_id):
                 f"backup {backup.uuid} is a member of group backup "
                 f"{backup.group_backup_id}; delete the group backup instead")
 
-    _cleanup_backup_kms_keys([backup])
-    if backup.status == Backup.STATUS_COMPLETED:
-        try:
-            snode = db_controller.get_storage_node_by_id(backup.node_id)
-        except KeyError:
-            snode = None
-        if snode is not None and snode.status == StorageNode.STATUS_ONLINE:
-            try:
-                snode.rpc_client().bdev_lvol_s3_delete([backup.s3_id])
-            except RPCException as e:
-                # Best effort, as delete_backups: the data plane does not
-                # implement the S3 delete yet, and the record goes regardless.
-                logger.error(f"Error deleting S3 objects of backup {backup.uuid}: {e}")
-    backup_events.backup_deleted(backup.cluster_id, backup.node_id, backup)
-    backup.remove(db_controller.kv_store)
+    if backup.status == Backup.STATUS_DELETING:
+        # Resuming a delete that claimed this backup but did not finish
+        # queuing its task (the process died in between): re-queue rather
+        # than re-claim, which would see this backup's own DELETING status
+        # among its siblings and refuse itself.
+        tasks_controller.add_backup_delete_task(backup.cluster_id, backup.node_id, [backup.uuid])
+        return
+
+    if backup.status == Backup.STATUS_FAILED:
+        # Uploaded nothing restorable, so there is no manifest and nothing
+        # in S3 to claim or wait on -- the same direct removal
+        # delete_backups gives every FAILED backup of a volume.
+        cleanup_backup_kms_keys([backup])
+        backup_events.backup_deleted(backup.cluster_id, backup.node_id, backup)
+        backup.remove(db_controller.kv_store)
+        return
+
+    dependents = [b for b in db_controller.get_backups_by_lvol_id(backup.lvol_id)
+                  if b.prev_backup_id == backup.uuid]
+    if dependents:
+        successor = next((b for b in dependents if b.status == Backup.STATUS_COMPLETED), None)
+        if successor is None:
+            raise PreconditionError(
+                f"backup {backup.uuid} is the predecessor of "
+                f"{', '.join(d.uuid[:8] for d in dependents)}, none of which is "
+                "completed yet; it cannot be merged or deleted")
+        ok, reason = trigger_merge(successor, backup)
+        if not ok:
+            raise PreconditionError(f"Cannot delete backup {backup.uuid}: {reason}")
+        return
+
+    if backup.status != Backup.STATUS_COMPLETED:
+        raise PreconditionError(f"backup {backup.uuid} is {backup.status}, not completed")
+
+    ok, reason = _start_backup_delete([backup])
+    if not ok:
+        raise PreconditionError(f"Cannot delete backup {backup.uuid}: {reason}")
 
 
 def list_backups(cluster_id=None, show_all=False):
@@ -1199,6 +1323,16 @@ def import_backups(export: backup_manifest.BackupExport, cluster_id=None) -> int
         for manifest in group.manifests:
             backup_id = manifest.backup_id
 
+            # A manifest a delete has marked DELETING describes objects that
+            # may already be gone -- the single-backup analog of
+            # import_group_backup's refusal of a non-COMMITTED group
+            # manifest. Explicit, named targets are refused outright here;
+            # import_from_bucket is where a bulk import skips these instead.
+            if manifest.state != backup_manifest.BackupManifestState.ACTIVE:
+                raise PreconditionError(
+                    f"Backup {backup_id} is {manifest.state} in its bucket, "
+                    f"not active; it cannot be imported")
+
             if backup_id in pending:
                 raise ValueError(f"Backup {backup_id} is listed more than once")
 
@@ -1256,37 +1390,214 @@ def import_backups(export: backup_manifest.BackupExport, cluster_id=None) -> int
 def import_from_bucket(config: BackupConfig, cluster_id=None) -> int:
     """Import every backup found in a bucket.
 
+    A bucket holds backups being deleted on their source cluster too; they
+    are not part of what it can restore, so they are left, not refused --
+    the single-backup analog of ``import_group_backup_from_bucket`` leaving a
+    non-``COMMITTED`` group manifest in place. A backup whose ancestor was
+    left this way is itself refused by the chain check in `import_backups`,
+    which is the correct outcome: its chain is incomplete in this bucket for
+    as long as the ancestor is being deleted.
+
     Raises:
         ManifestError: the bucket could not be read.
         PreconditionError: the manifests it holds cannot be imported as a batch.
     """
+    active = []
+    for manifest in discover_backups(config):
+        if manifest.state != backup_manifest.BackupManifestState.ACTIVE:
+            logger.info("Backup %s is %s in the bucket; not importing it",
+                        manifest.backup_id, manifest.state)
+            continue
+        active.append(manifest)
+
     return import_backups(
         backup_manifest.BackupExport(groups=[
             backup_manifest.LocatedManifests(
                 location=config.location(),
-                manifests=discover_backups(config)),
+                manifests=active),
         ]),
         cluster_id=cluster_id)
 
 
+#: Backup statuses whose manifest this function checks, and whose manifest
+#: --repair can re-derive from the record. MERGED and MERGING are excluded:
+#: the merge path does not mark a manifest state at all (it writes the
+#: survivor's and deletes the old one only once the merge itself is done),
+#: so neither a MERGED backup's manifest existing nor its absence is a
+#: reliable signal here -- that is a gap in the merge path itself, not one
+#: this check can resolve by rewriting anything.
+_MANIFEST_CHECKED_STATUSES = (Backup.STATUS_COMPLETED, Backup.STATUS_DELETING)
+
+
+def check_backups(cluster_id=None, repair=False) -> bool:
+    """Verify every backup's FDB record agrees with its S3 manifest, in both
+    directions, and report the drift. The backup analog of
+    ``cluster_ops.check_indices``.
+
+    For ``cluster_id`` (or every cluster with a usable backup configuration,
+    deployment-wide):
+
+    * every COMPLETED or DELETING backup must have a manifest, whose
+      ``state`` matches (ACTIVE for COMPLETED, DELETING for DELETING) and
+      whose ``s3_id``/``prev_backup_id`` agree with the record;
+    * every ACTIVE manifest the bucket holds must name a backup record that
+      still exists in some status -- one that does not is an orphan,
+      reported but never repaired: it may be a disaster-recovery backup
+      nothing has imported yet, which looks identical to genuine drift from
+      here, and there is no record to derive a fix from either way.
+
+    ``--repair`` rewrites a missing or disagreeing manifest from the record,
+    which is today's single source of truth: the project's own roadmap is to
+    make the bucket canonical instead (see ``controller.build_manifest``),
+    but that is not the status quo this function can assume.
+
+    Returns ``True`` if nothing is left unresolved.
+    """
+    clusters = (
+        [db_controller.get_cluster_by_id(cluster_id)]
+        if cluster_id else db_controller.get_clusters())
+
+    problems = 0
+    repaired = 0
+    orphans = 0
+
+    for cluster in clusters:
+        try:
+            config = cluster.get_backup_config()
+        except ValueError:
+            continue    # nothing of its own to check
+
+        all_backups = db_controller.get_backups(cluster.get_id())
+        known_s3_ids = set()
+        for backup in all_backups:
+            try:
+                if backup.get_location() == config.location():
+                    known_s3_ids.add(backup.s3_id)
+            except ValueError:
+                continue
+
+        for backup in all_backups:
+            if backup.status not in _MANIFEST_CHECKED_STATUSES:
+                continue
+            try:
+                if backup.get_location() != config.location():
+                    continue    # lives in a bucket this cluster does not own
+            except ValueError:
+                continue
+
+            expected_state = (backup_manifest.BackupManifestState.DELETING
+                              if backup.status == Backup.STATUS_DELETING
+                              else backup_manifest.BackupManifestState.ACTIVE)
+            manifest = backup_manifest.read_if_present(config, UUID(backup.uuid))
+
+            if manifest is None:
+                problems += 1
+                logger.error("Backup %s (%s) has no manifest in %s",
+                            backup.uuid, backup.status, config.bucket_name)
+                if repair and _rewrite_manifest_from_record(backup):
+                    repaired += 1
+                continue
+
+            disagreements = []
+            if manifest.state != expected_state:
+                disagreements.append(f"state={manifest.state}, expected {expected_state}")
+            if manifest.s3_id != backup.s3_id:
+                disagreements.append(f"s3_id={manifest.s3_id}, expected {backup.s3_id}")
+            manifest_prev = str(manifest.prev_backup_id) if manifest.prev_backup_id else ""
+            if manifest_prev != backup.prev_backup_id:
+                disagreements.append(
+                    f"prev_backup_id={manifest_prev or '(none)'}, "
+                    f"expected {backup.prev_backup_id or '(none)'}")
+            if not disagreements:
+                continue
+
+            problems += 1
+            logger.error("Backup %s manifest disagrees with its record: %s",
+                        backup.uuid, "; ".join(disagreements))
+            if repair and _rewrite_manifest_from_record(backup):
+                repaired += 1
+
+        try:
+            manifests = discover_backups(config)
+        except backup_manifest.ManifestError as e:
+            problems += 1
+            logger.error("Could not list bucket %s for cluster %s: %s",
+                        config.bucket_name, cluster.get_id(), e)
+            continue
+
+        for manifest in manifests:
+            if manifest.state != backup_manifest.BackupManifestState.ACTIVE:
+                continue    # a delete's own manifest; may briefly outlive its record
+            if manifest.s3_id not in known_s3_ids:
+                orphans += 1
+                logger.error(
+                    "Manifest for backup %s (s3_id=%s) in %s names no known "
+                    "record in cluster %s", manifest.backup_id, manifest.s3_id,
+                    config.bucket_name, cluster.get_id())
+
+    logger.info("Backup check: %d problem(s), %d repaired, %d orphaned manifest(s) "
+                "(never auto-repaired)", problems, repaired, orphans)
+    if problems > repaired and not repair:
+        logger.error("Re-run with --repair to rewrite manifests from their records.")
+    return (problems - repaired) == 0 and orphans == 0
+
+
+def _rewrite_manifest_from_record(backup: Backup) -> bool:
+    """Rewrite ``backup``'s manifest from its FDB record: ACTIVE, then
+    DELETING again if that is what the record says. Two steps because
+    ``write_manifest`` always writes ACTIVE (it is what a freshly completed
+    backup's manifest has never not been), and only a second, explicit mark
+    turns that into DELETING -- the same two calls ``_start_backup_delete``
+    itself would have made, in the same order.
+
+    Never raises: a record this cannot rebuild from (an unreadable location,
+    a missing encryption descriptor, an unreachable bucket) is one
+    ``check_backups`` has to report and move on from, not one that aborts
+    the whole run over a single bad backup. Returns whether it succeeded.
+    """
+    try:
+        write_manifest(backup)
+        if backup.status == Backup.STATUS_DELETING:
+            mark_manifest_deleting(backup)
+    except (ValueError, backup_manifest.ManifestError, PreconditionError, KeyError) as e:
+        logger.error("Could not rewrite the manifest of backup %s from its "
+                    "record: %s", backup.uuid, e)
+        return False
+    return True
+
+
 def trigger_merge(keep_backup, old_backup):
     """Merge ``old_backup`` into ``keep_backup``, its successor in one volume's
-    chain: mark the old one merging and queue the merge task.
+    chain: claim the chain, mark the old one merging, and queue the merge task.
 
-    Both must be completed; otherwise nothing happens and a later pass retries.
-    Used by the single-volume retention (policy) and by the group backup's
-    retirement of a pruned generation's members (group_backup).
+    Both must be completed, and the chain must not already be claimed by
+    another merge, delete, or an active restore
+    (``DBController.claim_backup_chain_op``) -- otherwise nothing happens and
+    a later pass retries. Used by the single-volume retention (policy), by
+    the group backup's retirement of a pruned generation's members
+    (group_backup), and by ``delete_backup`` when the backup requested for
+    deletion has a completed successor: deleting it and merging it into that
+    successor are the same operation up to this point, so both go through
+    here rather than duplicating the claim.
+
+    Returns ``(True, None)`` once the merge task is queued, or
+    ``(False, reason)`` if nothing happened. The scheduled callers above
+    treat ``False`` as "try again next cycle" and ignore the reason;
+    ``delete_backup`` surfaces it to its own caller.
     """
     if old_backup.status != Backup.STATUS_COMPLETED:
-        return
+        return False, f"backup {old_backup.uuid} is {old_backup.status}, not completed"
     if keep_backup.status != Backup.STATUS_COMPLETED:
-        return
+        return False, f"backup {keep_backup.uuid} is {keep_backup.status}, not completed"
 
-    old_backup.status = Backup.STATUS_MERGING
-    old_backup.write_to_db()
+    ok, reason = db_controller.claim_backup_chain_op(
+        old_backup.lvol_id, [old_backup.uuid], Backup.STATUS_MERGING)
+    if not ok:
+        return False, reason
 
     tasks_controller.add_backup_merge_task(
         keep_backup.cluster_id,
         keep_backup.node_id,
         keep_backup.uuid,
         old_backup.uuid)
+    return True, None
