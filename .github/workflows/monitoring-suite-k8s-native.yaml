@@ -749,6 +749,33 @@ jobs:
           # Last resort. Everything above addresses why it hangs; this makes
           # sure it does not STAY hung, because a Terminating vault blocks the
           # next run's KMS install.
+          # Clearing a namespace's finalizer deletes the namespace OBJECT and
+          # nothing else. The namespace controller is what normally reaps the
+          # contents, so bypassing it leaves every Service, EndpointSlice and
+          # Pod behind as an orphan whose namespace no longer exists.
+          #
+          # An orphaned Service is not cosmetic. ovnkube-controller's gateway
+          # sync walks every Service and resolves its namespace; a single miss
+          # fails the whole sync:
+          #
+          #   gateway sync services failed: failed to get namespace "vault":
+          #   namespace "vault" not found
+          #
+          # The node network controller then never starts, so ovnkube-node
+          # crash loops on EVERY worker, multus times out waiting for OVN's
+          # readiness file, and no pod anywhere gets a sandbox. It never
+          # self-heals -- the Services have to be deleted by hand. Run
+          # 43332045357 left the cluster in exactly that state.
+          #
+          # So empty the namespace before force-finalizing it.
+          if kubectl get namespace vault >/dev/null 2>&1; then
+            echo "Emptying vault namespace before force-finalize"
+            kubectl delete svc,endpointslices,deploy,statefulset,replicaset,cm,secret \
+              --all -n vault --timeout=60s 2>/dev/null || true
+            kubectl delete pods --all -n vault \
+              --force --grace-period=0 --timeout=60s 2>/dev/null || true
+          fi
+
           if kubectl get namespace vault >/dev/null 2>&1; then
             echo "vault still Terminating; force-finalizing"
             kubectl get namespace vault -o json \
