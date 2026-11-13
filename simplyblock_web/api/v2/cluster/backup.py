@@ -9,6 +9,7 @@ from simplyblock_core.controllers.backup import controller as backup_controller
 from simplyblock_core.controllers.backup import policy as backup_policy
 from simplyblock_core.controllers.backup.manifest import ManifestError
 from simplyblock_core.db_controller import DBController
+from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.models.backup_config import S3Credentials
 from simplyblock_core.models.cluster import Cluster as ClusterModel
 from simplyblock_core.models.lvol_model import LVol
@@ -173,8 +174,8 @@ def _lookup_lvol_in_cluster(volume_id: str, cluster: ClusterModel) -> LVol:
 @api.delete(
     '/{volume_id}',
     name='clusters:backups:delete',
-    status_code=204,
-    responses={204: {"content": None}},
+    status_code=202,
+    responses={202: {"content": None}},
     deprecated=True,
     summary='Deprecated — delete all backups for a volume',
     description=(
@@ -187,8 +188,8 @@ def delete_backups(cluster: Cluster, volume_id: UUID) -> Response:
     volume = _lookup_lvol_in_cluster(str(volume_id), cluster)
     success, error = backup_controller.delete_backups(volume.get_id())
     if error:
-        raise HTTPException(400, error)
-    return Response(status_code=204)
+        raise HTTPException(409, error)
+    return Response(status_code=202)
 
 
 # Backup policies
@@ -284,6 +285,21 @@ instance_api = APIRouter(prefix='/{backup_id}')
 @instance_api.get('/', name='clusters:backups:detail')
 def get_backup(cluster: Cluster, backup: BackupResource) -> BackupDTO:
     return BackupDTO.from_model(backup)
+
+
+@instance_api.delete('/', name='clusters:backups:delete-one',
+                     status_code=202, responses={202: {"content": None}})
+def delete_backup(cluster: Cluster, backup: BackupResource) -> Response:
+    """Delete one backup. A backup nothing chains against is claimed for
+    deletion: its record and manifest are marked deleting, and a task
+    removes its S3 objects and then both. A backup something chains against
+    is instead merged into that successor -- deleting it and merging it are
+    the same request once a successor exists."""
+    try:
+        backup_controller.delete_backup(backup.uuid)
+    except PreconditionError as e:
+        raise HTTPException(409, str(e)) from e
+    return Response(status_code=202)
 
 
 api.include_router(instance_api)
