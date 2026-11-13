@@ -56,7 +56,15 @@ spec:
               # kubelet that names none, and for one embedded in another process.
               KUBELET_CFG_ON_HOST="/var/lib/kubelet/config.yaml"
               CFG_FROM_KUBELET=""
-              KUBELET_PID="$(pgrep -x kubelet | head -n 1 || true)"
+              # Found by its name in /proc rather than with pgrep: the pgrep of this
+              # image is the one of BusyBox, whose -x does not match the kubelet.
+              KUBELET_PID=""
+              for comm in /proc/[0-9]*/comm; do
+                if [ "$(cat "$comm" 2>/dev/null)" = "kubelet" ]; then
+                  KUBELET_PID="$(basename "$(dirname "$comm")")"
+                  break
+                fi
+              done
               if [ -n "$KUBELET_PID" ] && [ -r "/proc/$KUBELET_PID/cmdline" ]; then
                 CFG_FROM_KUBELET="$(tr '\0' '\n' < "/proc/$KUBELET_PID/cmdline" \
                   | awk 'prev == "--config" { print; exit } /^--config=/ { sub(/^--config=/, ""); print; exit } { prev = $0 }' \

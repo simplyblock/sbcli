@@ -13,7 +13,10 @@ The same settings applied by hand to that file gave the SPDK pod exclusive CPUs.
 
 The script runs for real here, against a fake host under a temporary directory:
 ``/host``, ``/proc`` and ``/var/simplyblock`` are pointed into it, and
-``nsenter``, ``systemctl``, ``pgrep``, ``apk`` and ``sleep`` are stand-ins.
+``nsenter``, ``systemctl``, ``apk`` and ``sleep`` are stand-ins. The kubelet is a
+process in the fake ``/proc``, found the way the Job finds it: the first run on a
+real node failed because BusyBox ``pgrep -x``, which the Job image has, did not
+match the kubelet, and a stand-in for ``pgrep`` had hidden that.
 """
 import json
 import os
@@ -44,7 +47,6 @@ _FAKES = {
         'esac\n'
         'exit 0\n'
     ),
-    "pgrep": '#!/bin/sh\n[ -n "$KUBELET_PID" ] && echo "$KUBELET_PID"\nexit 0\n',
     "apk": "#!/bin/sh\nexit 0\n",
     "sleep": "#!/bin/sh\nexit 0\n",
 }
@@ -68,17 +70,24 @@ class _Host:
         self.comes_back = comes_back
         self.calls = os.path.join(root, "calls")
         for d in ("host/var/lib/kubelet", "host/etc/kubernetes/kubelet", "host/etc/systemd/system",
-                  "var/simplyblock", "proc/4242", "bin"):
+                  "var/simplyblock", "proc/4242", "proc/77", "bin"):
             os.makedirs(os.path.join(root, d))
         for name, body in _FAKES.items():
             path = os.path.join(root, "bin", name)
             with open(path, "w") as f:
                 f.write(body)
             os.chmod(path, 0o755)
+        # A process whose name only starts like the kubelet's is not the kubelet.
+        self._proc("77", "kubelet-wrapper", ["/usr/bin/kubelet-wrapper", "--config=/nowhere"])
         if kubelet_args is not None:
-            with open(os.path.join(root, "proc/4242/cmdline"), "wb") as f:
-                f.write(b"\0".join(a.encode() for a in ["/snap/kubelet-eks/current/kubelet"] + kubelet_args) + b"\0")
+            self._proc("4242", "kubelet", ["/snap/kubelet-eks/277/kubelet"] + kubelet_args)
         self.write("/var/lib/kubelet/cpu_manager_state", '{"policyName":"none"}')
+
+    def _proc(self, pid, comm, argv):
+        with open(os.path.join(self.root, "proc", pid, "comm"), "w") as f:
+            f.write(comm + "\n")
+        with open(os.path.join(self.root, "proc", pid, "cmdline"), "wb") as f:
+            f.write(b"\0".join(a.encode() for a in argv) + b"\0")
 
     def path(self, host_path):
         return os.path.join(self.root, "host", host_path.lstrip("/"))
@@ -108,7 +117,6 @@ class _Host:
             PATH=os.path.join(self.root, "bin") + os.pathsep + os.environ["PATH"],
             CALLS=self.calls,
             HOST_UNITS=self.units,
-            KUBELET_PID="4242" if self.kubelet_args is not None else "",
             KUBELET_COMES_BACK="yes" if self.comes_back else "no",
         )
         done = subprocess.run(["dash", "-c", script], capture_output=True, text=True, env=env)
