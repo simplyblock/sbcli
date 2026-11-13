@@ -1,0 +1,833 @@
+"""Talos: huge pages reserved through the Talos API, not written to the host.
+
+On Talos the host is immutable and has no shell, so the node agent cannot
+write ``nr_hugepages`` or restart the kubelet the way the init Job does
+elsewhere. The storage node used to discover Talos by sniffing
+``/proc/version`` inside the init Job and then simply skip -- leaving the SPDK
+pod Pending on ``Insufficient hugepages-2Mi`` whenever the operator's
+pre-provisioned pool was short. It is now stated the way OpenShift is
+(``TALOS_CLUSTER`` on the node agent, set by the operator from the
+StorageCluster's environment), and a stated Talos node reserves the pages
+itself through ``talosctl`` run as Jobs against the node's own apid, in two
+steps: patch the per-NUMA counts into ``machine.sysfs`` and wait for the pool
+to appear on the host, then restart the kubelet and wait for it to advertise
+the pool. Two steps because Talos writes the kernel parameter asynchronously:
+one Job that restarted the kubelet right after the patch booted it seeing
+zero pages (lab cluster, worker-1, 2026-10-16).
+"""
+import json
+import os
+import shutil
+import subprocess
+import tempfile
+import unittest
+from unittest.mock import MagicMock, patch
+
+import yaml
+from jinja2 import Environment, PackageLoader
+from kubernetes.client import ApiException
+
+from simplyblock_web.api.internal.storage_node import kubernetes as k8s_node
+
+MIB = 1024 * 1024
+GIB = 1024 * MIB
+
+
+def _env():
+    return Environment(loader=PackageLoader('simplyblock_web', 'templates'), trim_blocks=True, lstrip_blocks=True)
+
+
+def _rendered_init_script(**overrides):
+    values = {
+        'JOBNAME': 'snode-spdk-job-worker-1', 'NAMESPACE': 'simplyblock', 'HOSTNAME': 'worker-1',
+        'TLS_CONNECT': 'disabled', 'TALOS_CLUSTER': False,
+    }
+    values.update(overrides)
+    job = yaml.safe_load(_env().get_template('storage_init_job.yaml.j2').render(values))
+    return job['spec']['template']['spec']['containers'][0]['args'][0]
+
+
+class TestHugepageShortfall(unittest.TestCase):
+
+    def test_enough_pages_is_no_shortfall(self):
+        self.assertIsNone(k8s_node._hugepage_shortfall(13 * GIB, 12800))
+
+    def test_exact_fit_is_no_shortfall(self):
+        self.assertIsNone(k8s_node._hugepage_shortfall(12800 * MIB, 12800))
+
+    def test_shortfall_names_both_sides_and_the_page_count(self):
+        msg = k8s_node._hugepage_shortfall(2048 * MIB, 12801)
+        self.assertIsNotNone(msg)
+        self.assertIn('2048 MiB', msg)
+        self.assertIn('12801 MiB', msg)
+        self.assertIn('6401 2 MiB pages', msg)  # 12801 MiB of 2 MiB pages, rounded up
+
+    def test_no_pool_at_all(self):
+        self.assertIn('host provides 0 MiB', k8s_node._hugepage_shortfall(0, 1024))
+
+
+class TestTalosHost(unittest.TestCase):
+    """Talos is detected from the Node object; TALOS_CLUSTER only overrides."""
+
+    def _with_os_image(self, os_image):
+        core = MagicMock()
+        core.read_node.return_value.status.node_info.os_image = os_image
+        return patch.object(k8s_node.core_utils, 'get_k8s_core_client', return_value=core)
+
+    def test_detected_from_the_nodes_os_image(self):
+        for img, want in (('Talos (v1.12.7)', True), ('talos (v1.14.0)', True),
+                          ('Red Hat Enterprise Linux CoreOS 418.94', False), ('Ubuntu 24.04.1 LTS', False), ('', False)):
+            with self.subTest(img=img), patch.dict(os.environ, {}, clear=True), self._with_os_image(img):
+                self.assertEqual(k8s_node._talos_host('worker-1'), want)
+
+    def test_override_beats_detection(self):
+        with patch.dict(os.environ, {'TALOS_CLUSTER': ' True '}, clear=True), self._with_os_image('Ubuntu 24.04'):
+            self.assertTrue(k8s_node._talos_host('worker-1'))
+        with patch.dict(os.environ, {'TALOS_CLUSTER': 'false'}, clear=True), self._with_os_image('Talos (v1.12.7)'):
+            self.assertFalse(k8s_node._talos_host('worker-1'))
+
+    def test_junk_override_falls_back_to_detection(self):
+        for v in ('1', 'yes', ''):
+            with self.subTest(v=v), patch.dict(os.environ, {'TALOS_CLUSTER': v}, clear=True), self._with_os_image('Talos (v1.12.7)'):
+                self.assertTrue(k8s_node._talos_host('worker-1'))
+
+    def test_unreadable_node_is_not_talos(self):
+        core = MagicMock()
+        core.read_node.side_effect = ApiException(status=403)
+        with patch.dict(os.environ, {}, clear=True), patch.object(k8s_node.core_utils, 'get_k8s_core_client', return_value=core):
+            self.assertFalse(k8s_node._talos_host('worker-1'))
+
+
+class TestKubeletTopologyHelpers(unittest.TestCase):
+
+    def test_kubelet_patch_carries_the_four_keys(self):
+        self.assertEqual(k8s_node._talos_kubelet_patch('0,1'), {"machine": {"kubelet": {"extraConfig": {
+            "cpuManagerPolicy": "static", "topologyManagerPolicy": "single-numa-node",
+            "topologyManagerScope": "pod", "reservedSystemCPUs": "0,1"}}}})
+
+    def test_reads_the_live_kubelet_config(self):
+        static = {"cpuManagerPolicy": "static", "topologyManagerPolicy": "single-numa-node",
+                  "topologyManagerScope": "pod", "reservedSystemCPUs": "0,1"}
+        core = MagicMock()
+        core.connect_get_node_proxy_with_path.return_value = json.dumps({"kubeletconfig": static})
+        self.assertEqual(k8s_node._read_kubelet_config(core, 'worker-1'), static)
+        # Not preloaded: the client's preloaded 'str' is a Python repr of the
+        # dict ("{'kubeletconfig': {...}}"), not JSON (seen on the lab cluster).
+        core.connect_get_node_proxy_with_path.assert_called_with('worker-1', 'configz', _preload_content=False)
+        raw = MagicMock()
+        raw.data = core.connect_get_node_proxy_with_path.return_value.encode()
+        core.connect_get_node_proxy_with_path.return_value = raw
+        self.assertEqual(k8s_node._read_kubelet_config(core, 'worker-1'), static)
+
+    def test_configured_compares_every_key_including_the_reserved_set(self):
+        static = {"cpuManagerPolicy": "static", "topologyManagerPolicy": "single-numa-node",
+                  "topologyManagerScope": "pod", "reservedSystemCPUs": "0,1"}
+        self.assertTrue(k8s_node._kubelet_topology_configured(static, '0,1'))
+        self.assertFalse(k8s_node._kubelet_topology_configured(static, '0-3'))  # other reserved set
+        self.assertFalse(k8s_node._kubelet_topology_configured({"cpuManagerPolicy": "none"}, '0,1'))
+
+    def test_unreadable_config_is_unknown(self):
+        core = MagicMock()
+        core.connect_get_node_proxy_with_path.side_effect = ApiException(status=403)
+        self.assertIsNone(k8s_node._read_kubelet_config(core, 'worker-1'))
+        core.connect_get_node_proxy_with_path.side_effect = None
+        for bad in ("not json", "{'kubeletconfig': {'cpuManagerPolicy': 'static'}}"):  # the preloaded repr form
+            core.connect_get_node_proxy_with_path.return_value = bad
+            self.assertIsNone(k8s_node._read_kubelet_config(core, 'worker-1'), bad)
+
+    def test_strict_cpu_reservation_is_refused(self):
+        """With the reserved set being everything but the SPDK cores, that
+        option would leave the host's other pods no CPU at all."""
+        self.assertIsNone(k8s_node._strict_cpu_reservation({"cpuManagerPolicy": "static"}, 'worker-1'))
+        self.assertIsNone(k8s_node._strict_cpu_reservation(
+            {"cpuManagerPolicyOptions": {"full-pcpus-only": "true"}}, 'worker-1'))
+        msg = k8s_node._strict_cpu_reservation(
+            {"cpuManagerPolicyOptions": {"strict-cpu-reservation": "true"}}, 'worker-1')
+        self.assertIn("strict-cpu-reservation", msg)
+        self.assertIn("worker-1", msg)
+
+
+class TestSizingHelpers(unittest.TestCase):
+
+    def test_pages_per_numa_is_the_apply_config_sizing(self):
+        """Two node configs on NUMA 0, one on NUMA 1, max_size overriding
+        where larger: the figures apply_config has always written."""
+        nodes = [
+            {"huge_page_memory": 4_000_000_000, "max_size": 0, "socket": 0},
+            {"huge_page_memory": 4_000_000_000, "max_size": 6_000_000_000, "socket": 0},
+            {"huge_page_memory": 2_000_000_000, "max_size": 0, "socket": 1},
+        ]
+        self.assertEqual(k8s_node._hugepages_per_numa(nodes), {
+            0: (4_000_000_000 + 1_000_000_000 + 6_000_000_000 + 1_000_000_000) // 2_000_000,
+            1: (2_000_000_000 + 1_000_000_000) // 2_000_000,
+        })
+
+    def test_sysfs_patch_is_one_dotted_key_per_numa_node(self):
+        patch_ = k8s_node._talos_sysfs_patch({1: 1500, 0: 6000})
+        self.assertEqual(patch_, {"machine": {"sysfs": {
+            "devices.system.node.node0.hugepages.hugepages-2048kB.nr_hugepages": "6000",
+            "devices.system.node.node1.hugepages.hugepages-2048kB.nr_hugepages": "1500",
+        }}})
+        # A merge patch, not a JSON-6902 array: it adds to machine.sysfs
+        # instead of replacing whatever else the operator keeps there, and it
+        # is the format a multi-document machine config accepts.
+        self.assertIsInstance(patch_, dict)
+
+    def test_quantity_to_mib(self):
+        for q, mib in (('13Gi', 13 * 1024), ('12800Mi', 12800), ('0', 0), (None, 0),
+                       (str(2 * GIB), 2048), ('1048576Ki', 1024)):
+            with self.subTest(q=q):
+                self.assertEqual(k8s_node._quantity_to_mib(q), mib)
+
+    def test_job_name_keeps_the_tail_under_63(self):
+        long_node = 'worker-' + 'x' * 80
+        name = k8s_node._job_name('snode-talos-hugepages-', long_node)
+        self.assertEqual(len(name), 63)
+        self.assertTrue(name.endswith('x' * 20))
+        self.assertEqual(k8s_node._job_name('p-', 'w1'), 'p-w1')
+
+
+class TestTalosJobTemplate(unittest.TestCase):
+
+    def _job(self, step):
+        values = {
+            'TALOS_JOBNAME': f'snode-talos-{step}-worker-1', 'NAMESPACE': 'simplyblock', 'HOSTNAME': 'worker-1',
+            'TALOSCTL_IMAGE': 'ghcr.io/siderolabs/talosctl:v1.12.7', 'TALOS_API_SECRET': 'talos-api-access-talos-secrets',
+            'TALOS_PATCH': json.dumps(k8s_node._talos_sysfs_patch({0: 6000}), separators=(',', ':')),
+            'TALOS_STEP': step,
+        }
+        return yaml.safe_load(_env().get_template('storage_talos_hugepages_job.yaml.j2').render(values))
+
+    def test_patch_step_is_one_talosctl_patch_without_a_shell(self):
+        spec = self._job('patch')['spec']['template']['spec']
+        self.assertEqual(spec['nodeSelector'], {'kubernetes.io/hostname': 'worker-1'})
+        self.assertNotIn('initContainers', spec)
+        [c] = spec['containers']
+        self.assertEqual(c['name'], 'patch-machine-config')
+        self.assertEqual(c['args'][:4], ['--nodes', '$(NODE_IP)', '--endpoints', '$(NODE_IP)'])
+        self.assertEqual(c['args'][4:8], ['patch', 'machineconfig', '--mode=no-reboot', '--patch'])
+        self.assertEqual(json.loads(c['args'][8]), k8s_node._talos_sysfs_patch({0: 6000}))
+        self.assertEqual(c['image'], 'ghcr.io/siderolabs/talosctl:v1.12.7')
+        self.assertNotIn('command', c)
+        self.assertIn({'name': 'TALOSCONFIG', 'value': '/var/run/secrets/talos.dev/config'}, c['env'])
+        self.assertEqual(c['volumeMounts'][0]['mountPath'], '/var/run/secrets/talos.dev')
+        self.assertEqual(spec['volumes'][0]['secret']['secretName'], 'talos-api-access-talos-secrets')
+
+    def test_kubelet_config_step_is_a_machine_config_patch(self):
+        spec = self._job('kubelet-config')['spec']['template']['spec']
+        [c] = spec['containers']
+        self.assertEqual(c['name'], 'patch-kubelet-config')
+        self.assertEqual(c['args'][4:8], ['patch', 'machineconfig', '--mode=no-reboot', '--patch'])
+
+    def test_kubelet_step_is_one_service_restart(self):
+        spec = self._job('kubelet')['spec']['template']['spec']
+        [c] = spec['containers']
+        self.assertEqual(c['name'], 'restart-kubelet')
+        self.assertEqual(c['args'][4:], ['service', 'kubelet', 'restart'])
+        self.assertNotIn('--patch', c['args'])
+
+    def test_node_ip_is_the_pods_own_host(self):
+        spec = self._job('patch')['spec']['template']['spec']
+        env = {e['name']: e for e in spec['containers'][0]['env']}
+        self.assertEqual(env['NODE_IP']['valueFrom']['fieldRef']['fieldPath'], 'status.hostIP')
+
+    def test_state_reset_step_removes_the_checkpoint_through_a_host_path(self):
+        """Talos has no shell: the kubelet's CPU-manager checkpoint is removed
+        by a privileged pod with the kubelet directory mounted."""
+        values = {'TALOS_JOBNAME': 'snode-talos-kubelet-state-worker-1', 'NAMESPACE': 'simplyblock',
+                  'HOSTNAME': 'worker-1', 'SIMPLYBLOCK_DOCKER_IMAGE': 'simplyblock:test'}
+        job = yaml.safe_load(_env().get_template('storage_kubelet_state_reset_job.yaml.j2').render(values))
+        spec = job['spec']['template']['spec']
+        self.assertEqual(spec['nodeSelector'], {'kubernetes.io/hostname': 'worker-1'})
+        [c] = spec['containers']
+        self.assertEqual(c['image'], 'simplyblock:test')
+        self.assertTrue(c['securityContext']['privileged'])
+        self.assertEqual(spec['volumes'][0]['hostPath']['path'], '/var/lib/kubelet')
+        self.assertEqual(c['volumeMounts'][0]['mountPath'], '/var/lib/kubelet')
+        self.assertIn('rm -f /var/lib/kubelet/cpu_manager_state', c['args'][0])
+
+
+def _body(spdk_mem):
+    return k8s_node.SPDKParams(
+        server_ip='10.0.0.5', rpc_port=4420, rpc_username='u', rpc_password='p', l_cores='2-5',
+        namespace='simplyblock', spdk_mem=spdk_mem, cluster_ip='10.0.0.1', cluster_mode='cluster',
+        cluster_id='0123456789abcdef',
+    )
+
+
+def _node(hugepages_2mi, os_image='Talos (v1.12.7)', ready='True'):
+    node = MagicMock()
+    node.spec.unschedulable = False
+    node.status.capacity = {'hugepages-2Mi': hugepages_2mi}
+    node.status.node_info.os_image = os_image
+    cond = MagicMock(); cond.type = 'Ready'; cond.status = ready
+    node.status.conditions = [cond]
+    return node
+
+
+STATIC_KUBELET = json.dumps({"kubeletconfig": {
+    "cpuManagerPolicy": "static", "topologyManagerPolicy": "single-numa-node",
+    "topologyManagerScope": "pod", "reservedSystemCPUs": "0,1"}})
+DEFAULT_KUBELET = json.dumps({"kubeletconfig": {"cpuManagerPolicy": "none"}})
+
+
+class _TalosHandlerCase(unittest.TestCase):
+    """Harness for the handler on a Talos host. The host pool is what
+    ``get_huge_memory`` returns on each call; the kubelet's view is what
+    ``read_node`` returns on each call."""
+
+    def setUp(self):
+        patches = [
+            patch.object(k8s_node, '_is_pod_up', return_value=False),
+            patch.object(k8s_node, '_is_pod_present', return_value=False),
+            patch.object(k8s_node, 'set_namespace'),
+            patch.object(k8s_node.node_utils_k8s, 'get_namespace', return_value='simplyblock'),
+            patch.object(k8s_node.node_utils_k8s, 'wait_for_job_completion'),
+            patch.object(k8s_node.utils, 'get_response',
+                         side_effect=lambda data, error=None, http_code=None: (data, error)),
+            patch.object(k8s_node.core_utils, 'get_k8s_batch_client'),
+            patch.object(k8s_node.core_utils, 'get_k8s_core_client'),
+            patch.object(k8s_node.core_utils, 'load_config', return_value={"nodes": [
+                {"huge_page_memory": 12 * GIB, "max_size": 0, "socket": 0}]}),
+            patch.object(k8s_node, '_create_job_replacing_stale'),
+            patch.object(k8s_node, 'Settings', return_value=MagicMock(
+                tls_serve=False, tls_connect='disabled', tls_provider='',
+                model_dump=lambda: {'tls_client_auth': 'none'})),
+            patch.object(k8s_node.time, 'sleep'),
+            patch.object(k8s_node, '_TALOS_HUGEPAGE_WAIT_S', 0),
+        ]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        # The managed flow's baseline files (the user's pages per NUMA node and
+        # the total simplyblock last set) live in a directory of their own.
+        self.state_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.state_dir, ignore_errors=True)
+        p = patch.object(k8s_node, '_TALOS_HUGEPAGES_STATE_DIR', self.state_dir)
+        p.start()
+        self.addCleanup(p.stop)
+        self.batch = k8s_node.core_utils.get_k8s_batch_client.return_value
+        self.core = k8s_node.core_utils.get_k8s_core_client.return_value
+        self.core.list_namespaced_pod.return_value.items = []
+        self.create_job = k8s_node._create_job_replacing_stale
+
+        def created(batch_v1, namespace, job_yaml):
+            resp = MagicMock()
+            resp.metadata.name = job_yaml['metadata']['name']
+            return resp
+        self.create_job.side_effect = created
+        # No TALOS_CLUSTER: the host is recognised from the Node's osImage (_node()).
+        self.env = {'HOSTNAME': 'worker-1'}
+        self.core.connect_get_node_proxy_with_path.return_value = STATIC_KUBELET
+
+    def _jobs_created(self):
+        return [call.args[2] for call in self.create_job.call_args_list]
+
+    def _talos_jobs(self):
+        return [j['metadata']['name'] for j in self._jobs_created()
+                if j['metadata']['name'].startswith('snode-talos-')]
+
+    def _start(self, host_pool, kubelet_capacity, spdk_mem=12 * GIB, env=None):
+        """Run the handler with the host pool and kubelet capacity sequences
+        the agent will observe on successive reads (the last value repeats).
+        The host pool is given in bytes; the pre-provisioned check reads it
+        as Hugetlb, the managed flow as NUMA node 0's page count."""
+        host = list(host_pool)
+        # The first read_node is the Talos detection (_talos_host); the
+        # capacity sequence starts with the read after it.
+        kube = [kubelet_capacity[0]] + list(kubelet_capacity)
+        host_iter = (host[min(i, len(host) - 1)] for i in range(10_000))
+        kube_iter = (_node(kube[min(i, len(kube) - 1)]) for i in range(10_000))
+        self.core.read_node.side_effect = lambda name: next(kube_iter)
+        with patch.dict(os.environ, env or self.env, clear=True), \
+                patch.object(k8s_node.node_utils, 'get_huge_memory', side_effect=lambda: next(host_iter)), \
+                patch.object(k8s_node, '_talos_nr_hugepages', side_effect=lambda numa: next(host_iter) // (2 * MIB)):
+            return k8s_node.spdk_process_start(_body(spdk_mem=spdk_mem))
+
+    def _state(self, numa=0):
+        """The managed flow's record for a NUMA node: (user baseline, last
+        total), None where a file is missing."""
+        out = []
+        for name in (f'hugepages_baseline_node{numa}', f'hugepages_sb_node{numa}'):
+            path = os.path.join(self.state_dir, name)
+            out.append(int(open(path).read()) if os.path.exists(path) else None)
+        return tuple(out)
+
+    def _provisioned(self, user_pages, total_pages, numa=0):
+        """Record a previous managed run: the user's pages and the total it set."""
+        for name, value in ((f'hugepages_baseline_node{numa}', user_pages), (f'hugepages_sb_node{numa}', total_pages)):
+            with open(os.path.join(self.state_dir, name), 'w') as f:
+                f.write(str(value))
+
+    def _topology_env(self, **extra):
+        env = dict(self.env, CPU_TOPOLOGY_ENABLED='true', SKIP_KUBELET_CONFIGURATION='false', RESERVED_SYSTEM_CPUS='0,1')
+        env.update(extra)
+        return env
+
+
+class TestSpdkProcessStartOnTalos(_TalosHandlerCase):
+    """The handler with the machine config managed (TALOS_MACHINE_CONFIG=
+    managed): a short pool or an unconfigured kubelet is patched through
+    the Talos API."""
+
+    def setUp(self):
+        super().setUp()
+        self.env = dict(self.env, TALOS_MACHINE_CONFIG='managed')
+        # A worker the managed flow has provisioned before, with no pages of
+        # the user's own: a 16 GiB host pool then reads as simplyblock's. The
+        # first-sight and shared-host cases below start from a clean record.
+        self._provisioned(user_pages=0, total_pages=8192)
+
+    def test_short_pool_is_patched_then_the_kubelet_restarted_then_the_add_proceeds(self):
+        """Host pool short, kubelet at zero: the patch Job runs, the agent
+        waits for the host pool, then the kubelet Job runs, the agent waits
+        for the kubelet, and the SPDK pod is created."""
+        data, error = self._start(host_pool=[2 * GIB, 16 * GIB], kubelet_capacity=['0', '16Gi'])
+        self.assertIsNone(error, error)
+        self.assertIn('Pod created', data)
+        self.assertEqual(self._talos_jobs(), ['snode-talos-hugepages-worker-1', 'snode-talos-kubelet-worker-1'])
+        [patch_job, kubelet_job] = [j for j in self._jobs_created() if j['metadata']['name'].startswith('snode-talos-')]
+        patch_arg = patch_job['spec']['template']['spec']['containers'][0]['args'][-1]
+        self.assertEqual(json.loads(patch_arg), k8s_node._talos_sysfs_patch({0: (12 * GIB + 10**9) // 2_000_000}))
+        self.assertEqual(kubelet_job['spec']['template']['spec']['containers'][0]['args'][-3:],
+                         ['service', 'kubelet', 'restart'])
+        self.core.create_namespaced_pod.assert_called()
+
+    def test_kubelet_is_not_restarted_before_the_host_pool_exists(self):
+        """The patch Job completes but Talos has not written the pages yet:
+        the agent keeps waiting on the host and does not create the kubelet
+        Job; when the wait runs out the add fails on the host side."""
+        data, error = self._start(host_pool=[2 * GIB], kubelet_capacity=['0'])
+        self.assertFalse(data)
+        self.assertIn('after applying the machine config patch', error)
+        self.assertIn('NUMA node 0 carries 1024 2 MiB pages, short of 6942', error)
+        self.assertEqual(self._talos_jobs(), ['snode-talos-hugepages-worker-1'])
+        self.core.create_namespaced_pod.assert_not_called()
+
+    def test_pool_present_but_kubelet_lagging_restarts_only_the_kubelet(self):
+        """The host already has the pool (a previous attempt patched it) but
+        the kubelet booted before it existed: no patch, one kubelet Job."""
+        data, error = self._start(host_pool=[16 * GIB], kubelet_capacity=['0', '16Gi'])
+        self.assertIsNone(error, error)
+        self.assertEqual(self._talos_jobs(), ['snode-talos-kubelet-worker-1'])
+        self.core.create_namespaced_pod.assert_called()
+
+    def test_pool_and_kubelet_already_sufficient_applies_nothing(self):
+        """No Talos Job -- and so no kubelet restart -- as on a plain node
+        restart with the pool in place."""
+        data, error = self._start(host_pool=[16 * GIB], kubelet_capacity=['16Gi'])
+        self.assertIsNone(error, error)
+        self.assertEqual(self._talos_jobs(), [])
+
+    def test_kubelet_never_following_fails_the_add(self):
+        data, error = self._start(host_pool=[16 * GIB], kubelet_capacity=['2Gi'])
+        self.assertFalse(data)
+        self.assertIn('kubelet', error)
+        self.assertIn('2048 MiB', error)
+        self.assertEqual(self._talos_jobs(), ['snode-talos-kubelet-worker-1'])
+
+    def test_missing_credentials_secret_fails_before_any_job(self):
+        self.core.read_namespaced_secret.side_effect = ApiException(status=404)
+        data, error = self._start(host_pool=[2 * GIB], kubelet_capacity=['0'])
+        self.assertFalse(data)
+        self.assertIn("Talos API access Secret not found in namespace 'simplyblock'", error)
+        self.assertIn("TALOS_API_SECRET setting, default 'talos-api-access-talos-secrets'", error)
+        self.assertIn('os:admin', error)
+        self.create_job.assert_not_called()
+
+    def test_unreadable_secret_does_not_block(self):
+        """No RBAC to read Secrets: the check is skipped and the Job tells."""
+        self.core.read_namespaced_secret.side_effect = ApiException(status=403)
+        data, error = self._start(host_pool=[2 * GIB, 16 * GIB], kubelet_capacity=['0', '16Gi'])
+        self.assertIsNone(error, error)
+        self.assertEqual(len(self._talos_jobs()), 2)
+
+    def test_job_failure_is_reported_with_the_step_and_job_name(self):
+        k8s_node.node_utils_k8s.wait_for_job_completion.side_effect = RuntimeError("Job 'x' failed")
+        data, error = self._start(host_pool=[2 * GIB], kubelet_capacity=['0'])
+        self.assertFalse(data)
+        self.assertIn('Talos patch Job', error)
+        self.assertIn('snode-talos-hugepages-worker-1', error)
+        self.core.create_namespaced_pod.assert_not_called()
+
+    def test_completed_job_log_is_copied_before_the_job_is_deleted(self):
+        pod = MagicMock()
+        pod.metadata.name = 'snode-talos-hugepages-worker-1-abcde'
+        self.core.list_namespaced_pod.return_value.items = [pod]
+        self.core.read_namespaced_pod_log.return_value = 'patched MachineConfigs\nApplied configuration without a reboot\n'
+        with self.assertLogs(k8s_node.logger, level='INFO') as logs:
+            data, error = self._start(host_pool=[2 * GIB, 16 * GIB], kubelet_capacity=['0', '16Gi'])
+        self.assertIsNone(error, error)
+        self.assertTrue(any('Applied configuration without a reboot' in line for line in logs.output), logs.output)
+        self.core.read_namespaced_pod_log.assert_any_call('snode-talos-hugepages-worker-1-abcde', 'simplyblock')
+        deleted = [c.kwargs['name'] for c in self.batch.delete_namespaced_job.call_args_list]
+        self.assertEqual([n for n in deleted if n.startswith('snode-talos-')],
+                         ['snode-talos-hugepages-worker-1', 'snode-talos-kubelet-worker-1'])
+
+    def test_image_and_secret_come_from_the_environment(self):
+        env = dict(self.env, TALOSCTL_IMAGE='mirror.local/talosctl:v1.11.5', TALOS_API_SECRET='sb-talos')
+        self._start(host_pool=[2 * GIB, 16 * GIB], kubelet_capacity=['0', '16Gi'], env=env)
+        [patch_job, _] = [j for j in self._jobs_created() if j['metadata']['name'].startswith('snode-talos-')]
+        spec = patch_job['spec']['template']['spec']
+        self.assertEqual(spec['containers'][0]['image'], 'mirror.local/talosctl:v1.11.5')
+        self.assertEqual(spec['volumes'][0]['secret']['secretName'], 'sb-talos')
+        self.core.read_namespaced_secret.assert_called_with('sb-talos', 'simplyblock')
+
+    def test_host_configuration_job_is_skipped_on_talos(self):
+        """Core isolation requested: the grubby Job is skipped rather than
+        run against a host with no shell."""
+        data, error = self._start(host_pool=[16 * GIB], kubelet_capacity=['16Gi'],
+                                  env=dict(self.env, CORE_ISOLATION='true'))
+        self.assertIsNone(error, error)
+        self.batch.create_namespaced_job.assert_not_called()
+
+    def test_a_non_talos_host_takes_the_managed_path(self):
+        """A managed host reserves the pages in the init Job; the agent must
+        not pre-judge it against the pool it is about to create."""
+        self.core.read_node.return_value = _node('0', os_image='Red Hat Enterprise Linux CoreOS 418.94')
+        with patch.dict(os.environ, {'HOSTNAME': 'worker-1'}, clear=True), \
+                patch.object(k8s_node.node_utils, 'get_huge_memory') as huge:
+            data, error = k8s_node.spdk_process_start(_body(spdk_mem=12 * GIB))
+        self.assertIsNone(error, error)
+        huge.assert_not_called()
+        self.assertEqual(self._talos_jobs(), [])
+
+    def test_override_false_forces_the_managed_path_on_talos(self):
+        self.core.read_node.return_value = _node('0')
+        with patch.dict(os.environ, {'HOSTNAME': 'worker-1', 'TALOS_CLUSTER': 'false'}, clear=True), \
+                patch.object(k8s_node.node_utils, 'get_huge_memory') as huge:
+            data, error = k8s_node.spdk_process_start(_body(spdk_mem=12 * GIB))
+        self.assertIsNone(error, error)
+        huge.assert_not_called()
+
+    # --- the user's own pages (the baseline the sysfs writer keeps elsewhere) ---
+
+    def _fresh_host(self):
+        for name in os.listdir(self.state_dir):
+            os.remove(os.path.join(self.state_dir, name))
+
+    def _patch_targets(self):
+        [job] = [j for j in self._jobs_created() if j['metadata']['name'].startswith('snode-talos-hugepages-')]
+        sysfs = json.loads(job['spec']['template']['spec']['containers'][0]['args'][-1])['machine']['sysfs']
+        return {int(k.split('.')[3].removeprefix('node')): int(v) for k, v in sysfs.items()}
+
+    def test_first_sight_adds_simplyblocks_pages_on_top_of_the_hosts(self):
+        """A worker never seen before carries 1024 pages of somebody else's:
+        the patch sets 1024 + 6942, not 6942, and the record says whose is
+        which."""
+        self._fresh_host()
+        data, error = self._start(host_pool=[2 * GIB, 7966 * 2 * MIB], kubelet_capacity=['0', '16Gi'])
+        self.assertIsNone(error, error)
+        self.assertEqual(self._patch_targets(), {0: 1024 + 6942})
+        self.assertEqual(self._state(), (1024, 7966))
+
+    def test_a_pool_that_already_covers_the_pod_is_not_taken_for_it(self):
+        """16 GiB of the user's pages cover the 12 GiB pod, and the old flow
+        would have applied nothing; now that pool is the baseline and
+        simplyblock's own pages go on top of it."""
+        self._fresh_host()
+        data, error = self._start(host_pool=[16 * GIB, (8192 + 6942) * 2 * MIB], kubelet_capacity=['16Gi', '30Gi'])
+        self.assertIsNone(error, error)
+        self.assertEqual(self._talos_jobs(), ['snode-talos-hugepages-worker-1', 'snode-talos-kubelet-worker-1'])
+        self.assertEqual(self._patch_targets(), {0: 8192 + 6942})
+        self.assertEqual(self._state(), (8192, 8192 + 6942))
+
+    def test_a_reboot_does_not_stack_a_second_allocation(self):
+        """Talos re-applies the machine config on boot, so the host comes
+        back with the full total; with the record kept across the reboot
+        that is not read as the user's pages."""
+        self._provisioned(user_pages=1024, total_pages=7966)
+        data, error = self._start(host_pool=[7966 * 2 * MIB], kubelet_capacity=['16Gi'])
+        self.assertIsNone(error, error)
+        self.assertEqual(self._talos_jobs(), [])
+        self.assertEqual(self._state(), (1024, 7966))
+
+    def test_a_manual_increase_is_absorbed_into_the_users_share(self):
+        self._provisioned(user_pages=1024, total_pages=7966)
+        data, error = self._start(host_pool=[(7966 + 1000) * 2 * MIB], kubelet_capacity=['16Gi'])
+        self.assertIsNone(error, error)
+        self.assertEqual(self._talos_jobs(), [])
+        self.assertEqual(self._state(), (2024, 8966))
+
+    def test_the_pool_is_never_shrunk(self):
+        """The host holds 8192 pages of simplyblock's from a larger sizing;
+        6942 is what it needs now. No patch, and the surplus is recorded as
+        simplyblock's rather than left to read as the user's next time."""
+        self._provisioned(user_pages=0, total_pages=8192)
+        data, error = self._start(host_pool=[16 * GIB], kubelet_capacity=['16Gi'])
+        self.assertIsNone(error, error)
+        self.assertEqual(self._talos_jobs(), [])
+        self.assertEqual(self._state(), (0, 8192))
+
+    def test_a_host_whose_pool_cannot_be_read_is_refused_before_any_job(self):
+        with patch.object(k8s_node, '_talos_nr_hugepages', side_effect=OSError('No such file or directory')):
+            with patch.dict(os.environ, self.env, clear=True):
+                self.core.read_node.return_value = _node('0')
+                data, error = k8s_node.spdk_process_start(_body(spdk_mem=12 * GIB))
+        self.assertFalse(data)
+        self.assertIn("cannot read the host's huge-page pool", error)
+        self.create_job.assert_not_called()
+
+    # --- kubelet CPU topology through the Talos API ---
+
+    def test_kubelet_topology_is_patched_when_the_kubelet_lacks_it(self):
+        """configz says cpuManagerPolicy none: the kubelet-config Job runs
+        with the four keys, the node comes back Ready, configz then says
+        static, and the SPDK pod is created."""
+        self.core.connect_get_node_proxy_with_path.side_effect = [DEFAULT_KUBELET, STATIC_KUBELET]
+        data, error = self._start(host_pool=[16 * GIB], kubelet_capacity=['16Gi'], env=self._topology_env())
+        self.assertIsNone(error, error)
+        # The checkpoint goes first: the kubelet would refuse to start over
+        # one written under the 'none' policy.
+        self.assertEqual(self._talos_jobs(), ['snode-talos-kubelet-state-worker-1',
+                                              'snode-talos-kubelet-config-worker-1'])
+        [job] = [j for j in self._jobs_created() if j['metadata']['name'].startswith('snode-talos-kubelet-config')]
+        c = job['spec']['template']['spec']['containers'][0]
+        self.assertEqual(c['name'], 'patch-kubelet-config')
+        self.assertEqual(c['args'][4:8], ['patch', 'machineconfig', '--mode=no-reboot', '--patch'])
+        self.assertEqual(json.loads(c['args'][8]), k8s_node._talos_kubelet_patch('0,1'))
+        self.batch.create_namespaced_job.assert_not_called()  # no nsenter Job
+        self.core.create_namespaced_pod.assert_called()
+
+    def test_kubelet_already_configured_is_left_alone(self):
+        """Static policy already in place (a plain restart): no Job, so no
+        kubelet restart."""
+        data, error = self._start(host_pool=[16 * GIB], kubelet_capacity=['16Gi'], env=self._topology_env())
+        self.assertIsNone(error, error)
+        self.assertEqual(self._talos_jobs(), [])
+
+    def test_unreadable_kubelet_config_skips_the_step_with_a_warning(self):
+        self.core.connect_get_node_proxy_with_path.side_effect = ApiException(status=403)
+        with self.assertLogs(k8s_node.logger, level='WARNING') as logs:
+            data, error = self._start(host_pool=[16 * GIB], kubelet_capacity=['16Gi'], env=self._topology_env())
+        self.assertIsNone(error, error)
+        self.assertEqual(self._talos_jobs(), [])
+        self.assertTrue(any('nodes/proxy' in line for line in logs.output), logs.output)
+
+    def test_skip_kubelet_configuration_is_honoured_on_talos(self):
+        self.core.connect_get_node_proxy_with_path.return_value = DEFAULT_KUBELET
+        data, error = self._start(host_pool=[16 * GIB], kubelet_capacity=['16Gi'],
+                                  env=self._topology_env(SKIP_KUBELET_CONFIGURATION='true'))
+        self.assertIsNone(error, error)
+        self.assertEqual(self._talos_jobs(), [])
+
+    def test_kubelet_coming_back_without_the_settings_fails_the_add(self):
+        self.core.connect_get_node_proxy_with_path.return_value = DEFAULT_KUBELET
+        data, error = self._start(host_pool=[16 * GIB], kubelet_capacity=['16Gi'], env=self._topology_env())
+        self.assertFalse(data)
+        self.assertIn('without the CPU topology settings', error)
+        self.core.create_namespaced_pod.assert_not_called()
+
+    def test_a_changed_reserved_set_is_applied(self):
+        """The operator changed reservedSystemCPU on the StorageCluster: the
+        kubelet still says 0,1, so the checkpoint is removed and the new set
+        patched in; the configured check then accepts the new set only."""
+        self.core.connect_get_node_proxy_with_path.side_effect = [
+            STATIC_KUBELET,
+            json.dumps({"kubeletconfig": dict(json.loads(STATIC_KUBELET)["kubeletconfig"], reservedSystemCPUs="0-3")})]
+        data, error = self._start(host_pool=[16 * GIB], kubelet_capacity=['16Gi'],
+                                  env=self._topology_env(RESERVED_SYSTEM_CPUS='0-3'))
+        self.assertIsNone(error, error)
+        self.assertEqual(self._talos_jobs(), ['snode-talos-kubelet-state-worker-1',
+                                              'snode-talos-kubelet-config-worker-1'])
+        [job] = [j for j in self._jobs_created() if j['metadata']['name'].startswith('snode-talos-kubelet-config')]
+        patch_arg = json.loads(job['spec']['template']['spec']['containers'][0]['args'][8])
+        self.assertEqual(patch_arg['machine']['kubelet']['extraConfig']['reservedSystemCPUs'], '0-3')
+
+    def test_no_stated_reserved_set_means_the_default(self):
+        """Nothing in the environment: the kubelet keeps 0,1 -- the reserved
+        set is never derived from the SPDK core layout (see spdk_process_start)."""
+        env = self._topology_env()
+        del env['RESERVED_SYSTEM_CPUS']
+        with patch.object(k8s_node.core_utils, 'get_numa_cores') as topology:
+            data, error = self._start(host_pool=[16 * GIB], kubelet_capacity=['16Gi'], env=env)
+        self.assertIsNone(error, error)
+        topology.assert_not_called()
+        self.assertEqual(self._talos_jobs(), [])  # configz already says 0,1
+
+    def test_strict_cpu_reservation_fails_the_add_before_any_job(self):
+        self.core.connect_get_node_proxy_with_path.return_value = json.dumps({"kubeletconfig": {
+            "cpuManagerPolicy": "static", "cpuManagerPolicyOptions": {"strict-cpu-reservation": "true"}}})
+        data, error = self._start(host_pool=[16 * GIB], kubelet_capacity=['16Gi'], env=self._topology_env())
+        self.assertFalse(data)
+        self.assertIn('strict-cpu-reservation', error)
+        self.assertEqual(self._talos_jobs(), [])
+        self.core.create_namespaced_pod.assert_not_called()
+
+
+class TestSpdkProcessStartOnPreprovisionedTalos(_TalosHandlerCase):
+    """The handler under the default mode (TALOS_MACHINE_CONFIG unset, i.e.
+    preprovisioned): the node checks the pool and the kubelet settings and
+    never touches the Talos API. A shortfall fails the add with the patch
+    the operator has to apply; nothing is created and the credentials
+    Secret is never looked for."""
+
+    def _nothing_applied(self):
+        self.create_job.assert_not_called()
+        self.core.read_namespaced_secret.assert_not_called()
+
+    def test_short_pool_is_refused_with_the_sysfs_patch_to_apply(self):
+        data, error = self._start(host_pool=[2 * GIB], kubelet_capacity=['0'])
+        self.assertFalse(data)
+        self.assertIn('pre-provisioned', error)
+        # The YAML is in the message itself; nothing writes a file anywhere (the host has no shell).
+        self.assertIn("Save the YAML below as patch.yaml and apply it to the worker with "
+                      "'talosctl -n <node ip> patch mc -p @patch.yaml'", error)
+        self.assertIn('service kubelet restart', error)
+        self.assertIn('talosMachineConfig: Managed', error)
+        pages = k8s_node._hugepages_per_numa([{"huge_page_memory": 12 * GIB, "max_size": 0, "socket": 0}])[0]
+        self.assertIn(f"devices.system.node.node0.hugepages.hugepages-2048kB.nr_hugepages: '{pages}'", error)
+        self.assertIn('host provides 2048 MiB of huge pages but the SPDK pod requests', error)
+        self._nothing_applied()
+
+    def test_the_patch_in_the_refusal_is_the_one_managed_mode_would_apply(self):
+        data, error = self._start(host_pool=[2 * GIB], kubelet_capacity=['0'])
+        patch_text = error.split(':\n', 1)[1]
+        self.assertEqual(
+            yaml.safe_load(patch_text),
+            k8s_node._talos_sysfs_patch(k8s_node._hugepages_per_numa(
+                [{"huge_page_memory": 12 * GIB, "max_size": 0, "socket": 0}])))
+
+    def test_kubelet_lagging_the_host_is_refused_with_a_restart_hint(self):
+        data, error = self._start(host_pool=[16 * GIB], kubelet_capacity=['0'])
+        self.assertFalse(data)
+        self.assertIn('the kubelet advertises less', error)
+        self.assertIn("'talosctl -n <node ip> service kubelet restart'", error)
+        self.assertNotIn('patch mc', error)
+        self._nothing_applied()
+
+    def test_the_pool_is_the_users_and_no_baseline_is_kept(self):
+        """Pre-provisioned verifies the pool as a whole and never records
+        whose pages they are: the sizing is the operator's."""
+        data, error = self._start(host_pool=[16 * GIB], kubelet_capacity=['16Gi'])
+        self.assertIsNone(error, error)
+        self.assertEqual(os.listdir(self.state_dir), [])
+
+    def test_pool_and_kubelet_sufficient_proceeds_without_any_credentials(self):
+        data, error = self._start(host_pool=[16 * GIB], kubelet_capacity=['16Gi'])
+        self.assertIsNone(error, error)
+        self.assertEqual(self._talos_jobs(), [])
+        self.core.read_namespaced_secret.assert_not_called()
+
+    def test_unconfigured_node_is_refused_before_sizing(self):
+        k8s_node.core_utils.load_config.return_value = {"nodes": []}
+        data, error = self._start(host_pool=[2 * GIB], kubelet_capacity=['0'])
+        self.assertIn('sbcli sn configure', error)
+        self._nothing_applied()
+
+    def test_kubelet_lacking_the_topology_is_refused_with_the_extra_config_patch(self):
+        self.core.connect_get_node_proxy_with_path.return_value = DEFAULT_KUBELET
+        data, error = self._start(host_pool=[16 * GIB], kubelet_capacity=['16Gi'],
+                                  env=self._topology_env(RESERVED_SYSTEM_CPUS='0-3'))
+        self.assertFalse(data)
+        self.assertIn('does not run with the CPU topology settings', error)
+        self.assertIn('cpu_manager_state', error)
+        self.assertEqual(yaml.safe_load(error.split(':\n', 1)[1]), k8s_node._talos_kubelet_patch('0-3'))
+        # The init Job (baseline capture) has run by then; nothing Talos-side has.
+        self.assertEqual(self._talos_jobs(), [])
+        self.core.read_namespaced_secret.assert_not_called()
+
+    def test_kubelet_already_configured_proceeds(self):
+        data, error = self._start(host_pool=[16 * GIB], kubelet_capacity=['16Gi'], env=self._topology_env())
+        self.assertIsNone(error, error)
+        self.assertEqual(self._talos_jobs(), [])
+
+    def test_an_unknown_mode_is_preprovisioned(self):
+        with self.assertLogs(k8s_node.logger, level='WARNING') as logs:
+            data, error = self._start(host_pool=[2 * GIB], kubelet_capacity=['0'],
+                                      env=dict(self.env, TALOS_MACHINE_CONFIG='yes please'))
+        self.assertIn('pre-provisioned', error)
+        self.assertTrue(any("TALOS_MACHINE_CONFIG='yes please' is not one of" in m for m in logs.output), logs.output)
+        self._nothing_applied()
+
+    def test_managed_is_read_case_insensitively(self):
+        data, error = self._start(host_pool=[2 * GIB, 16 * GIB], kubelet_capacity=['0', '16Gi'],
+                                  env=dict(self.env, TALOS_MACHINE_CONFIG=' Managed '))
+        self.assertIsNone(error, error)
+        self.assertEqual(len(self._talos_jobs()), 2)
+
+
+class TestApplyConfigSizingUnchanged(unittest.TestCase):
+
+    def test_apply_config_writes_the_shared_sizing(self):
+        nodes = [{"huge_page_memory": 12 * GIB, "max_size": 0, "socket": 0},
+                 {"huge_page_memory": 4 * GIB, "max_size": 0, "socket": 1}]
+        with patch.object(k8s_node.core_utils, 'load_config', return_value={"nodes": nodes}), \
+                patch.object(k8s_node.core_utils, 'validate_config', return_value=True), \
+                patch.object(k8s_node.core_utils, 'set_hugepages_if_needed') as set_hp, \
+                patch.object(k8s_node.utils, 'get_response', side_effect=lambda d, error=None, http_code=None: (d, error)):
+            k8s_node.apply_config()
+        self.assertEqual([c.args for c in set_hp.call_args_list],
+                         [(numa, pages) for numa, pages in k8s_node._hugepages_per_numa(nodes).items()])
+
+
+class TestCpuTopologyJobScript(unittest.TestCase):
+    """The vanilla CPU-topology Job: idempotent on the kubelet config's
+    content, since reservedSystemCPUs follows the node's SPDK core layout."""
+
+    def _script(self, **overrides):
+        values = {'CORE_JOBNAME': 'snode-spdk-enable-cpu-topology-worker-1', 'NAMESPACE': 'simplyblock',
+                  'HOSTNAME': 'worker-1', 'RESERVED_SYSTEM_CPUS': '0-3,12-15'}
+        values.update(overrides)
+        job = yaml.safe_load(_env().get_template('storage_cpu_topology.yaml.j2').render(values))
+        return job['spec']['template']['spec']['containers'][0]['args'][0]
+
+    def test_no_marker_file(self):
+        self.assertNotIn('cpu_topology_applied', self._script())
+
+    def test_compares_the_reserved_set_and_writes_it_quoted(self):
+        script = self._script()
+        self.assertIn('has_key reservedSystemCPUs "0-3,12-15"', script)
+        self.assertIn('set_key "reservedSystemCPUs" "\\"0-3,12-15\\""', script)
+        self.assertIn('rm -rf $CPU_MNG', script)  # the checkpoint still goes before the restart
+
+    @unittest.skipUnless(os.name == 'posix' and shutil.which('dash'), 'dash is not installed')
+    def test_parses_under_dash(self):
+        subprocess.run(['dash', '-n', '-c', self._script()], check=True)
+
+
+class TestInitJobScript(unittest.TestCase):
+
+    def test_flag_renders_into_the_script(self):
+        self.assertIn('if [ "true" = "true" ]; then', _rendered_init_script(TALOS_CLUSTER=True))
+        self.assertIn('if [ "false" = "true" ]; then', _rendered_init_script(TALOS_CLUSTER=False))
+
+    def test_host_writes_are_gated_on_the_one_variable(self):
+        """Every host-touching step keys off MANAGE_HUGEPAGES; the kernel
+        sniff only feeds that variable, so stating Talos and detecting it
+        take the same path."""
+        script = _rendered_init_script()
+        self.assertNotIn('if [ "$OS_ID" != "talos" ]', script)
+        self.assertEqual(script.count('if [ "$MANAGE_HUGEPAGES" = "true" ]; then'), 2)
+
+    @unittest.skipUnless(os.name == 'posix' and shutil.which('dash'), 'dash is not installed')
+    def test_parses_under_dash(self):
+        for flag in (True, False):
+            subprocess.run(['dash', '-n', '-c', _rendered_init_script(TALOS_CLUSTER=flag)], check=True)
+
+    @unittest.skipUnless(os.name == 'posix' and shutil.which('dash'), 'dash is not installed')
+    def test_stated_talos_on_a_non_talos_kernel_sends_no_config(self):
+        """The flag alone, with a kernel string that does not say talos: the
+        script never POSTs apply_config and never restarts anything."""
+        with tempfile.TemporaryDirectory() as d:
+            proc = os.path.join(d, 'proc')
+            os.makedirs(proc)
+            with open(os.path.join(proc, 'version'), 'w') as f:
+                f.write('Linux version 6.8.0-generic (build@host) #1 SMP\n')
+            with open(os.path.join(proc, 'meminfo'), 'w') as f:
+                f.write('HugePages_Total:    1024\n')
+            for tool in ('curl', 'nsenter'):
+                path = os.path.join(d, tool)
+                with open(path, 'w') as f:
+                    f.write('#!/bin/sh\necho "%s $*" >> %s/calls\necho 200\n' % (tool, d))
+                os.chmod(path, 0o755)
+            script = (_rendered_init_script(TALOS_CLUSTER=True)
+                      .replace('/proc/version', proc + '/version')
+                      .replace('/proc/meminfo', proc + '/meminfo')
+                      .replace('/sys/devices/system/node', d + '/no-such-sysfs')
+                      .replace('/var/run/simplyblock', d))
+            env = dict(os.environ, PATH=d + os.pathsep + os.environ['PATH'], NODE_IP='10.0.0.5', NODE_NAME='w1')
+            out = subprocess.run(['dash', '-c', script], check=True, capture_output=True, text=True, env=env).stdout
+            self.assertIn('TALOS_CLUSTER is set', out)
+            self.assertIn('Init setup complete', out)
+            self.assertFalse(os.path.exists(os.path.join(d, 'calls')), 'curl/nsenter were invoked')

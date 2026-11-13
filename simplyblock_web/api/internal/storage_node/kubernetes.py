@@ -501,6 +501,594 @@ def _create_job_replacing_stale(batch_v1, namespace: str, job_yaml: dict):
     return batch_v1.create_namespaced_job(namespace=namespace, body=job_yaml)
 
 
+def _env_flag(name):
+    """A boolean the operator sets on the node agent's DaemonSet as the string
+    'true'/'false' (OPENSHIFT_CLUSTER, TALOS_CLUSTER, ...). Unset is False."""
+    return os.environ.get(name, "").strip().lower() == "true"
+
+
+def _talos_host(node_name):
+    """Whether this worker runs Talos Linux.
+
+    Read off the Node object, where the kubelet publishes the host's
+    os-release (``status.nodeInfo.osImage``, e.g. ``Talos (v1.12.7)``): the
+    fact is the host's own, so nothing has to be told and nothing can be
+    told wrongly. The discovery run derives ``environment: Talos`` from the
+    same source. ``TALOS_CLUSTER=true|false`` overrides it -- for a Talos
+    derivative whose osImage says something else, or to force the managed
+    path -- and is otherwise not needed. Unreadable Node object: not Talos,
+    with a warning, which is the managed path this code always took.
+    """
+    override = os.environ.get("TALOS_CLUSTER", "").strip().lower()
+    if override in ("true", "false"):
+        return override == "true"
+    try:
+        node = core_utils.get_k8s_core_client().read_node(node_name)
+        os_image = (node.status.node_info.os_image or "")
+    except Exception as e:
+        logger.warning("Cannot read Node '%s' to detect the host OS (%s); assuming it is not Talos", node_name, e)
+        return False
+    return os_image.strip().lower().startswith("talos")
+
+
+_TALOS_MACHINE_CONFIG_MODES = ("managed", "preprovisioned")
+
+
+def _talos_machine_config_managed():
+    """Whether this node may patch a Talos worker's machine config through
+    the Talos API.
+
+    ``TALOS_MACHINE_CONFIG`` is ``managed`` or ``preprovisioned``; the
+    operator sets it from the StorageCluster's
+    ``storageNodes.talosMachineConfig``. ``preprovisioned`` is the default,
+    and what an unknown value falls back to with a warning, because the mode
+    that touches nothing is the safe one: the huge-page pool and the
+    kubelet's CPU topology are then the operator's to put in the machine
+    config, and the node only checks them and fails the add with the patch
+    to apply. ``managed`` is the talosctl Jobs, which need the os:admin
+    credentials Secret in the namespace.
+    """
+    mode = (os.environ.get("TALOS_MACHINE_CONFIG") or constants.TALOS_MACHINE_CONFIG).strip().lower()
+    if mode not in _TALOS_MACHINE_CONFIG_MODES:
+        logger.warning("TALOS_MACHINE_CONFIG=%r is not one of %s; treating the machine config as pre-provisioned",
+                       mode, "/".join(_TALOS_MACHINE_CONFIG_MODES))
+        return False
+    return mode == "managed"
+
+
+_TALOS_MANAGED_HINT = ("or set storageNodes.talosMachineConfig: Managed on the StorageCluster to let the node "
+                       "apply it through the Talos API")
+
+
+def _machine_config_patch_text(patch):
+    """A machine-config patch as the YAML an operator applies with
+    ``talosctl -n <node ip> patch mc -p @patch.yaml``, for a refusal that
+    names what to apply."""
+    return yaml.safe_dump(patch, sort_keys=False, default_flow_style=False).strip()
+
+
+# The kubelet keys the CPU-topology Job writes on a vanilla host
+# (storage_cpu_topology.yaml.j2); on Talos they go into the machine config.
+_KUBELET_TOPOLOGY = {
+    "cpuManagerPolicy": "static",
+    "topologyManagerPolicy": "single-numa-node",
+    "topologyManagerScope": "pod",
+}
+
+
+def _talos_kubelet_patch(reserved_system_cpus):
+    """The strategic-merge machine-config patch that gives the kubelet the
+    CPU topology settings. machine.kubelet.extraConfig is merged into the
+    kubelet configuration Talos renders; the change is applied without a
+    reboot and Talos restarts the kubelet itself."""
+    cfg = dict(_KUBELET_TOPOLOGY, reservedSystemCPUs=str(reserved_system_cpus))
+    return {"machine": {"kubelet": {"extraConfig": cfg}}}
+
+
+def _read_kubelet_config(k8s_core_v1, node_name):
+    """The kubelet's live configuration on ``node_name`` -- the
+    'kubeletconfig' object of ``/api/v1/nodes/<node>/proxy/configz`` -- or
+    None when it cannot be read (the storage-node role needs ``nodes/proxy
+    get``)."""
+    try:
+        # Not preloaded: the client's 'str' deserialization of this call is
+        # str(bytes), i.e. "b'{...}'", which is not JSON. Read the body.
+        resp = k8s_core_v1.connect_get_node_proxy_with_path(node_name, "configz", _preload_content=False)
+        raw = resp.data if hasattr(resp, "data") else resp
+    except ApiException as e:
+        logger.warning("Cannot read the kubelet configuration of '%s' (HTTP %s)", node_name, e.status)
+        return None
+    try:
+        if isinstance(raw, bytes):
+            raw = raw.decode()
+        cfg = (json.loads(raw) if isinstance(raw, str) else raw).get("kubeletconfig", {})
+    except (ValueError, AttributeError):
+        logger.warning("Unexpected kubelet configz payload from '%s'", node_name)
+        return None
+    return cfg if isinstance(cfg, dict) else None
+
+
+def _kubelet_topology_configured(cfg, reserved_system_cpus):
+    """Whether the kubelet configuration ``cfg`` (see _read_kubelet_config)
+    already carries the CPU topology settings with this reserved set. This
+    is what makes the step idempotent: Talos restarts the kubelet on every
+    machine-config change, and a restart per SPDK restart would be a
+    regression, so the patch is only sent when the kubelet does not have
+    the settings yet -- or has them with another reserved set, which the
+    operator may change on the StorageCluster."""
+    want = dict(_KUBELET_TOPOLOGY, reservedSystemCPUs=str(reserved_system_cpus))
+    return all(str(cfg.get(k, "")) == v for k, v in want.items())
+
+
+def _strict_cpu_reservation(cfg, node_name):
+    """The message to refuse the node with when its kubelet runs the static
+    policy with the strict-cpu-reservation option, else None. The kubelet
+    runs normal pods on the reserved CPUs too, which is what the reserved
+    set is sized against; that option keeps them off, so the host's other
+    pods would be squeezed onto the CPUs SPDK is about to take
+    exclusively."""
+    options = cfg.get("cpuManagerPolicyOptions") or {}
+    if str(options.get("strict-cpu-reservation", "")).strip().lower() == "true":
+        return (f"the kubelet on '{node_name}' runs with cpuManagerPolicyOptions strict-cpu-reservation, "
+                f"which keeps every other pod off the reserved CPUs; with the SPDK cores the only "
+                f"non-reserved CPUs nothing else could run there -- turn the option off")
+    return None
+
+
+def _wait_for_node_ready(k8s_core_v1, node_name):
+    """Block until the Node reports Ready again (the kubelet restarted), or
+    return the message to fail with."""
+    deadline = time.monotonic() + _TALOS_HUGEPAGE_WAIT_S
+    while True:
+        node = k8s_core_v1.read_node(node_name)
+        ready = next((c.status for c in (node.status.conditions or []) if c.type == "Ready"), None)
+        if ready == "True":
+            return None
+        if time.monotonic() >= deadline:
+            return f"node '{node_name}' did not report Ready after its kubelet restart"
+        time.sleep(_TALOS_HUGEPAGE_POLL_S)
+
+
+def _configure_talos_kubelet_topology(node_name, namespace, values, reserved_system_cpus):
+    """Give the kubelet on a Talos worker the CPU topology settings the
+    vanilla CPU-topology Job writes, through the Talos API, and return None
+    -- or the message to fail the add with. Skipped when the kubelet
+    already runs with them (a plain node restart touches nothing) and,
+    with a warning, when its configuration cannot be read at all: without
+    that check every restart would restart the kubelet."""
+    k8s_core_v1 = core_utils.get_k8s_core_client()
+    cfg = _read_kubelet_config(k8s_core_v1, node_name)
+    if cfg is None:
+        logger.warning("Not configuring the kubelet CPU topology on Talos node '%s': its configuration cannot be "
+                       "verified (grant the storage-node role nodes/proxy get)", node_name)
+        return None
+    refusal = _strict_cpu_reservation(cfg, node_name)
+    if refusal:
+        return refusal
+    if _kubelet_topology_configured(cfg, reserved_system_cpus):
+        logger.info("Kubelet on '%s' already runs with the CPU topology settings; nothing to apply", node_name)
+        return None
+    if not _talos_machine_config_managed():
+        return (f"the kubelet on Talos node '{node_name}' does not run with the CPU topology settings "
+                f"(cpuManagerPolicy static, reservedSystemCPUs {reserved_system_cpus}) and the machine config is "
+                f"pre-provisioned (TALOS_MACHINE_CONFIG=preprovisioned). Save the YAML below as patch.yaml and apply it "
+                f"to the worker with 'talosctl -n <node ip> patch mc -p @patch.yaml' -- Talos restarts the kubelet itself; a kubelet "
+                f"that ran under another policy first needs /var/lib/kubelet/cpu_manager_state removed, see "
+                f"docs/talos.md -- {_TALOS_MANAGED_HINT}:\n"
+                f"{_machine_config_patch_text(_talos_kubelet_patch(reserved_system_cpus))}")
+    api_access_name = os.environ.get("TALOS_API_SECRET") or constants.TALOS_API_SECRET
+    missing = _talos_api_access_missing(k8s_core_v1, namespace, api_access_name)
+    if missing:
+        return missing
+    job_values = dict(values,
+                      TALOSCTL_IMAGE=os.environ.get("TALOSCTL_IMAGE") or constants.TALOSCTL_IMAGE,
+                      TALOS_API_SECRET=api_access_name,
+                      TALOS_PATCH=json.dumps(_talos_kubelet_patch(reserved_system_cpus), separators=(',', ':')))
+    # The kubelet refuses to start over a CPU-manager checkpoint written
+    # under another policy ("configured policy differs from state checkpoint
+    # policy") or one whose assignments overlap the new reserved set; the
+    # vanilla Job removes the file before restarting the kubelet, and Talos
+    # has no shell to do that from, so a hostPath Job removes it here. Safe
+    # while SPDK is down (spdk_process_start removed its pod above): the
+    # kubelet rebuilds the state from the pods it finds at start.
+    logger.info("Removing the kubelet's CPU-manager checkpoint on Talos node '%s' before the config patch", node_name)
+    err = _run_talos_job("kubelet-state", node_name, namespace, job_values)
+    if err:
+        return err
+    logger.info("Configuring the kubelet CPU topology on Talos node '%s' through the Talos API "
+                "(cpuManagerPolicy=static, reservedSystemCPUs=%s)", node_name, reserved_system_cpus)
+    err = _run_talos_job("kubelet-config", node_name, namespace, job_values)
+    if err:
+        return err
+    time.sleep(_TALOS_HUGEPAGE_POLL_S)  # Talos restarts the kubelet a moment after accepting the patch
+    err = _wait_for_node_ready(k8s_core_v1, node_name)
+    if err:
+        return err
+    cfg = _read_kubelet_config(k8s_core_v1, node_name)
+    if cfg is not None and not _kubelet_topology_configured(cfg, reserved_system_cpus):
+        return (f"the kubelet on '{node_name}' came back without the CPU topology settings after the "
+                f"machine config patch")
+    return None
+
+
+def _hugepage_shortfall(host_hugetlb_bytes, required_mib):
+    """The message to fail the add with when the host carries fewer huge
+    pages than the SPDK pod is about to request, or None when it carries
+    enough.
+
+    Used where the node may not write the pages itself (a Talos host with a
+    pre-provisioned machine config) to decide whether the add can go ahead.
+    Without it the pod would sit Pending on 'Insufficient hugepages-2Mi'
+    with nothing naming the number. The managed flow sizes per NUMA node
+    instead (_talos_managed_pool). ``host_hugetlb_bytes`` is Hugetlb from /proc/meminfo:
+    the pool across every page size and NUMA node, so this is a lower bound
+    -- it can only pass a pod that at least fits the host as a whole.
+    """
+    available_mib = int(host_hugetlb_bytes) // (1024 * 1024)
+    if available_mib >= required_mib:
+        return None
+    pages_2mi = -(-required_mib // 2)  # ceil
+    return (f"host provides {available_mib} MiB of huge pages but the SPDK pod requests "
+            f"{required_mib} MiB (hugepages-2Mi), i.e. at least {pages_2mi} 2 MiB pages")
+
+
+def _hugepages_per_numa(nodes):
+    """2 MiB pages to reserve on each NUMA node for this host's node configs:
+    the sizing the init Job's apply_config has always used, so a Talos host
+    (reserved through the Talos API) and any other (written to sysfs) end up
+    with the same pool. The constants are kept as they were: a flat 1 GB of
+    headroom per node config, and pages of 2,000,000 rather than 2 MiB
+    bytes, which over-reserves by about 5 %."""
+    per_numa_bytes: dict = {}
+    for node_config in nodes:
+        hg_memory = node_config["huge_page_memory"]
+        if int(node_config["max_size"]) > 0:
+            hg_memory = max(hg_memory, node_config["max_size"])
+        numa = node_config["socket"]
+        per_numa_bytes[numa] = per_numa_bytes.get(numa, 0) + hg_memory + 1000000000
+    return {numa: mem // 2000000 for numa, mem in per_numa_bytes.items()}
+
+
+def _talos_sysfs_patch(pages_per_numa):
+    """The strategic-merge machine-config patch that reserves the pages.
+
+    machine.sysfs keys are dotted paths under /sys (Talos swaps dots for
+    slashes), so this is the same per-NUMA nr_hugepages file sysfs mode
+    writes, only applied by Talos. A merge patch adds to the sysfs map
+    rather than replacing it, so whatever else the operator keeps there
+    (cpufreq governors, ...) survives -- and it is the format Talos accepts
+    on a multi-document machine config, where a JSON 6902 patch is refused
+    ("JSON6902 patches are not supported for multi-document machine
+    configuration", Talos v1.12.7). machine.sysfs is deprecated on
+    recent Talos in favour of a SysfsConfig document but still honoured,
+    and it is what every supported Talos minor understands."""
+    return {"machine": {"sysfs": {
+        f"devices.system.node.node{numa}.hugepages.hugepages-2048kB.nr_hugepages": str(pages)
+        for numa, pages in sorted(pages_per_numa.items())
+    }}}
+
+
+_K8S_QUANTITY_MIB = {'Ki': 1 / 1024, 'Mi': 1, 'Gi': 1024, 'Ti': 1024 * 1024}
+
+
+def _quantity_to_mib(quantity):
+    """A Kubernetes resource quantity ('13Gi', '12800Mi', '0', bytes) in MiB."""
+    q = str(quantity or '0').strip()
+    for suffix, factor in _K8S_QUANTITY_MIB.items():
+        if q.endswith(suffix):
+            return int(float(q[:-len(suffix)]) * factor)
+    return int(float(q)) // (1024 * 1024)
+
+
+def _job_name(prefix, node_name):
+    """A Job name under Kubernetes' 63-character limit that keeps the end of
+    the node name, where generated names differ."""
+    name = prefix + node_name
+    return name[len(name) - 63:] if len(name) > 63 else name
+
+
+_TALOS_JOB_TIMEOUT_S = 300
+_TALOS_HUGEPAGE_WAIT_S = 240
+_TALOS_HUGEPAGE_POLL_S = 5
+
+# Where the managed Talos flow keeps the user's huge-page baseline per NUMA
+# node (see _talos_managed_pool). The agent's /etc/simplyblock is the host's
+# /var/simplyblock, on the partition Talos keeps across reboots, and it has to
+# be: the machine config re-applies the whole pool after a reboot, so a
+# baseline kept on a tmpfs (where the sysfs writer keeps its own, rightly --
+# a reboot zeroes its pool) would count simplyblock's pages as the user's on
+# every boot and the pool would grow by one allocation per reboot.
+_TALOS_HUGEPAGES_STATE_DIR = os.path.dirname(constants.NODES_CONFIG_FILE)
+
+
+def _talos_nr_hugepages(numa):
+    """The 2 MiB pages NUMA node ``numa`` of the host carries right now, read
+    from the host's sysfs (the agent mounts it at /sys). Raises OSError when
+    the file cannot be read, which on a NUMA node the node config names is a
+    host the add must not guess about."""
+    path = f"/sys/devices/system/node/node{numa}/hugepages/hugepages-2048kB/nr_hugepages"
+    with open(path) as f:
+        return int(f.read().strip())
+
+
+def _talos_managed_pool(pages_per_numa):
+    """Per NUMA node of ``pages_per_numa`` (simplyblock's own sizing, see
+    _hugepages_per_numa): the pages the host carries now, the user's share of
+    them, and the total the machine config has to hold -- the user's share
+    plus simplyblock's pages -- as ``{numa: (current, user, target)}``.
+
+    The user's share is what the sysfs writer on other hosts calls the
+    baseline (core_utils.user_hugepages_baseline): what the host carried the
+    first time simplyblock saw it, plus any later manual increase. Without
+    it the patch would set the pool to simplyblock's number and a host
+    shared with another huge-page consumer would lose that consumer's pages
+    -- or, when that consumer's pages already covered the SPDK pod, be left
+    with a pool two workloads then fight over."""
+    pool = {}
+    for numa, sb_pages in sorted(pages_per_numa.items()):
+        current = _talos_nr_hugepages(numa)
+        user = core_utils.user_hugepages_baseline(numa, current, _TALOS_HUGEPAGES_STATE_DIR)
+        pool[numa] = (current, user, user + sb_pages)
+    return pool
+
+
+def _talos_pool_shortfall(pool):
+    """The NUMA nodes of a _talos_managed_pool whose host count is below
+    the target, as 'NUMA node N carries X 2 MiB pages, short of Y' phrases,
+    or an empty list when every node holds its target."""
+    return [f"NUMA node {numa} carries {current} 2 MiB pages, short of {target}"
+            for numa, (current, _, target) in sorted(pool.items()) if current < target]
+
+
+def _save_talos_pool(pool):
+    """Record, per NUMA node, the total the host holds once the managed flow
+    is done with it, which the next run measures the user's changes against
+    (core_utils.save_sb_hugepages_allocation). The pool is never shrunk --
+    a node config sized down leaves its surplus in place rather than
+    reclaiming pages another consumer may have started using -- so the
+    recorded total is the larger of the target and what the host carries,
+    or the surplus would read as the user's pages on the next run and be
+    added to on top."""
+    for numa, (current, _, target) in pool.items():
+        if not core_utils.save_sb_hugepages_allocation(numa, max(current, target), _TALOS_HUGEPAGES_STATE_DIR):
+            logger.error("NUMA node %s: the huge-page total could not be recorded; the next run will "
+                         "read simplyblock's pages as the user's", numa)
+
+
+def _wait_for_talos_pool(pool):
+    """Block until every NUMA node of ``pool`` carries its target, or return
+    the message to fail with. Talos writes the kernel parameter
+    asynchronously after the machine config patch is accepted, so the pool
+    appears some seconds after the patch Job completes."""
+    deadline = time.monotonic() + _TALOS_HUGEPAGE_WAIT_S
+    while True:
+        short = _talos_pool_shortfall(
+            {numa: (_talos_nr_hugepages(numa), user, target) for numa, (_, user, target) in pool.items()})
+        if not short:
+            return None
+        if time.monotonic() >= deadline:
+            return f"after applying the machine config patch, {'; '.join(short)}"
+        time.sleep(_TALOS_HUGEPAGE_POLL_S)
+
+
+def _talos_api_access_missing(k8s_core_v1, namespace, name):
+    """None when the Talos API access Secret is there (or cannot be
+    checked), else the message to fail with. Checked up front because a
+    missing Secret otherwise leaves the Job's pod in ContainerCreating for
+    the whole Job timeout with a FailedMount event nobody reads.
+
+    The message names the knob, not the configured value: the value is
+    only the Secret's name, but it comes out of TALOS_API_SECRET, and a
+    name-based scanner (CodeQL) reads anything logged from there as the
+    secret itself."""
+    try:
+        k8s_core_v1.read_namespaced_secret(name, namespace)
+    except ApiException as e:
+        if e.status == 404:
+            return (f"Talos API access Secret not found in namespace '{namespace}' (its name is the "
+                    f"TALOS_API_SECRET setting, default 'talos-api-access-talos-secrets'): enable Talos API "
+                    f"access from Kubernetes for this namespace with the os:admin role and create a "
+                    f"talos.dev/v1alpha1 ServiceAccount of that name with roles [os:admin] (see docs/talos.md)")
+        logger.warning("Cannot check for the Talos API access Secret (HTTP %s); letting the Job tell", e.status)
+    return None
+
+
+def _kubelet_hugepages_mib(k8s_core_v1, node_name):
+    """What the kubelet on ``node_name`` advertises as hugepages-2Mi capacity,
+    in MiB. The kubelet reads it at start, so it lags the host until the
+    kubelet is restarted."""
+    node = k8s_core_v1.read_node(node_name)
+    return _quantity_to_mib((node.status.capacity or {}).get('hugepages-2Mi'))
+
+
+def _wait_for_kubelet_hugepages(k8s_core_v1, node_name, required_mib):
+    """Block until the kubelet's capacity covers the pod's request, or return
+    the message to fail with."""
+    deadline = time.monotonic() + _TALOS_HUGEPAGE_WAIT_S
+    while True:
+        kubelet_mib = _kubelet_hugepages_mib(k8s_core_v1, node_name)
+        if kubelet_mib >= required_mib:
+            return None
+        if time.monotonic() >= deadline:
+            return (f"the kubelet on '{node_name}' still reports {kubelet_mib} MiB of hugepages-2Mi "
+                    f"capacity against the SPDK pod's {required_mib} MiB after its restart")
+        time.sleep(_TALOS_HUGEPAGE_POLL_S)
+
+
+def _job_pod_logs(k8s_core_v1, namespace, job_name):
+    """The log of the Job's pod(s), for the agent log: the Job is deleted once
+    it has run, and what talosctl said is the only record of what happened
+    on the Talos side."""
+    try:
+        pods = k8s_core_v1.list_namespaced_pod(namespace, label_selector=f"job-name={job_name}")
+        return " | ".join(
+            k8s_core_v1.read_namespaced_pod_log(pod.metadata.name, namespace).strip().replace("\n", " / ")
+            for pod in (pods.items or []))
+    except ApiException as e:
+        return f"<pod log unavailable: HTTP {e.status}>"
+
+
+# The Jobs of the Talos flow: step -> (Job name prefix, template). All but the
+# checkpoint removal are talosctl against the node's own apid.
+_TALOS_STEPS = {
+    "patch": ("snode-talos-hugepages-", "storage_talos_hugepages_job.yaml.j2"),
+    "kubelet": ("snode-talos-kubelet-", "storage_talos_hugepages_job.yaml.j2"),
+    "kubelet-config": ("snode-talos-kubelet-config-", "storage_talos_hugepages_job.yaml.j2"),
+    "kubelet-state": ("snode-talos-kubelet-state-", "storage_kubelet_state_reset_job.yaml.j2"),
+}
+
+
+def _run_talos_job(step, node_name, namespace, job_values):
+    """Run one step of the Talos flow (_TALOS_STEPS) as a Job on the node and
+    wait for it; return None, or the message to fail the add with. The Job
+    is deleted on success (its pod log is copied into the agent log first)
+    and left in place on failure, where its pod log says why talosctl failed
+    (role not allowed, apid unreachable, patch rejected)."""
+    prefix, template_name = _TALOS_STEPS[step]
+    values = dict(job_values, TALOS_STEP=step, TALOS_JOBNAME=_job_name(prefix, node_name))
+    env = Environment(loader=PackageLoader('simplyblock_web', 'templates'), trim_blocks=True, lstrip_blocks=True)
+    job_yaml = yaml.safe_load(env.get_template(template_name).render(values))
+    batch_v1 = core_utils.get_k8s_batch_client()
+    k8s_core_v1 = core_utils.get_k8s_core_client()
+    job_resp = _create_job_replacing_stale(batch_v1, namespace, job_yaml)
+    job_name = job_resp.metadata.name
+    logger.info("Job created: '%s' in namespace '%s'", job_name, namespace)
+    try:
+        node_utils_k8s.wait_for_job_completion(job_name, namespace, timeout=_TALOS_JOB_TIMEOUT_S)
+    except (RuntimeError, TimeoutError) as e:
+        return (f"Talos {step} Job on '{node_name}' did not succeed: {e}; "
+                f"see the pod log of Job '{job_name}'")
+    logger.info("Job '%s' completed; talosctl said: %s", job_name, _job_pod_logs(k8s_core_v1, namespace, job_name))
+    try:
+        batch_v1.delete_namespaced_job(
+            name=job_name, namespace=namespace,
+            body=V1DeleteOptions(propagation_policy='Foreground', grace_period_seconds=0))
+    except ApiException as e:
+        if e.status != 404:
+            raise
+    return None
+
+
+def _configured_pages_per_numa():
+    """The per-NUMA page counts this host's node configs call for, or None
+    with the message to fail the add with when there are none yet."""
+    nodes = core_utils.load_config(constants.NODES_CONFIG_FILE).get("nodes") or []
+    if not nodes:
+        return None, "Please run sbcli sn configure before adding the storage node"
+    return _hugepages_per_numa(nodes), None
+
+
+def _preprovisioned_hugepage_refusal(required_mib, node_name, host_short):
+    """The message that fails the add when the machine config is
+    pre-provisioned and the pool is short: the node may not apply anything,
+    so it names what to apply. A host pool that covers the pod while the
+    kubelet advertises less is the kubelet having started before the pool
+    existed (Talos writes machine.sysfs after boot, racing the kubelet),
+    which one kubelet restart fixes."""
+    if not host_short:
+        return (f"Talos node '{node_name}': the host's huge-page pool covers the SPDK pod's {required_mib} MiB but "
+                f"the kubelet advertises less, so it started before the pool existed. Restart it with "
+                f"'talosctl -n <node ip> service kubelet restart' {_TALOS_MANAGED_HINT}")
+    pages_per_numa, err = _configured_pages_per_numa()
+    if err:
+        return err
+    shortfall = _hugepage_shortfall(node_utils.get_huge_memory(), required_mib)
+    return (f"Talos node '{node_name}': {shortfall}, and the machine config is pre-provisioned "
+            f"(TALOS_MACHINE_CONFIG=preprovisioned). Save the YAML below as patch.yaml and apply it to the worker with "
+            f"'talosctl -n <node ip> patch mc -p @patch.yaml', then restart its kubelet with "
+            f"'talosctl -n <node ip> service kubelet restart' so it advertises the pool, {_TALOS_MANAGED_HINT}:\n"
+            f"{_machine_config_patch_text(_talos_sysfs_patch(pages_per_numa))}")
+
+
+def _provision_talos_hugepages(required_mib, node_name, namespace, values):
+    """Make a Talos worker's huge-page pool cover the SPDK pod about to be
+    created, through the Talos API, and return None -- or the message to
+    fail the add with.
+
+    Talos has no host shell and no writable sysfs for us, so the init Job's
+    nr_hugepages write is replaced by talosctl run as Jobs against the
+    node's own apid, in two steps with a wait between them:
+
+    1. If the host's pool is short: patch the per-NUMA counts into
+       machine.sysfs (applied live, no reboot) and wait until the pool shows
+       in /proc/meminfo -- Talos writes the kernel parameter asynchronously.
+    2. If the kubelet's capacity is short: restart the kubelet and wait until
+       it advertises the pool. The kubelet reads huge-page capacity at start,
+       which is why the two steps are not one Job: a restart that races the
+       write boots the kubelet seeing zero (worker-1, 2026-10-16), and the
+       pod then never schedules.
+
+    Each step is skipped when its half already holds, so a plain node
+    restart with the pool in place touches nothing -- in particular, no
+    kubelet restart. With the machine config pre-provisioned (the default,
+    see _talos_machine_config_managed) nothing is ever applied: a short
+    pool fails the add with the patch to apply.
+
+    The two modes size the host differently. Pre-provisioned verifies the
+    pool as a whole: it is the operator's, and it only has to cover the SPDK
+    pod. Managed owns its part of the pool and adds it on top of the user's
+    (_talos_managed_pool), per NUMA node: the host is short whenever a NUMA
+    node carries less than the user's pages plus simplyblock's, so a pool
+    another consumer reserved is never taken for the SPDK pod, and never
+    overwritten by the patch either.
+    """
+    k8s_core_v1 = core_utils.get_k8s_core_client()
+    kubelet_short = _kubelet_hugepages_mib(k8s_core_v1, node_name) < required_mib
+    if not _talos_machine_config_managed():
+        host_short = _hugepage_shortfall(node_utils.get_huge_memory(), required_mib) is not None
+        if not host_short and not kubelet_short:
+            logger.info("Huge-page pool on '%s' already covers the SPDK pod's %s MiB; nothing to apply",
+                        node_name, required_mib)
+            return None
+        return _preprovisioned_hugepage_refusal(required_mib, node_name, host_short)
+
+    pages_per_numa, err = _configured_pages_per_numa()
+    if err:
+        return err
+    try:
+        pool = _talos_managed_pool(pages_per_numa)
+    except OSError as e:
+        return f"Talos node '{node_name}': cannot read the host's huge-page pool: {e}"
+    host_short = bool(_talos_pool_shortfall(pool))
+    if not host_short and not kubelet_short:
+        logger.info("Huge-page pool on '%s' already holds the user's pages plus simplyblock's per NUMA node "
+                    "(%s) and the kubelet advertises it; nothing to apply",
+                    node_name, {numa: f"{current} = {user} + {target - user}" for numa, (current, user, target) in pool.items()})
+        _save_talos_pool(pool)
+        return None
+
+    api_access_name = os.environ.get("TALOS_API_SECRET") or constants.TALOS_API_SECRET
+    missing = _talos_api_access_missing(k8s_core_v1, namespace, api_access_name)
+    if missing:
+        return missing
+    job_values = dict(values,
+                      TALOSCTL_IMAGE=os.environ.get("TALOSCTL_IMAGE") or constants.TALOSCTL_IMAGE,
+                      TALOS_API_SECRET=api_access_name)
+
+    if host_short:
+        targets = {numa: target for numa, (_, _, target) in pool.items()}
+        logger.info("Reserving huge pages on Talos node '%s' through the Talos API, per NUMA node: %s "
+                    "(2 MiB pages, the user's own pages kept on top: %s)",
+                    node_name, targets, {numa: user for numa, (_, user, _) in pool.items()})
+        job_values["TALOS_PATCH"] = json.dumps(_talos_sysfs_patch(targets), separators=(',', ':'))
+        err = _run_talos_job("patch", node_name, namespace, job_values)
+        if err:
+            return err
+        err = _wait_for_talos_pool(pool)
+        if err:
+            return err
+        kubelet_short = True  # the kubelet booted before this pool existed
+    _save_talos_pool(pool)
+
+    if kubelet_short:
+        logger.info("Restarting the kubelet on Talos node '%s' so it advertises the huge-page pool", node_name)
+        err = _run_talos_job("kubelet", node_name, namespace, job_values)
+        if err:
+            return err
+        return _wait_for_kubelet_hugepages(k8s_core_v1, node_name, required_mib)
+    return None
+
+
 class SPDKParams(BaseModel):
     server_ip: str = Field(pattern=utils.IP_PATTERN)
     rpc_port: int = Field(ge=1, lt=65536)
@@ -610,6 +1198,16 @@ def spdk_process_start(body: SPDKParams):
     if isinstance(openshift, str):
        openshift = openshift.strip().lower() in ("true")
 
+    # Talos is detected from what the kubelet reports about its host (see
+    # _talos_host), with TALOS_CLUSTER as an override. On Talos the host is
+    # immutable and has no shell, so nothing here touches it directly -- no
+    # nr_hugepages write, no nsenter kubelet restart, no grubby/KubeletConfig
+    # Job. Huge pages are reserved and the kubelet's CPU topology configured
+    # through the Talos API instead (talosctl Jobs patching the machine
+    # config); see _provision_talos_hugepages and
+    # _configure_talos_kubelet_topology.
+    talos = _talos_host(node_name)
+
     # limit the job name length to 63 characters
     k8s_job_name_length = len(node_prepration_job_name+node_name)
     ubuntu_name_length = len(node_prepration_ubuntu_name+node_name)
@@ -628,7 +1226,16 @@ def spdk_process_start(body: SPDKParams):
     skip_kubelet_configuration = os.environ.get("SKIP_KUBELET_CONFIGURATION", False)
     if isinstance(skip_kubelet_configuration, str):
        skip_kubelet_configuration = skip_kubelet_configuration.strip().lower() in ("true")
-    reserved_system_cpus = os.environ.get("RESERVED_SYSTEM_CPUS", "0,1")
+    # The kubelet's reserved CPUs are the operator's choice (RESERVED_SYSTEM_CPUS,
+    # from the StorageCluster), not derived from the SPDK core layout. Deriving
+    # them as "everything but the SPDK cores" would put the SPDK pod on exactly
+    # its planned cores, but the kubelet also sizes the node's allocatable CPU
+    # as capacity minus that list, so the SPDK pod (its cores plus the proxy)
+    # and every other pod's request would have to fit into the SPDK core count
+    # -- worker-4 went from 22 to 4 allocatable and the pod sat Pending on
+    # "Insufficient cpu" (lab, 2026-10-21). Which cores the pod gets is the
+    # kubelet's pick from the non-reserved set; the restart path follows it.
+    reserved_system_cpus = (os.environ.get("RESERVED_SYSTEM_CPUS") or "").strip() or "0,1"
     # Initial storage-MCP maxUnavailable when it's first created for CPU-topology
     # apply = the configured parallel-add count, so the first-time,
     # pre-activation reboots roll in one wave instead of a one-at-a-time queue.
@@ -684,6 +1291,7 @@ def spdk_process_start(body: SPDKParams):
             'TOTAL_HP': total_mem_mib,
             'NSOCKET': body.socket,
             'CPU_TOPOLOGY_ENABLED': cpu_topology_enabled,
+            'TALOS_CLUSTER': talos,
             'RESERVED_SYSTEM_CPUS': reserved_system_cpus,
             'MCP_MAX_UNAVAILABLE': mcp_max_unavailable,
             'OPENSHIFT_MCP': openshift_mcp,
@@ -700,6 +1308,12 @@ def spdk_process_start(body: SPDKParams):
             'FULL_CLUSTER_ID': body.cluster_id,
             'DEVICE_RESOURCES': network_attachments.device_resources(body.networks),
         }
+
+        if talos:
+            err = _provision_talos_hugepages(values['MEM_MEGA'], node_name, namespace, values)
+            if err:
+                logger.error(err)
+                return utils.get_response(False, err)
 
         if ubuntu_host:
             ubuntu_template = env.get_template('ubuntu_kernel_extra.yaml.j2')
@@ -747,8 +1361,28 @@ def spdk_process_start(body: SPDKParams):
             if e.status != 404:
                 raise
             logger.info(f"Job '{job_resp.metadata.name}' already gone, skipping delete")
-        if (cpu_topology_enabled and not skip_kubelet_configuration) or (core_isolate and not cpu_topology_enabled):
+        wants_host_config = (cpu_topology_enabled and not skip_kubelet_configuration) or (core_isolate and not cpu_topology_enabled)
+        if wants_host_config and talos:
+            # Both Jobs nsenter into the host (kubelet config, grubby), which
+            # Talos has not. The kubelet half goes through the Talos API
+            # instead; the kernel-argument half (core isolation) would need
+            # machine.install.extraKernelArgs and an upgrade/reboot cycle,
+            # which is not done here.
             if cpu_topology_enabled and not skip_kubelet_configuration:
+                err = _configure_talos_kubelet_topology(node_name, namespace, values, reserved_system_cpus)
+                if err:
+                    logger.error(err)
+                    return utils.get_response(False, err)
+            if core_isolate and not cpu_topology_enabled:
+                logger.warning("Talos node '%s': core isolation (isolcpus) is not applied; set the kernel "
+                               "arguments in the machine config (machine.install.extraKernelArgs)", node_name)
+        elif wants_host_config:
+            if cpu_topology_enabled and not skip_kubelet_configuration:
+                cfg = _read_kubelet_config(core_utils.get_k8s_core_client(), node_name)
+                refusal = _strict_cpu_reservation(cfg, node_name) if cfg is not None else None
+                if refusal:
+                    logger.error(refusal)
+                    return utils.get_response(False, refusal)
                 if not openshift:
                     template_name = 'storage_cpu_topology.yaml.j2'
                 else:
@@ -1050,15 +1684,7 @@ def apply_config():
         return utils.get_response(False, "Config validation is incorrect")
 
     # Set Huge page memory
-    huge_page_memory_dict: dict = {}
-    for node_config in nodes:
-        hg_memory = node_config["huge_page_memory"]
-        if int(node_config["max_size"]) > 0:
-            hg_memory = max(hg_memory , node_config["max_size"])
-        numa = node_config["socket"]
-        huge_page_memory_dict[numa] = huge_page_memory_dict.get(numa, 0) + hg_memory + 1000000000
-    for numa, huge_page_memory in huge_page_memory_dict.items():
-        num_pages = huge_page_memory // 2000000
+    for numa, num_pages in _hugepages_per_numa(nodes).items():
         core_utils.set_hugepages_if_needed(numa, num_pages)
 
     return utils.get_response(True)
