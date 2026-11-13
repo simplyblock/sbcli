@@ -1,0 +1,41 @@
+name: OpenAPI schema
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    name: Export v2 OpenAPI schema
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Set up Python
+      uses: actions/setup-python@v7
+      with:
+        python-version: '3.11'
+        cache: 'pip'
+
+    - name: Install FoundationDB client library
+      run: |
+        curl -fsSL https://github.com/apple/foundationdb/releases/download/7.3.63/foundationdb-clients_7.3.63-1_amd64.deb -o /tmp/fdb-clients.deb
+        sudo dpkg -i /tmp/fdb-clients.deb
+
+    - name: Install tox
+      run: pip install tox tox-uv
+
+    - name: Export schema
+      run: tox run -e openapi
+
+    - name: Upload schema
+      uses: actions/upload-artifact@v4
+      with:
+        name: openapi-${{ github.sha }}
+        path: openapi.json
+        retention-days: 90

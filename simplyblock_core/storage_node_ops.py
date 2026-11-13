@@ -67,6 +67,7 @@ from simplyblock_core.db_controller import DBController
 from simplyblock_core.distr_controller import DistribHomeSiteError
 from simplyblock_core.exceptions import (
     PreconditionError,
+    PromoteIncompleteError,
     SyncReplicationUnsupportedError,
     reject_on_sync_replication,
 )
@@ -9122,6 +9123,36 @@ def _reconcile_discovered_devices(snode, nvme_devs):
     return new_devices
 
 
+def record_host(snode, node_address, node_info):
+    """Point the node's record at the host whose agent answers at ``node_address``.
+
+    The same identity the add gives a node: ``api_endpoint`` is the agent's
+    stable name, ``mgmt_ip`` the worker's address, ``hostname`` the worker's
+    name with the RPC port suffix and ``k8s_node_name`` the worker's name. An
+    agent off the host network (attached networks, pod network) cannot see the
+    worker's interfaces and reports the worker's address itself (``host_ip``);
+    on the host network its own address is the worker's.
+
+    A relocation (StorageNodeOps Migrate) restarts the node with another
+    host's address. Until 2026-11-12 the restart stored whatever that address
+    resolved to, which on the pod network is the agent pod: the monitor then
+    pinged a pod that the next DaemonSet roll replaced and declared a healthy
+    node unreachable (Talos lab, three seconds after a Migrate succeeded), and
+    the monitor's host grouping, keyed by ``mgmt_ip``, counted the node as a
+    host of its own. The hostname lost its port suffix the same way.
+    """
+    snode.api_endpoint = node_address
+    if snode.on_pod_network:
+        ip_iface = utils.get_mgmt_ip(node_info, [], snode.networks, snode.pod_network)
+        if not ip_iface:
+            raise ValueError(f"the agent at {node_address} reports no host address")
+        snode.mgmt_ip = ip_iface[0]
+    else:
+        snode.mgmt_ip = utils.resolve_address(node_address)
+    snode.hostname = f"{node_info['hostname']}_{snode.rpc_port}"
+    snode.k8s_node_name = node_info['hostname']
+
+
 def _restart_storage_node_impl(
         node_id, max_lvol=0, max_snap=0, max_prov=0,
         spdk_image=None, set_spdk_debug=None,
@@ -9226,8 +9257,11 @@ def _restart_storage_node_impl(
         # captured before mgmt_ip/hostname are overwritten below.
         _old_rpc_client = snode.rpc_client()
         old_rpc_host, old_rpc_port = _old_rpc_client.host, _old_rpc_client.port
-        snode.api_endpoint = node_address
-        snode.mgmt_ip = utils.resolve_address(node_address)
+        try:
+            record_host(snode, node_address, node_info)
+        except ValueError as e:
+            logger.error(f"Cannot restart {node_id} on {node_address}: {e}")
+            return False
         if not snode.on_pod_network:
             data_nics = []
             for nic in snode.data_nics:
@@ -9241,8 +9275,6 @@ def _restart_storage_node_impl(
                         'status': device['status'],
                         'net_type': device['net_type']}))
             snode.data_nics = data_nics
-        snode.hostname = node_info['hostname']
-        snode.k8s_node_name = node_info['hostname']
         evict_cached_session(old_rpc_host, old_rpc_port)
 
         if snode.num_partitions_per_dev == 0 and reattach_volume:
@@ -20011,6 +20043,27 @@ def get_cluster_map(node_id):
 
 
 def make_sec_new_primary(node_id):
+    """Finish a node's relocation onto another host: activate the devices
+    the restart found there (``new``) and retire the ones it did not
+    (``removed``), whose data the retirement migrates off them, then re-point
+    the node's own addresses and its volumes.
+
+    The devices are the point of no return, and the record, re-read after the
+    calls, is the verdict: a device still new or still removed is one the
+    promote did not finish, whatever the calls answered. It raises
+    PromoteIncompleteError then, naming them, instead of returning True over
+    a node whose old devices stay in the cluster map as live. (Talos lab
+    2026-11-12: a relocated node's three origin devices had been set back
+    online by the self-repair, device_set_failed refused each with "must be
+    in removed status" and logged it, the promote returned True, the
+    operator's Migrate reported Succeeded, and the volume on the node was
+    corrupt.) The caller calls again once what blocked it is gone; the
+    promote is idempotent.
+
+    The re-point is done either way: the node is on the new host whether or
+    not its devices are settled, and a volume that names the old host is
+    wrong on every retry.
+    """
     db_controller = DBController()
     try:
         snode = db_controller.get_storage_node_by_id(node_id)
@@ -20018,14 +20071,17 @@ def make_sec_new_primary(node_id):
         logger.exception("snode not found")
         return False
 
+    refused = []
     for dev in snode.nvme_devices:
         if dev.status == NVMeDevice.STATUS_NEW:
-            device_controller.add_device(dev.get_id(), add_migration_task=False)
+            if not device_controller.add_device(dev.get_id(), add_migration_task=False):
+                refused.append(f"add_device({dev.get_id()})")
 
     time.sleep(5)
     for dev in snode.nvme_devices:
         if dev.status == NVMeDevice.STATUS_REMOVED:
-            device_controller.device_set_failed(dev.get_id())
+            if not device_controller.device_set_failed(dev.get_id()):
+                refused.append(f"device_set_failed({dev.get_id()})")
 
     snode = db_controller.get_storage_node_by_id(node_id)
     snode.primary_ip = snode.mgmt_ip
@@ -20034,6 +20090,21 @@ def make_sec_new_primary(node_id):
     for lvol in db_controller.get_lvols_by_node_id(node_id):
         lvol.hostname = snode.hostname
         lvol.write_to_db()
+
+    still_new = [d.get_id() for d in snode.nvme_devices if d.status == NVMeDevice.STATUS_NEW]
+    still_removed = [d.get_id() for d in snode.nvme_devices if d.status == NVMeDevice.STATUS_REMOVED]
+    if still_new or still_removed:
+        parts = []
+        if still_new:
+            parts.append(f"devices of the new host still new, not activated: {', '.join(still_new)}")
+        if still_removed:
+            parts.append("devices of the old host still removed, their data not migrated off them: "
+                         + ", ".join(still_removed))
+        if refused:
+            parts.append("refused: " + ", ".join(refused))
+        raise PromoteIncompleteError(
+            f"the promote of node {node_id} on {snode.hostname} did not finish: " + "; ".join(parts),
+            still_new=still_new, still_removed=still_removed)
 
     return True
 

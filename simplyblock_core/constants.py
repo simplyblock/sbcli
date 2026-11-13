@@ -1072,6 +1072,7 @@ GRAFANA_EVENT_ALERTS_PLUGIN_URL = (
 # prometheus.yml.j2 scrapes /cluster/metrics from.
 MONITORING_CONTROL_PLANE_ADDR = "http://HAProxy"
 MONITORING_GRAFANA_SERVICE = "monitoring_grafana"
+MONITORING_PROMETHEUS_SERVICE = "monitoring_prometheus"
 
 GRAFANA_K8S_ENDPOINT = "http://simplyblock-grafana:3000"
 GRAYLOG_K8S_ENDPOINT = "http://simplyblock-graylog:9000"

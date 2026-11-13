@@ -1459,6 +1459,26 @@ def alceml_checksum_params(cluster, nvme_device):
     return 2, 0, 0
 
 
+def nvme_namespace_serial(nvme_driver_data: dict, id_device_by_nqn: bool = False) -> str:
+    """The serial a device record carries for an NVMe namespace bdev, from the
+    bdev's ``driver_specific.nvme[0]`` block.
+
+    It is the controller's serial, except on a node that identifies devices by
+    NQN, where it is the PCI address joined with the namespace id. The device
+    inventory records it, and every later check of "is the drive SPDK holds
+    under this name the one the record describes" compares against it, so
+    both have to derive it the same way.
+    """
+    serial_number = nvme_driver_data['ctrlr_data']['serial_number']
+    if id_device_by_nqn:
+        if "ns_data" in nvme_driver_data:
+            # SPDK reports the namespace id as a number.
+            serial_number = nvme_driver_data['pci_address'] + str(nvme_driver_data['ns_data']['id'])
+        else:
+            logger.error(f"No subsystem nqn found for device: {nvme_driver_data['pci_address']}")
+    return serial_number
+
+
 def addNvmeDevices(rpc_client, snode, devs):
     devices = []
     ret = rpc_client.bdev_nvme_controller_list()
@@ -1516,12 +1536,7 @@ def addNvmeDevices(rpc_client, snode, devs):
                 )
                 continue
 
-            serial_number = nvme_driver_data['ctrlr_data']['serial_number']
-            if snode.id_device_by_nqn:
-                if "ns_data" in nvme_driver_data:
-                    serial_number = nvme_driver_data['pci_address'] + nvme_driver_data['ns_data']['id']
-                else:
-                    logger.error(f"No subsystem nqn found for device: {nvme_driver_data['pci_address']}")
+            serial_number = nvme_namespace_serial(nvme_driver_data, snode.id_device_by_nqn)
 
             # SPDK exposes per-namespace metadata size as a top-level uint32 in bdev_get_bdevs JSON
             # (lib/bdev/bdev_rpc.c writes "md_size" via spdk_bdev_get_md_size). >=8 means alceml can run
@@ -4179,6 +4194,46 @@ def build_graylog_patch(cluster_secret: str) -> dict:
         }
     }
     return graylog_patch
+
+
+PROMETHEUS_CONFIGMAP = "simplyblock-prometheus-config"
+
+
+def replace_secret_token(text: str, old: str, new: str) -> tuple[str, int]:
+    """Replace every occurrence of ``old`` that stands as a whole token.
+
+    A token is bounded by whitespace, a colon or a quote, which is how a secret
+    sits in the monitoring configs (``password: '<s>'``, ``credentials: <s>``,
+    ``"Bearer <s>"``), so the quoting around it is left as it was. Returns the
+    new text and the number of replacements; zero means the text does not
+    carry ``old``.
+    """
+    if not old:
+        return text, 0
+    pattern = re.compile(rf"(?<![^\s:'\"]){re.escape(old)}(?![^\s'\"])")
+    return pattern.subn(lambda _: new, text)
+
+
+def rotate_prometheus_configmap_secret(old_secret: str, new_secret: str) -> bool:
+    """Swap ``old_secret`` for ``new_secret`` in the Prometheus ConfigMap.
+
+    Keyed on the old value rather than on field names, so only the scrape jobs
+    that authenticate as this cluster change, whichever cluster the ConfigMap
+    was last pointed at. Returns whether the ConfigMap carried the old secret;
+    raises ``kubernetes.client.exceptions.ApiException`` when it cannot be read
+    or patched.
+    """
+    load_kube_config_with_fallback()
+    v1 = client.CoreV1Api()
+    cm = v1.read_namespaced_config_map(name=PROMETHEUS_CONFIGMAP, namespace=constants.K8S_NAMESPACE)
+    rotated, count = replace_secret_token((cm.data or {}).get("prometheus.yml", ""), old_secret, new_secret)
+    if not count:
+        return False
+    v1.patch_namespaced_config_map(
+        name=PROMETHEUS_CONFIGMAP, namespace=constants.K8S_NAMESPACE,
+        body={"data": {"prometheus.yml": rotated}})
+    logger.info(f"Rotated the cluster secret in the {PROMETHEUS_CONFIGMAP} ConfigMap")
+    return True
 
 
 def patch_prometheus_configmap(username: str, password: str):

@@ -1,12 +1,32 @@
 import logging
+from typing import TYPE_CHECKING
 
-from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.settings import Settings
 
 from ._base import KMS
 from ._exceptions import KMSException
 from ._fdb import LocalKMS
 from ._hcp import HCPClient
+from ._kmip import KMIPClient
+from ._settings import KMIPKMSSettings, KMSSettings, VaultKMSSettings
+
+if TYPE_CHECKING:
+    # Type-hint only: models.cluster imports this package for KMSSettings, so a
+    # module-level import here would cycle back through it.
+    from simplyblock_core.models.cluster import Cluster
+
+__all__ = [
+    "KMS",
+    "KMIPKMSSettings",
+    "KMSException",
+    "KMSSettings",
+    "VaultKMSSettings",
+    "backup_dek_path",
+    "backup_kek_name",
+    "create_kms_connection",
+    "lvol_dek_path",
+    "pool_kek_name",
+]
 
 logger = logging.getLogger()
 
@@ -29,8 +49,9 @@ def backup_kek_name(backup_id: str) -> str:
     return f"backup-{backup_id}"
 
 
-def create_kms_connection(cluster: Cluster) -> KMS:
-    if not cluster.hashicorp_vault_settings:
+def create_kms_connection(cluster: "Cluster") -> KMS:
+    kms_settings = cluster.get_kms_settings()
+    if kms_settings is None:
         return LocalKMS(cluster)
 
     settings = Settings()
@@ -45,13 +66,21 @@ def create_kms_connection(cluster: Cluster) -> KMS:
         if not path.is_file()
     }):
         raise KMSException("Missing certificates: " + ", ".join(map(str, missing)))
-    vault = cluster.hashicorp_vault_settings
-    return HCPClient(
-        vault.base_url,
+
+    if isinstance(kms_settings, VaultKMSSettings):
+        return HCPClient(
+            str(kms_settings.base_url),
+            settings.tls_certificate_authority,
+            settings.tls_certificate,
+            settings.tls_key,
+            transit_mount=kms_settings.transit_mount,
+            kv_mount=kms_settings.kv_mount,
+            cert_role=kms_settings.cert_role,
+        )
+
+    return KMIPClient(
+        kms_settings.server_url,
         settings.tls_certificate_authority,
         settings.tls_certificate,
         settings.tls_key,
-        transit_mount=vault.transit_mount,
-        kv_mount=vault.kv_mount,
-        cert_role=vault.cert_role,
     )

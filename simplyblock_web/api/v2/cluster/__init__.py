@@ -5,7 +5,6 @@ from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field, computed_field, model_validator
-from pydantic.networks import AnyUrl, UrlConstraints
 from sse_starlette import EventSourceResponse
 
 from simplyblock_core import cluster_ops, constants
@@ -19,7 +18,6 @@ from simplyblock_core.controllers import (
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.exceptions import ReachabilityAddressError
 from simplyblock_core.models.cluster import Cluster as ClusterModel
-from simplyblock_core.models.cluster import HashicorpVaultSettings as ModelVaultSettings
 
 from .. import util as util
 from .._dependencies import Cluster
@@ -27,6 +25,7 @@ from .._dtos import (
     BackupConfigDTO,
     ClusterDTO,
     ClusterLogEntryDTO,
+    KMSSettingsDTO,
     NodeReachabilityDTO,
     UnresolvedBackupConfigDTO,
 )
@@ -60,13 +59,6 @@ class _UpdateParams(BaseModel):
     restart: bool = Field(False)
 
 
-class HashicorpVaultSettings(BaseModel):
-    base_url: Annotated[AnyUrl, UrlConstraints(allowed_schemes=["https"])] | None = None
-    transit_mount: str = "simplyblock/transit"
-    kv_mount: str = "simplyblock/kv"
-    cert_role: str = "simplyblock-webappapi"
-
-
 class ClusterParams(BaseModel):
     name: str = ""
     blk_size: Literal[512, 4096] = 512
@@ -95,7 +87,7 @@ class ClusterParams(BaseModel):
     rpc_base_port: int = 8080
     snode_api_port: int = 50001
     backup_config: UnresolvedBackupConfigDTO | None = None
-    hashicorp_vault_settings: HashicorpVaultSettings | None = None
+    kms_settings: KMSSettingsDTO | None = None
     enable_failure_domain: bool = False
     lvol_geometry_enabled: bool = True
     sync_replication: bool = False
@@ -169,10 +161,10 @@ def list(watch: WatchParam = False) -> Union[builtins.list[ClusterDTO], EventSou
 def add(request: Request, parameters: ClusterParams, response_format: util.CreationResponseFormatParameter = "full"):
     try:
         params = parameters.model_dump(exclude_none=True)
-        if "hashicorp_vault_settings" in params:
-            params["hashicorp_vault_settings"] = ModelVaultSettings(params["hashicorp_vault_settings"])
         if parameters.backup_config is not None:
             params["backup_config"] = parameters.backup_config.model_dump(exclude_none=True)
+        if parameters.kms_settings is not None:
+            params["kms_settings"] = parameters.kms_settings.model_dump(exclude_none=True)
         with util.sync_http_errors():
             cluster_id_or_false = cluster_ops.add_cluster(**params)
     except ValueError as e:

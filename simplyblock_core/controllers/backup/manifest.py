@@ -213,10 +213,28 @@ class HCPKeyDescriptor(_KeyDescriptor):
         return kms.get_data_encryption_keys(self.dek_path, self.kek_name)
 
 
+class KMIPKeyDescriptor(_KeyDescriptor):
+    """Keys held in a KMIP-speaking appliance, wrapped under a named key."""
+
+    type: Literal["kmip"] = "kmip"
+
+    #: The appliance key the DEKs are wrapped under. Required, same as
+    #: HCPKeyDescriptor.kek_name -- unwrapping is not possible without it.
+    kek_name: str
+
+    #: Absent where the originating cluster's KMIP settings did not record it;
+    #: a reader then falls back on its own configuration.
+    server_url: str | None = None
+
+    def read_keys(self, kms: KMS) -> tuple[SecretStr, SecretStr]:
+        return kms.get_data_encryption_keys(self.dek_path, self.kek_name)
+
+
 #: Tagged on ``type``, so a stored descriptor is read back as the backend that
 #: wrote it rather than matched against each shape in turn.
 KeyDescriptor = Annotated[
-    Union[FDBKeyDescriptor, HCPKeyDescriptor], Field(discriminator="type")]
+    Union[FDBKeyDescriptor, HCPKeyDescriptor, KMIPKeyDescriptor],
+    Field(discriminator="type")]
 
 _key_descriptor_adapter: TypeAdapter = TypeAdapter(KeyDescriptor)
 

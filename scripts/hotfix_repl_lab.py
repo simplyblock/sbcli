@@ -120,7 +120,7 @@ def discover_drift(mgmt):
     # exactly as built.
     image = ssh(mgmt, "sudo docker service inspect app_TasksRunnerReplicationFinal "
                       "--format '{{.Spec.TaskTemplate.ContainerSpec.Image}}'", check=False).strip()
-    probe = 'cd /app && find simplyblock_core -name "*.py" | sort | xargs md5sum'
+    probe = 'cd /app && find simplyblock_core -name "*.py" | sort | xargs sha256sum'
     listing = ssh(mgmt, f"sudo docker run --rm --entrypoint sh {shlex.quote(image)} "
                         f"-c {shlex.quote(probe)}", check=False) if image else ""
     image = {}
@@ -138,7 +138,7 @@ def discover_drift(mgmt):
         if "__pycache__" in rel or rel.startswith("simplyblock_core/test"):
             continue
         raw = path.read_bytes().replace(CRLF, LF)   # image files are LF
-        digest = hashlib.md5(raw).hexdigest()
+        digest = hashlib.sha256(raw).hexdigest()
         if image.get(rel) != digest:
             drift[rel] = path.relative_to(core).as_posix()
     log(f"image drift: {len(drift)} module(s) differ from the deployed image")
