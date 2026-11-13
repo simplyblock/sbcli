@@ -417,34 +417,43 @@ def rebalance_cluster( cluster: Cluster) -> Response:
     return Response(status_code=204)
 
 
-class DeviceRebalanceDTO(BaseModel):
-    weights_updated: bool
-    started: bool
-    reason: str
+class DeviceGrowthEntryDTO(BaseModel):
+    device_id: str
+    old_size: int
+    new_size: int
+    backend_size: int
+    unused_size: int
+    placement_size: int
 
 
 class DeviceGrowthDTO(BaseModel):
-    devices: builtins.list[dict]
+    grown: bool
+    factor: float
+    devices: builtins.list[DeviceGrowthEntryDTO]
     errors: dict[str, str]
-    uniform: bool
-    rebalance: DeviceRebalanceDTO | None = None
+    reason: str
+    shrunk: builtins.list[str] = []
     luns: dict[str, dict] | None = None
 
 
 @instance_api.post('/grow-devices', name='clusters:grow_devices', response_model=DeviceGrowthDTO)
-def grow_devices(cluster: Cluster, rebalance: bool = True,
+def grow_devices(cluster: Cluster,
                  lun_factor: Annotated[float | None, Query(gt=1)] = None) -> DeviceGrowthDTO:
-    """Grow every online lblk data device of the cluster to the size of its
-    block device, one device at a time. Used after the LUNs of the cluster
-    were grown on the storage array. If they have grown unevenly, the device
-    weights are set to the new sizes and the cluster is rebalanced, unless
-    ``rebalance`` is false. ``lun_factor`` (multi-attach cluster with a
-    registered array): grow every LUN by this factor at the array first."""
+    """Grow all lblk data devices of the cluster online by the same factor.
+
+    Every block device is rescanned (for example, after its LUN was grown on
+    the storage array), and every device grows by the smallest growth factor
+    of all of them; the rest of a larger block device stays unused
+    (`unused_size`). If one block device did not grow, nothing grows
+    (`grown` false, `reason`). Device weights and data placement never change.
+    A block device smaller than its device is refused, listed in `shrunk`
+    and `errors`, and raises the device_shrunk alert.
+    """
     if cluster.device_mode != constants.DEVICE_MODE_LBLK:
         raise HTTPException(409, 'Online device growth needs a cluster in lblk device mode')
+    extra = {"lun_factor": lun_factor} if lun_factor is not None else {}
     try:
-        extra = {"lun_factor": lun_factor} if lun_factor is not None else {}
-        result = device_controller.grow_cluster_devices(cluster.get_id(), rebalance=rebalance, **extra)
+        result = device_controller.grow_cluster_devices(cluster.get_id(), **extra)
     except ValueError as e:
         raise HTTPException(409, str(e))
     return DeviceGrowthDTO(**result)

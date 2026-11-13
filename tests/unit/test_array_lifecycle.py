@@ -583,23 +583,26 @@ class TestGrowth(_Case):
         with self.assertRaisesRegex(ValueError, "array"):
             array_controller.grow_luns(CID, 2)
 
-    def test_grow_devices_skips_devices_whose_lun_failed(self):
-        db = MagicMock()
-        node = MagicMock(is_secondary_node=False)
-        dev = MagicMock(status=NVMeDevice.STATUS_ONLINE, bdev_type="aio")
-        dev.get_id.return_value = "d1"
-        node.nvme_devices = [dev]
-        db.get_storage_nodes_by_cluster_id.return_value = [node]
-        db.get_cluster_by_id.return_value.reweight_pending = False
-        with patch.object(device_controller, "DBController", return_value=db), \
-             patch.object(array_controller, "grow_luns",
-                          return_value={"luns": {}, "errors": {"d1": "array resize failed"}}), \
-             patch.object(device_controller, "resize_device") as rd, \
-             patch.object(device_controller, "cluster_growth_uniformity", return_value=(True, 1, 1)):
+    def test_a_failed_lun_grows_nothing(self):
+        # Growth is uniform (PR #1572): a LUN that did not grow at the array
+        # would cap the factor at 1, so nothing on the cluster is grown.
+        with patch.object(array_controller, "grow_luns",
+                          return_value={"luns": {}, "errors": {"d1": "array resize failed"}}),              patch.object(device_controller, "_grow_cluster_devices") as inner:
             out = device_controller.grow_cluster_devices(CID, lun_factor=2)
-        rd.assert_not_called()
+        inner.assert_not_called()
+        self.assertFalse(out["grown"])
         self.assertEqual(out["errors"], {"d1": "array resize failed"})
         self.assertEqual(out["luns"], {})
+
+    def test_grown_luns_then_uniform_growth(self):
+        luns = {"d1": {"lun_id": "vol-1", "old_size": 1, "new_size": 2}}
+        with patch.object(array_controller, "grow_luns", return_value={"luns": luns, "errors": {}}),              patch.object(device_controller, "_grow_cluster_devices",
+                          return_value={"grown": True, "factor": 2.0, "devices": [], "errors": {},
+                                        "reason": "", "shrunk": []}) as inner:
+            out = device_controller.grow_cluster_devices(CID, lun_factor=2)
+        inner.assert_called_once_with(CID)
+        self.assertTrue(out["grown"])
+        self.assertEqual(out["luns"], luns)
 
     def test_served_elsewhere_is_not_resized_on_the_owner(self):
         dev = NVMeDevice()
@@ -607,11 +610,10 @@ class TestGrowth(_Case):
         dev.status, dev.bdev_type, dev.alceml_bdev, dev.nvme_bdev = NVMeDevice.STATUS_ONLINE, "aio", "al", "nv"
         snode = StorageNode()
         snode.uuid, snode.status = "a", StorageNode.STATUS_ONLINE
-        db = MagicMock()
-        db.get_cluster_by_id.return_value.device_mode = "lblk"
-        with patch.object(device_controller.constants, "DEVICE_MODE_LBLK", "lblk"):
+        cluster = MagicMock(device_mode=device_controller.constants.DEVICE_MODE_LBLK)
+        with patch.object(device_controller.tasks_controller, "get_active_dev_restart_task", return_value=None):
             with self.assertRaisesRegex(ValueError, "served by node b"):
-                device_controller._check_resizable(db, dev, snode)
+                device_controller._check_resizable(cluster, dev, snode)
 
 
 # --------------------------------------------------------- release / delete

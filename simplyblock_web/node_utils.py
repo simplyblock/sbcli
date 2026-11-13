@@ -317,7 +317,7 @@ def get_block_devices_info() -> list[dict]:
 
     logger.debug("function:get_block_devices_info start")
     out, err, rc = shell_utils.run_command(
-        "lsblk -J -b -o NAME,TYPE,SIZE,SERIAL,WWN,MOUNTPOINT,MODEL,ROTA,RO,VENDOR,PKNAME,PARTUUID")
+        "lsblk -J -b -o NAME,KNAME,TYPE,SIZE,SERIAL,WWN,MOUNTPOINT,MODEL,ROTA,RO,VENDOR,PKNAME,PARTUUID")
     if rc != 0:
         logger.error("Error running lsblk: %s", err)
         return []
@@ -350,8 +350,16 @@ def get_block_devices_info() -> list[dict]:
             serial = "SYN-" + hashlib.sha1(seed.encode()).hexdigest()[:16]
             synthetic = True
         numa_node = int(_read_sysfs(f"/sys/block/{name}/device/numa_node") or -1)
+        # The control plane picks the AIO bdev block size of a new device
+        # from these (utils.choose_aio_block_size): 4096 unless impossible.
+        logical_bs = _logical_block_size(name)
+        physical_bs = _physical_block_size(name)
         devices.append({
             "name": name,
+            # Kernel name (dm-N for a device-mapper node, whose NAME is the
+            # map name) and TYPE: the control plane serves device-mapper
+            # nodes through bdev_uring (utils.lblk_io_engine_for).
+            "kname": dev.get("kname") or name,
             "device_path": f"/dev/{name}",
             "type": dev.get("type"),
             "size": int(dev.get("size") or 0),
@@ -369,6 +377,8 @@ def get_block_devices_info() -> list[dict]:
             "by_id_path": by_id_path,
             "by_id_paths": by_id_paths,
             "numa_node": numa_node,
+            "logical_block_size": logical_bs,
+            "physical_block_size": physical_bs,
         })
         for child in children:
             if child.get("type") != "part":
@@ -385,6 +395,7 @@ def get_block_devices_info() -> list[dict]:
                 part_synthetic = True
             devices.append({
                 "name": part_name,
+                "kname": child.get("kname") or part_name,
                 "device_path": f"/dev/{part_name}",
                 "type": "part",
                 "size": int(child.get("size") or 0),
@@ -405,6 +416,9 @@ def get_block_devices_info() -> list[dict]:
                 "by_id_path": part_paths[0] if part_paths else "",
                 "by_id_paths": part_paths,
                 "numa_node": numa_node,
+                "logical_block_size": logical_bs,
+                "physical_block_size": physical_bs,
+                "start_bytes": _partition_start_bytes(name, part_name),
             })
     logger.debug("function:get_block_devices_info end")
     return devices
@@ -483,6 +497,25 @@ def _logical_block_size(disk_name: str) -> int:
     except ValueError:
         size = 512
     return size if size > 0 else 512
+
+
+def _physical_block_size(disk_name: str) -> int:
+    """Physical sector size of a disk, in bytes (informational: a 512e
+    device reports 512 logical / 4096 physical)."""
+    try:
+        size = int(_read_sysfs(f"/sys/block/{disk_name}/queue/physical_block_size") or 0)
+    except ValueError:
+        size = 0
+    return size if size > 0 else _logical_block_size(disk_name)
+
+
+def _partition_start_bytes(disk_name: str, part_name: str) -> int | None:
+    """Byte offset of a partition on its disk; sysfs counts the start in
+    512-byte units whatever the logical block size. None when unreadable."""
+    try:
+        return int(_read_sysfs(f"/sys/block/{disk_name}/{part_name}/start")) * 512
+    except ValueError:
+        return None
 
 
 def split_partition_partner(part: dict, devices: list[dict]) -> tuple[dict, dict] | None:

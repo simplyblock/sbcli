@@ -353,18 +353,19 @@ def _probe(node, dev, deadline):
 # --------------------------------------------------------------- 4. export
 
 def _create_base_bdev(rpc, name, path, dev):
-    """The base bdev over the LUN, with the engine and block size the device
-    records when it records them (lblk I/O-engine fields, if present)."""
-    engine = getattr(dev, "lblk_io_engine", "") or "aio"
-    block_size = int(getattr(dev, "aio_block_size", 0) or 0)
-    if engine == "uring":
-        if hasattr(rpc, "bdev_uring_create"):
-            return rpc.bdev_uring_create(name, path, block_size) if block_size else rpc.bdev_uring_create(name, path)
-        params = {"name": name, "filename": path}
-        if block_size:
-            params["block_size"] = block_size
-        return rpc._request("bdev_uring_create", **params)
-    return rpc.bdev_aio_create(name, path, block_size)
+    """The base bdev over the LUN on the standby, with the block size the
+    device was formatted with (NVMeDevice.aio_block_size; 0 = legacy, SPDK's
+    logical block size) and checked after creation: alceml over a base bdev
+    of another block size cannot read the device. The engine follows the
+    standby's own path to the LUN (a device-mapper node there needs io_uring
+    even if the owner reaches the LUN as a plain disk), else what the device
+    records."""
+    engine = utils.lblk_io_engine_for({"path": path})
+    if engine != constants.LBLK_IO_ENGINE_URING:
+        engine = dev.lblk_io_engine or constants.LBLK_IO_ENGINE_AIO
+    utils.create_aio_bdev(rpc, name, path, block_size=int(dev.aio_block_size or 0),
+                          new_device=False, verify=True, io_engine=engine)
+    return True
 
 
 def _export_on_standby(db, cluster, standby, dev, path, deadline) -> dict:
@@ -468,7 +469,8 @@ def _teardown(rpc, sid, created):
             elif kind == "alceml":
                 rpc.bdev_alceml_delete(name)
             elif kind == "base":
-                rpc.bdev_aio_delete(name)
+                engine = utils.bdev_io_engine(rpc.bdev_get(name)) or constants.LBLK_IO_ENGINE_AIO
+                utils.delete_lblk_bdev(rpc, name, engine)
         except Exception as e:                              # noqa: BLE001
             logger.warning("LUN takeover cleanup on %s: %s %s not removed: %s", sid, kind, name, e)
 
