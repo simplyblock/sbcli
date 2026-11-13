@@ -149,16 +149,32 @@ class TestHousekeepingCadence(unittest.TestCase):
 class TestApplyNodeLossStatus(unittest.TestCase):
     """The shutdown's own status update applies node-loss downgrades only."""
 
-    def _run(self, current, computed):
+    def _run(self, current, computed, sync_replication=False):
         cluster = MagicMock()
         cluster.status = current
+        cluster.sync_replication = sync_replication
+        cluster.get_id.return_value = "cl-1"
         with patch.object(monitor, "db") as db, \
                 patch.object(monitor, "get_next_cluster_status",
                              return_value=computed) as verdict, \
+                patch.object(monitor.sync_replication_controller,
+                             "clear_monitor_lost_site") as self.clear_site, \
                 patch.object(monitor.cluster_ops, "set_cluster_status") as set_status:
             db.get_cluster_by_id.return_value = cluster
             monitor.apply_node_loss_status("cl-1")
         return verdict, set_status
+
+    def test_suspension_clears_the_site_record_of_a_sync_replication_cluster(self):
+        """The suspension is written the monitor's way (_set_cluster_status):
+        a sync-replication cluster keeps no site record under SUSPENDED."""
+        _, set_status = self._run(Cluster.STATUS_DEGRADED, Cluster.STATUS_SUSPENDED,
+                                  sync_replication=True)
+        self.clear_site.assert_called_once_with("cl-1")
+        set_status.assert_called_once_with("cl-1", Cluster.STATUS_SUSPENDED)
+
+    def test_no_site_record_is_touched_without_sync_replication(self):
+        self._run(Cluster.STATUS_DEGRADED, Cluster.STATUS_SUSPENDED)
+        self.clear_site.assert_not_called()
 
     def test_active_cluster_is_degraded(self):
         _, set_status = self._run(Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED)
