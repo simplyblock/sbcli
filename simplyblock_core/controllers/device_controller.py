@@ -130,6 +130,10 @@ CAUSE_ADMIN_REMOVE = "admin_remove"
 # when IO resumes (2026-07-06 failback incident: placement failures because
 # peers still saw the recovering node's devices UNAVAILABLE).
 CAUSE_NODE_RECOVERY = "node_recovery"
+# Multi-attach array LUN mode: the device's LUN is served by another node
+# (controllers/lun_takeover) while its owner is not ONLINE. The device may go
+# ONLINE as long as its SERVING node is ONLINE.
+CAUSE_LUN_TAKEOVER = "lun_takeover"
 
 
 def _atomic_device_set(db_controller, node_id, device_id, apply_fields):
@@ -202,6 +206,22 @@ def connect_peers_to_node_devices(snode):
         th.join()
 
 
+def _serving_node_online(db_controller, device):
+    try:
+        server = db_controller.get_storage_node_by_id(device.serving_node())
+    except KeyError:
+        return False
+    return server.status == StorageNode.STATUS_ONLINE
+
+
+def _served_by_online_node(db_controller, device, cause):
+    """CAUSE_LUN_TAKEOVER only: the multi-attach device is served by another
+    node (serving_node_id) and that node is ONLINE."""
+    if cause != CAUSE_LUN_TAKEOVER or not multi_attach.served_elsewhere(device, device.node_id):
+        return False
+    return _serving_node_online(db_controller, device)
+
+
 def device_set_state(device_id, state, cause=CAUSE_OTHER, connect_peers=True):
     db_controller = DBController()
     try:
@@ -238,11 +258,29 @@ def device_set_state(device_id, state, cause=CAUSE_OTHER, connect_peers=True):
     # ONLINE node, so it is unaffected.
     if (state == NVMeDevice.STATUS_ONLINE
             and snode.status != StorageNode.STATUS_ONLINE
-            and cause not in (CAUSE_DEVICE_RESTART, CAUSE_NODE_RECOVERY)):
+            and cause not in (CAUSE_DEVICE_RESTART, CAUSE_NODE_RECOVERY)
+            and not _served_by_online_node(db_controller, device, cause)):
         logger.warning(
             f"Refusing to set device {device_id} ONLINE while node "
             f"{snode.get_id()} is {snode.status} (cause={cause}); "
             f"node bring-up owns device re-online")
+        return False
+
+    # Multi-attach: a device whose LUN another node serves is ONLINE only
+    # while that node is; its owner's recovery does not bring it back (the
+    # owner built nothing for it).
+    if (state == NVMeDevice.STATUS_ONLINE
+            and multi_attach.served_elsewhere(device, snode.get_id())
+            and not _serving_node_online(db_controller, device)):
+        logger.warning(
+            f"Refusing to set device {device_id} ONLINE: its LUN is served by node "
+            f"{device.serving_node()}, which is not ONLINE (cause={cause})")
+        return False
+    if (state == NVMeDevice.STATUS_ONLINE
+            and multi_attach.fenced_from(device, device.serving_node())):
+        logger.warning(
+            f"Refusing to set device {device_id} ONLINE: node {device.serving_node()} "
+            f"is fenced from its LUN (cause={cause})")
         return False
 
     # Failed is a terminal state. The only allowed exits are:

@@ -195,6 +195,15 @@ class Cluster(BaseModel):
     # Requires raid_devices. Gates every multi-attach path (device NQN,
     # controller-ID ranges, hold timeouts, owner loopback).
     multi_attach: bool = False
+    # Multi-attach clusters: the storage array the LUNs live on. A LUN is
+    # taken over by another node only after its serving node is fenced at the
+    # array, through the plugin named here (entry point in the group
+    # simplyblock.array_plugins, see simplyblock_core.array). Empty = no
+    # plugin: a takeover is refused (never reopen a LUN unfenced). Credentials
+    # are resolved from the KMS in a later phase.
+    array_plugin: str = ""
+    array_endpoint: str = ""
+    array_options: dict = default_factory(dict)
     tls: bool = False
     tls_config: dict = default_factory(dict)
     is_re_balancing: bool = False

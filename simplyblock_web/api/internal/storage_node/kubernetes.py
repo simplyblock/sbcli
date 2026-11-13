@@ -350,6 +350,22 @@ def wipe_block_device(body: _WipeBlockDeviceParams):
     return utils.get_response(True)
 
 
+class _LunInfoParams(BaseModel):
+    wwn: str
+
+
+@api.post('/lun_info', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'array',
+        'items': {'type': 'object', 'additionalProperties': True},
+    })}}},
+})
+def lun_info(body: _LunInfoParams):
+    """Multi-attach array LUN mode: the local disks carrying LUN ``wwn``, with
+    whether block 0 holds the alceml signature. Read-only."""
+    return utils.get_response(node_utils.find_lun_devices(body.wwn))
+
+
 class _RescanBlockDeviceParams(BaseModel):
     device_path: str
 

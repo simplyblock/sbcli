@@ -1068,6 +1068,13 @@ MULTI_ATTACH_ALCEML_STUCK_IO_MS = 60000
 MULTI_ATTACH_CNTLID_BLOCK_SIZE = 64
 MULTI_ATTACH_MAX_CNTLID = 0xFFEF
 MULTI_ATTACH_MAX_NODES = 1022
+# A LUN takeover (controllers/lun_takeover) must finish well inside the
+# peers' hold, or their I/O fails before the new path exists; it gives up at
+# this deadline (seconds from its start) and the device goes unavailable.
+MULTI_ATTACH_TAKEOVER_DEADLINE_SEC = 90
+# Lease of a running takeover (one per LUN, in FDB): a holder older than this
+# is presumed dead.
+MULTI_ATTACH_TAKEOVER_LOCK_TTL_SEC = 2 * MULTI_ATTACH_TAKEOVER_DEADLINE_SEC
 MIG_JOB_SIZE = 64
 
 # Sync-replication resync (tasks_runner_sync_resync): the shared task driver

@@ -438,6 +438,43 @@ def simplyblock_data_signature(device_name: str) -> bool | None:
     return head.startswith(ALCEML_STORAGE_SIGNATURE)
 
 
+def _normalize_wwn(value: str) -> str:
+    v = (value or "").strip().lower()
+    return v.removeprefix("0x")
+
+
+def find_lun_devices(wwn: str) -> list[dict]:
+    """The whole disks of this host that carry LUN ``wwn`` (multi-attach array
+    LUN mode): every lsblk disk whose WWN, or serial (the inventory falls back
+    to the WWN for it), matches, case-insensitive and with or without ``0x``.
+
+    One dict per match: ``name``, ``device_path``, ``by_id_path``,
+    ``by_id_paths``, ``size`` (bytes), ``ro`` and ``has_alceml_signature`` --
+    True when block 0 carries the alceml storage signature, False when it was
+    read and does not, None when it could not be read (a fenced or failed
+    path). Read-only: nothing is written to the device. Several matches mean
+    several host paths to the LUN; the caller chooses."""
+    want = _normalize_wwn(wwn)
+    if not want:
+        return []
+    found = []
+    for dev in get_block_devices_info():
+        if dev.get("type") != "disk":
+            continue
+        if want not in (_normalize_wwn(dev.get("wwn", "")), _normalize_wwn(dev.get("serial", ""))):
+            continue
+        found.append({
+            "name": dev["name"],
+            "device_path": dev["device_path"],
+            "by_id_path": dev.get("by_id_path", ""),
+            "by_id_paths": dev.get("by_id_paths", []),
+            "size": dev.get("size", 0),
+            "ro": dev.get("ro", False),
+            "has_alceml_signature": simplyblock_data_signature(dev["name"]),
+        })
+    return found
+
+
 def _logical_block_size(disk_name: str) -> int:
     """Logical sector size of a disk, in bytes: the unit sgdisk counts in.
     sysfs reports partition start and size in 512-byte units regardless."""

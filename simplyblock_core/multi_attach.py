@@ -164,3 +164,138 @@ def own_multi_attach_devices(node, statuses) -> list:
     controller instead of the local alceml."""
     return [d for d in (getattr(node, "nvme_devices", None) or [])
             if is_multi_attach(d) and d.status in statuses and d.alceml_bdev]
+
+
+# ------------------------------------------------------------------ phase 3
+# LUN takeover (controllers/lun_takeover) and the paths it touches: a device
+# may now be served by a node other than its owner (serving_node_id).
+
+_NODE_ONLINE = "online"
+
+
+def served_elsewhere(device, node_id) -> bool:
+    """A multi-attach device served by a node other than ``node_id``: that
+    node must not build the device's alceml, subsystem or anything above the
+    base bdev, nor report the device lost when it goes away."""
+    return is_multi_attach(device) and device.serving_node() != node_id
+
+
+def fenced_from(device, node_id) -> bool:
+    """A takeover fenced ``node_id`` from the LUN of ``device`` at the array
+    and nothing unfenced it since."""
+    return is_multi_attach(device) and node_id in (getattr(device, "fenced_node_ids", None) or [])
+
+
+def not_servable_here(device, node_id) -> bool:
+    """``node_id`` must not build a stack for ``device``: another node serves
+    its LUN, or ``node_id`` is fenced from it (the takeover after its failure
+    did not complete; an operator unfences it -- lun_takeover.unfence_node --
+    once its host is known to hold no queued writes)."""
+    return served_elsewhere(device, node_id) or fenced_from(device, node_id)
+
+
+def array_host(node) -> str:
+    """A storage node's identity on the storage array: its hostname, without
+    the ``_<rpc_port>`` suffix a containerised node's hostname carries."""
+    host = getattr(node, "hostname", "") or ""
+    suffix = f"_{getattr(node, 'rpc_port', '')}"
+    if suffix != "_" and host.endswith(suffix):
+        host = host[: -len(suffix)]
+    return host
+
+
+def standby_candidates(owner, failed_node_id) -> list[str]:
+    """Node ids that may take over ``owner``'s LUNs, in preference order: the
+    owner's LVS secondary, its tertiary, then the owner itself (when it is
+    alive while the node serving its LUN fails). The failed node is never a
+    candidate."""
+    out: list[str] = []
+    for nid in (getattr(owner, "secondary_node_id", ""), getattr(owner, "tertiary_node_id", ""),
+                owner.get_id()):
+        if nid and nid != failed_node_id and nid not in out:
+            out.append(nid)
+    return out
+
+
+def devices_served_by(nodes, node_id) -> list:
+    """``(owner, device)`` for every multi-attach device of ``nodes`` whose
+    serving node is ``node_id`` (its own LUNs it still serves, and LUNs it took
+    over)."""
+    return [(owner, dev) for owner in nodes for dev in (owner.nvme_devices or [])
+            if is_multi_attach(dev) and dev.serving_node() == node_id]
+
+
+def served_by_online_node(owner, nodes_by_id) -> list:
+    """``owner``'s multi-attach devices served by another node that is
+    ONLINE: reachable although the owner itself is down."""
+    out = []
+    for dev in getattr(owner, "nvme_devices", None) or []:
+        if not served_elsewhere(dev, owner.get_id()):
+            continue
+        server = nodes_by_id.get(dev.serving_node())
+        if server is not None and server.status == _NODE_ONLINE:
+            out.append(dev)
+    return out
+
+
+def normalize_wwn(value) -> str:
+    v = (value or "").strip().lower()
+    return v.removeprefix("0x")
+
+
+def lun_keys(device) -> set:
+    """Identities a host may report for the LUN of ``device``: its WWN and
+    its serial (lsblk falls back to the WWN for the serial)."""
+    return {k for k in (normalize_wwn(getattr(device, "lun_wwn", "")),
+                        normalize_wwn(getattr(device, "serial_number", ""))) if k}
+
+
+def foreign_lun_keys(nodes, node_id) -> set:
+    """LUN identities of the multi-attach devices of every node but
+    ``node_id``. A device with one of them, found on ``node_id``'s host, is
+    another node's LUN (all LUNs are presented to every node): it is never a
+    new device of ``node_id`` and is never formatted."""
+    keys: set = set()
+    for node in nodes:
+        if node.get_id() == node_id:
+            continue
+        for dev in node.nvme_devices or []:
+            if is_multi_attach(dev):
+                keys |= lun_keys(dev)
+    return keys
+
+
+def is_foreign_lun(device, foreign_keys) -> bool:
+    return bool(foreign_keys) and bool(lun_keys(device) & foreign_keys)
+
+
+def pick_lun_path(entries, device):
+    """The path to open the LUN of ``device`` with on a takeover node, from
+    the node agent's ``lun_info`` answer. Returns ``(path, "")`` or
+    ``(None, reason)``.
+
+    Only disks whose block 0 carries the alceml signature (read just now) and
+    that are at least as large as the device qualify. The by-id path the owner
+    opened it with is preferred when the node has it too (a WWN-derived by-id
+    name is the same on every host); otherwise exactly one qualifying disk is
+    required -- several host paths to one LUN are not chosen between."""
+    if not entries:
+        return None, "the LUN is not visible on this node"
+    readable = [e for e in entries if e.get("has_alceml_signature") is True]
+    if not readable:
+        states = sorted({str(e.get("has_alceml_signature")) for e in entries})
+        return None, f"no path to the LUN carries the alceml signature (signature: {', '.join(states)})"
+    size = int(getattr(device, "size", 0) or 0)
+    sized = [e for e in readable if int(e.get("size") or 0) >= size]
+    if not sized:
+        return None, f"the LUN is smaller here than the device ({size} bytes)"
+    owner_path = ((getattr(device, "node_paths", None) or {}).get(device.node_id, {}).get("path")
+                  or getattr(device, "by_id_path", "") or "")
+    if owner_path.startswith("/dev/disk/by-id/"):
+        for e in sized:
+            if owner_path in (e.get("by_id_paths") or []) or owner_path == e.get("by_id_path"):
+                return owner_path, ""
+    if len(sized) == 1:
+        e = sized[0]
+        return e.get("by_id_path") or e.get("device_path"), ""
+    return None, f"{len(sized)} disks carry the LUN and none has the owner's path {owner_path!r}"

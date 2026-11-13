@@ -1817,6 +1817,50 @@ class DBController(metaclass=Singleton):
             _NoTxnStore(kv), node_key, alloc_key, node.get_id(), live_node_ids,
             max_blocks, index_list)
 
+    # ---- Multi-attach LUN takeover lease (Single FDB Transaction) ----
+
+    LUN_TAKEOVER_LOCK_PREFIX = "lun_takeover_lock"
+
+    @staticmethod
+    def _acquire_lun_takeover_lock_tx(tr, key, owner, now, ttl):
+        raw = tr.get(key).wait()
+        if raw.present():
+            held = json.loads(bytes(raw).decode())
+            if (held.get("owner") and held.get("owner") != owner
+                    and now - float(held.get("at", 0)) <= ttl):
+                return False, held.get("owner")
+        tr.set(key, json.dumps({"owner": owner, "at": now}).encode())
+        return True, None
+
+    @staticmethod
+    def _release_lun_takeover_lock_tx(tr, key, owner):
+        raw = tr.get(key).wait()
+        if raw.present() and json.loads(bytes(raw).decode()).get("owner") == owner:
+            tr.clear(key)
+
+    def acquire_lun_takeover_lock(self, device_id, owner, ttl):
+        """Take the takeover lease of one multi-attach LUN for ``owner``, so
+        two takeovers of the same LUN never run together, in this process or
+        in another. A lease older than ``ttl`` seconds (its holder died) is
+        taken over. Returns ``(True, None)`` or ``(False, holder)``."""
+        key = f"{self.LUN_TAKEOVER_LOCK_PREFIX}/{device_id}".encode()
+        now = time.time()
+        kv = self.kv_store
+        if kv is not None and hasattr(kv, 'create_transaction'):
+            transactional = fdb.transactional(DBController._acquire_lun_takeover_lock_tx)
+            return transactional(kv, key, owner, now, ttl)
+        return DBController._acquire_lun_takeover_lock_tx(_NoTxnStore(kv), key, owner, now, ttl)
+
+    def release_lun_takeover_lock(self, device_id, owner):
+        """Release the lease only if ``owner`` still holds it."""
+        key = f"{self.LUN_TAKEOVER_LOCK_PREFIX}/{device_id}".encode()
+        kv = self.kv_store
+        if kv is not None and hasattr(kv, 'create_transaction'):
+            transactional = fdb.transactional(DBController._release_lun_takeover_lock_tx)
+            transactional(kv, key, owner)
+            return
+        DBController._release_lun_takeover_lock_tx(_NoTxnStore(kv), key, owner)
+
     # ---- Generic atomic read-modify-write (Single FDB Transaction) ----
 
     def _atomic_update_tx(self, tr, key, model_cls, mutate_fn, index_list):

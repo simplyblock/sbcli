@@ -3,7 +3,13 @@ import threading
 import time
 from datetime import datetime
 
-from simplyblock_core import constants, db_controller, storage_node_ops, utils
+from simplyblock_core import (
+    constants,
+    db_controller,
+    multi_attach,
+    storage_node_ops,
+    utils,
+)
 from simplyblock_core.controllers import (
     device_controller,
     device_events,
@@ -291,6 +297,11 @@ def check_node(snode):
                 if device.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_UNAVAILABLE]:
                     logger.info(f"Device skipped: {device.get_id()} status: {device.status}")
                     continue
+                if multi_attach.served_elsewhere(device, snode.get_id()):
+                    # Multi-attach: another node took the LUN over; this node
+                    # has no stack for it (its loopback is checked below).
+                    logger.info(f"Device skipped: {device.get_id()} served by {device.serving_node()}")
+                    continue
 
                 passed = True
 
@@ -349,7 +360,11 @@ def check_node(snode):
 
             for remote_device in snode.remote_devices:
                 org_dev = db.get_storage_device_by_id(remote_device.get_id())
-                org_node = db.get_storage_node_by_id(remote_device.node_id)
+                # The node exporting the device: its owner, or the node a
+                # multi-attach takeover moved its LUN to.
+                org_node = db.get_storage_node_by_id(
+                    org_dev.serving_node() if multi_attach.is_multi_attach(org_dev)
+                    else remote_device.node_id)
                 # Only treat a missing remote device as a fault when the owning node
                 # is ONLINE/DOWN/UNREACHABLE. If the owner is mid-transition (restart,
                 # shutdown, ...) the connection is expected to be gone — skip it.
@@ -360,7 +375,9 @@ def check_node(snode):
                         # connect. _peer_connections_relevant also admits
                         # UNREACHABLE, which is fine for judging whether a missing
                         # connection is a fault and wrong for deciding to dial out.
-                        if org_dev.nvmf_multipath:
+                        # Multi-attach: also single-path, the controller may
+                        # still miss the path to the node that took it over.
+                        if org_dev.nvmf_multipath or multi_attach.is_multi_attach(org_dev):
                             ctrl_name = f"remote_{org_dev.alceml_bdev}" if org_dev.alceml_bdev else None
                             if ctrl_name and health_controller.repairs_allowed(org_node):
                                 device_repair_jobs.append((ctrl_name, org_dev, snode))

@@ -1024,6 +1024,34 @@ def set_two_node_arbitration(cl_id, enabled: bool) -> None:
     db_controller.atomic_update(cluster, mutate)
 
 
+def set_array_plugin(cl_id, plugin: str, endpoint: str = "", options: dict | None = None) -> None:
+    """Configure the storage-array plugin of a multi-attach cluster (the
+    plugin that fences a failed node from its LUNs before a takeover; see
+    simplyblock_core.array). An empty ``plugin`` clears it, after which
+    takeovers are refused. Credentials come from the KMS (later phase).
+
+    Raises:
+        ValueError: not a multi-attach cluster, or the plugin cannot be loaded.
+    """
+    from simplyblock_core import array, multi_attach
+    cluster = db_controller.get_cluster_by_id(cl_id)
+    if not multi_attach.is_multi_attach(cluster):
+        raise ValueError("an array plugin is only used by a multi-attach cluster")
+    if plugin:
+        try:
+            array.plugin_class(plugin)
+        except array.ArrayError as e:
+            raise ValueError(str(e)) from e
+    opts = dict(options or {})
+
+    def mutate(fresh):
+        fresh.array_plugin = plugin or ""
+        fresh.array_endpoint = endpoint or ""
+        fresh.array_options = opts
+
+    db_controller.atomic_update(cluster, mutate)
+
+
 def _wait_for_full_device_connectivity(cl_id, timeout_sec=300, poll_sec=10, checkpoint=None):
     """Block until every ONLINE primary node holds a connected remote-device
     record for every ONLINE device of every OTHER online node, or raise.

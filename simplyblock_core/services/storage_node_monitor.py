@@ -10,6 +10,7 @@ from simplyblock_core import (
     constants,
     db_controller,
     floors,
+    multi_attach,
     storage_network,
     storage_node_ops,
     utils,
@@ -1164,10 +1165,7 @@ def _force_offline_lost_site_node(node):
     tasks_controller.cancel_pending_node_restart_tasks(node.cluster_id, node.get_id())
     storage_node_ops.set_node_status(node.get_id(), StorageNode.STATUS_OFFLINE,
                                      caused_by="sync_site_lost")
-    for dev in node.nvme_devices:
-        if dev.status in (NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY,
-                          NVMeDevice.STATUS_CANNOT_ALLOCATE):
-            device_controller.device_set_unavailable(dev.get_id())
+    _set_node_devices_unavailable(node, "site lost")
 
 
 def _drain_nodes(nodes, what, gone=None) -> bool:
@@ -1830,6 +1828,86 @@ def _take_over_leaderless_lvstores(snode):
                         lvs_name, leader.get_id(), snode.get_id())
 
 
+#: Device states that are lost with their node (set unavailable).
+_DEV_SERVING_STATES = (NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY,
+                       NVMeDevice.STATUS_CANNOT_ALLOCATE)
+
+#: device id -> running LUN takeover thread (multi-attach clusters).
+lun_takeover_threads: dict[str, threading.Thread] = {}
+
+
+def _lun_takeover_worker(device_id, failed_node_id, reason, started):
+    """Take over one LUN; mark the device unavailable when it was not taken
+    over (the regular node-loss behaviour). When the LUN was fenced but no
+    standby could read it, the peers keep holding I/O: the device is marked
+    unavailable only when their hold has run out."""
+    from simplyblock_core.controllers import lun_takeover
+    try:
+        outcome = lun_takeover.take_over_lun_outcome(device_id, failed_node_id, reason)
+    except Exception as e:                                  # noqa: BLE001
+        logger.error("LUN takeover of %s raised: %s", device_id, e)
+        outcome = lun_takeover.FAILED
+    if outcome in (lun_takeover.TAKEN_OVER, lun_takeover.IN_PROGRESS):
+        return
+    if outcome == lun_takeover.NO_STANDBY:
+        wait = started + constants.MULTI_ATTACH_HOLD_SEC - time.monotonic()
+        if wait > 0:
+            time.sleep(wait)
+    try:
+        dev = db.get_storage_device_by_id(device_id)
+    except KeyError:
+        return
+    if dev.serving_node() != failed_node_id or dev.status not in _DEV_SERVING_STATES:
+        return
+    logger.warning("LUN of device %s not taken over (%s); setting it unavailable",
+                   device_id, outcome)
+    device_controller.device_set_unavailable(device_id)
+
+
+def _start_lun_takeover(device_id, failed_node_id, reason):
+    existing = lun_takeover_threads.get(device_id)
+    if existing is not None and existing.is_alive():
+        logger.info("LUN takeover of %s already running", device_id)
+        return
+    t = threading.Thread(target=_lun_takeover_worker,
+                         args=(device_id, failed_node_id, reason, time.monotonic()),
+                         name=f"lun-takeover-{device_id[:8]}", daemon=True)
+    lun_takeover_threads[device_id] = t
+    t.start()
+
+
+def _set_node_devices_unavailable(node, reason):
+    """The devices lost with ``node``: set unavailable, as always.
+
+    Multi-attach clusters (only): a LUN the node served -- its own or one it
+    had taken over -- is taken over by a standby instead, each in its own
+    thread, started before anything else so the fence comes first and the
+    takeover fits in the peers' hold; a LUN of the node that another node
+    serves is not lost with it and is left alone. Only devices whose takeover
+    fails are set unavailable (by the takeover thread)."""
+    try:
+        cluster = db.get_cluster_by_id(node.cluster_id)
+    except Exception as e:                                  # noqa: BLE001
+        # Unknown cluster mode: the regular behaviour (never a takeover).
+        logger.warning("Cluster of %s not read (%s); devices set unavailable", node.get_id(), e)
+        cluster = None
+    if not multi_attach.is_multi_attach(cluster):
+        for dev in node.nvme_devices:
+            if dev.status in _DEV_SERVING_STATES:
+                # Default cause is correct: node going offline cascades
+                # to all its devices, that does not count as a flap.
+                device_controller.device_set_unavailable(dev.get_id())
+        return
+    node_id = node.get_id()
+    for _owner, dev in multi_attach.devices_served_by(
+            db.get_storage_nodes_by_cluster_id(node.cluster_id), node_id):
+        if dev.status in _DEV_SERVING_STATES:
+            _start_lun_takeover(dev.get_id(), node_id, reason)
+    for dev in node.nvme_devices:
+        if dev.status in _DEV_SERVING_STATES and not multi_attach.is_multi_attach(dev):
+            device_controller.device_set_unavailable(dev.get_id())
+
+
 def _ana_failover_rearm(node_id) -> None:
     """Forget the one-shot marker so the next offline episode re-triggers."""
     _ana_failover_applied.discard(node_id)
@@ -1855,12 +1933,9 @@ def set_node_offline(node):
                            StorageNode.STATUS_RESTARTING]:
         try:
             storage_node_ops.set_node_status(node.get_id(), StorageNode.STATUS_OFFLINE)
-            for dev in node.nvme_devices:
-                if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY,
-                                  NVMeDevice.STATUS_CANNOT_ALLOCATE]:
-                    # Default cause is correct: node going offline cascades
-                    # to all its devices, that does not count as a flap.
-                    device_controller.device_set_unavailable(dev.get_id())
+            # Multi-attach: LUN takeovers start here, before the LVS ANA
+            # failover below (they run in parallel with it).
+            _set_node_devices_unavailable(node, "node offline")
         except Exception as e:
             logger.debug("Setting node to OFFLINE state failed")
             logger.error(e)
@@ -2162,10 +2237,7 @@ def set_node_schedulable(node):
             # initiate shutdown
             # initiate restart
             # tasks_controller.add_node_to_auto_restart(node)
-            for dev in node.nvme_devices:
-                if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY,
-                                  NVMeDevice.STATUS_CANNOT_ALLOCATE]:
-                    device_controller.device_set_unavailable(dev.get_id())
+            _set_node_devices_unavailable(node, "node schedulable")
             update_cluster_status(node.cluster_id)
         except Exception as e:
             logger.debug("Setting node to SCHEDULABLE state failed")

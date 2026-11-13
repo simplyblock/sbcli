@@ -127,6 +127,10 @@ class NVMeDevice(BaseModel):
     #: node_id -> {"path": by-id path of the LUN on that node, "bdev": the
     #: base bdev name there}. Only the owner's entry is filled so far.
     node_paths: dict = default_factory(dict)
+    #: Nodes a LUN takeover fenced from this LUN at the array. Phase 3 never
+    #: unfences on its own: a fenced node's host may still hold queued
+    #: writes. Such a node is no takeover candidate for this LUN.
+    fenced_node_ids: list = default_factory(list)
 
     def serving_node(self) -> str:
         """The node whose alceml serves this device now (the owner unless a
