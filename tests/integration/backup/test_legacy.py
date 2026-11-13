@@ -743,22 +743,28 @@ class TestRestoreBackup(unittest.TestCase):
 
 class TestDeleteBackups(unittest.TestCase):
 
-    @patch("simplyblock_core.controllers.backup.controller.backup_events")
-    @patch("simplyblock_core.models.storage_node.RPCClient")
-    @patch("simplyblock_core.controllers.backup.controller.db_controller")
-    def test_success(self, mock_db, MockRPC, mock_events):
+    @patch("simplyblock_core.controllers.backup.manifest.boto3.client")
+    def test_success(self, mock_boto3_client):
+        # delete_backups claims the chain and marks the manifest DELETING
+        # against the real database and a real (faked) S3 client -- it no
+        # longer removes the record synchronously, so there is nothing left
+        # here to mock away the way the old, synchronous delete_backups did.
+        from botocore.exceptions import ClientError
+        mock_boto3_client.return_value.get_object.side_effect = ClientError(
+            {"Error": {"Code": "NoSuchKey"}}, "GetObject")
+
+        db = DBController()
+        cluster = _cluster()
+        cluster.write_to_db(db.kv_store)
         b1 = _backup(uuid="b-1")
-        mock_db.get_backups_by_lvol_id.return_value = [b1]
-        mock_db.get_storage_node_by_id.return_value = _node()
-        b1.remove = MagicMock()
-        MockRPC.return_value.bdev_lvol_s3_delete.return_value = True
+        b1.location = _backup_config().location().model_dump(mode="json")
+        b1.write_to_db(db.kv_store)
 
         from simplyblock_core.controllers.backup.controller import delete_backups
         success, error = delete_backups("lvol-1")
 
-        self.assertTrue(success)
-        self.assertIsNone(error)
-        b1.remove.assert_called_once()
+        self.assertTrue(success, error)
+        self.assertEqual(db.get_backup_by_id("b-1").status, Backup.STATUS_DELETING)
 
     @patch("simplyblock_core.controllers.backup.controller.db_controller")
     def test_no_backups(self, mock_db):
@@ -984,17 +990,24 @@ class TestEvaluatePolicy(unittest.TestCase):
 
         mock_tasks.add_backup_merge_task.assert_not_called()
 
-    @patch.object(Backup, 'write_to_db')
     @patch("simplyblock_core.controllers.backup.controller.tasks_controller")
     @patch("simplyblock_core.controllers.backup.policy.db_controller")
-    def test_version_limit_exceeded(self, mock_db, mock_tasks, _mock_write):
+    def test_version_limit_exceeded(self, mock_db, mock_tasks):
         policy = _policy(max_versions=2, max_age_seconds=0)
         mock_db.get_policy_for_lvol.return_value = policy
 
+        # trigger_merge's own chain guard (claim_backup_chain_op) reads the
+        # REAL database, not policy.py's mocked one above -- see the module
+        # docstring on why this file is legacy and tests/AGENTS.md on why a
+        # patched DB only covers the module it names. The backups the guard
+        # has to find therefore have to be real.
+        db = DBController()
         now = int(time.time())
         b1 = _backup(uuid="b1", created_at=now - 300)
         b2 = _backup(uuid="b2", created_at=now - 200)
         b3 = _backup(uuid="b3", created_at=now - 100)
+        for b in (b1, b2, b3):
+            b.write_to_db(db.kv_store)
         mock_db.get_backups_by_lvol_id.return_value = [b1, b2, b3]
 
         from simplyblock_core.controllers.backup.policy import evaluate_policy
@@ -1020,17 +1033,19 @@ class TestEvaluatePolicy(unittest.TestCase):
 
         mock_tasks.add_backup_merge_task.assert_not_called()
 
-    @patch.object(Backup, 'write_to_db')
     @patch("simplyblock_core.controllers.backup.controller.tasks_controller")
     @patch("simplyblock_core.controllers.backup.policy.db_controller")
-    def test_age_limit_exceeded(self, mock_db, mock_tasks, _mock_write):
+    def test_age_limit_exceeded(self, mock_db, mock_tasks):
         policy = _policy(max_versions=0)
         policy.max_age_seconds = 3600  # 1 hour
         mock_db.get_policy_for_lvol.return_value = policy
 
+        db = DBController()
         now = int(time.time())
         b1 = _backup(uuid="b1", created_at=now - 7200)  # 2 hours old
         b2 = _backup(uuid="b2", created_at=now - 100)
+        for b in (b1, b2):
+            b.write_to_db(db.kv_store)
         mock_db.get_backups_by_lvol_id.return_value = [b1, b2]
 
         from simplyblock_core.controllers.backup.policy import evaluate_policy
@@ -1039,18 +1054,20 @@ class TestEvaluatePolicy(unittest.TestCase):
 
         mock_tasks.add_backup_merge_task.assert_called_once()
 
-    @patch.object(Backup, 'write_to_db')
     @patch("simplyblock_core.controllers.backup.controller.tasks_controller")
     @patch("simplyblock_core.controllers.backup.policy.db_controller")
-    def test_both_conditions_required(self, mock_db, mock_tasks, _mock_write):
+    def test_both_conditions_required(self, mock_db, mock_tasks):
         """When both versions and age are set, either limit can trigger a merge."""
         policy = _policy(max_versions=3)
         policy.max_age_seconds = 3600
         mock_db.get_policy_for_lvol.return_value = policy
 
+        db = DBController()
         now = int(time.time())
         # 4 backups (exceeds version limit of 3) but all recent (doesn't exceed age)
         backups = [_backup(uuid=f"b{i}", created_at=now - (i * 60)) for i in range(4)]
+        for b in backups:
+            b.write_to_db(db.kv_store)
         mock_db.get_backups_by_lvol_id.return_value = backups
 
         from simplyblock_core.controllers.backup.policy import evaluate_policy
@@ -1059,19 +1076,21 @@ class TestEvaluatePolicy(unittest.TestCase):
 
         mock_tasks.add_backup_merge_task.assert_called_once()
 
-    @patch.object(Backup, 'write_to_db')
     @patch("simplyblock_core.controllers.backup.controller.tasks_controller")
     @patch("simplyblock_core.controllers.backup.policy.db_controller")
-    def test_both_conditions_met(self, mock_db, mock_tasks, _mock_write):
+    def test_both_conditions_met(self, mock_db, mock_tasks):
         """When both limits set and both exceeded, merge triggers."""
         policy = _policy(max_versions=2)
         policy.max_age_seconds = 3600
         mock_db.get_policy_for_lvol.return_value = policy
 
+        db = DBController()
         now = int(time.time())
         b1 = _backup(uuid="b1", created_at=now - 7200)
         b2 = _backup(uuid="b2", created_at=now - 200)
         b3 = _backup(uuid="b3", created_at=now - 100)
+        for b in (b1, b2, b3):
+            b.write_to_db(db.kv_store)
         mock_db.get_backups_by_lvol_id.return_value = [b1, b2, b3]
 
         from simplyblock_core.controllers.backup.policy import evaluate_policy
@@ -1295,14 +1314,21 @@ class TestTriggerMerge(unittest.TestCase):
     @patch("simplyblock_core.controllers.backup.controller.tasks_controller")
     def test_trigger_merge_marks_old_as_merging(self, mock_tasks):
         from simplyblock_core.controllers.backup.controller import trigger_merge
+        # trigger_merge's chain guard (claim_backup_chain_op) flips the status
+        # of the record it finds in the REAL database, inside its own
+        # transaction -- never the caller's in-memory object -- so both
+        # backups have to be real, and the result is read back through the
+        # database too.
+        db = DBController()
         keep = _backup(uuid="keep")
         old = _backup(uuid="old")
-        old.write_to_db = MagicMock()
+        keep.write_to_db(db.kv_store)
+        old.write_to_db(db.kv_store)
 
-        trigger_merge(keep, old)
+        ok, reason = trigger_merge(keep, old)
 
-        self.assertEqual(old.status, Backup.STATUS_MERGING)
-        old.write_to_db.assert_called_once()
+        self.assertTrue(ok, reason)
+        self.assertEqual(db.get_backup_by_id("old").status, Backup.STATUS_MERGING)
         mock_tasks.add_backup_merge_task.assert_called_once()
 
     @patch("simplyblock_core.controllers.backup.controller.tasks_controller")
