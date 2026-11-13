@@ -356,6 +356,12 @@ class TestValidateNodeConfig(unittest.TestCase):
         node = self._node(lblk_devices=[{"name": "sdb", "serial": "S1", "size": 100}])
         self.assertFalse(utils.validate_node_config(node))
 
+    def test_single_journal_only_entry_valid(self):
+        # sn configure --lblk-journal-only: the data device is the array LUN
+        # added at add-node, which checks the minimum again with it counted.
+        node = self._node(lblk_devices=[{"name": "sdb", "serial": "S1", "size": 100, "journal": True}])
+        self.assertTrue(utils.validate_node_config(node))
+
     def test_two_journal_flags_rejected(self):
         node = self._node(lblk_devices=[
             {"name": "sdb1", "serial": "S1", "size": 100, "journal": True},

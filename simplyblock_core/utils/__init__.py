@@ -3676,7 +3676,11 @@ def validate_node_config(node):
                          f"'size' in node: {node.get('socket')}")
             return False
     if lblk_devices:
-        if len(lblk_devices) < constants.LBLK_MIN_DEVICES_PER_NODE:
+        # sn configure --lblk-journal-only: the node's one entry is its flagged
+        # journal disk; its data device is the array LUN added at add-node,
+        # where the minimum is checked again with that LUN counted.
+        journal_only = len(lblk_devices) == 1 and bool(lblk_devices[0].get("journal"))
+        if len(lblk_devices) < constants.LBLK_MIN_DEVICES_PER_NODE and not journal_only:
             logger.error(
                 f"lblk mode requires at least {constants.LBLK_MIN_DEVICES_PER_NODE} "
                 f"partitions or SSDs per node; node {node.get('socket')} carries "
