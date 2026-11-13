@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - R26.4-Beta
 
 permissions:
   contents: read
