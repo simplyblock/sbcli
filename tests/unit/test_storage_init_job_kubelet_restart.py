@@ -80,6 +80,25 @@ class TestInitJobRestartsTheKubelet(unittest.TestCase):
         _, calls = self._run("k3s-agent.service")
         self.assertEqual([c for c in calls if c.startswith("restart")], ["restart k3s-agent.service"])
 
+    def test_restarts_the_rke2_agent(self):
+        _, calls = self._run("rke2-agent.service")
+        self.assertEqual([c for c in calls if c.startswith("restart")], ["restart rke2-agent.service"])
+
+    def test_restarts_the_server_unit_of_a_node_that_is_also_a_server(self):
+        """On a k3s or RKE2 server node the kubelet is embedded in the server
+        process, so that is the unit to restart: a single-node k3s cluster has
+        no agent unit at all."""
+        for unit in ("k3s.service", "rke2-server.service"):
+            with self.subTest(unit=unit):
+                _, calls = self._run(unit)
+                self.assertEqual([c for c in calls if c.startswith("restart")], ["restart " + unit])
+
+    def test_an_agent_unit_is_preferred_to_a_server_unit(self):
+        """Restarting a server unit also restarts the API server it embeds, so
+        it is the last resort."""
+        _, calls = self._run("k3s.service k3s-agent.service")
+        self.assertEqual([c for c in calls if c.startswith("restart")], ["restart k3s-agent.service"])
+
     def test_restarts_one_unit_only(self):
         """A host with more than one of them has one kubelet: the first match
         is the one restarted."""
@@ -92,7 +111,8 @@ class TestInitJobRestartsTheKubelet(unittest.TestCase):
         found from the log instead of from a Pending pod."""
         out, calls = self._run("")
         self.assertEqual([c for c in calls if c.startswith("restart")], [])
-        for unit in ("kubelet.service", "snap.kubelet-eks.daemon.service", "k3s-agent.service"):
+        for unit in ("kubelet.service", "snap.kubelet-eks.daemon.service", "k3s-agent.service",
+                     "rke2-agent.service", "k3s.service", "rke2-server.service"):
             self.assertIn(unit, out)
         self.assertIn("not restarted", out)
 
