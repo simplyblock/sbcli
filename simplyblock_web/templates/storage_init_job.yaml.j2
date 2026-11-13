@@ -136,15 +136,25 @@ spec:
 
                 if [ "$HUGEPAGES_AFTER_KB" -ne "$K8S_NODE_HUGEPAGES_KB" ]; then
                   echo "[INFO] Hugepages changed from Kubernetes-known value ($HUGEPAGES_AFTER_KB kB != $K8S_NODE_HUGEPAGES_KB kB), restarting kubelet..."
+                  # The unit the kubelet runs under depends on how the distribution
+                  # packages it: a systemd unit, the snap of the Canonical EKS image, or
+                  # the k3s or RKE2 process that embeds it. The first one the host has is
+                  # restarted. The server units come last, because restarting one also
+                  # restarts the API server it embeds.
                   nsenter --target 1 --mount --uts --ipc --net --pid -- /bin/sh -c '
                     if command -v systemctl >/dev/null 2>&1; then
-                      if systemctl cat kubelet.service >/dev/null 2>&1; then
-                        systemctl restart kubelet && echo "Kubelet restarted" || echo "Kubelet restart failed"
-                      elif systemctl cat k3s-agent.service >/dev/null 2>&1; then
-                        echo "kubelet service not found, restarting k3s-agent..."
-                        systemctl restart k3s-agent && echo "k3s-agent restarted" || echo "k3s-agent restart failed"
+                      KUBELET_UNITS="kubelet.service snap.kubelet-eks.daemon.service k3s-agent.service rke2-agent.service k3s.service rke2-server.service"
+                      KUBELET_UNIT=""
+                      for unit in $KUBELET_UNITS; do
+                        if systemctl cat "$unit" >/dev/null 2>&1; then
+                          KUBELET_UNIT="$unit"
+                          break
+                        fi
+                      done
+                      if [ -n "$KUBELET_UNIT" ]; then
+                        systemctl restart "$KUBELET_UNIT" && echo "$KUBELET_UNIT restarted" || echo "$KUBELET_UNIT restart failed"
                       else
-                        echo "Neither kubelet nor k3s-agent service found, skipping restart"
+                        echo "[WARN] None of $KUBELET_UNITS found: the kubelet is not restarted, and keeps reporting the huge pages it read when it started"
                       fi
                     fi
                   '
