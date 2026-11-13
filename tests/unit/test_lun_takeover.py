@@ -702,3 +702,91 @@ class TestConnectAndState(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# --------------------------------------------- multi-attach bed findings, F1
+
+class TestUnreachableTrigger(unittest.TestCase):
+    """The takeover starts once a node has been UNREACHABLE for
+    MULTI_ATTACH_UNREACHABLE_TAKEOVER_SEC, not when it is declared OFFLINE:
+    on the bed the OFFLINE verdict took ~6 min, far past the peers' hold."""
+
+    def setUp(self):
+        from simplyblock_core.services import storage_node_monitor as mon
+        self.mon = mon
+        mon._unreachable_since.clear()
+        self.addCleanup(mon._unreachable_since.clear)
+        self.db, self.dev = _bed()
+        self.db.get_storage_node_by_id("node-a").status = StorageNode.STATUS_UNREACHABLE
+        for target, attr, kw in ((mon, "db", {"new": self.db}),
+                                 (mon, "_start_lun_takeover", {})):
+            p = patch.object(target, attr, **kw)
+            started = p.start()
+            if attr == "_start_lun_takeover":
+                self.start = started
+            self.addCleanup(p.stop)
+
+    def _trigger(self, after):
+        node = self.db.get_storage_node_by_id("node-a")
+        with patch.object(self.mon.time, "monotonic", return_value=1000.0):
+            self.mon._take_over_luns_of_unreachable(node)
+        with patch.object(self.mon.time, "monotonic", return_value=1000.0 + after):
+            self.mon._take_over_luns_of_unreachable(node)
+
+    def test_not_before_the_confirmation_time(self):
+        self._trigger(constants.MULTI_ATTACH_UNREACHABLE_TAKEOVER_SEC - 1)
+        self.start.assert_not_called()
+
+    def test_after_the_confirmation_time(self):
+        self._trigger(constants.MULTI_ATTACH_UNREACHABLE_TAKEOVER_SEC)
+        self.start.assert_called_once_with(DEV_ID, "node-a", "node unreachable")
+
+    def test_regular_cluster_never(self):
+        self.db.cluster.multi_attach = False
+        self._trigger(10 * constants.MULTI_ATTACH_UNREACHABLE_TAKEOVER_SEC)
+        self.start.assert_not_called()
+
+    def test_hold_covers_detection_trigger_and_takeover(self):
+        # ~20 s to see the node unreachable, the trigger delay, the takeover deadline
+        self.assertGreater(constants.MULTI_ATTACH_HOLD_SEC,
+                           20 + constants.MULTI_ATTACH_UNREACHABLE_TAKEOVER_SEC
+                           + constants.MULTI_ATTACH_TAKEOVER_DEADLINE_SEC)
+
+
+class TestRetireStaleLocalStack(unittest.TestCase):
+    """A node back ONLINE without a restart drops its stale stack of a LUN
+    another node took over: own loopback path first, then subsystem, PT,
+    alceml. Nothing is formatted."""
+
+    def _setup(self, served_by="node-b", with_stack=True):
+        db, dev = _bed()
+        a = db.get_storage_node_by_id("node-a")
+        a.status = StorageNode.STATUS_ONLINE
+        dev.serving_node_id = served_by
+        if with_stack:
+            a.spdk.bdevs[dev.alceml_bdev] = {"name": dev.alceml_bdev}
+            a.spdk.bdevs[f"{dev.alceml_bdev}_PT"] = {"name": f"{dev.alceml_bdev}_PT"}
+        with patch("simplyblock_core.db_controller.DBController", return_value=db):
+            retired = lun_takeover.retire_stale_local_stack(a)
+        return a, dev, retired
+
+    def test_retires_in_order(self):
+        a, dev, retired = self._setup()
+        self.assertEqual(retired, [DEV_ID])
+        detach = a.spdk.ops("detach")
+        self.assertEqual(detach[0][1][0], f"remote_{dev.alceml_bdev}")
+        self.assertEqual(detach[0][2]["traddr"], "10.0.0.1")
+        order = [c[0] for c in a.spdk.calls if c[0] in ("subsystem_delete", "bdev_PT_NoExcl_delete",
+                                                        "bdev_alceml_delete")]
+        self.assertEqual(order, ["subsystem_delete", "bdev_PT_NoExcl_delete", "bdev_alceml_delete"])
+        self.assertFalse(a.spdk.ops("bdev_alceml_create"))
+
+    def test_nothing_when_still_served_here(self):
+        a, _dev, retired = self._setup(served_by="")
+        self.assertEqual(retired, [])
+        self.assertFalse(a.spdk.ops("subsystem_delete"))
+
+    def test_nothing_without_a_stack(self):
+        a, _dev, retired = self._setup(with_stack=False)
+        self.assertEqual(retired, [])
+        self.assertFalse(a.spdk.ops("detach"))

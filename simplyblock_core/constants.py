@@ -1192,7 +1192,10 @@ DISTR_AFFINITY_FLOOR_RPC = False
 # path is available (per-controller ctrlr_loss_timeout_sec), so a takeover
 # that adds the LUN's new export as a path within the window resumes I/O
 # instead of failing it. The cluster-wide bdev_nvme defaults (1 s) stay.
-MULTI_ATTACH_HOLD_SEC = 120
+# It must cover: detecting the owner unreachable (~20 s), the
+# MULTI_ATTACH_UNREACHABLE_TAKEOVER_SEC confirmation, and the takeover up to
+# its MULTI_ATTACH_TAKEOVER_DEADLINE_SEC.
+MULTI_ATTACH_HOLD_SEC = 150
 MULTI_ATTACH_RECONNECT_DELAY_SEC = 2
 MULTI_ATTACH_FAST_IO_FAIL_SEC = MULTI_ATTACH_HOLD_SEC
 # The alceml of a multi-attach device fails its pending I/O and unregisters
@@ -1212,6 +1215,13 @@ MULTI_ATTACH_MAX_NODES = 1022
 # peers' hold, or their I/O fails before the new path exists; it gives up at
 # this deadline (seconds from its start) and the device goes unavailable.
 MULTI_ATTACH_TAKEOVER_DEADLINE_SEC = 90
+# The takeover of a node's LUNs starts once the node has been UNREACHABLE
+# this long, not when it is declared OFFLINE: the OFFLINE verdict waits for
+# every online peer to see the node's journal disconnected, which took about
+# six minutes on the multi-attach bed, far past the peers' hold. The fence
+# comes first, so a takeover of a node that is alive behind a management
+# network fault is safe; it costs a short I/O pause on that LUN.
+MULTI_ATTACH_UNREACHABLE_TAKEOVER_SEC = 15
 # Lease of a running takeover (one per LUN, in FDB): a holder older than this
 # is presumed dead.
 MULTI_ATTACH_TAKEOVER_LOCK_TTL_SEC = 2 * MULTI_ATTACH_TAKEOVER_DEADLINE_SEC

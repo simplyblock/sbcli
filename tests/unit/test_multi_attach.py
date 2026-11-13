@@ -336,7 +336,8 @@ class TestNames(unittest.TestCase):
     def test_hold_and_stuck_io_constants(self):
         self.assertLess(constants.MULTI_ATTACH_ALCEML_STUCK_IO_MS, constants.MULTI_ATTACH_HOLD_SEC * 1000)
         self.assertEqual(multi_attach.attach_controller_kwargs(_device(multi=True)), {
-            "ctrlr_loss_timeout_sec": 120, "reconnect_delay_sec": 2, "fast_io_fail_timeout_sec": 120})
+            "ctrlr_loss_timeout_sec": constants.MULTI_ATTACH_HOLD_SEC, "reconnect_delay_sec": 2,
+            "fast_io_fail_timeout_sec": constants.MULTI_ATTACH_HOLD_SEC})
         self.assertEqual(multi_attach.alceml_create_kwargs(_device(multi=True)),
                          {"stuck_io_timeout_ms": 60000})
 

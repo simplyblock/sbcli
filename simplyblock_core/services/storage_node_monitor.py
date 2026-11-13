@@ -1978,6 +1978,34 @@ def set_node_offline(node):
             logger.error("add_node_to_auto_restart for %s failed: %s", node.get_id(), ar_e)
 
 
+# node id -> monotonic time it was first seen UNREACHABLE in the current
+# episode (multi-attach LUN takeover trigger; see
+# constants.MULTI_ATTACH_UNREACHABLE_TAKEOVER_SEC). Cleared on any other status.
+_unreachable_since: dict = {}
+
+
+def _take_over_luns_of_unreachable(node):
+    """Multi-attach clusters (only): start the takeover of the LUNs a node
+    serves once it has been UNREACHABLE for MULTI_ATTACH_UNREACHABLE_TAKEOVER_SEC.
+    The takeover fences the node at the array first; each LUN gets one
+    thread (_start_lun_takeover is idempotent across monitor cycles)."""
+    node_id = node.get_id()
+    since = _unreachable_since.setdefault(node_id, time.monotonic())
+    if time.monotonic() - since < constants.MULTI_ATTACH_UNREACHABLE_TAKEOVER_SEC:
+        return
+    try:
+        cluster = db.get_cluster_by_id(node.cluster_id)
+    except Exception as e:                                  # noqa: BLE001
+        logger.warning("Cluster of %s not read (%s); no LUN takeover", node_id, e)
+        return
+    if not multi_attach.is_multi_attach(cluster):
+        return
+    for _owner, dev in multi_attach.devices_served_by(
+            db.get_storage_nodes_by_cluster_id(node.cluster_id), node_id):
+        if dev.status in _DEV_SERVING_STATES:
+            _start_lun_takeover(dev.get_id(), node_id, "node unreachable")
+
+
 def set_node_unreachable(node):
     # Same rationale as set_node_offline: when the runner owns the node's
     # status transitions (IN_SHUTDOWN → OFFLINE → IN_RESTART → ONLINE), the
@@ -1991,6 +2019,11 @@ def set_node_unreachable(node):
         except Exception as e:
             logger.debug("Setting node to UNREACHABLE state failed")
             logger.error(e)
+
+    try:
+        _take_over_luns_of_unreachable(node)
+    except Exception as e:                                  # noqa: BLE001
+        logger.error("LUN takeover trigger for unreachable node %s failed: %s", node.get_id(), e)
 
     # Check data-plane health from surviving nodes.  If all online peers
     # report the unreachable node's remote JM as disconnected, the data
@@ -2816,6 +2849,10 @@ PORT_PUBLISH_INTERVAL_SEC = 60
 
 def check_node(snode):
     snode = db.get_storage_node_by_id(snode.get_id())
+    if snode.status != StorageNode.STATUS_UNREACHABLE:
+        # Ends an UNREACHABLE episode: a later one starts the multi-attach
+        # LUN takeover timer afresh (_take_over_luns_of_unreachable).
+        _unreachable_since.pop(snode.get_id(), None)
     if snode.status == StorageNode.STATUS_ONLINE:
         storage_network.publish_ports(snode, at_most_every=PORT_PUBLISH_INTERVAL_SEC)
 
@@ -3094,6 +3131,20 @@ def check_node(snode):
         )
         storage_node_ops.set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE)
         readmit_devices_after_node_online(snode.get_id())
+        _retire_taken_over_luns(snode)
+
+
+def _retire_taken_over_luns(snode):
+    """Multi-attach clusters (only): a node back ONLINE without a restart
+    drops what it still holds of LUNs taken over while it was unreachable
+    (lun_takeover.retire_stale_local_stack)."""
+    try:
+        if not multi_attach.is_multi_attach(db.get_cluster_by_id(snode.cluster_id)):
+            return
+        from simplyblock_core.controllers import lun_takeover
+        lun_takeover.retire_stale_local_stack(snode)
+    except Exception as e:                                  # noqa: BLE001
+        logger.error("Retiring taken-over LUN stacks on %s failed: %s", snode.get_id(), e)
 
 
 def readmit_devices_after_node_online(node_id):

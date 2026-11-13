@@ -566,6 +566,61 @@ def _switch_paths(db, cluster_id, dev, standby, failed, failed_paths) -> list:
     return added
 
 
+def retire_stale_local_stack(node) -> list:
+    """Retire, on a node that is back ONLINE, what it still holds of the LUNs
+    another node took over while it was unreachable: its own path in each
+    ``remote_alceml_<uuid>`` controller (the loopback to its now-stale export),
+    then that export's subsystem, PT bdev and alceml. Nothing is formatted; the
+    base bdev over the LUN is left alone (the node is fenced from the LUN).
+
+    Needed when the node returns without a restart (a management-plane blip
+    long enough to start a takeover): a restart never builds these stacks
+    (``multi_attach.served_elsewhere``), but a node that never restarted still
+    has them, and its own distribs would keep writing through its loopback
+    into an alceml whose LUN the array has fenced. Returns the ids of the
+    devices retired; best-effort and idempotent."""
+    from simplyblock_core.db_controller import DBController
+    db = DBController()
+    node_id = node.get_id()
+    try:
+        rpc = node.rpc_client(timeout=10, retry=1)
+    except Exception as e:                                  # noqa: BLE001
+        logger.warning("LUN retire: no RPC client for %s: %s", node_id, e)
+        return []
+    retired = []
+    for owner in db.get_storage_nodes_by_cluster_id(node.cluster_id):
+        for dev in owner.nvme_devices or []:
+            if not multi_attach.is_multi_attach(dev) or not multi_attach.served_elsewhere(dev, node_id):
+                continue
+            # Only a node that once exported the LUN can hold a stale stack:
+            # its owner, or a node it was taken over by before.
+            if node_id != dev.node_id and node_id not in (dev.node_paths or {}):
+                continue
+            pt = f"{dev.alceml_bdev}_PT"
+            try:
+                has_stack = bool(rpc.bdev_get(dev.alceml_bdev)) or bool(rpc.bdev_get(pt))
+            except Exception:                               # noqa: BLE001
+                has_stack = False
+            if not has_stack:
+                continue
+            name = f"remote_{dev.alceml_bdev}"
+            own_ips = [iface.ip4_address for iface in node.data_nics or [] if iface.ip4_address]
+            for ip in own_ips:
+                try:
+                    rpc.bdev_nvme_detach_controller(name, traddr=ip, trsvcid=node.nvmf_port,
+                                                    trtype=_transport(node) or "TCP")
+                except Exception as e:                      # noqa: BLE001
+                    logger.info("LUN retire: own path %s of %s on %s not detached: %s",
+                                ip, name, node_id, e)
+            nqn = multi_attach.device_subsystem_nqn(node, dev, db.get_cluster_by_id(node.cluster_id))
+            _teardown(rpc, node_id, [("alceml", dev.alceml_bdev), ("pt", pt), ("subsystem", nqn)])
+            logger.warning("LUN retire: %s on %s is served by %s since a takeover; its stale "
+                           "local stack was removed (nothing formatted)",
+                           dev.get_id(), node_id, dev.serving_node())
+            retired.append(dev.get_id())
+    return retired
+
+
 # ------------------------------------------------------------- operator
 
 def unfence_node(device_id, node_id) -> bool:
