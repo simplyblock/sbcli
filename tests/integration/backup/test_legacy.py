@@ -756,7 +756,12 @@ class TestDeleteBackups(unittest.TestCase):
         db = DBController()
         cluster = _cluster()
         cluster.write_to_db(db.kv_store)
-        b1 = _backup(uuid="b-1")
+        # A real UUID, not the short "b-1" placeholder used elsewhere in this
+        # file: the manifest path now parses backup.uuid with UUID(...)
+        # (manifest_key, build_manifest's backup_id), which a short string
+        # like "b-1" is not shaped like.
+        backup_uuid = "00000000-0000-4000-8000-000000000001"
+        b1 = _backup(uuid=backup_uuid)
         b1.location = _backup_config().location().model_dump(mode="json")
         b1.write_to_db(db.kv_store)
 
@@ -764,7 +769,7 @@ class TestDeleteBackups(unittest.TestCase):
         success, error = delete_backups("lvol-1")
 
         self.assertTrue(success, error)
-        self.assertEqual(db.get_backup_by_id("b-1").status, Backup.STATUS_DELETING)
+        self.assertEqual(db.get_backup_by_id(backup_uuid).status, Backup.STATUS_DELETING)
 
     @patch("simplyblock_core.controllers.backup.controller.db_controller")
     def test_no_backups(self, mock_db):
