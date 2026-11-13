@@ -1619,6 +1619,34 @@ def add_backup_restore_task(source_lvol_id, cluster_id, node_id, backup_id, lvol
     return task.uuid
 
 
+def add_backup_delete_task(cluster_id, node_id, backup_ids):
+    """Create the task that deletes one or more backups of the same volume
+    that nothing chains against, unless an open task already covers them.
+
+    The targets are already DELETING by the time this is called --
+    ``backup_controller.delete_backup``/``delete_backups`` claim them via
+    ``DBController.claim_backup_chain_op`` first -- so, like
+    ``add_backup_merge_task``, this needs no transactional join of its own:
+    there is no gap between a check and this task existing left to close.
+    """
+    wanted = set(backup_ids)
+    for task in db.get_job_tasks_by_function(cluster_id, JobSchedule.FN_BACKUP_DELETE):
+        if (not task.canceled and task.status != JobSchedule.STATUS_DONE
+                and wanted <= set((task.function_params or {}).get("backup_ids") or [])):
+            logger.info(f"Task found, skip adding new task: {task.uuid}")
+            return False
+    return _add_task(
+        JobSchedule.FN_BACKUP_DELETE,
+        cluster_id,
+        node_id,
+        "",
+        max_retry=constants.BACKUP_TASK_MAX_RETRIES,
+        function_params={
+            "backup_ids": list(backup_ids),
+        },
+    )
+
+
 def add_backup_merge_task(cluster_id, node_id, keep_backup_id, old_backup_id):
     """Create the task that merges two S3 backups."""
     return _add_task(
