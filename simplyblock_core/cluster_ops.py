@@ -638,10 +638,11 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     log_level = "DEBUG" if constants.LOG_WEB_DEBUG else "INFO"
 
     def deploy_stack_phase(phase):
-        scripts.deploy_stack(cli_pass.get_secret_value(), dev_ip, constants.SIMPLY_BLOCK_DOCKER_IMAGE,
+        scripts.deploy_stack(cli_pass.get_secret_value(), dev_ip,
+                             cluster.prefixed_image(constants.SIMPLY_BLOCK_DOCKER_IMAGE),
                              cluster.secret.get_secret_value(), cluster.uuid, log_del_interval,
                              metrics_retention_period, log_level, cluster.grafana_endpoint, str(disable_monitoring),
-                             phase=phase)
+                             phase=phase, image_prefix=cluster.container_image_prefix)
 
     # Order matters: every simplyblock service exits on an unconfigured
     # database, so the database must be configured after FDB is up and before
@@ -3645,7 +3646,7 @@ def _grafana_provisioning_dirs(cluster_docker) -> tuple[str, str]:
     return os.path.dirname(sources[GRAFANA_DATASOURCE_TARGET]), sources[GRAFANA_ALERTING_TARGET]
 
 
-def _install_provisioning_on_all_managers(files: dict[str, str]) -> None:
+def _install_provisioning_on_all_managers(files: dict[str, str], image: str) -> None:
     """Write Grafana's provisioning files onto every management node.
 
     Grafana is constrained to node.role == manager and may be rescheduled to
@@ -3670,7 +3671,7 @@ def _install_provisioning_on_all_managers(files: dict[str, str]) -> None:
             node_docker = docker.DockerClient(
                 base_url=f"tcp://{node.docker_ip_port}", version="auto", timeout=60)
             node_docker.containers.run(
-                constants.SIMPLY_BLOCK_DOCKER_IMAGE, ["sh", "-c", script], user="root",
+                image, ["sh", "-c", script], user="root",
                 volumes=[f"{directory}:{directory}" for directory in volumes],
                 remove=True, detach=False)
             logger.info("Provisioning files written on %s", node.mgmt_ip)
@@ -3693,7 +3694,7 @@ def _service_mount_source(service, target: str) -> str | None:
     return {mount.get('Target'): mount.get('Source') for mount in mounts}.get(target)
 
 
-def _run_on_mgmt_node(node, command: builtins.list[str], directory: str) -> bytes:
+def _run_on_mgmt_node(node, command: builtins.list[str], directory: str, image: str) -> bytes:
     """Run ``command`` as root on a management node, with ``directory`` mounted.
 
     Host paths of the monitoring stack belong to root, and the image runs as
@@ -3701,11 +3702,11 @@ def _run_on_mgmt_node(node, command: builtins.list[str], directory: str) -> byte
     """
     node_docker = docker.DockerClient(base_url=f"tcp://{node.docker_ip_port}", version="auto", timeout=60)
     return node_docker.containers.run(
-        constants.SIMPLY_BLOCK_DOCKER_IMAGE, command, user="root",
+        image, command, user="root",
         volumes=[f"{directory}:{directory}"], remove=True, detach=False)
 
 
-def _rotate_secret_on_all_managers(nodes, path: str, old: str, new: str) -> bool:
+def _rotate_secret_on_all_managers(nodes, path: str, old: str, new: str, image: str) -> bool:
     """Swap ``old`` for ``new`` in the host file ``path`` on every management node.
 
     Each manager holds its own copy (the monitoring services are global on, or
@@ -3717,12 +3718,12 @@ def _rotate_secret_on_all_managers(nodes, path: str, old: str, new: str) -> bool
     failed = {}
     for node in nodes:
         try:
-            current = _run_on_mgmt_node(node, ["cat", path], directory).decode('utf-8')
+            current = _run_on_mgmt_node(node, ["cat", path], directory, image).decode('utf-8')
             rotated, count = utils.replace_secret_token(current, old, new)
             if count:
                 encoded = base64.b64encode(rotated.encode('utf-8')).decode('ascii')
                 _run_on_mgmt_node(
-                    node, ["sh", "-c", f"echo {encoded} | base64 -d > {shlex.quote(path)}"], directory)
+                    node, ["sh", "-c", f"echo {encoded} | base64 -d > {shlex.quote(path)}"], directory, image)
                 changed = True
         except DockerException as e:
             failed[node.mgmt_ip] = str(e)
@@ -3744,6 +3745,7 @@ def _rotate_docker_monitoring_secret(cluster_id, old: str, new: str) -> None:
     """
     cluster_docker = utils.get_docker_client(cluster_id)
     nodes = db_controller.get_mgmt_nodes()
+    image = db_controller.get_cluster_by_id(cluster_id).prefixed_image(constants.SIMPLY_BLOCK_DOCKER_IMAGE)
     for service_name, target, required in (
             (constants.MONITORING_PROMETHEUS_SERVICE, PROMETHEUS_CONFIG_TARGET, True),
             (constants.MONITORING_GRAFANA_SERVICE, GRAFANA_EVENT_DATASOURCE_TARGET, False)):
@@ -3759,7 +3761,7 @@ def _rotate_docker_monitoring_secret(cluster_id, old: str, new: str) -> None:
                 raise MonitoringConfigError(f"Service {service_name} has no bind mount at {target}")
             continue
 
-        if _rotate_secret_on_all_managers(nodes, source, old, new):
+        if _rotate_secret_on_all_managers(nodes, source, old, new, image):
             logger.info(f"Restarting {service_name} to load the rotated secret...")
             service.force_update()
 
@@ -3803,7 +3805,7 @@ def set_event_alerts(cluster_id, enabled=True, log_limit=None, interval=None, pe
         os.path.join(alerting_dir, utils.EVENT_ALERT_RULES_FILE):
             rendered[utils.EVENT_ALERT_RULES_FILE],
         datasource_path: rendered[utils.EVENT_ALERT_DATASOURCE_FILE],
-    })
+    }, cluster.prefixed_image(constants.SIMPLY_BLOCK_DOCKER_IMAGE))
 
     # --force recreates the task, which is what makes Grafana re-read
     # provisioning; a single-file bind mount also tracks the inode it started
@@ -3959,9 +3961,7 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
     logger.info("Updating mgmt cluster")
     if cluster.mode == "docker":
         cluster_docker = utils.get_docker_client(cluster_id)
-        service_image = constants.SIMPLY_BLOCK_DOCKER_IMAGE
-        if mgmt_image:
-            service_image = mgmt_image
+        service_image = cluster.prefixed_image(mgmt_image or constants.SIMPLY_BLOCK_DOCKER_IMAGE)
         logger.info(f"Pulling image {service_image}")
         pull_docker_image_with_retry(cluster_docker, service_image)
         service_names = []
@@ -4055,7 +4055,7 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
         apps_v1 = k8s_client.AppsV1Api()
         namespace = constants.K8S_NAMESPACE
         image_parts = ["simplyblock-io/simplyblock:", "simplyblock/simplyblock:", "simply-block/simplyblock:"]
-        service_image = mgmt_image or constants.SIMPLY_BLOCK_DOCKER_IMAGE
+        service_image = cluster.prefixed_image(mgmt_image or constants.SIMPLY_BLOCK_DOCKER_IMAGE)
         deployment_names = []
         # Update Deployments
         deployments = apps_v1.list_namespaced_deployment(namespace=namespace)
@@ -4122,9 +4122,7 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
         for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
             if node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
                 node_docker = docker.DockerClient(base_url=f"tcp://{node.mgmt_ip}:2375", version="auto", timeout=60 * 5)
-                img = constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE
-                if spdk_image:
-                    img = spdk_image
+                img = cluster.prefixed_image(spdk_image or constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
                 logger.info(f"Pulling image {img}")
                 pull_docker_image_with_retry(node_docker, img)
 

@@ -75,7 +75,7 @@ STACK_PHASES = ("monitoring", "fdb", "app")
 
 def deploy_stack(cli_pass, dev_ip, image_name, graylog_password, cluster_id,
                  log_del_interval, metrics_retention_period, log_level, grafana_endpoint, disable_monitoring,
-                 *, phase):
+                 *, phase, image_prefix=""):
     if phase not in STACK_PHASES:
         raise ValueError(f"Unknown deploy phase {phase!r}, expected one of {STACK_PHASES}")
     pass_hash = hashlib.sha256(graylog_password.encode('utf-8')).hexdigest()
@@ -85,7 +85,7 @@ def deploy_stack(cli_pass, dev_ip, image_name, graylog_password, cluster_id,
         __run_script(
             ['sudo', 'bash', '-x', os.path.join(DIR_PATH, 'deploy_stack.sh'), cli_pass, dev_ip, image_name, pass_hash,
              graylog_password, cluster_id, log_del_interval, metrics_retention_period, log_level, grafana_endpoint,
-             disable_monitoring, phase, str(STACK_WAIT_TIMEOUT_SEC), report_path],
+             disable_monitoring, phase, str(STACK_WAIT_TIMEOUT_SEC), report_path, image_prefix],
             failure_report=(f"deploy_stack.sh phase {phase}", report_path))
     finally:
         os.unlink(report_path)

@@ -71,7 +71,7 @@ from simplyblock_core.exceptions import (
     SyncReplicationUnsupportedError,
     reject_on_sync_replication,
 )
-from simplyblock_core.models.cluster import Cluster
+from simplyblock_core.models.cluster import Cluster, prefix_image
 from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lock import DbLock, DbLockBusyError, DbLockUnavailableError
@@ -4456,14 +4456,16 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         rpc_port = db_controller.reserve_cluster_nvmf_port(cluster_id, node_uuid)
         logger.info(f"mgmt interface is {mgmt_iface}")
 
-        if not spdk_image:
-            spdk_image = constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE
+        spdk_image = cluster.prefixed_image(spdk_image or constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
 
         if cluster.mode == "docker":
             log_config_type = utils.get_storage_node_api_log_type(mgmt_ip, '/SNodeAPI')
             if log_config_type and log_config_type != LogConfig.types.GELF:
                 logger.info("SNodeAPI container found but not configured with gelf logger")
-                start_storage_node_api_container(mgmt_ip, cluster_ip)
+                start_storage_node_api_container(
+                    mgmt_ip, cluster_ip,
+                    image=cluster.prefixed_image(constants.SIMPLY_BLOCK_DOCKER_IMAGE),
+                    spdk_image=spdk_image)
         node_socket = node_config.get("socket")
 
         # Idempotent re-entry. A prior add attempt for this (node, socket) may
@@ -4586,8 +4588,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                     snode_api.bind_device_to_spdk(ssd)
                 snode_api.bind_device_to_spdk(ssd)
 
-        if not spdk_proxy_image:
-            spdk_proxy_image = cluster.container_image_prefix + constants.SIMPLY_BLOCK_DOCKER_IMAGE
+        spdk_proxy_image = cluster.prefixed_image(spdk_proxy_image or constants.SIMPLY_BLOCK_DOCKER_IMAGE)
         # Initial storage-MCP maxUnavailable for the first-time CPU-topology
         # reboots = the configured parallel-add count (StorageCluster
         # spec.storageNodes.maxParallelNodeAdds), read straight from the CR.
@@ -9375,8 +9376,10 @@ def _restart_storage_node_impl(
     else:
         max_prov = snode.max_prov
 
-    if spdk_image:
-        snode.spdk_image = spdk_image
+    # An empty record would let SNodeAPI fall back to its own unprefixed
+    # default, bypassing the cluster's registry prefix.
+    snode.spdk_image = cluster.prefixed_image(
+        spdk_image or snode.spdk_image or constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
 
     # Calculate minimum huge page memory
     minimum_hp_memory = utils.calculate_minimum_hp_memory(snode.iobuf_small_pool_count, snode.iobuf_large_pool_count,
@@ -9434,11 +9437,8 @@ def _restart_storage_node_impl(
         if n.api_endpoint == snode.api_endpoint and n.socket == snode.socket and n.uuid != snode.uuid:
             total_mem += (n.spdk_mem + 500000000)
 
-    if spdk_proxy_image:
-        snode.spdk_proxy_image = spdk_proxy_image
-
-    if not snode.spdk_proxy_image:
-        snode.spdk_proxy_image = cluster.container_image_prefix + constants.SIMPLY_BLOCK_DOCKER_IMAGE
+    snode.spdk_proxy_image = cluster.prefixed_image(
+        spdk_proxy_image or snode.spdk_proxy_image or constants.SIMPLY_BLOCK_DOCKER_IMAGE)
 
     lblk_mode = cluster.device_mode == constants.DEVICE_MODE_LBLK
 
@@ -11331,7 +11331,7 @@ def generate_automated_deployment_config(max_lvol, max_prov, sockets_to_use, nod
     return True
 
 
-def deploy(ifname, isolate_cores=False):
+def deploy(ifname, isolate_cores=False, container_image_prefix=None):
     if not ifname:
         ifname = "eth0"
 
@@ -11364,7 +11364,12 @@ def deploy(ifname, isolate_cores=False):
     logger.info(f"Node IP: {dev_ip}")
     scripts.configure_docker(dev_ip)
 
-    start_storage_node_api_container(dev_ip)
+    # The host belongs to no cluster yet, so the prefix the cluster will be
+    # created with cannot be read from it and has to be given here.
+    start_storage_node_api_container(
+        dev_ip,
+        image=prefix_image(container_image_prefix, constants.SIMPLY_BLOCK_DOCKER_IMAGE),
+        spdk_image=prefix_image(container_image_prefix, constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE))
 
     if isolate_cores:
         utils.generate_realtime_variables_file(all_isolated_cores)
@@ -11375,11 +11380,13 @@ def deploy(ifname, isolate_cores=False):
     return f"{dev_ip}:5000"
 
 
-def start_storage_node_api_container(node_ip, cluster_ip=None):
+def start_storage_node_api_container(node_ip, cluster_ip=None,
+                                     image=constants.SIMPLY_BLOCK_DOCKER_IMAGE,
+                                     spdk_image=constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE):
     node_docker = docker.DockerClient(base_url=f"tcp://{node_ip}:2375", version="auto", timeout=60 * 5)
     # node_docker = docker.DockerClient(base_url='unix://var/run/docker.sock', version="auto", timeout=60 * 5)
-    logger.info(f"Pulling image {constants.SIMPLY_BLOCK_DOCKER_IMAGE}")
-    pull_docker_image_with_retry(node_docker, constants.SIMPLY_BLOCK_DOCKER_IMAGE)
+    logger.info(f"Pulling image {image}")
+    pull_docker_image_with_retry(node_docker, image)
 
     logger.info("Recreating SNodeAPI container")
 
@@ -11392,7 +11399,7 @@ def start_storage_node_api_container(node_ip, cluster_ip=None):
         log_config = LogConfig(type=LogConfig.types.JOURNALD)
 
     node_docker.containers.run(
-        constants.SIMPLY_BLOCK_DOCKER_IMAGE,
+        image,
         "sudo -E python3 simplyblock_web/node_webapp.py storage_node",
         detach=True,
         privileged=True,
@@ -11421,8 +11428,8 @@ def start_storage_node_api_container(node_ip, cluster_ip=None):
             "SIMPLYBLOCK_LOG_LEVEL=DEBUG",
         ]
     )
-    logger.info(f"Pulling image {constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE}")
-    pull_docker_image_with_retry(node_docker, constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
+    logger.info(f"Pulling image {spdk_image}")
+    pull_docker_image_with_retry(node_docker, spdk_image)
     return True
 
 

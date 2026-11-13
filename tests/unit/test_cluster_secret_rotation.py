@@ -138,14 +138,14 @@ class TestRotateOnAllManagers:
         files = {"10.0.0.1": f"password: '{OLD}'", "10.0.0.2": "password: 'already-rotated-123456'"}
         writes = []
 
-        def run(node, command, directory):
+        def run(node, command, directory, image):
             if command[0] == "cat":
                 return files[node.mgmt_ip].encode()
             writes.append(node.mgmt_ip)
             return b""
 
         with patch.object(cluster_ops, "_run_on_mgmt_node", side_effect=run):
-            assert cluster_ops._rotate_secret_on_all_managers(nodes, "/x/prometheus.yml", OLD, NEW) is True
+            assert cluster_ops._rotate_secret_on_all_managers(nodes, "/x/prometheus.yml", OLD, NEW, "img") is True
         assert writes == ["10.0.0.1"]
 
     def test_an_unreachable_manager_raises(self):
@@ -153,7 +153,7 @@ class TestRotateOnAllManagers:
         with patch.object(cluster_ops, "_run_on_mgmt_node",
                           side_effect=cluster_ops.DockerException("connection refused")):
             with pytest.raises(MonitoringConfigError, match="10.0.0.1"):
-                cluster_ops._rotate_secret_on_all_managers(nodes, "/x/prometheus.yml", OLD, NEW)
+                cluster_ops._rotate_secret_on_all_managers(nodes, "/x/prometheus.yml", OLD, NEW, "img")
 
 
 class TestAddGrafanaUserOrDisableMonitoring:
