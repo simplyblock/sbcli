@@ -11,6 +11,10 @@ The Job stopped at "kubelet config not found at /host/var/lib/kubelet/config.yam
 so a deployment that asked for the kubelet configuration could not add a node.
 The same settings applied by hand to that file gave the SPDK pod exclusive CPUs.
 
+Regression: 2026-11-13, RKE2 1.36 on Rocky 9. The kubelet there is started with
+``--config-dir=/var/lib/rancher/rke2/agent/etc/kubelet.conf.d`` and no
+``--config``, under ``rke2-agent.service``, and the Job stopped the same way.
+
 The script runs for real here, against a fake host under a temporary directory:
 ``/host``, ``/proc`` and ``/var/simplyblock`` are pointed into it, and
 ``nsenter``, ``systemctl``, ``apk`` and ``sleep`` are stand-ins. The kubelet is a
@@ -34,6 +38,9 @@ TEMPLATE_DIR = Path(__file__).resolve().parents[2] / "simplyblock_web" / "templa
 EKS_CONFIG = "/etc/kubernetes/kubelet/kubelet-config.json"
 KUBEADM_CONFIG = "/var/lib/kubelet/config.yaml"
 SNAP_UNIT = "snap.kubelet-eks.daemon.service"
+RKE2_CONFIG_DIR = "/var/lib/rancher/rke2/agent/etc/kubelet.conf.d"
+RKE2_DEFAULTS = RKE2_CONFIG_DIR + "/00-rke2-defaults.conf"
+RKE2_DROPIN = RKE2_CONFIG_DIR + "/99-simplyblock-cpu-topology.conf"
 
 _FAKES = {
     # Run what follows `--` on this machine instead of in the host's namespaces.
@@ -52,11 +59,11 @@ _FAKES = {
 }
 
 
-def _script() -> str:
+def _script(reserved="0,8") -> str:
     env = Environment(loader=FileSystemLoader(str(TEMPLATE_DIR)), trim_blocks=True, lstrip_blocks=True)
     job = yaml.safe_load(env.get_template("storage_cpu_topology.yaml.j2").render(
         CORE_JOBNAME="snode-spdk-enable-cpu-topology-worker-1", NAMESPACE="simplyblock",
-        HOSTNAME="worker-1", RESERVED_SYSTEM_CPUS="0,8"))
+        HOSTNAME="worker-1", RESERVED_SYSTEM_CPUS=reserved))
     return job["spec"]["template"]["spec"]["containers"][0]["args"][0]
 
 
@@ -104,10 +111,10 @@ class _Host:
     def marker(self):
         return os.path.join(self.root, "var/simplyblock/.cpu_topology_applied")
 
-    def run(self):
+    def run(self, reserved="0,8"):
         # The Job's container is busybox ash, which knows pipefail; dash, which
         # stands in for it here, does not in every version.
-        script = (_script()
+        script = (_script(reserved)
                   .replace("set -euo pipefail", "set -eu")
                   .replace("/host", os.path.join(self.root, "host"))
                   .replace("/var/simplyblock/", os.path.join(self.root, "var/simplyblock") + "/")
@@ -203,6 +210,64 @@ class TestCpuTopologyJob(unittest.TestCase):
         self.assertEqual(config["cgroupDriver"], "systemd")
         self.assertEqual(_restarts(calls), ["restart kubelet.service"])
         self.assertTrue(os.path.exists(host.marker))
+
+    def _rke2_host(self, **kw):
+        host = _Host(self._tmp.name, "rke2-agent.service",
+                     kubelet_args=["--config-dir=" + RKE2_CONFIG_DIR,
+                                   "--kubeconfig=/var/lib/rancher/rke2/agent/kubelet.kubeconfig"], **kw)
+        os.makedirs(host.path(RKE2_CONFIG_DIR))
+        host.write(RKE2_DEFAULTS, "kind: KubeletConfiguration\ncgroupDriver: systemd\n"
+                                  "cpuManagerReconcilePeriod: 10s\n")
+        return host
+
+    def test_configures_the_kubelet_of_an_rke2_node_with_a_drop_in(self):
+        """2026-11-13, RKE2 1.36 on Rocky 9: the kubelet names no --config, only
+        --config-dir, and the Job stopped at "kubelet config not found at
+        /host/var/lib/kubelet/config.yaml". RKE2 writes its own drop-in again at
+        every start, so the settings go into a second one, which it leaves."""
+        host = self._rke2_host()
+        defaults = host.read(RKE2_DEFAULTS)
+
+        done, calls = host.run()
+
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(yaml.safe_load(host.read(RKE2_DROPIN)), {
+            "apiVersion": "kubelet.config.k8s.io/v1beta1",
+            "kind": "KubeletConfiguration",
+            "cpuManagerPolicy": "static",
+            "cpuManagerReconcilePeriod": "5s",
+            "topologyManagerPolicy": "single-numa-node",
+            "topologyManagerScope": "pod",
+            "reservedSystemCPUs": "0,8",
+        })
+        self.assertEqual(host.read(RKE2_DEFAULTS), defaults, "RKE2's own drop-in was edited")
+        self.assertEqual(sorted(os.listdir(host.path(RKE2_CONFIG_DIR))),
+                         ["00-rke2-defaults.conf", "99-simplyblock-cpu-topology.conf"],
+                         "the kubelet reads every file of the directory as configuration")
+        self.assertEqual(_restarts(calls), ["restart rke2-agent.service"])
+        self.assertFalse(os.path.exists(host.path("/var/lib/kubelet/cpu_manager_state")))
+        self.assertFalse(os.path.exists(host.path(KUBEADM_CONFIG)))
+        self.assertEqual(os.listdir(host.path("/etc/systemd/system")), [],
+                         "a systemd drop-in pointing the kubelet at a file it does not read was written")
+        self.assertTrue(os.path.exists(host.marker))
+
+    def test_a_single_reserved_cpu_stays_a_string_in_the_drop_in(self):
+        """reservedSystemCPUs is a string to the kubelet; an unquoted `0` is a
+        number in YAML, and the kubelet refuses the file."""
+        host = self._rke2_host()
+        done, _ = host.run(reserved="0")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(yaml.safe_load(host.read(RKE2_DROPIN))["reservedSystemCPUs"], "0")
+
+    def test_an_rke2_kubelet_that_does_not_come_back_loses_the_drop_in(self):
+        host = self._rke2_host(comes_back=False)
+
+        done, calls = host.run()
+
+        self.assertNotEqual(done.returncode, 0)
+        self.assertEqual(os.listdir(host.path(RKE2_CONFIG_DIR)), ["00-rke2-defaults.conf"])
+        self.assertEqual(_restarts(calls), ["restart rke2-agent.service"] * 2)
+        self.assertFalse(os.path.exists(host.marker))
 
     def test_a_kubelet_that_does_not_come_back_gets_its_configuration_back(self):
         """A configuration the kubelet refuses takes the node out of the
