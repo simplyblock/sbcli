@@ -8,6 +8,7 @@ dynamic = ["version"]
 dependencies = [
     "foundationdb==7.3.63",
     "hvac",
+    "pykmip>=0.11",
     "requests>=2.33.0",
     "prettytable>=3.10.0",
     "docker",
@@ -58,6 +59,7 @@ aws-ebs = "simplyblock_core.array.aws_ebs:AwsEbsPlugin"
 [dependency-groups]
 test = [
     "mock",
+    "cryptography",  # tests/integration/kms/conftest.py: throwaway PyKMIP test cert
     "httpx",  # fastapi.testclient
     "pytest>=9.0.3",
     "pytest-randomly",  # per-run seed + per-test reseed; see tests/AGENTS.md
@@ -150,12 +152,29 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-# TID251 is flake8-tidy-imports.banned-api, configured below. Test code only —
-# production code may seed the global RNG.
-"!tests/**" = ["TID251"]
 "e2e/**" = ["C401", "C408", "C414"]
 
 [tool.ruff.lint.flake8-tidy-imports.banned-api]
+# Applies everywhere (no per-file-ignore): unlike random.seed below, a stray
+# md5 call is a liability in production code and e2e/scripts alike, not just
+# tests. The one existing production use of random.seed silences this
+# call-by-call with `# noqa: TID251` instead of a path-wide ignore, so a
+# second banned symbol doesn't have to inherit that scope.
+#
+# Mirrors the `.grype.yaml` ignore for CVE-2026-119170: that entry is a
+# temporary exception for existing sha1/sha256 use (upstream hasn't shipped
+# the FIPS fix yet); this rule is the permanent guard against ever adding a
+# new md5 call that the same regression would silently mishandle under FIPS.
+# Keep both in sync -- if CVE-2026-119170 is ever fixed upstream and the
+# grype ignore is dropped, this ban can stay (or be relaxed to require
+# usedforsecurity=False, which banned-api cannot express).
+"hashlib.md5".msg = "md5 is banned -- CVE-2026-119170 (see .grype.yaml) means the pinned CPython's FIPS enforcement for it is currently broken. Switch to hashlib.sha256 (and, if comparing against an external tool's output, that tool's sha256 equivalent -- banned-api forbids the symbol outright, so usedforsecurity=False does not clear this rule)."
+
+# Seeding the global RNG breaks seed replay for every later test —
+# pytest-randomly seeds it per test. See tests/AGENTS.md § Randomness and
+# seeds. Production code may still seed it deliberately (e.g. a
+# reproducible load-test run); the one such call site silences this with
+# `# noqa: TID251` rather than a path-wide ignore.
 "random.seed".msg = "Seeding the global RNG breaks seed replay for every later test — pytest-randomly seeds it per test. See tests/AGENTS.md § Randomness and seeds."
 
 [tool.ruff.lint.flake8-comprehensions]

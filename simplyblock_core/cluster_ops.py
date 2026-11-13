@@ -22,7 +22,7 @@ import requests
 import yaml
 from docker.errors import DockerException
 from kubernetes import client as k8s_client
-from pydantic import SecretStr
+from pydantic import SecretStr, TypeAdapter
 from tenacity import (
     Retrying,
     before_sleep_log,
@@ -67,12 +67,12 @@ from simplyblock_core.exceptions import (
     SyncReplicationSiteError,
     reject_on_sync_replication,
 )
+from simplyblock_core.kms import KMSSettings
 from simplyblock_core.models import indices
 from simplyblock_core.models.backup_config import UnresolvedBackupConfig
 from simplyblock_core.models.cluster import (
     Cluster,
     DeployConfig,
-    HashicorpVaultSettings,
 )
 from simplyblock_core.models.events import EventObj
 from simplyblock_core.models.job_schedule import JobSchedule
@@ -480,7 +480,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    tls_secret, ingress_host_source, dns_name, fabric, is_single_node, client_data_nic,
                    nvmeof_tls_config=None, max_fault_tolerance=1, backup_config=None,
                    nvmf_base_port=4420, rpc_base_port=8080, snode_api_port=50001, container_image_prefix=None,
-                   hashicorp_vault_settings : HashicorpVaultSettings | None = None,
+                   kms_settings : t.Mapping[str, t.Any] | None = None,
                    enable_failure_domain=False,
                    lvol_geometry_enabled=True,
                    device_mode=constants.DEVICE_MODE_NVME,
@@ -514,8 +514,12 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         if distr_npcs < 2 and not multi_attach:
             raise ValueError("max_fault_tolerance > 1 requires distr_npcs >= 2")
 
-    if (hashicorp_vault_settings is not None) and (Settings().tls_connect != "authenticated"):
-        raise ValueError("External KMS requires mTLS authentication to be used")
+    if kms_settings is not None:
+        # Reject a configuration no backend could act on before installing
+        # anything, rather than at the set_kms_settings below.
+        TypeAdapter(KMSSettings).validate_python(kms_settings)
+        if Settings().tls_connect != "authenticated":
+            raise ValueError("External KMS requires mTLS authentication to be used")
 
     if ingress_host_source == "dns" or ingress_host_source == "loadbalancer":
         if not dns_name:
@@ -674,7 +678,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.rpc_base_port = rpc_base_port
     cluster.snode_api_port = snode_api_port
     cluster.container_image_prefix = container_image_prefix or ""
-    cluster.hashicorp_vault_settings = hashicorp_vault_settings
+    cluster.set_kms_settings(kms_settings)
     cluster.backup_local_path = os.path.join(constants.KVD_DB_BACKUP_PATH, cluster.uuid)
     cluster.cluster_vip = cluster_vip or ""
     if nvmeof_tls_config:
@@ -793,7 +797,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
                 max_subsys=0, hugepages_mem=0, spdk_vcpu_count=0,
                 client_data_nic="", max_fault_tolerance=1, backup_config=None,
                 nvmf_base_port=4420, rpc_base_port=8080, snode_api_port=50001,
-                hashicorp_vault_settings : HashicorpVaultSettings | None = None,
+                kms_settings : t.Mapping[str, t.Any] | None = None,
                 enable_failure_domain=False,
                 lvol_geometry_enabled=True,
                 device_mode=constants.DEVICE_MODE_NVME,
@@ -835,7 +839,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
         cr_name=cr_name, cr_namespace=cr_namespace, cr_plural=cr_plural, fabric=fabric,
         client_data_nic=client_data_nic, max_fault_tolerance=max_fault_tolerance, backup_config=backup_config,
         nvmf_base_port=nvmf_base_port, rpc_base_port=rpc_base_port, snode_api_port=snode_api_port,
-        hashicorp_vault_settings=hashicorp_vault_settings, enable_failure_domain=enable_failure_domain,
+        kms_settings=kms_settings, enable_failure_domain=enable_failure_domain,
         lvol_geometry_enabled=lvol_geometry_enabled,
         device_mode=device_mode,
         inline_checksum=inline_checksum,
@@ -875,7 +879,7 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
                 max_subsys=0, hugepages_mem=0, spdk_vcpu_count=0,
                 client_data_nic="", max_fault_tolerance=1, backup_config=None,
                 nvmf_base_port=4420, rpc_base_port=8080, snode_api_port=50001,
-                hashicorp_vault_settings : HashicorpVaultSettings | None = None,
+                kms_settings : t.Mapping[str, t.Any] | None = None,
                 enable_failure_domain=False,
                 lvol_geometry_enabled=True,
                 device_mode=constants.DEVICE_MODE_NVME,
@@ -918,8 +922,12 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
         if distr_npcs < 2 and not multi_attach:
             raise ValueError("max_fault_tolerance > 1 requires distr_npcs >= 2")
 
-    if (hashicorp_vault_settings is not None) and (Settings().tls_connect != "authenticated"):
-        raise ValueError("External KMS requires mTLS authentication to be used")
+    if kms_settings is not None:
+        # Reject a configuration no backend could act on before installing
+        # anything, rather than at the set_kms_settings below.
+        TypeAdapter(KMSSettings).validate_python(kms_settings)
+        if Settings().tls_connect != "authenticated":
+            raise ValueError("External KMS requires mTLS authentication to be used")
 
     logger.info("Adding new cluster")
     cluster = Cluster()
@@ -1045,7 +1053,7 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
     cluster.nvmf_base_port = nvmf_base_port
     cluster.rpc_base_port = rpc_base_port
     cluster.snode_api_port = snode_api_port
-    cluster.hashicorp_vault_settings = hashicorp_vault_settings
+    cluster.set_kms_settings(kms_settings)
     if backup_config:
         cluster.set_backup_config(backup_config)
 

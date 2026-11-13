@@ -171,7 +171,7 @@ class TestLocalKmsSecrets(unittest.TestCase):
 
     def _kms(self):
         kv = FakeKV()
-        with patch("simplyblock_core.kms._fdb.DBController") as dbc:
+        with patch("simplyblock_core.db_controller.DBController") as dbc:
             dbc.return_value.kv_store = kv
             return LocalKMS(MagicMock()), kv
 

@@ -2,14 +2,23 @@ import os.path
 from collections.abc import Mapping
 from typing import Any, ClassVar
 
-from pydantic import SecretStr
+from pydantic import SecretStr, TypeAdapter
 
 from simplyblock_core import constants
+from simplyblock_core.kms import KMSSettings
 from simplyblock_core.models.backup_config import BackupConfig
 from simplyblock_core.models.base_model import BaseModel, default_factory
 
+_KMS_SETTINGS_ADAPTER: TypeAdapter[Any] = TypeAdapter(KMSSettings)
+
 
 class HashicorpVaultSettings(BaseModel):
+    """Superseded by ``Cluster.kms_settings`` (a validated ``KMSSettings``
+    union, see ``simplyblock_core.kms``). Kept only so a record written before
+    that change still loads: ``Cluster.get_kms_settings`` falls back to this
+    field until ``kms_settings_migration`` (``release_upgrades/``) rewrites the
+    record on that cluster's next ``cluster upgrade-complete``. Nothing writes
+    to this field any more."""
     base_url: str = ""
     transit_mount: str = "simplyblock/transit"
     kv_mount: str = "simplyblock/kv"
@@ -421,6 +430,12 @@ class Cluster(BaseModel):
     rpc_base_port: int = 8080
     snode_api_port: int = 50001
     container_image_prefix: str = ""
+    # Validated via get_kms_settings()/set_kms_settings() into a KMSSettings
+    # union (simplyblock_core.kms) -- stays an untyped dict on the record for
+    # the same reason backup_config does: BaseModel cannot nest a pydantic
+    # union, so validating on read/write gives the typing without an FDB
+    # migration for every create/update. Empty dict = no external KMS (LocalKMS).
+    kms_settings: dict = default_factory(dict)
     hashicorp_vault_settings: HashicorpVaultSettings | None = None
 
     # Single-node-expansion resumability cursor. Empty dict means no expansion
@@ -518,6 +533,63 @@ class Cluster(BaseModel):
         """
         self._resolve_backup_config(config)
         self.backup_config = dict(config)
+
+    def _resolve_kms_settings(self, config: Mapping[str, Any]):
+        if "provider" not in config and "base_url" in config:
+            # The flat shape HashicorpVaultSettings used before kms_settings
+            # existed, with no discriminator -- legacy cluster records (and
+            # anything still posting the old hashicorp_vault_settings shape)
+            # carry this.
+            config = {"provider": "vault", **config}
+        return _KMS_SETTINGS_ADAPTER.validate_python(config)
+
+    def get_kms_settings(self):
+        """Validate and return this cluster's KMS configuration, or ``None``
+        for the default (``LocalKMS``, keys held in FoundationDB).
+
+        ``kms_settings`` stays an untyped dict on the record for the same
+        reason ``backup_config`` does (see ``get_backup_config``); validating
+        on read gives the typing without an FDB migration for every write.
+        A cluster written before this field existed has no ``kms_settings``
+        but may have the legacy ``hashicorp_vault_settings`` field populated
+        -- read from there until ``kms_settings_migration``
+        (``release_upgrades/``) rewrites the record on this cluster's next
+        ``cluster upgrade-complete``.
+
+        Raises:
+            ValueError: The stored configuration is not valid. ``ValidationError``
+                is a ``ValueError``, so one except clause covers both.
+        """
+        if self.kms_settings:
+            return self._resolve_kms_settings(self.kms_settings)
+        if self.hashicorp_vault_settings is not None:
+            legacy = self.hashicorp_vault_settings
+            # Not legacy.to_dict(): HashicorpVaultSettings is a BaseModel
+            # subclass, so that also carries id/uuid/name/status/... from the
+            # base class, which KMSSettings' extra="forbid" would then reject.
+            return self._resolve_kms_settings({
+                "base_url": legacy.base_url,
+                "transit_mount": legacy.transit_mount,
+                "kv_mount": legacy.kv_mount,
+                "cert_role": legacy.cert_role,
+            })
+        return None
+
+    def set_kms_settings(self, config: Mapping[str, Any] | None) -> None:
+        """Validate a raw KMS configuration and store it on this record.
+
+        The only way to put a KMS configuration on a cluster going forward --
+        nothing writes to the legacy ``hashicorp_vault_settings`` field any
+        more. ``config=None`` clears it back to the default (``LocalKMS``).
+
+        Raises:
+            ValueError: The configuration does not match any known KMS provider.
+        """
+        if not config:
+            self.kms_settings = {}
+            return
+        self._resolve_kms_settings(config)
+        self.kms_settings = dict(config)
 
     def get_backup_path(self, path=""):
         if self.backup_s3_bucket and self.backup_s3_cred:
