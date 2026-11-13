@@ -567,16 +567,28 @@ echo "=== Phase 11: Cleanup stale CSI hostpath data ==="
 if [ "$IS_TALOS" = "true" ]; then
   echo "  Talos cluster detected — skipping CSI hostpath cleanup (immutable OS)"
 else
+  # Capped and parallel, for the same reason as phase 9 above. A node that
+  # cannot start a pod -- CRI-O wedged on containers whose processes sit in
+  # uninterruptible sleep against a dead NFS server, say -- never admits the
+  # debug pod, and `oc debug` then waits out its own 15 minute internal
+  # timeout. Serial and uncapped that is 15 minutes per node: six wedged
+  # workers cost 90 minutes, and the run still dies later in a bring-up step
+  # with its real cause 90 minutes upstream of the error. Capped and parallel
+  # it costs 90 seconds, and this pass is best-effort either way.
   for NODE in "${NODES[@]}"; do
-    echo "  Cleaning CSI hostpath data on $NODE..."
-    if [[ "$CLUSTER_ENV" == *"openshift"* ]]; then
-      oc debug node/"$NODE" -- chroot /host bash -c \
-        "find /var/lib/csi-hostpath-data -mindepth 1 -maxdepth 1 -type d -mtime +2 -exec rm -rf {} \;" 2>/dev/null || true
-    else
-      kubectl debug node/"$NODE" -q --image=busybox:latest -- chroot /host sh -c \
-        "find /var/lib/csi-hostpath-data -mindepth 1 -maxdepth 1 -type d -mtime +2 -exec rm -rf {} \;" 2>/dev/null || true
-    fi
+    (
+      echo "  Cleaning CSI hostpath data on $NODE..."
+      if [[ "$CLUSTER_ENV" == *"openshift"* ]]; then
+        timeout 90 oc debug node/"$NODE" -- chroot /host bash -c \
+          "find /var/lib/csi-hostpath-data -mindepth 1 -maxdepth 1 -type d -mtime +2 -exec rm -rf {} \;" 2>/dev/null || true
+      else
+        timeout 90 kubectl debug node/"$NODE" -q --image=busybox:latest -- chroot /host sh -c \
+          "find /var/lib/csi-hostpath-data -mindepth 1 -maxdepth 1 -type d -mtime +2 -exec rm -rf {} \;" 2>/dev/null || true
+      fi
+      echo "  Done: $NODE"
+    ) &
   done
+  wait
 fi
 
 echo "  Phase 11 complete."
