@@ -9,6 +9,8 @@ the ``cluster_id/uuid`` composite id.
 import datetime
 from typing import ClassVar
 
+from pydantic import SecretStr
+
 from simplyblock_core.models.base_model import BaseModel, default_factory
 from simplyblock_core.models.indices import Index, Unique
 
@@ -42,9 +44,21 @@ class ReplicationTarget(BaseModel):
     target_pool_uuid: str = ""
     timeout_sec: int = 60 * 10
     status: str = STATUS_ACTIVE
+    # Set when target_cluster_id is managed by ANOTHER control plane (the
+    # control-plane split): the root URL of that control plane's API, the bearer
+    # credential it accepts for target_cluster_id, and the PEM CA bundle that
+    # signs its certificate (empty: the system trust store). All empty means the
+    # target cluster lives in this control plane's own database, as before.
+    peer_endpoint: str = ""
+    peer_secret: SecretStr = SecretStr("")
+    peer_ca_cert: str = ""
 
     def get_id(self):
         return "%s/%s" % (self.cluster_id, self.uuid)
+
+    def has_peer(self) -> bool:
+        """Whether the target cluster is reached through a peer control plane."""
+        return bool(self.peer_endpoint)
 
     def write_to_db(self, kv_store=None):
         self.updated_at = str(datetime.datetime.now(datetime.UTC))
