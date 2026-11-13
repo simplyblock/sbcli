@@ -317,7 +317,7 @@ def get_block_devices_info() -> list[dict]:
 
     logger.debug("function:get_block_devices_info start")
     out, err, rc = shell_utils.run_command(
-        "lsblk -J -b -o NAME,TYPE,SIZE,SERIAL,WWN,MOUNTPOINT,MODEL,ROTA,RO,VENDOR,PKNAME,PARTUUID")
+        "lsblk -J -b -o NAME,KNAME,TYPE,SIZE,SERIAL,WWN,MOUNTPOINT,MODEL,ROTA,RO,VENDOR,PKNAME,PARTUUID")
     if rc != 0:
         logger.error("Error running lsblk: %s", err)
         return []
@@ -356,6 +356,10 @@ def get_block_devices_info() -> list[dict]:
         physical_bs = _physical_block_size(name)
         devices.append({
             "name": name,
+            # Kernel name (dm-N for a device-mapper node, whose NAME is the
+            # map name) and TYPE: the control plane serves device-mapper
+            # nodes through bdev_uring (utils.lblk_io_engine_for).
+            "kname": dev.get("kname") or name,
             "device_path": f"/dev/{name}",
             "type": dev.get("type"),
             "size": int(dev.get("size") or 0),
@@ -391,6 +395,7 @@ def get_block_devices_info() -> list[dict]:
                 part_synthetic = True
             devices.append({
                 "name": part_name,
+                "kname": child.get("kname") or part_name,
                 "device_path": f"/dev/{part_name}",
                 "type": "part",
                 "size": int(child.get("size") or 0),

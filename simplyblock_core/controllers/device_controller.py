@@ -804,10 +804,12 @@ def restart_device(device_id, force=False):
         if not snode.rpc_client().bdev_get(device_obj.nvme_bdev):
             try:
                 filename = device_obj.by_id_path or device_obj.device_path
+                live = None
                 try:
                     inventory, _ = snode.client(timeout=30, retry=1).get_blockdevices()
                     for blk in inventory or []:
                         if blk.get("serial") == device_obj.serial_number:
+                            live = blk
                             filename = blk.get("by_id_path") or blk.get("device_path")
                             device_obj.device_path = blk.get("device_path", device_obj.device_path)
                             device_obj.by_id_path = blk.get("by_id_path", device_obj.by_id_path)
@@ -821,8 +823,12 @@ def restart_device(device_id, force=False):
                 block_size = (device_obj.aio_block_size
                               or utils.recorded_aio_block_size(snode, device_obj.serial_number)
                               or 0)
+                # aio, or uring for a device-mapper node.
+                device_obj.lblk_io_engine = utils.lblk_io_engine_of_device(
+                    snode, device_obj, live, filename)
                 utils.create_aio_bdev(snode.rpc_client(), device_obj.nvme_bdev,
-                                      filename, block_size)
+                                      filename, block_size,
+                                      io_engine=device_obj.lblk_io_engine)
                 snode.rpc_client().bdev_examine(device_obj.nvme_bdev)
                 snode.rpc_client().bdev_wait_for_examine()
                 snode.rpc_client().bdev_set_qd_sampling_period(
@@ -1649,10 +1655,12 @@ def new_device_from_failed(device_id):
         if not device_node.rpc_client().bdev_get(device.nvme_bdev):
             try:
                 filename = device.by_id_path or device.device_path
+                live = None
                 try:
                     inventory, _ = device_node.client(timeout=30, retry=1).get_blockdevices()
                     for blk in inventory or []:
                         if blk.get("serial") == device.serial_number:
+                            live = blk
                             filename = blk.get("by_id_path") or blk.get("device_path")
                             break
                 except Exception as e:
@@ -1664,8 +1672,13 @@ def new_device_from_failed(device_id):
                 block_size = (device.aio_block_size
                               or utils.recorded_aio_block_size(device_node, device.serial_number)
                               or 0)
+                # aio, or uring for a device-mapper node; the new device
+                # record below copies it.
+                device.lblk_io_engine = utils.lblk_io_engine_of_device(
+                    device_node, device, live, filename)
                 utils.create_aio_bdev(device_node.rpc_client(), device.nvme_bdev,
-                                      filename, block_size)
+                                      filename, block_size,
+                                      io_engine=device.lblk_io_engine)
                 device_node.rpc_client().bdev_examine(device.nvme_bdev)
                 device_node.rpc_client().bdev_wait_for_examine()
                 device_node.rpc_client().bdev_set_qd_sampling_period(
@@ -2051,9 +2064,11 @@ def _resize_failed(device_id, dev, msg, set_unavailable):
 
 def _reopen_alceml(snode, dev):
     """Let alceml reopen its AIO bdev at the size the block device has now:
-    resize_begin -> bdev_aio_rescan -> resize_end. Raises ValueError."""
+    resize_begin -> bdev_aio_rescan (bdev_uring_rescan for a uring device)
+    -> resize_end. Raises ValueError."""
     device_id = dev.get_id()
     rpc_client = snode.rpc_client()
+    io_engine = utils.lblk_io_engine_of_device(snode, dev)
     try:
         rpc_client.alceml_bdev_backend_resize_begin(
             dev.alceml_bdev, request_timeout=RESIZE_RPC_TIMEOUT_SEC)
@@ -2064,14 +2079,14 @@ def _reopen_alceml(snode, dev):
 
     rescan_error = None
     try:
-        rpc_client.bdev_aio_rescan(dev.nvme_bdev)
+        utils.rescan_lblk_bdev(rpc_client, dev.nvme_bdev, io_engine)
     except RPCException as e:
         rescan_error = e
 
     if not _reopen_after_resize(rpc_client, dev):
         raise _resize_failed(device_id, dev, "alceml resize_end failed", True)
     if rescan_error is not None:
-        raise _resize_failed(device_id, dev, f"AIO rescan failed: {rescan_error}", False)
+        raise _resize_failed(device_id, dev, f"{io_engine} rescan failed: {rescan_error}", False)
 
 
 def _growth_result(grown, factor, devices, errors, reason, shrunk=()):

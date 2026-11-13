@@ -122,6 +122,13 @@ class NVMeDevice(BaseModel):
     # Also kept in the node's ``lblk_devices`` entries (see
     # utils.recorded_aio_block_size).
     aio_block_size: int = 0
+    # I/O engine of the base bdev of an lblk device: "aio" (bdev_aio) or
+    # "uring" (bdev_uring, for device-mapper nodes such as multipath maps,
+    # which refuse the RWF_NOWAIT submits of bdev_aio). Only the
+    # create/delete/rescan RPCs differ; the bdev name and bdev_type "aio"
+    # are the same. Does not change the on-disk format. Also kept in the
+    # node's ``lblk_devices`` entries (see utils.recorded_lblk_io_engine).
+    lblk_io_engine: str = "aio"
     # The latest disk-health assessment an external assessor (the Kubernetes
     # operator) recorded through PUT .../devices/{id}/health-assessment,
     # stored verbatim: {"reporter", "reported_at", "valid_seconds",

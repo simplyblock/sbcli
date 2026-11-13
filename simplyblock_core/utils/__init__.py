@@ -1617,6 +1617,18 @@ def resolve_lblk_entries(configured_entries, host_devices):
         # very same device: a different device in the same slot is new.
         if entry.get("aio_block_size") and resolved_entry["serial"] == entry.get("serial"):
             resolved_entry["aio_block_size"] = int(entry["aio_block_size"])
+        # I/O engine inputs: the kernel name and lsblk type (an agent that
+        # predates them sends neither; a /dev/mapper/ or /dev/dm- path still
+        # shows a device-mapper node), the engine the rule gives, and the
+        # engine recorded on the config entry for the very same device.
+        if live.get("kname"):
+            resolved_entry["kname"] = live["kname"]
+        if live.get("type"):
+            resolved_entry["dev_type"] = live["type"]
+        resolved_entry["io_engine"] = lblk_io_engine_for(resolved_entry)
+        if (entry.get("lblk_io_engine") in constants.LBLK_IO_ENGINES
+                and resolved_entry["serial"] == entry.get("serial")):
+            resolved_entry["lblk_io_engine"] = entry["lblk_io_engine"]
         resolved.append(resolved_entry)
     return resolved, missing
 
@@ -1716,28 +1728,182 @@ def check_aio_block_size(name, bdev, block_size):
                         f"{block_size}; refusing to use it as storage")
 
 
+_DM_PATH_PREFIXES = ("/dev/dm-", "/dev/mapper/")
+_DM_BY_ID_PREFIXES = ("dm-name-", "dm-uuid-")
+
+
+def _is_dm_path(path) -> bool:
+    """A device path that names a device-mapper node: /dev/dm-N,
+    /dev/mapper/<map>, or a /dev/disk/by-id/dm-name-* / dm-uuid-* link."""
+    if not isinstance(path, str) or not path:
+        return False
+    if path.startswith(_DM_PATH_PREFIXES):
+        return True
+    return (path.startswith("/dev/disk/by-id/")
+            and path.rsplit("/", 1)[-1].startswith(_DM_BY_ID_PREFIXES))
+
+
+def lblk_io_engine_for(dev) -> str:
+    """The I/O engine the rule gives a block device (inventory dict,
+    resolved entry, or a dict of paths): "uring" for a device-mapper node,
+    "aio" for everything else (see constants.LBLK_IO_ENGINE_URING).
+
+    A device-mapper node is one whose kernel name starts with "dm-" (this
+    includes a partition kpartx mapped from a multipath map), whose lsblk
+    TYPE is one of LBLK_DM_TYPES, or, for an agent that predates ``kname``
+    and the type, whose path is /dev/dm-*, /dev/mapper/* or a by-id
+    dm-name-* / dm-uuid-* link. Whole disks, sd*/nvme* partitions and md
+    arrays stay on aio: md honours RWF_NOWAIT (EAGAIN is retried by SPDK)."""
+    if not isinstance(dev, dict):
+        return constants.LBLK_IO_ENGINE_AIO
+    for key in ("kname", "name"):
+        if str(dev.get(key) or "").startswith("dm-"):
+            return constants.LBLK_IO_ENGINE_URING
+    for key in ("dev_type", "type"):
+        if dev.get(key) in constants.LBLK_DM_TYPES:
+            return constants.LBLK_IO_ENGINE_URING
+    for key in ("path", "filename", "device_path", "current_path", "by_id", "by_id_path"):
+        if _is_dm_path(dev.get(key)):
+            return constants.LBLK_IO_ENGINE_URING
+    return constants.LBLK_IO_ENGINE_AIO
+
+
+def recorded_lblk_io_engine(snode, serial):
+    """The I/O engine recorded for the device with this serial: its
+    NVMeDevice record, the node's journal device record and the node's
+    ``lblk_devices`` entry (see recorded_aio_block_size for why all three).
+    "uring" when any of them says so (a device is never moved back from
+    uring implicitly), "aio" when it is recorded otherwise, None when nothing
+    is recorded."""
+    engines = []
+    devices = getattr(snode, "nvme_devices", None)
+    for dev in devices if isinstance(devices, list) else []:
+        if getattr(dev, "serial_number", None) == serial:
+            engines.append(getattr(dev, "lblk_io_engine", None))
+    jm = getattr(snode, "jm_device", None)
+    if jm is not None:
+        data = getattr(jm, "device_data_dict", None)
+        data = data if isinstance(data, dict) else {}
+        if data.get("serial_number") == serial or getattr(jm, "serial_number", None) == serial:
+            engines.append(data.get("lblk_io_engine"))
+            engines.append(getattr(jm, "lblk_io_engine", None))
+    entries = getattr(snode, "lblk_devices", None)
+    for entry in entries if isinstance(entries, list) else []:
+        if isinstance(entry, dict) and entry.get("serial") == serial:
+            engines.append(entry.get("lblk_io_engine"))
+    engines = [e for e in engines if e in constants.LBLK_IO_ENGINES]
+    if constants.LBLK_IO_ENGINE_URING in engines:
+        return constants.LBLK_IO_ENGINE_URING
+    return constants.LBLK_IO_ENGINE_AIO if engines else None
+
+
+def choose_lblk_io_engine(recorded, derived, what="") -> str:
+    """The engine to create a device's base bdev with, from the recorded
+    engine (None: nothing recorded) and the one the rule gives now
+    (lblk_io_engine_for). The engine does not change the on-disk format, so
+    it may be re-derived; the recorded one is kept, except that the rule's
+    uring wins over a recorded aio: bdev_aio cannot serve a device-mapper
+    node at all (e.g. a device recorded before the engine existed)."""
+    if derived == constants.LBLK_IO_ENGINE_URING:
+        if recorded == constants.LBLK_IO_ENGINE_AIO:
+            logger.warning(f"{what}: recorded I/O engine is aio, but the device is a "
+                           f"device-mapper node, which bdev_aio cannot serve; using uring")
+        return constants.LBLK_IO_ENGINE_URING
+    if recorded == constants.LBLK_IO_ENGINE_URING:
+        return constants.LBLK_IO_ENGINE_URING
+    return constants.LBLK_IO_ENGINE_AIO
+
+
+def lblk_io_engine_of_device(snode, dev, live=None, filename=None) -> str:
+    """The engine for (re-)creating the base bdev of an existing lblk device
+    record ``dev``: its recorded engine (the record itself, the journal
+    record, the node's config entry), with the rule applied to the live
+    inventory dict ``live`` (if any), the ``filename`` the bdev is opened on
+    and the stored paths."""
+    serial = getattr(dev, "serial_number", None)
+    engines = [recorded_lblk_io_engine(snode, serial), getattr(dev, "lblk_io_engine", None)]
+    engines = [e for e in engines if e in constants.LBLK_IO_ENGINES]
+    recorded = None
+    if engines:
+        recorded = (constants.LBLK_IO_ENGINE_URING
+                    if constants.LBLK_IO_ENGINE_URING in engines
+                    else constants.LBLK_IO_ENGINE_AIO)
+    probe = {"device_path": getattr(dev, "device_path", "") or "",
+             "by_id_path": getattr(dev, "by_id_path", "") or ""}
+    if isinstance(live, dict):
+        probe.update(live)
+    probe["filename"] = filename or ""
+    return choose_lblk_io_engine(recorded, lblk_io_engine_for(probe),
+                                 what=f"Device {serial}")
+
+
+def remember_lblk_io_engine(snode, serial, io_engine):
+    """Store a device's I/O engine on the node's ``lblk_devices`` entry, next
+    to NVMeDevice.lblk_io_engine (see recorded_lblk_io_engine)."""
+    entries = getattr(snode, "lblk_devices", None)
+    if io_engine not in constants.LBLK_IO_ENGINES or not isinstance(entries, list):
+        return
+    for entry in entries:
+        if isinstance(entry, dict) and entry.get("serial") == serial:
+            entry["lblk_io_engine"] = io_engine
+
+
+def bdev_io_engine(bdev):
+    """The engine of a live bdev (a bdev_get result) by its driver-specific
+    info: "aio", "uring", or None when it does not say."""
+    driver = bdev.get("driver_specific") if isinstance(bdev, dict) else None
+    if isinstance(driver, dict):
+        for engine in (constants.LBLK_IO_ENGINE_URING, constants.LBLK_IO_ENGINE_AIO):
+            if engine in driver:
+                return engine
+    return None
+
+
+def _lblk_bdev_rpc(rpc_client, io_engine, op):
+    """The bdev_aio_<op> or bdev_uring_<op> method of ``rpc_client``."""
+    if io_engine == constants.LBLK_IO_ENGINE_URING:
+        return getattr(rpc_client, f"bdev_uring_{op}"), f"bdev_uring_{op}"
+    return getattr(rpc_client, f"bdev_aio_{op}"), f"bdev_aio_{op}"
+
+
+def delete_lblk_bdev(rpc_client, name, io_engine=constants.LBLK_IO_ENGINE_AIO):
+    """bdev_aio_delete or bdev_uring_delete, by the device's I/O engine."""
+    delete, _ = _lblk_bdev_rpc(rpc_client, io_engine, "delete")
+    return delete(name)
+
+
+def rescan_lblk_bdev(rpc_client, name, io_engine=constants.LBLK_IO_ENGINE_AIO):
+    """bdev_aio_rescan or bdev_uring_rescan (re-read the size of the block
+    device), by the device's I/O engine."""
+    rescan, _ = _lblk_bdev_rpc(rpc_client, io_engine, "rescan")
+    return rescan(name)
+
+
 def create_aio_bdev(rpc_client, name, filename, block_size=0, new_device=False,
-                    verify=True):
-    """bdev_aio_create with ``block_size`` (0: none, SPDK uses the logical
-    block size), then (``verify``) check that the bdev has that block size;
-    a caller that reads the bdev anyway passes verify=False and runs
-    check_aio_block_size itself. Returns the block size requested. Raises
-    when the bdev cannot be created or its block size differs from the one
-    requested: building alceml over a bdev of another block size would make
-    the device's data unreadable. Only for a ``new_device`` (nothing
-    formatted on it yet) a refused block size is retried without one."""
+                    verify=True, io_engine=constants.LBLK_IO_ENGINE_AIO):
+    """Create the base bdev of an lblk device: bdev_aio_create, or for
+    ``io_engine`` "uring" bdev_uring_create (same arguments, same block-size
+    rules), with ``block_size`` (0: none, SPDK uses the logical block size),
+    then (``verify``) check that the bdev has that block size; a caller that
+    reads the bdev anyway passes verify=False and runs check_aio_block_size
+    itself. Returns the block size requested. Raises when the bdev cannot be
+    created or its block size differs from the one requested: building
+    alceml over a bdev of another block size would make the device's data
+    unreadable. Only for a ``new_device`` (nothing formatted on it yet) a
+    refused block size is retried without one."""
+    create, rpc_name = _lblk_bdev_rpc(rpc_client, io_engine, "create")
     if block_size:
-        ret = rpc_client.bdev_aio_create(name, filename, block_size=block_size)
+        ret = create(name, filename, block_size=block_size)
         if not ret and new_device:
-            logger.warning(f"bdev_aio_create {name} ({filename}) with block size "
+            logger.warning(f"{rpc_name} {name} ({filename}) with block size "
                            f"{block_size} failed on {rpc_client.host}; retrying with "
                            f"the device's logical block size")
             block_size = 0
-            ret = rpc_client.bdev_aio_create(name, filename)
+            ret = create(name, filename)
     else:
-        ret = rpc_client.bdev_aio_create(name, filename)
+        ret = create(name, filename)
     if not ret:
-        raise Exception(f"bdev_aio_create failed for {name} ({filename}) on {rpc_client.host}")
+        raise Exception(f"{rpc_name} failed for {name} ({filename}) on {rpc_client.host}")
     if verify:
         check_aio_block_size(name, rpc_client.bdev_get(name), block_size)
     return block_size
@@ -1758,6 +1924,14 @@ def addAioDevices(rpc_client, snode, blk_entries):
         recorded = recorded_aio_block_size(snode, entry["serial"])
         if recorded is None and entry.get("aio_block_size"):
             recorded = int(entry["aio_block_size"])
+        # The I/O engine: the recorded one, unless the rule says uring (a
+        # device-mapper node, which bdev_aio cannot serve).
+        recorded_engine = recorded_lblk_io_engine(snode, entry["serial"])
+        if recorded_engine is None and entry.get("lblk_io_engine") in constants.LBLK_IO_ENGINES:
+            recorded_engine = entry["lblk_io_engine"]
+        io_engine = choose_lblk_io_engine(
+            recorded_engine, entry.get("io_engine") or lblk_io_engine_for(entry),
+            what=f"Block device {entry.get('name')} ({bdev_name})")
         ret = rpc_client.bdev_get(bdev_name)
         if not ret:
             # A path the caller selected the device by is opened as given.
@@ -1767,12 +1941,20 @@ def addAioDevices(rpc_client, snode, blk_entries):
             if recorded is None:
                 expected = create_aio_bdev(rpc_client, bdev_name, filename,
                                            choose_aio_block_size(entry),
-                                           new_device=True, verify=False)
+                                           new_device=True, verify=False,
+                                           io_engine=io_engine)
             else:
                 expected = create_aio_bdev(rpc_client, bdev_name, filename,
-                                           recorded, verify=False)
+                                           recorded, verify=False,
+                                           io_engine=io_engine)
         else:
             expected = recorded
+            # A bdev that is still there is used as it is; record its engine.
+            live_engine = bdev_io_engine(ret)
+            if live_engine and live_engine != io_engine:
+                logger.warning(f"Base bdev {bdev_name} exists as a {live_engine} bdev, "
+                               f"expected {io_engine}; using it as it is")
+                io_engine = live_engine
         rpc_client.bdev_examine(bdev_name)
         rpc_client.bdev_wait_for_examine()
 
@@ -1787,6 +1969,7 @@ def addAioDevices(rpc_client, snode, blk_entries):
         # A new device is formatted at the block size its bdev has now.
         aio_block_size = int(bdev['block_size']) if recorded is None else recorded
         remember_aio_block_size(snode, entry["serial"], aio_block_size)
+        remember_lblk_io_engine(snode, entry["serial"], io_engine)
 
         # Queue-depth sampling feeds the control-plane hung-IO watchdog
         # (AIO has no bdev_nvme-style timeout/action_on_timeout).
@@ -1809,6 +1992,7 @@ def addAioDevices(rpc_client, snode, blk_entries):
                 'nvme_controller': "",
                 'bdev_type': "aio",
                 'aio_block_size': aio_block_size,
+                'lblk_io_engine': io_engine,
                 'device_path': entry["current_path"],
                 'by_id_path': entry.get("path") or entry.get("by_id", ""),
                 'node_id': snode.get_id(),
