@@ -1381,6 +1381,144 @@ def import_from_bucket(config: BackupConfig, cluster_id=None) -> int:
         cluster_id=cluster_id)
 
 
+#: Backup statuses whose manifest this function checks, and whose manifest
+#: --repair can re-derive from the record. MERGED and MERGING are excluded:
+#: the merge path does not mark a manifest state at all (it writes the
+#: survivor's and deletes the old one only once the merge itself is done),
+#: so neither a MERGED backup's manifest existing nor its absence is a
+#: reliable signal here -- that is a gap in the merge path itself, not one
+#: this check can resolve by rewriting anything.
+_MANIFEST_CHECKED_STATUSES = (Backup.STATUS_COMPLETED, Backup.STATUS_DELETING)
+
+
+def check_backups(cluster_id=None, repair=False) -> bool:
+    """Verify every backup's FDB record agrees with its S3 manifest, in both
+    directions, and report the drift. The backup analog of
+    ``cluster_ops.check_indices``.
+
+    For ``cluster_id`` (or every cluster with a usable backup configuration,
+    deployment-wide):
+
+    * every COMPLETED or DELETING backup must have a manifest, whose
+      ``state`` matches (ACTIVE for COMPLETED, DELETING for DELETING) and
+      whose ``s3_id``/``prev_backup_id`` agree with the record;
+    * every ACTIVE manifest the bucket holds must name a backup record that
+      still exists in some status -- one that does not is an orphan,
+      reported but never repaired: it may be a disaster-recovery backup
+      nothing has imported yet, which looks identical to genuine drift from
+      here, and there is no record to derive a fix from either way.
+
+    ``--repair`` rewrites a missing or disagreeing manifest from the record,
+    which is today's single source of truth: the project's own roadmap is to
+    make the bucket canonical instead (see ``controller.build_manifest``),
+    but that is not the status quo this function can assume.
+
+    Returns ``True`` if nothing is left unresolved.
+    """
+    clusters = (
+        [db_controller.get_cluster_by_id(cluster_id)]
+        if cluster_id else db_controller.get_clusters())
+
+    problems = 0
+    repaired = 0
+    orphans = 0
+
+    for cluster in clusters:
+        try:
+            config = cluster.get_backup_config()
+        except ValueError:
+            continue    # nothing of its own to check
+
+        all_backups = db_controller.get_backups(cluster.get_id())
+        known_s3_ids = set()
+        for backup in all_backups:
+            try:
+                if backup.get_location() == config.location():
+                    known_s3_ids.add(backup.s3_id)
+            except ValueError:
+                continue
+
+        for backup in all_backups:
+            if backup.status not in _MANIFEST_CHECKED_STATUSES:
+                continue
+            try:
+                if backup.get_location() != config.location():
+                    continue    # lives in a bucket this cluster does not own
+            except ValueError:
+                continue
+
+            expected_state = (backup_manifest.BackupManifestState.DELETING
+                              if backup.status == Backup.STATUS_DELETING
+                              else backup_manifest.BackupManifestState.ACTIVE)
+            manifest = backup_manifest.read_if_present(config, UUID(backup.uuid))
+
+            if manifest is None:
+                problems += 1
+                logger.error("Backup %s (%s) has no manifest in %s",
+                            backup.uuid, backup.status, config.bucket_name)
+                if repair:
+                    _rewrite_manifest_from_record(backup)
+                    repaired += 1
+                continue
+
+            disagreements = []
+            if manifest.state != expected_state:
+                disagreements.append(f"state={manifest.state}, expected {expected_state}")
+            if manifest.s3_id != backup.s3_id:
+                disagreements.append(f"s3_id={manifest.s3_id}, expected {backup.s3_id}")
+            manifest_prev = str(manifest.prev_backup_id) if manifest.prev_backup_id else ""
+            if manifest_prev != backup.prev_backup_id:
+                disagreements.append(
+                    f"prev_backup_id={manifest_prev or '(none)'}, "
+                    f"expected {backup.prev_backup_id or '(none)'}")
+            if not disagreements:
+                continue
+
+            problems += 1
+            logger.error("Backup %s manifest disagrees with its record: %s",
+                        backup.uuid, "; ".join(disagreements))
+            if repair:
+                _rewrite_manifest_from_record(backup)
+                repaired += 1
+
+        try:
+            manifests = discover_backups(config)
+        except backup_manifest.ManifestError as e:
+            problems += 1
+            logger.error("Could not list bucket %s for cluster %s: %s",
+                        config.bucket_name, cluster.get_id(), e)
+            continue
+
+        for manifest in manifests:
+            if manifest.state != backup_manifest.BackupManifestState.ACTIVE:
+                continue    # a delete's own manifest; may briefly outlive its record
+            if manifest.s3_id not in known_s3_ids:
+                orphans += 1
+                logger.error(
+                    "Manifest for backup %s (s3_id=%s) in %s names no known "
+                    "record in cluster %s", manifest.backup_id, manifest.s3_id,
+                    config.bucket_name, cluster.get_id())
+
+    logger.info("Backup check: %d problem(s), %d repaired, %d orphaned manifest(s) "
+                "(never auto-repaired)", problems, repaired, orphans)
+    if problems > repaired and not repair:
+        logger.error("Re-run with --repair to rewrite manifests from their records.")
+    return (problems - repaired) == 0 and orphans == 0
+
+
+def _rewrite_manifest_from_record(backup: Backup) -> None:
+    """Rewrite ``backup``'s manifest from its FDB record: ACTIVE, then
+    DELETING again if that is what the record says. Two steps because
+    ``write_manifest`` always writes ACTIVE (it is what a freshly completed
+    backup's manifest has never not been), and only a second, explicit mark
+    turns that into DELETING -- the same two calls ``_start_backup_delete``
+    itself would have made, in the same order.
+    """
+    write_manifest(backup)
+    if backup.status == Backup.STATUS_DELETING:
+        mark_manifest_deleting(backup)
+
+
 def trigger_merge(keep_backup, old_backup):
     """Merge ``old_backup`` into ``keep_backup``, its successor in one volume's
     chain: claim the chain, mark the old one merging, and queue the merge task.

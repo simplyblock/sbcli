@@ -743,6 +743,10 @@ class CLIWrapperBase:
     def cluster__check_indices(self, sub_command, args):
         return cluster_ops.check_indices(repair=args.repair)
 
+    def cluster__check_backups(self, sub_command, args):
+        return cluster_ops.check_backups(
+            cluster_id=getattr(args, 'cluster_id', None), repair=args.repair)
+
     def cluster__graceful_shutdown(self, sub_command, args):
         cluster_ops.cluster_grace_shutdown(args.cluster_id)
         return True

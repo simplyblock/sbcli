@@ -398,6 +398,7 @@ class CLIWrapper(CLIWrapperBase):
         self.init_cluster__build_indices(subparser)
         self.init_cluster__index_state(subparser)
         self.init_cluster__check_indices(subparser)
+        self.init_cluster__check_backups(subparser)
         self.init_cluster__graceful_shutdown(subparser)
         self.init_cluster__restart(subparser)
         self.init_cluster__graceful_startup(subparser)
@@ -639,6 +640,11 @@ class CLIWrapper(CLIWrapperBase):
     def init_cluster__check_indices(self, subparser):
         subcommand = self.add_sub_command(subparser, 'check-indices', 'Verifies the database\'s secondary indices.')
         subcommand.add_argument('--repair', help='Write back the entries that can be derived from the records, and clear orphaned ones, instead of only reporting them.', dest='repair', action='store_true')
+
+    def init_cluster__check_backups(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'check-backups', 'Verifies every backup\'s FDB record against its S3 manifest.')
+        subcommand.add_argument('--cluster-id', help='Limit the check to one cluster. Omit to check every cluster.', type=str, dest='cluster_id')
+        subcommand.add_argument('--repair', help='Rewrite manifests that are missing or disagree with their record, instead of only reporting them.', dest='repair', action='store_true')
 
     def init_cluster__graceful_shutdown(self, subparser):
         subcommand = self.add_sub_command(subparser, 'graceful-shutdown', 'Initiates a graceful shutdown of a cluster\'s storage nodes.')
@@ -1760,6 +1766,8 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.cluster__index_state(sub_command, args)
                 elif sub_command in ['check-indices']:
                     ret = self.cluster__check_indices(sub_command, args)
+                elif sub_command in ['check-backups']:
+                    ret = self.cluster__check_backups(sub_command, args)
                 elif sub_command in ['graceful-shutdown']:
                     ret = self.cluster__graceful_shutdown(sub_command, args)
                 elif sub_command in ['restart']:

@@ -452,7 +452,7 @@ def delete(config: BackupConfig, backup_id: UUID) -> None:
         raise ManifestError(f"Failed to delete manifest for backup {backup_id}") from e
 
 
-def _read_if_present(config: BackupConfig, backup_id: UUID) -> BackupManifest | None:
+def read_if_present(config: BackupConfig, backup_id: UUID) -> BackupManifest | None:
     """:func:`read`, but ``None`` for a manifest the bucket does not hold."""
     try:
         body = s3_client(config).get_object(
@@ -484,7 +484,7 @@ def mark_deleting(config: BackupConfig, backup_id: UUID) -> None:
     Raises:
         ManifestError: the manifest could not be read or rewritten.
     """
-    manifest = _read_if_present(config, backup_id)
+    manifest = read_if_present(config, backup_id)
     if manifest is not None and manifest.state != BackupManifestState.DELETING:
         write(config, manifest.model_copy(update={"state": BackupManifestState.DELETING}))
 
@@ -500,7 +500,7 @@ def mark_active(config: BackupConfig, backup_id: UUID) -> None:
     Raises:
         ManifestError: the manifest could not be read or rewritten.
     """
-    manifest = _read_if_present(config, backup_id)
+    manifest = read_if_present(config, backup_id)
     if manifest is not None and manifest.state != BackupManifestState.ACTIVE:
         write(config, manifest.model_copy(update={"state": BackupManifestState.ACTIVE}))
 

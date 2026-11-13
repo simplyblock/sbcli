@@ -44,6 +44,7 @@ from simplyblock_core.controllers import (
     tasks_controller,
     tcp_ports_events,
 )
+from simplyblock_core.controllers.backup import controller as backup_controller
 from simplyblock_core.controllers.backup import device as backup_device
 from simplyblock_core.controllers.cluster_expansion.planner import (
     RemoteTripletPlacementError,
@@ -4154,6 +4155,16 @@ def check_indices(repair=False) -> bool:
                      "both carry cannot be repaired by picking one of them.",
                      findings['unresolved'])
     return findings['unresolved'] == 0
+
+
+def check_backups(cluster_id=None, repair=False) -> bool:
+    """Verify every backup's FDB record agrees with its S3 manifest, in both
+    directions, and report the drift. The backup analog of
+    :func:`check_indices`.
+
+    Deployment-wide when ``cluster_id`` is omitted.
+    """
+    return backup_controller.check_backups(cluster_id=cluster_id, repair=repair)
 
 
 def cluster_grace_startup(cl_id, clear_data=False, spdk_image=None) -> None:

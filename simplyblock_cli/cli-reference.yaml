@@ -1728,6 +1728,25 @@ commands:
             dest: repair
             type: bool
             action: store_true
+      - name: check-backups
+        help: "Verifies every backup's FDB record against its S3 manifest."
+        usage: >
+          Checks, in both directions, that every COMPLETED or DELETING backup has a manifest whose state
+          and s3_id/prev_backup_id agree with the record, and that every ACTIVE manifest in the bucket
+          names a record that still exists. Read-only unless `--repair` is given, which rewrites a
+          missing or disagreeing manifest from the record (today's source of truth). An orphaned
+          manifest - one naming no known record - is never auto-repaired: it may be a disaster-recovery
+          backup nothing has imported yet. Deployment-wide unless --cluster-id is given.
+        arguments:
+          - name: "--cluster-id"
+            help: "Limit the check to one cluster. Omit to check every cluster."
+            dest: cluster_id
+            type: str
+          - name: "--repair"
+            help: "Rewrite manifests that are missing or disagree with their record, instead of only reporting them."
+            dest: repair
+            type: bool
+            action: store_true
       - name: graceful-shutdown
         help: "Initiates a graceful shutdown of a cluster's storage nodes."
         arguments:
