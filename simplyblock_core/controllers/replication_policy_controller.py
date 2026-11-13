@@ -1171,7 +1171,13 @@ def failover_replicated_group(cluster_id, group_id):
         raise ValueError(f"group id {group_id!r} must be <source cluster>/<group>")
     group = ConsistencyGroup()
     group.uuid, group.cluster_id, group.group_name = gid, source_cluster_id, gid
-    return _failover_group_from_target_copies(group, on_cluster=cluster_id, source_cut_off=True)
+    results = _failover_group_from_target_copies(group, on_cluster=cluster_id, source_cut_off=True)
+    # Replicate back toward the source, as the central fail-over does: csi-addons
+    # calls no Enable after a promote, so without it the clones' group ran
+    # unprotected once the source returned (bed run 20261112-1712-ebs-splitdr).
+    # Until the source answers, its replication retries as during the partition.
+    _attach_promoted_peer(group, results, "")
+    return results
 
 
 def resolve_replicated_group(group_id):

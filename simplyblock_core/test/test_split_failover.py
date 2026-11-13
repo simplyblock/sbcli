@@ -129,6 +129,42 @@ def test_a_second_promote_reports_the_clone_it_made(monkeypatch):
     assert results[0]["status"] == "failed_over" and results[0]["target_lvol_id"] == "CLONE"
 
 
+def test_a_failed_over_group_replicates_back_toward_its_source(monkeypatch):
+    """The central fail-over attaches the clones' group to this cluster's policy
+    toward the source (_attach_promoted_peer); csi-addons calls no Enable after a
+    promote. Without it the group ran unprotected after the heal (bed run
+    20261112-1712-ebs-splitdr, M3)."""
+    db, landing = _site_b(monkeypatch)
+    for m in ("M1", "M2"):
+        _copy(db, landing, m, 15, 1000, ["M1", "M2"])
+    group_here = ConsistencyGroup()
+    group_here.uuid, group_here.cluster_id, group_here.group_name = "GB", TGT, "gitea"
+    db._groups.append(group_here)
+    for m in ("M1", "M2"):
+        db._lvols.append(_vol(f"CLONE_{m}", TGT, node="NB", group=f"{TGT}/GB"))
+    _record_clones(monkeypatch)
+    attached = []
+    monkeypatch.setattr(rpc, "_attach_reverse_replication",
+                        lambda group, toward, former: attached.append((group.get_id(), toward)))
+
+    rpc.failover_replicated_group(TGT, GROUP)
+
+    assert attached == [(f"{TGT}/GB", SRC)]
+
+
+def test_a_fail_over_that_cloned_nothing_attaches_nothing(monkeypatch):
+    db, landing = _site_b(monkeypatch)
+    _copy(db, landing, "M1", 15, 1000, ["M1", "M2"])          # no complete generation
+    _record_clones(monkeypatch)
+    attached = []
+    monkeypatch.setattr(rpc, "_attach_reverse_replication",
+                        lambda group, toward, former: attached.append((group.get_id(), toward)))
+
+    rpc.failover_replicated_group(TGT, GROUP)
+
+    assert attached == []
+
+
 # ------------------------------------------------------------------ the group on this side
 
 def test_the_clone_rejoins_a_group_of_the_copys_group_name(monkeypatch):
