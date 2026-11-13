@@ -121,13 +121,14 @@ on:
         default: true
         type: boolean
       cluster_security:
-        description: "Cluster setup mode. 'backup' deploys MinIO and enables backup on StorageCluster. Auto-enabled when testname contains 'backup'."
+        description: "Cluster setup mode. 'backup' deploys MinIO and enables backup on StorageCluster. 's3' enables pNFS, installs OpenBao and creates the ObjectStore gateway, after the cluster is Online. Auto-enabled when testname contains 'backup' or 's3'."
         required: false
         type: choice
         default: "none"
         options:
           - none
           - backup
+          - s3
 
 env:
   # The lab cluster this workflow's hosts belong to, as

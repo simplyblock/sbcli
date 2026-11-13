@@ -70,13 +70,14 @@ on:
         default: ''
         type: string
       cluster_security:
-        description: "Cluster setup mode. 'backup' deploys MinIO and enables backup on StorageCluster. Auto-enabled when testname is backup/backup-stress."
+        description: "Cluster setup mode. 'backup' deploys MinIO and enables backup on StorageCluster. 's3' enables pNFS, installs OpenBao and creates the ObjectStore gateway, after the cluster is Online. Auto-enabled when testname is backup/backup-stress, or contains 's3'."
         required: false
         type: choice
         default: "none"
         options:
           - none
           - backup
+          - s3
       send_slack_notification:
         description: 'Send Slack notification?'
         required: false
