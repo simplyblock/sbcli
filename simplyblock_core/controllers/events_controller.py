@@ -19,6 +19,9 @@ EVENT_DISTR_IO_ERROR = "DISTR_IO_ERROR"
 #: A client LVS port was reopened FENCE_RELEASE_BUDGET times in one window
 #: and SPDK fenced it again each time; the control plane stopped reopening it.
 EVENT_FENCE_LOOP = "FENCE_LOOP"
+#: A replication step on the target keeps failing (e.g. the landing merge
+#: cannot get memory); the control plane backs off and keeps retrying.
+EVENT_REPLICATION_STALLED = "REPLICATION_STALLED"
 
 DOMAIN_CLUSTER = "cluster"
 DOMAIN_MANAGEMENT = "management"

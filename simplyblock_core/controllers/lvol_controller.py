@@ -779,6 +779,16 @@ def _lvstore_has_existing_leader(host_node):
     return leader is not None and leader.status == StorageNode.STATUS_ONLINE
 
 
+def _lvol_geometry(cl, ndcs, npcs):
+    """(ndcs, npcs) for a new lvol: 0x0 when the cluster has LVol geometry
+    disabled, else the explicit values, else the cluster's distr geometry."""
+    if not cl.lvol_geometry_enabled:
+        return 0, 0
+    if ndcs or npcs:
+        return ndcs or 0, npcs or 0
+    return cl.distr_ndcs, cl.distr_npcs
+
+
 def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=False, use_crypto=False,
                 distr_vuid=0, max_rw_iops=0, max_rw_mbytes=0, max_r_mbytes=0, max_w_mbytes=0,
                 with_snapshot=False, max_size=0, lvol_priority_class=0,
@@ -907,6 +917,12 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
         return False, size_error
 
     cl = db_controller.get_cluster_by_id(pool.cluster_id)
+
+    if not cl.lvol_geometry_enabled:
+        if ndcs or npcs:
+            logger.warning(f"LVol geometry is disabled on cluster {cl.get_id()}, "
+                           f"ignoring ndcs={ndcs}, npcs={npcs}")
+        ndcs, npcs = 0, 0
 
     if (fabric == "tcp" and not cl.fabric_tcp) or (fabric == "rdma" and not cl.fabric_rdma):
         return False,  f"Fabric not available in cluster: {fabric}"
@@ -1141,12 +1157,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
     lvol.subsys_port = host_node.get_lvol_subsys_port(host_node.lvstore)
     lvol.top_bdev = f"{lvol.lvs_name}/{lvol.lvol_bdev}"
     lvol.base_bdev = lvol.top_bdev
-    if npcs or ndcs:
-        lvol.npcs = npcs or 0
-        lvol.ndcs = ndcs or 0
-    else:
-        lvol.npcs = cl.distr_npcs
-        lvol.ndcs = cl.distr_ndcs
+    lvol.ndcs, lvol.npcs = _lvol_geometry(cl, ndcs, npcs)
     lvol.do_replicate = bool(do_replicate)
     if lvol.do_replicate:
         if replication_cluster_id:

@@ -136,7 +136,27 @@ class ReachabilityAddressError(PreconditionError):
     more addresses than one request may name."""
 
 
+class PromoteIncompleteError(Exception):
+    """The promote that finishes a node's relocation left devices as they
+    were: a device of the new host still ``new`` (not activated) or a device
+    of the old host still ``removed`` (its data not migrated off it). The
+    node's own addresses were re-pointed regardless, since the node is on the
+    new host either way; the promote is idempotent and the caller calls it
+    again once what blocked it is gone. ``still_new`` and ``still_removed``
+    list the device ids."""
+
+    def __init__(self, message: str, still_new=(), still_removed=()):
+        self.still_new = list(still_new)
+        self.still_removed = list(still_removed)
+        super().__init__(message)
+
+
 class NodeTransitionInProgress(Exception):
     """Raised when a node is mid-transition (e.g. its shutdown has not
     finished) and the request can only be served once it lands. Retryable:
     the v2 API answers 503."""
+
+
+class MonitoringConfigError(Exception):
+    """A monitoring component (Grafana, Prometheus) refused a configuration
+    change or could not be reached to apply it."""

@@ -37,7 +37,7 @@ def _members(db, lvol):
     return [db.get_storage_node_by_id(nid) for nid in ids if nid]
 
 
-def local_write_counts(lvol):
+def local_write_counts(lvol, timeout=5, retry=1):
     """``{node_id: [count, online_since]}`` for every member of the volume's
     lvstore, or ``{}`` when any of them could not be read (an older SPDK, a
     member that is down) -- which later rules out a delta for both snapshots
@@ -46,7 +46,7 @@ def local_write_counts(lvol):
     counts = {}
     try:
         for node in _members(db, lvol):
-            info = node.rpc_client(timeout=5, retry=1).bdev_lvol_dirty_bitmap_info(lvol.top_bdev)
+            info = node.rpc_client(timeout=timeout, retry=retry).bdev_lvol_dirty_bitmap_info(lvol.top_bdev)
             if not isinstance(info, dict) or "lvs_local_writes" not in info:
                 return {}
             counts[node.get_id()] = [int(info["lvs_local_writes"]), node.online_since]
@@ -90,6 +90,21 @@ def delta_basis(prev_snap, snap, transfer_node_id):
     end = getattr(snap, "local_writes_after", None) or {}
     if not start or not end:
         return False, "local write counts were not recorded for both snapshots"
+    return _same_writer(start, end, transfer_node_id)
+
+
+def live_delta_basis(base_snap, counts_now, transfer_node_id):
+    """``delta_basis`` for the cutover's final step: the delta is the LIVE
+    volume's, written since ``base_snap``, and it ends at the fence, so the
+    window's far end is ``counts_now`` -- read with the source already fenced
+    (``local_write_counts``) -- instead of a successor snapshot's record."""
+    start = getattr(base_snap, "local_writes_before", None) or {}
+    if not start or not counts_now:
+        return False, "local write counts unavailable for the base snapshot or now"
+    return _same_writer(start, counts_now, transfer_node_id)
+
+
+def _same_writer(start, end, transfer_node_id):
     if set(start) != set(end):
         return False, "the lvstore's members changed between the snapshots"
     if transfer_node_id not in end:
