@@ -255,6 +255,25 @@ class ManifestDataPlane(BaseModel):
     with_compression: bool = False
 
 
+class BackupManifestState(StrEnum):
+    """Whether a backup manifest's objects can be relied on.
+
+    A manifest is written (and stays) ``active`` for as long as its backup is
+    restorable from its own objects. A delete marks it ``deleting`` before it
+    touches any S3 object, and removes the manifest only once the data plane
+    has confirmed those objects are gone -- the single-backup half of the same
+    metadata-before-data ordering :class:`GroupManifestState` keeps for group
+    backups. A reader that is not the one deleting it -- a disaster-recovery
+    ``discover``/``import`` on another cluster -- must skip a manifest in this
+    state rather than treat it as restorable, the same rule
+    ``import_group_backup_from_bucket`` already applies to a non-``COMMITTED``
+    group manifest. A manifest written before deletes marked it reads as
+    ``active``, which is what it was.
+    """
+    ACTIVE = "active"
+    DELETING = "deleting"
+
+
 class BackupManifest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -285,6 +304,9 @@ class BackupManifest(BaseModel):
     source: ManifestSource
     volume: ManifestVolume
     dataplane: ManifestDataPlane
+
+    #: See BackupManifestState.
+    state: BackupManifestState = BackupManifestState.ACTIVE
 
 
 EXPORT_SCHEMA_VERSION = 1
@@ -419,14 +441,68 @@ def delete(config: BackupConfig, backup_id: UUID) -> None:
     """Remove a manifest.
 
     Only for a backup whose data is genuinely gone -- a merge folding it into
-    its successor. Deleting the manifest of a backup whose objects still exist
-    turns them into weight nobody can identify or reclaim.
+    its successor, or a delete that has confirmed the data plane removed its
+    objects. Deleting the manifest of a backup whose objects still exist turns
+    them into weight nobody can identify or reclaim.
     """
     try:
         s3_client(config).delete_object(
             Bucket=config.bucket_name, Key=manifest_key(backup_id))
     except (BotoCoreError, ClientError) as e:
         raise ManifestError(f"Failed to delete manifest for backup {backup_id}") from e
+
+
+def _read_if_present(config: BackupConfig, backup_id: UUID) -> BackupManifest | None:
+    """:func:`read`, but ``None`` for a manifest the bucket does not hold."""
+    try:
+        body = s3_client(config).get_object(
+            Bucket=config.bucket_name, Key=manifest_key(backup_id))["Body"].read()
+    except ClientError as e:
+        if e.response.get("Error", {}).get("Code") in ("NoSuchKey", "404"):
+            return None
+        raise ManifestError(
+            f"Failed to read manifest for backup {backup_id} "
+            f"from {config.bucket_name}") from e
+    except BotoCoreError as e:
+        raise ManifestError(
+            f"Failed to read manifest for backup {backup_id} "
+            f"from {config.bucket_name}") from e
+    return _parse(body, manifest_key(backup_id))
+
+
+def mark_deleting(config: BackupConfig, backup_id: UUID) -> None:
+    """Mark a backup's manifest DELETING, before any of its S3 objects are
+    touched -- the single-backup half of the metadata-before-data ordering
+    :func:`delete_group_backup <group_backup.delete_group_backup>` keeps for
+    group backups.
+
+    A no-op if the manifest already says so (a delete resuming after a
+    restart or retry), or if it is already gone (a delete that got as far as
+    removing the manifest before being abandoned -- :func:`delete`, not this,
+    is the next step on retry, not this one again).
+
+    Raises:
+        ManifestError: the manifest could not be read or rewritten.
+    """
+    manifest = _read_if_present(config, backup_id)
+    if manifest is not None and manifest.state != BackupManifestState.DELETING:
+        write(config, manifest.model_copy(update={"state": BackupManifestState.DELETING}))
+
+
+def mark_active(config: BackupConfig, backup_id: UUID) -> None:
+    """Revert a backup's manifest to ACTIVE: a delete that did not finish.
+
+    A no-op if the manifest is already active, or already gone (the delete
+    got as far as removing it before being abandoned -- there is nothing left
+    to revert, and the FDB record it was abandoned alongside is reverted
+    separately).
+
+    Raises:
+        ManifestError: the manifest could not be read or rewritten.
+    """
+    manifest = _read_if_present(config, backup_id)
+    if manifest is not None and manifest.state != BackupManifestState.ACTIVE:
+        write(config, manifest.model_copy(update={"state": BackupManifestState.ACTIVE}))
 
 
 def _parse(body: bytes, key: str) -> BackupManifest:

@@ -1479,14 +1479,25 @@ class DBController(metaclass=Singleton):
             idx.entry_id(Backup, bytes(key), bytes(value))
             for key, value in tr.get_range_startswith(idx.prefix(Backup, (lvol_id,)))
         ]
+        # Keyed by the bare uuid, not get_id(): every caller holds a Backup's
+        # uuid, never its "<cluster_id>/<uuid>" composite id, and a chain
+        # never spans clusters -- so the uuid alone is already unambiguous
+        # within one lvol_id's siblings.
         siblings = {}
         for sibling_id in sibling_ids:
             rows = Backup().read_from_db(tr, id=sibling_id)
             if rows:
-                siblings[sibling_id] = rows[0]
+                siblings[rows[0].uuid] = rows[0]
 
+        target_set = set(target_ids)
+        # A sibling already MERGING/DELETING blocks the claim UNLESS it is one
+        # of this call's own targets: re-claiming backups already in the state
+        # this call is about to set is what makes resuming an interrupted
+        # delete (the caller is retrying, not racing itself) safe, while a
+        # DIFFERENT concurrent operation's claim still refuses.
         blocking = next((b for b in siblings.values()
-                         if b.status in (Backup.STATUS_MERGING, Backup.STATUS_DELETING)), None)
+                         if b.status in (Backup.STATUS_MERGING, Backup.STATUS_DELETING)
+                         and b.uuid not in target_set), None)
         if blocking is not None:
             return False, f"backup {blocking.uuid} of this chain is already {blocking.status}"
 
@@ -1518,14 +1529,29 @@ class DBController(metaclass=Singleton):
         return True, None
 
     def claim_backup_chain_op(self, lvol_id, target_ids, new_status):
-        """Atomically claim one or more backups of ``lvol_id``'s chain for a
-        destructive operation (merge or delete).
+        """Atomically claim one or more backups of ``lvol_id``'s chain (named
+        by their bare ``uuid``, not ``get_id()``) for a destructive operation
+        (merge or delete).
 
-        Refuses, as ``(False, reason)``, if any backup anywhere in the chain --
-        not only the targets -- is already ``MERGING``/``DELETING``, or is named
-        by an active restore's chain (``JobSchedule.restore_chain_s3_id``). On
-        success, every id in ``target_ids`` is flipped to ``new_status`` and
+        Refuses, as ``(False, reason)``, if any OTHER backup of the chain --
+        one not in ``target_ids`` -- is already ``MERGING``/``DELETING``, or if
+        any backup in the chain (target or not) is named by an active
+        restore's own chain (``JobSchedule.restore_chain_s3_id``). On success,
+        every id in ``target_ids`` is flipped to ``new_status`` and
         ``(True, None)`` is returned.
+
+        Idempotent by design, not exclusive between identical claims: a target
+        already in ``new_status`` -- this call resuming one that claimed it
+        but did not finish queuing the task that follows -- does not block
+        itself. Two callers racing to claim the very same ids at once can
+        therefore BOTH succeed (one commits, the other retries on conflict,
+        re-reads the now-already-``new_status`` targets, and finds nothing of
+        its own to object to) -- what this guarantees is that no OTHER,
+        genuinely different claim can interleave with either, not that only
+        one of two identical ones wins. Callers rely on idempotency further
+        downstream (``manifest.mark_deleting`` is a no-op if already marked;
+        ``add_backup_delete_task`` dedupes against an open task) to make a
+        repeat claim of the same ids harmless rather than merely admitted.
 
         Assumes ``Backup``'s ``lvol_id`` index is ready, which it already is in
         any deployment old enough to run this: an index still ``building`` would

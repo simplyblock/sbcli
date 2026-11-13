@@ -80,6 +80,11 @@ class JobSchedule(BaseModel):
     FN_BACKUP = "s3_backup"
     FN_BACKUP_RESTORE = "s3_backup_restore"
     FN_BACKUP_MERGE = "s3_backup_merge"
+    # Delete one or more backups of the same volume that nothing chains
+    # against: remove their S3 objects, then their manifests, then their
+    # records -- metadata-before-data on the way in (claim_backup_chain_op
+    # marks them DELETING first), data-before-metadata on the way out.
+    FN_BACKUP_DELETE = "s3_backup_delete"
     # Consistency-group backup commit: watch the member backups of one group
     # generation and publish the group manifest once every member completed,
     # the all-or-nothing barrier.
