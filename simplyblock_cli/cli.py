@@ -382,6 +382,9 @@ class CLIWrapper(CLIWrapperBase):
         self.init_cluster__status(subparser)
         self.init_cluster__complete_expand(subparser)
         self.init_cluster__grow_devices(subparser)
+        self.init_cluster__set_array(subparser)
+        self.init_cluster__get_array(subparser)
+        self.init_cluster__remove_array(subparser)
         self.init_cluster__show(subparser)
         self.init_cluster__get(subparser)
         if self.developer_mode:
@@ -568,6 +571,26 @@ class CLIWrapper(CLIWrapperBase):
         subcommand = self.add_sub_command(subparser, 'grow-devices', 'Grows every Linux block device (lblk) of the cluster online to the size of its block device.')
         subcommand.add_argument('cluster_id', help='The cluster id.', type=str).completer = self._completer_get_cluster_list
         subcommand.add_argument('--no-rebalance', help='Keep the device weights after an uneven growth and do not rebalance the cluster.', default=False, dest='no_rebalance', action='store_true')
+        subcommand.add_argument('--lun-factor', help='Multi-attach cluster with a registered array only: first grow every LUN the array plugin created by this factor (greater than 1, e.g. 1.5) at the array and wait until every node sees the new size.', type=str, dest='lun_factor')
+
+    def init_cluster__set_array(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'set-array', 'Registers the storage array of a multi-attach cluster (or updates it, e.g. to rotate credentials).')
+        subcommand.add_argument('cluster_id', help='The cluster id.', type=str).completer = self._completer_get_cluster_list
+        subcommand.add_argument('--plugin', help='The array plugin, e.g. `aws-ebs`.', type=str, dest='plugin', required=True)
+        subcommand.add_argument('--endpoint', help='The array\'s management endpoint (for aws-ebs: an EC2 endpoint URL override, usually empty).', type=str, default='', dest='endpoint')
+        subcommand.add_argument('--options', help='Plugin options as a JSON object, e.g. `{"az": "us-east-1a", "iops": 6000}`.', type=str, dest='options')
+        subcommand.add_argument('--credentials-file', help='A JSON file with the array credentials as an object of strings (for aws-ebs: aws_access_key_id, aws_secret_access_key; omit to use the instance role).', type=str, dest='credentials_file')
+        subcommand.add_argument('--lun-size', help='Size of the LUN created for each node added to the cluster, e.g. `1T`. Default: none.', type=size_type(), default='0', dest='lun_size')
+
+    def init_cluster__get_array(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'get-array', 'Shows the storage array registered for a multi-attach cluster (without its credentials).')
+        subcommand.add_argument('cluster_id', help='The cluster id.', type=str).completer = self._completer_get_cluster_list
+
+    def init_cluster__remove_array(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'remove-array', 'Removes the storage array registration of a multi-attach cluster and its credentials.')
+        subcommand.add_argument('cluster_id', help='The cluster id.', type=str).completer = self._completer_get_cluster_list
+        subcommand.add_argument('array_id', help='The array id.', type=str)
+        subcommand.add_argument('--force', help='Remove it even though LUNs created through it exist (they can then no longer be fenced).', default=False, dest='force', action='store_true')
 
     def init_cluster__show(self, subparser):
         subcommand = self.add_sub_command(subparser, 'show', 'Shows a cluster\'s statistics.')
@@ -1719,6 +1742,12 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.cluster__complete_expand(sub_command, args)
                 elif sub_command in ['grow-devices']:
                     ret = self.cluster__grow_devices(sub_command, args)
+                elif sub_command in ['set-array']:
+                    ret = self.cluster__set_array(sub_command, args)
+                elif sub_command in ['get-array']:
+                    ret = self.cluster__get_array(sub_command, args)
+                elif sub_command in ['remove-array']:
+                    ret = self.cluster__remove_array(sub_command, args)
                 elif sub_command in ['show']:
                     ret = self.cluster__show(sub_command, args)
                 elif sub_command in ['get']:

@@ -199,11 +199,21 @@ class Cluster(BaseModel):
     # taken over by another node only after its serving node is fenced at the
     # array, through the plugin named here (entry point in the group
     # simplyblock.array_plugins, see simplyblock_core.array). Empty = no
-    # plugin: a takeover is refused (never reopen a LUN unfenced). Credentials
-    # are resolved from the KMS in a later phase.
+    # plugin: a takeover is refused (never reopen a LUN unfenced). The array
+    # is registered through controllers/array_controller (POST
+    # /clusters/{id}/arrays); its credentials live in the KMS at
+    # cluster/<id>/array/<array_id>, never here.
     array_plugin: str = ""
     array_endpoint: str = ""
     array_options: dict = default_factory(dict)
+    # Id of the registered array ("" = none, or configured before arrays were
+    # registered) and whether credentials were stored for it in the KMS.
+    array_id: str = ""
+    array_has_credentials: bool = False
+    # Size in bytes of the LUN created for each node added to the cluster
+    # while an array is registered; 0 = node adds create no LUN (the LUNs are
+    # presented by the operator, as in phase 2/3).
+    array_lun_size: int = 0
     tls: bool = False
     tls_config: dict = default_factory(dict)
     is_re_balancing: bool = False

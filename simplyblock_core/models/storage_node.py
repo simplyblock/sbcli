@@ -234,6 +234,10 @@ class StorageNode(BaseNodeObject):
     # block (multi_attach.cntlid_range). -1 = not assigned; claimed at
     # add-node or lazily when a multi-attach device subsystem is created.
     cntlid_block: int = -1
+    # Multi-attach clusters with a registered array: the array's id of this
+    # node's host (ArrayPlugin.ensure_host; the EC2 instance id on EBS). ""
+    # = not known; the fence then names the host by its hostname.
+    array_host_id: str = ""
     # Sync-replication site of the node (operator-supplied at add-node).
     # Mandatory on a cluster with sync_replication, empty everywhere else.
     site: str = ""

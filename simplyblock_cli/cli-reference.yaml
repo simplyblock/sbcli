@@ -1554,6 +1554,76 @@ commands:
             type: bool
             default: false
             action: store_true
+          - name: "--lun-factor"
+            help: >
+              Multi-attach cluster with a registered array only: first grow every LUN the array plugin created by
+              this factor (greater than 1, e.g. 1.5) at the array and wait until every node sees the new size.
+            dest: lun_factor
+            type: str
+      - name: set-array
+        help: "Registers the storage array of a multi-attach cluster (or updates it, e.g. to rotate credentials)."
+        usage: >
+          simplyblock creates, multi-attaches, grows, fences and deletes the LUNs of a multi-attach cluster through
+          the array plugin registered here. The plugin is loaded and connected with the credentials before anything
+          is saved. The credentials are stored in the cluster's KMS, never in the cluster record. With --lun-size,
+          every node added afterwards gets a LUN of that size created and attached on the array.
+        arguments:
+          - name: "cluster_id"
+            help: "The cluster id."
+            dest: cluster_id
+            type: str
+            completer: _completer_get_cluster_list
+          - name: "--plugin"
+            help: "The array plugin, e.g. `aws-ebs`."
+            dest: plugin
+            type: str
+            required: true
+          - name: "--endpoint"
+            help: "The array's management endpoint (for aws-ebs: an EC2 endpoint URL override, usually empty)."
+            dest: endpoint
+            type: str
+            default: ""
+          - name: "--options"
+            help: 'Plugin options as a JSON object, e.g. `{"az": "us-east-1a", "iops": 6000}`.'
+            dest: options
+            type: str
+          - name: "--credentials-file"
+            help: >
+              A JSON file with the array credentials as an object of strings (for aws-ebs: aws_access_key_id,
+              aws_secret_access_key; omit to use the instance role).
+            dest: credentials_file
+            type: str
+          - name: "--lun-size"
+            help: "Size of the LUN created for each node added to the cluster, e.g. `1T`. Default: none."
+            dest: lun_size
+            type: size
+            default: "0"
+      - name: get-array
+        help: "Shows the storage array registered for a multi-attach cluster (without its credentials)."
+        arguments:
+          - name: "cluster_id"
+            help: "The cluster id."
+            dest: cluster_id
+            type: str
+            completer: _completer_get_cluster_list
+      - name: remove-array
+        help: "Removes the storage array registration of a multi-attach cluster and its credentials."
+        arguments:
+          - name: "cluster_id"
+            help: "The cluster id."
+            dest: cluster_id
+            type: str
+            completer: _completer_get_cluster_list
+          - name: "array_id"
+            help: "The array id."
+            dest: array_id
+            type: str
+          - name: "--force"
+            help: "Remove it even though LUNs created through it exist (they can then no longer be fenced)."
+            dest: force
+            type: bool
+            default: false
+            action: store_true
       - name: show
         help: "Shows a cluster's statistics."
         arguments:

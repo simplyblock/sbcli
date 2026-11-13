@@ -821,7 +821,9 @@ def rescan_block_device(device_path: str) -> dict:
     SCSI disks (FC, iSCSI, SAS) are rescanned through
     ``/sys/block/<dev>/device/rescan``; NVMe namespaces through
     ``rescan_controller`` of every controller that reaches them, which also
-    covers the head device of native NVMe multipathing. Other devices, such
+    covers the head device of native NVMe multipathing. A dm-multipath map
+    (``dm-N`` with an ``mpath-`` uuid) has each of its path devices
+    rescanned, then ``multipathd resize map``. Other devices, such
     as virtio-blk, pick up a resize on their own, so their size is just
     read. Partitions are refused: growing one is a partition-table change,
     not a rescan.
@@ -843,19 +845,39 @@ def rescan_block_device(device_path: str) -> dict:
         raise ValueError(f"{name} is a partition, which cannot be resized online")
 
     rescanned: list[str] = []
-    if _re.match(r"^nvme\d+n\d+$", name):
-        # A plain namespace links device -> its controller; the head device
-        # of native multipathing links device -> the subsystem, whose
-        # controllers are its nvme* children.
-        candidates = [f"{sys_dev}/device/rescan_controller"]
-        candidates += sorted(_glob.glob(f"{sys_dev}/device/nvme*/rescan_controller"))
-        for path in candidates:
-            if os.path.exists(path):
-                _write_sysfs(path, "1")
-                rescanned.append(path)
-    elif os.path.exists(f"{sys_dev}/device/rescan"):
-        _write_sysfs(f"{sys_dev}/device/rescan", "1")
-        rescanned.append(f"{sys_dev}/device/rescan")
+
+    def _rescan_disk(disk: str, sys_disk: str) -> None:
+        if _re.match(r"^nvme\d+n\d+$", disk):
+            # A plain namespace links device -> its controller; the head
+            # device of native multipathing links device -> the subsystem,
+            # whose controllers are its nvme* children.
+            candidates = [f"{sys_disk}/device/rescan_controller"]
+            candidates += sorted(_glob.glob(f"{sys_disk}/device/nvme*/rescan_controller"))
+            for path in candidates:
+                if os.path.exists(path):
+                    _write_sysfs(path, "1")
+                    rescanned.append(path)
+        elif os.path.exists(f"{sys_disk}/device/rescan"):
+            _write_sysfs(f"{sys_disk}/device/rescan", "1")
+            rescanned.append(f"{sys_disk}/device/rescan")
+
+    if _re.match(r"^dm-\d+$", name):
+        # A dm-multipath map (array LUN over several paths): every path
+        # device is rescanned first, then multipathd resizes the map, which
+        # only grows once all its paths report the new size.
+        slaves = sorted(os.listdir(f"{sys_dev}/slaves")) if os.path.isdir(f"{sys_dev}/slaves") else []
+        for slave in slaves:
+            if _re.match(r"^[a-zA-Z0-9_\-]+$", slave):
+                _rescan_disk(slave, f"/sys/class/block/{slave}")
+        map_name = _read_sysfs(f"{sys_dev}/dm/name")
+        uuid = _read_sysfs(f"{sys_dev}/dm/uuid")
+        if map_name and uuid.startswith("mpath-") and _re.match(r"^[A-Za-z0-9_.\-]+$", map_name):
+            out, err, rc = shell_utils.run_command(f"multipathd resize map {map_name}")
+            if rc != 0 or "fail" in (out or "").lower():
+                raise ValueError(f"multipathd resize map {map_name} failed: {err or out}")
+            rescanned.append(f"multipathd:{map_name}")
+    else:
+        _rescan_disk(name, sys_dev)
 
     sectors = _read_sysfs(f"{sys_dev}/size")
     if not sectors:

@@ -149,7 +149,12 @@ def mark_lun_devices(cluster, snode, devices, blk_entries) -> None:
         if entry.get("journal"):
             continue
         dev.multi_attach = True
-        dev.lun_wwn = entry.get("wwn") or dev.serial_number or ""
+        # A LUN the array plugin created carries the identity the plugin
+        # reported for it (array_controller.provision_node_lun); it is one of
+        # the WWN / serial the host reports, so lun_keys matches either way.
+        dev.lun_wwn = entry.get("lun_wwn") or entry.get("wwn") or dev.serial_number or ""
+        if entry.get("array_lun_id"):
+            dev.array_lun_id = entry["array_lun_id"]
         dev.node_paths = {
             snode.get_id(): {
                 "path": dev.by_id_path or dev.device_path,
@@ -202,6 +207,19 @@ def array_host(node) -> str:
     if suffix != "_" and host.endswith(suffix):
         host = host[: -len(suffix)]
     return host
+
+
+def array_host_ref(node) -> str:
+    """How the array plugin names a node's host: the id ``ensure_host``
+    returned (``StorageNode.array_host_id``; the EC2 instance id on EBS),
+    else the hostname (``array_host``)."""
+    return getattr(node, "array_host_id", "") or array_host(node)
+
+
+def array_lun_ref(device) -> str:
+    """How the array plugin names a device's LUN: the id the plugin created
+    it under (``NVMeDevice.array_lun_id``), else its WWN."""
+    return getattr(device, "array_lun_id", "") or getattr(device, "lun_wwn", "") or ""
 
 
 def standby_candidates(owner, failed_node_id) -> list[str]:

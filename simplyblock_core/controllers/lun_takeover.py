@@ -275,10 +275,13 @@ def _take_over_locked(db, cluster, device_id, failed_node_id, reason, deadline) 
 # ---------------------------------------------------------------- 1. fence
 
 def _fence(cluster, dev, failed):
-    host = multi_attach.array_host(failed)
+    # The array's own ids when the plugin created the LUN / registered the
+    # host (array_controller), else the WWN / hostname as in phase 3.
+    host = multi_attach.array_host_ref(failed)
     if not host:
         raise TakeoverError(f"node {failed.get_id()} has no hostname to fence it by")
-    if not dev.lun_wwn:
+    lun = multi_attach.array_lun_ref(dev)
+    if not lun:
         raise TakeoverError("the device has no LUN WWN to fence")
     try:
         plugin = array.plugin_for_cluster(cluster)
@@ -289,12 +292,12 @@ def _fence(cluster, dev, failed):
     except array.ArrayError as e:
         raise TakeoverError(f"array plugin unavailable: {e}")
     try:
-        ok = plugin.fence(dev.lun_wwn, host)
+        ok = plugin.fence(lun, host)
     except Exception as e:                                  # noqa: BLE001
-        raise TakeoverError(f"array fence of {host} on LUN {dev.lun_wwn} failed: {e}")
+        raise TakeoverError(f"array fence of {host} on LUN {lun} failed: {e}")
     if not ok:
-        raise TakeoverError(f"array did not acknowledge the fence of {host} on LUN {dev.lun_wwn}")
-    logger.info("LUN %s: node %s (%s) fenced at the array", dev.lun_wwn, failed.get_id(), host)
+        raise TakeoverError(f"array did not acknowledge the fence of {host} on LUN {lun}")
+    logger.info("LUN %s: node %s (%s) fenced at the array", lun, failed.get_id(), host)
 
 
 def _record_fenced(db, owner, device_id, node_id):
@@ -580,7 +583,8 @@ def unfence_node(device_id, node_id) -> bool:
         logger.error("Unfence of %s on %s refused: it is the serving node", node_id, device_id)
         return False
     try:
-        if not array.plugin_for_cluster(cluster).unfence(dev.lun_wwn, multi_attach.array_host(node)):
+        if not array.plugin_for_cluster(cluster).unfence(
+                multi_attach.array_lun_ref(dev), multi_attach.array_host_ref(node)):
             logger.error("Unfence of %s on LUN %s not acknowledged", node_id, dev.lun_wwn)
             return False
     except Exception as e:                                  # noqa: BLE001

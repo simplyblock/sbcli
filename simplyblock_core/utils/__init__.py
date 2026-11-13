@@ -1641,6 +1641,11 @@ def resolve_lblk_entries(configured_entries, host_devices):
             resolved_entry["partuuid"] = live.get("partuuid") or entry.get("partuuid", "")
         if entry.get("journal"):
             resolved_entry["journal"] = True
+        # A LUN the cluster's array plugin created (multi-attach): its
+        # identity at the array, for multi_attach.mark_lun_devices.
+        for key in ("lun_wwn", "array_lun_id"):
+            if entry.get(key):
+                resolved_entry[key] = entry[key]
         resolved.append(resolved_entry)
     return resolved, missing
 

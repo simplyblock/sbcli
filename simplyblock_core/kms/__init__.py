@@ -21,6 +21,12 @@ def backup_dek_path(cluster_id: str, backup_id: str) -> str:
     return f"cluster/{cluster_id}/backup/{backup_id}"
 
 
+def array_secret_path(cluster_id: str, array_id: str) -> str:
+    """Where the credentials of a cluster's storage array live in the KMS
+    (multi-attach array LUN mode, simplyblock_core.array)."""
+    return f"cluster/{cluster_id}/array/{array_id}"
+
+
 def pool_kek_name(pool_id: str) -> str:
     return f"pool-{pool_id}"
 

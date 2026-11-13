@@ -168,6 +168,10 @@ def _amazon_info() -> dict | None:
             "cloud": "amazon",
             "ip": data["privateIp"],
             "public_ip": "",
+            # Multi-attach clusters on EBS (simplyblock_core.array.aws_ebs):
+            # volumes attach only within their zone.
+            "availability_zone": data.get("availabilityZone", ""),
+            "region": data.get("region", ""),
         }
     except Exception:
         return None

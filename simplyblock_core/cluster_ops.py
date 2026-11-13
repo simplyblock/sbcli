@@ -37,6 +37,7 @@ from simplyblock_core import (
 )
 from simplyblock_core.controllers import (
     activation_gate,
+    array_controller,
     cluster_events,
     device_controller,
     pool_controller,
@@ -1024,32 +1025,23 @@ def set_two_node_arbitration(cl_id, enabled: bool) -> None:
     db_controller.atomic_update(cluster, mutate)
 
 
-def set_array_plugin(cl_id, plugin: str, endpoint: str = "", options: dict | None = None) -> None:
-    """Configure the storage-array plugin of a multi-attach cluster (the
-    plugin that fences a failed node from its LUNs before a takeover; see
-    simplyblock_core.array). An empty ``plugin`` clears it, after which
-    takeovers are refused. Credentials come from the KMS (later phase).
+def set_array_plugin(cl_id, plugin: str, endpoint: str = "", options: dict | None = None,
+                     credentials: dict | None = None, lun_size: int = 0) -> None:
+    """Configure the storage-array plugin of a multi-attach cluster (see
+    controllers/array_controller.register_array: the plugin is connected
+    before anything is saved, credentials go to the KMS). An empty
+    ``plugin`` removes the registration, after which takeovers are refused.
 
     Raises:
-        ValueError: not a multi-attach cluster, or the plugin cannot be loaded.
+        ValueError: not a multi-attach cluster, the plugin cannot be loaded
+            or connected, or (removal) LUNs created through it exist.
     """
-    from simplyblock_core import array, multi_attach
     cluster = db_controller.get_cluster_by_id(cl_id)
-    if not multi_attach.is_multi_attach(cluster):
-        raise ValueError("an array plugin is only used by a multi-attach cluster")
-    if plugin:
-        try:
-            array.plugin_class(plugin)
-        except array.ArrayError as e:
-            raise ValueError(str(e)) from e
-    opts = dict(options or {})
-
-    def mutate(fresh):
-        fresh.array_plugin = plugin or ""
-        fresh.array_endpoint = endpoint or ""
-        fresh.array_options = opts
-
-    db_controller.atomic_update(cluster, mutate)
+    if not plugin:
+        if cluster.array_plugin:
+            array_controller.delete_array(cl_id, cluster.array_id)
+        return
+    array_controller.register_array(cl_id, plugin, endpoint, options, credentials, lun_size)
 
 
 def _wait_for_full_device_connectivity(cl_id, timeout_sec=300, poll_sec=10, checkpoint=None):
@@ -1999,6 +1991,10 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False, site_activ
                 snode = db_controller.get_storage_node_by_id(snode.get_id())
                 used_nodes_as_tertiary.append(snode.tertiary_node_id)
 
+        # Multi-attach cluster with an array: present every owner's LUN to
+        # its new secondary / tertiary (a no-op on every other cluster).
+        array_controller.reconcile_after_role_change(cl_id)
+
         # Sync replication: every LVS also gets its remote triplet on the other
         # site. Refs a re-activation finds are kept; missing ones are picked.
         if cluster.sync_replication:
@@ -2784,6 +2780,10 @@ def cluster_expand(cl_id) -> None:
             sec_node_2 = db_controller.get_storage_node_by_id(snode.tertiary_node_id)
             sec_node_2.lvstore_stack_tertiary = snode.get_id()
             sec_node_2.write_to_db()
+
+        if cluster.ha_type == "ha":
+            # Multi-attach cluster with an array: the new roles' LUN paths.
+            array_controller.reconcile_after_role_change(cl_id)
 
         if cluster.ha_type == "ha" and cluster.sync_replication:
             try:
@@ -4435,6 +4435,10 @@ def delete_cluster(cl_id, force=False) -> None:
     pools = db_controller.get_pools(cl_id)
     if pools:
         raise ValueError("Can only remove Empty cluster, Pools found")
+
+    # Multi-attach cluster with an array: the only place its LUNs are
+    # deleted, with the array credentials in the KMS. No-op otherwise.
+    array_controller.delete_cluster_luns(cluster, force=force)
 
     logger.info(f"Deleting Cluster {cl_id}")
     cluster_events.cluster_delete(cluster)

@@ -51,6 +51,7 @@ from simplyblock_core.constants import (
 )
 from simplyblock_core.controllers import (
     activation_gate,
+    array_controller,
     device_controller,
     device_events,
     health_controller,
@@ -4425,6 +4426,25 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         lblk_configured = node_config.get("lblk_devices") or []
 
         lblk_mode = cluster.device_mode == constants.DEVICE_MODE_LBLK
+        # Multi-attach cluster with a registered array and a LUN size: the
+        # node's data LUN is created and presented here (the host's own
+        # config names the journal device only), then added like any
+        # configured lblk device. No-op on every other cluster.
+        array_host_id = ""
+        if lblk_mode and array_controller.provisions_luns(cluster):
+            if not lblk_configured:
+                logger.error(
+                    "This cluster creates each node's LUN on its array, but the node "
+                    "config carries no 'lblk_devices' for the journal; run "
+                    "'sn configure --lblk <journal device>' first.")
+                return False
+            try:
+                lun_entry, array_host_id = array_controller.provision_node_lun(
+                    cluster, snode_api, node_info, node_config, lblk_configured)
+            except array_controller.ArrayLifecycleError as e:
+                logger.error(f"Could not provision the node's array LUN: {e}")
+                return False
+            lblk_configured = array_controller.add_lun_to_config(lblk_configured, lun_entry)
         if lblk_mode:
             if not lblk_configured:
                 logger.error(
@@ -4856,6 +4876,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         # lblk mode: persist the configured selection (with serial identity)
         # so restart can re-resolve devices without the host config file.
         snode.lblk_devices = lblk_configured if lblk_mode else []
+        snode.array_host_id = array_host_id
         snode.hostname = hostname
         snode.k8s_node_name = node_info['hostname']
         snode.host_nqn = subsystem_nqn
@@ -5350,6 +5371,9 @@ def delete_storage_node(node_id, force=False):
     if snode.pod_network:
         # The Service held the node's address; with the record gone nothing names it.
         _delete_spdk_service(snode, snode.rpc_port, snode.cluster_id)
+    # Multi-attach cluster with an array: detach the node's LUNs from every
+    # host and other LUNs from its host (nothing is deleted; no-op otherwise).
+    array_controller.release_node_luns(snode)
     snode.remove(db_controller.kv_store)
 
     for node in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):

@@ -125,12 +125,21 @@ class NVMeDevice(BaseModel):
     #: (``node_id``).
     serving_node_id: str = ""
     #: node_id -> {"path": by-id path of the LUN on that node, "bdev": the
-    #: base bdev name there}. Only the owner's entry is filled so far.
+    #: base bdev name there}. The owner's entry, plus the LVS secondary and
+    #: tertiary once an array-managed LUN is attached to them (bdev "").
     node_paths: dict = default_factory(dict)
     #: Nodes a LUN takeover fenced from this LUN at the array. Phase 3 never
     #: unfences on its own: a fenced node's host may still hold queued
     #: writes. Such a node is no takeover candidate for this LUN.
     fenced_node_ids: list = default_factory(list)
+    #: The array's id of the LUN when the cluster's array plugin created it
+    #: (controllers/array_controller); "" for a LUN the operator presented.
+    #: Only such LUNs are attached, detached, grown and deleted by simplyblock.
+    array_lun_id: str = ""
+    #: Nodes the array presents the LUN to, as last applied by
+    #: array_controller.reconcile_lun_attachments (owner, LVS secondary and
+    #: tertiary, serving node).
+    array_attached_node_ids: list = default_factory(list)
 
     def serving_node(self) -> str:
         """The node whose alceml serves this device now (the owner unless a

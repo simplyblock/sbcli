@@ -2120,6 +2120,10 @@ def _check_resizable(db_controller, dev, snode):
         raise ValueError("Device runs with a testing or hang bdev under alceml, remove it first")
     if not dev.alceml_bdev or not dev.nvme_bdev:
         raise ValueError("Device has no alceml or AIO bdev recorded")
+    if multi_attach.served_elsewhere(dev, snode.get_id()):
+        # The alceml runs on the takeover node; this path grows the owner's.
+        raise ValueError(f"The device's LUN is served by node {dev.serving_node()} after a "
+                         "takeover; grow it once its owner serves it again")
     if tasks_controller.get_active_dev_restart_task(snode.cluster_id, dev.get_id()):
         raise ValueError("A restart task is active for the device")
 
@@ -2327,10 +2331,17 @@ def _rebalance_outcome(weights_updated, started, reason):
     return {"weights_updated": weights_updated, "started": started, "reason": reason}
 
 
-def grow_cluster_devices(cluster_id, rebalance=True):
+def grow_cluster_devices(cluster_id, rebalance=True, lun_factor=None):
     """Grow every online lblk data device of a cluster to the size of its
     block device, one device at a time. Devices whose size did not change
     are left alone; a device that fails does not stop the others.
+
+    ``lun_factor`` (multi-attach cluster with an array only): grow every LUN
+    the array plugin created by this factor at the array first and wait
+    until every node it is presented to sees the new size
+    (array_controller.grow_luns); a LUN that fails is reported under
+    ``errors`` and its device is not grown. The result then carries
+    ``luns`` too.
 
     When the devices have grown unevenly and ``rebalance`` is set, the
     weights are updated and the cluster is rebalanced (rebalance_after_growth),
@@ -2340,11 +2351,18 @@ def grow_cluster_devices(cluster_id, rebalance=True):
     ``uniform`` describes the growth before any weight change."""
     db_controller = DBController()
     results, errors = [], {}
+    lun_report = None
+    if lun_factor is not None:
+        from simplyblock_core.controllers import array_controller
+        lun_report = array_controller.grow_luns(cluster_id, lun_factor)
+        errors.update(lun_report["errors"])
     for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
         if node.is_secondary_node:
             continue
         for dev in node.nvme_devices:
             if dev.status != NVMeDevice.STATUS_ONLINE or dev.bdev_type != "aio":
+                continue
+            if dev.get_id() in errors:
                 continue
             try:
                 results.append(resize_device(dev.get_id()))
@@ -2360,4 +2378,7 @@ def grow_cluster_devices(cluster_id, rebalance=True):
                               "cluster grow-devices again")
         else:
             outcome = rebalance_after_growth(cluster_id)
-    return {"devices": results, "errors": errors, "uniform": uniform, "rebalance": outcome}
+    out = {"devices": results, "errors": errors, "uniform": uniform, "rebalance": outcome}
+    if lun_report is not None:
+        out["luns"] = lun_report["luns"]
+    return out

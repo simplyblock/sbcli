@@ -8,11 +8,14 @@ import time
 from pathlib import Path
 from typing import Any
 
+from pydantic import SecretStr
+
 from simplyblock_cli.alerting_config_parser import parse_alerting_config
 from simplyblock_core import cluster_ops, constants, db_controller, utils
 from simplyblock_core import mgmt_node_ops as mgmt_ops
 from simplyblock_core import storage_node_ops as storage_ops
 from simplyblock_core.controllers import (
+    array_controller,
     device_controller,
     fdb_backup_controller,
     health_controller,
@@ -804,10 +807,20 @@ class CLIWrapperBase:
         return True
 
     def cluster__grow_devices(self, sub_command, args):
+        lun_factor = getattr(args, 'lun_factor', None)
+        if lun_factor is not None:
+            try:
+                lun_factor = float(lun_factor)
+            except ValueError:
+                raise ValueError(f"--lun-factor must be a number, not {lun_factor!r}")
+        extra = {"lun_factor": lun_factor} if lun_factor is not None else {}
         result = device_controller.grow_cluster_devices(
-            args.cluster_id, rebalance=not getattr(args, 'no_rebalance', False))
-        lines = [f"{r['device_id']}: {utils.humanbytes(r['old_size'])} -> {utils.humanbytes(r['new_size'])}"
-                 for r in result["devices"] if r["resized"]]
+            args.cluster_id, rebalance=not getattr(args, 'no_rebalance', False), **extra)
+        lines = [f"LUN {r['lun_id']} of {dev_id}: {utils.humanbytes(r['old_size'])} -> "
+                 f"{utils.humanbytes(r['new_size'])} at the array"
+                 for dev_id, r in (result.get("luns") or {}).items()]
+        lines += [f"{r['device_id']}: {utils.humanbytes(r['old_size'])} -> {utils.humanbytes(r['new_size'])}"
+                  for r in result["devices"] if r["resized"]]
         lines += [f"{dev_id}: failed: {err}" for dev_id, err in result["errors"].items()]
         rebalance = result.get("rebalance")
         if rebalance and rebalance["started"]:
@@ -823,6 +836,41 @@ class CLIWrapperBase:
                          "only fully usable once all of them have grown by the same factor, or after "
                          "grow-devices without --no-rebalance has updated the weights.")
         return "\n".join(lines) or "No device has grown"
+
+    def cluster__set_array(self, sub_command, args):
+        options = {}
+        if args.options:
+            try:
+                options = json.loads(args.options)
+            except json.JSONDecodeError as e:
+                raise ValueError(f"--options is not valid JSON: {e}")
+            if not isinstance(options, dict):
+                raise ValueError("--options must be a JSON object")
+        credentials = {}
+        if args.credentials_file:
+            try:
+                raw = json.loads(Path(args.credentials_file).read_text())
+            except (OSError, json.JSONDecodeError) as e:
+                # Never the file content: it is the secret.
+                raise ValueError(f"--credentials-file could not be read as JSON: {type(e).__name__}")
+            if not isinstance(raw, dict) or not all(isinstance(v, str) for v in raw.values()):
+                raise ValueError("--credentials-file must hold a JSON object of strings")
+            # Wrapped at the boundary; unwrapped only by the KMS and the plugin.
+            credentials = {str(k): SecretStr(v) for k, v in raw.items()}
+        view = array_controller.register_array(
+            args.cluster_id, args.plugin, args.endpoint or "", options, credentials,
+            int(args.lun_size or 0))
+        return _format_result([view], json=getattr(args, "json", False))
+
+    def cluster__get_array(self, sub_command, args):
+        arrays = array_controller.get_arrays(args.cluster_id)
+        if not arrays:
+            return "No array registered"
+        return _format_result(arrays, json=getattr(args, "json", False))
+
+    def cluster__remove_array(self, sub_command, args):
+        array_controller.delete_array(args.cluster_id, args.array_id, force=args.force)
+        return True
 
     def cluster__complete_expand(self, sub_command, args):
         cluster_ops.cluster_expand(args.cluster_id)

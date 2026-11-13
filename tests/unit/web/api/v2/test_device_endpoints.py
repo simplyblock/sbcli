@@ -420,6 +420,23 @@ class TestGrowClusterDevices:
         assert response.json()['rebalance'] is None
         mock.grow_cluster_devices.assert_called_once_with(CLUSTER_ID, rebalance=True)
 
+    def test_lun_factor_is_passed_through(self, client, db, cluster, monkeypatch):
+        from unittest.mock import MagicMock
+
+        import simplyblock_web.api.v2.cluster as cluster_module
+        mock = MagicMock()
+        mock.grow_cluster_devices.return_value = {
+            'devices': [], 'errors': {}, 'uniform': True,
+            'luns': {'d1': {'lun_id': 'vol-1', 'old_size': 1, 'new_size': 2}}}
+        monkeypatch.setattr(cluster_module, 'device_controller', mock)
+        cluster.device_mode = 'lblk'
+
+        response = client.post(f'{self.URL}?lun_factor=2')
+        assert response.status_code == 200
+        assert response.json()['luns']['d1']['lun_id'] == 'vol-1'
+        mock.grow_cluster_devices.assert_called_once_with(CLUSTER_ID, rebalance=True, lun_factor=2.0)
+        assert client.post(f'{self.URL}?lun_factor=1').status_code == 422
+
     def test_uneven_growth_reports_rebalance(self, client, db, cluster, monkeypatch):
         from unittest.mock import MagicMock
 

@@ -25,6 +25,8 @@ EVENT_FENCE_LOOP = "FENCE_LOOP"
 #: Multi-attach array LUN mode: a LUN was (or could not be) taken over by
 #: another node after its serving node failed.
 EVENT_LUN_TAKEOVER = "LUN_TAKEOVER"
+# Multi-attach array LUN lifecycle (controllers/array_controller).
+EVENT_ARRAY_LUN = "ARRAY_LUN"
 
 DOMAIN_CLUSTER = "cluster"
 DOMAIN_MANAGEMENT = "management"

@@ -11,6 +11,7 @@ from simplyblock_core import (
     utils,
 )
 from simplyblock_core.controllers import (
+    array_controller,
     device_controller,
     device_events,
     health_controller,
@@ -686,6 +687,13 @@ def main():
             continue
         clusters = db.get_clusters()
         for cluster in clusters:
+            # Multi-attach cluster with an array: keep every LUN presented to
+            # its owner's current LVS secondary / tertiary (roles move on
+            # node removal and migration). No-op on every other cluster.
+            try:
+                array_controller.reconcile_in_background(cluster)
+            except Exception as e:
+                logger.error(f"Array LUN reconcile of {cluster.get_id()} not started: {e}")
             for node in db.get_storage_nodes_by_cluster_id(cluster.get_id()):
                 node_id = node.get_id()
                 if node_id not in threads_maps or threads_maps[node_id].is_alive() is False:
