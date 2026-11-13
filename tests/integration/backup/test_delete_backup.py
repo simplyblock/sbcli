@@ -88,11 +88,6 @@ class _Bucket:
                 yield {"Contents": [{"Key": k} for k in objects if k.startswith(Prefix)]}
         return _Paginator()
 
-    def delete_objects(self, Bucket, Delete):
-        for entry in Delete["Objects"]:
-            self.objects.pop(entry["Key"], None)
-        return {}
-
 
 @pytest.fixture
 def bucket(monkeypatch):
