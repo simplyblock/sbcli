@@ -687,6 +687,13 @@ def _status_verdict_rules(cluster, snodes, affected_physical_nodes, online_nodes
     # npcs k = 1
     n = cluster.distr_ndcs
     k = cluster.distr_npcs
+    if getattr(cluster, "multi_attach", False) is True:
+        # Multi-attach array LUNs run 1+0: no parity, but a lost node's LUN is
+        # taken over by a standby (controllers/lun_takeover), so the cluster
+        # survives as many lost nodes as its FTT. With k = npcs = 0 the first
+        # node loss suspended the cluster, which shut the other nodes down
+        # and with them the takeover's standby (found on the multi-attach bed).
+        k = max(k, int(getattr(cluster, "max_fault_tolerance", 0) or 1))
 
     # Failure-domain-aware suspend criteria. When the cluster was created with
     # --enable-failure-domain, chunks are spread across distinct domains, so it
