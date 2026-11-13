@@ -249,11 +249,13 @@ def delete_array(cluster_id, array_id, force=False) -> None:
 
 # ------------------------------------------------------------------- hosts
 
-def host_initiators(hostname="", cloud_instance=None, system_id="") -> dict:
-    """What identifies a host on an array: its hostname, system id and, on
-    AWS, the EC2 instance id (reported by the node agent from the instance
-    metadata service, IMDSv2)."""
+def host_initiators(hostname="", cloud_instance=None, system_id="", ip="") -> dict:
+    """What identifies a host on an array: its hostname, system id, IP and,
+    on AWS, the EC2 instance id (reported by the node agent from the
+    instance metadata service when its cloud probe runs)."""
     out = {"hostname": hostname}
+    if ip:
+        out["ip"] = ip
     if system_id:
         out["system_id"] = system_id
     cloud = cloud_instance or {}
@@ -264,7 +266,8 @@ def host_initiators(hostname="", cloud_instance=None, system_id="") -> dict:
 
 def _node_initiators(node) -> dict:
     cloud = {"cloud": getattr(node, "cloud_name", ""), "id": getattr(node, "cloud_instance_id", "")}
-    return host_initiators(multi_attach.array_host(node), cloud, getattr(node, "system_uuid", ""))
+    return host_initiators(multi_attach.array_host(node), cloud, getattr(node, "system_uuid", ""),
+                           getattr(node, "mgmt_ip", "") or "")
 
 
 def ensure_node_host(plugin, node, db=None) -> str:
@@ -303,7 +306,7 @@ def _find_in_inventory(inventory, wwn):
 
 
 def provision_node_lun(cluster, snode_api, node_info, node_config, lblk_configured,
-                       timeout=LUN_APPEAR_TIMEOUT_SEC):
+                       timeout=LUN_APPEAR_TIMEOUT_SEC, node_ip=""):
     """Create (or find) the LUN of the node being added, present it to the
     node's host and wait until the host sees it.
 
@@ -321,7 +324,7 @@ def provision_node_lun(cluster, snode_api, node_info, node_config, lblk_configur
     try:
         plugin = array.plugin_for_cluster(cluster)
         host_id = plugin.ensure_host(hostname, host_initiators(
-            hostname, node_info.get("cloud_instance"), node_info.get("system_id", "")))
+            hostname, node_info.get("cloud_instance"), node_info.get("system_id", ""), node_ip))
         existing = next((e for e in lblk_configured or [] if e.get("array_lun_id")), None)
         if existing:
             lun = {"id": existing["array_lun_id"], "wwn": existing.get("lun_wwn", "")}

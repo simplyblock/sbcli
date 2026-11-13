@@ -4444,7 +4444,8 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                 return False
             try:
                 lun_entry, array_host_id = array_controller.provision_node_lun(
-                    cluster, snode_api, node_info, node_config, lblk_configured)
+                    cluster, snode_api, node_info, node_config, lblk_configured,
+                    node_ip=node_addr.split(":")[0])
             except array_controller.ArrayLifecycleError as e:
                 logger.error(f"Could not provision the node's array LUN: {e}")
                 return False

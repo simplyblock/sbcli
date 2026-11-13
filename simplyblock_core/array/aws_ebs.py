@@ -230,7 +230,11 @@ class AwsEbsPlugin(ArrayPlugin):
     def ensure_host(self, name, initiators):
         instance_id = (initiators or {}).get("ec2_instance_id") or ""
         if not instance_id.startswith("i-"):
-            raise ArrayError(f"aws-ebs: host {name} has no EC2 instance id")
+            # The node agent reports the instance id only when its cloud
+            # probe runs (docker deployments start it with
+            # WITHOUT_CLOUD_INFO). The node's private IP identifies the
+            # instance as well, within the zone of the volumes.
+            instance_id = self._instance_by_private_ip(name, (initiators or {}).get("ip") or "")
         try:
             res = self._client().describe_instances(InstanceIds=[instance_id])
             inst = res["Reservations"][0]["Instances"][0]
@@ -244,6 +248,23 @@ class AwsEbsPlugin(ArrayPlugin):
                 f"aws-ebs: instance {instance_id} of host {name} is in {az}, the volumes in "
                 f"{self.options.get('az')}; Multi-Attach volumes cannot cross zones")
         return instance_id
+
+    def _instance_by_private_ip(self, name, ip):
+        if not ip:
+            raise ArrayError(f"aws-ebs: host {name} has no EC2 instance id and no IP")
+        try:
+            res = self._client().describe_instances(Filters=[
+                {"Name": "private-ip-address", "Values": [ip]},
+                {"Name": "availability-zone", "Values": [self.options.get("az") or ""]},
+                {"Name": "instance-state-name", "Values": ["pending", "running"]}])
+        except Exception as e:
+            raise ArrayError(f"aws-ebs: find the instance of host {name} ({ip}): {self._err(e)}") from e
+        ids = [i["InstanceId"] for r in res.get("Reservations") or [] for i in r.get("Instances") or []]
+        if len(ids) != 1:
+            raise ArrayError(
+                f"aws-ebs: host {name} has no EC2 instance id, and {len(ids)} running instances "
+                f"in {self.options.get('az')} have the private IP {ip}")
+        return ids[0]
 
     def create_lun(self, name, size_bytes, tags):
         all_tags = self.cluster_tags(dict(self.options.get("tags") or {}, **(tags or {})), name)

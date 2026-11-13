@@ -861,6 +861,33 @@ class TestAwsEbs(unittest.TestCase):
         with self.assertRaisesRegex(array.ArrayError, "no EC2 instance id"):
             self.p.ensure_host("w3", {"hostname": "w3"})
 
+    def test_ensure_host_by_private_ip(self):
+        # Docker deployments start the node agent with WITHOUT_CLOUD_INFO, so
+        # the instance is found by the node's private IP within the zone.
+        expected = {"Filters": [
+            {"Name": "private-ip-address", "Values": ["172.31.36.102"]},
+            {"Name": "availability-zone", "Values": ["us-east-1a"]},
+            {"Name": "instance-state-name", "Values": ["pending", "running"]}]}
+        self.stub.add_response("describe_instances", {"Reservations": [{"Instances": [{
+            "InstanceId": "i-7"}]}]}, expected)
+        self.stub.add_response("describe_instances", {"Reservations": [{"Instances": [{
+            "InstanceId": "i-7", "Placement": {"AvailabilityZone": "us-east-1a"}}]}]})
+        self.assertEqual(self.p.ensure_host("w1", {"hostname": "w1", "ip": "172.31.36.102"}), "i-7")
+        self.stub.assert_no_pending_responses()
+
+    def test_ensure_host_by_ip_refuses_none_or_several(self):
+        self.stub.add_response("describe_instances", {"Reservations": []})
+        with self.assertRaisesRegex(array.ArrayError, "0 running instances"):
+            self.p.ensure_host("w1", {"ip": "10.0.0.9"})
+        self.stub.add_response("describe_instances", {"Reservations": [
+            {"Instances": [{"InstanceId": "i-1"}, {"InstanceId": "i-2"}]}]})
+        with self.assertRaisesRegex(array.ArrayError, "2 running instances"):
+            self.p.ensure_host("w1", {"ip": "10.0.0.9"})
+
+    def test_host_initiators_carry_the_ip(self):
+        out = array_controller.host_initiators("w1", {}, "", "172.31.36.102")
+        self.assertEqual(out, {"hostname": "w1", "ip": "172.31.36.102"})
+
     def test_connect(self):
         p = aws_ebs.AwsEbsPlugin(cluster_id=CID)
         with self.assertRaisesRegex(array.ArrayError, "'az'"):
@@ -970,12 +997,20 @@ class TestAgent(unittest.TestCase):
         from simplyblock_web.api.internal import _node_info
         doc = {"instanceId": "i-1", "instanceType": "m5", "privateIp": "10.0.0.1",
                "availabilityZone": "us-east-1a", "region": "us-east-1"}
-        fake = MagicMock()
-        fake.EC2Metadata.return_value.instance_identity_document = doc
-        with patch.dict("sys.modules", {"ec2_metadata": fake}):
+        token = MagicMock(text="tok")
+        ident = MagicMock()
+        ident.json.return_value = doc
+        with patch.object(_node_info.requests, "put", return_value=token) as put,                 patch.object(_node_info.requests, "get", return_value=ident) as get:
             info = _node_info._amazon_info()
         self.assertEqual((info["id"], info["availability_zone"], info["region"]),
                          ("i-1", "us-east-1a", "us-east-1"))
+        self.assertIn("/latest/api/token", put.call_args.args[0])
+        self.assertEqual(get.call_args.kwargs["headers"], {"X-aws-ec2-metadata-token": "tok"})
+
+    def test_amazon_info_none_off_aws(self):
+        from simplyblock_web.api.internal import _node_info
+        with patch.object(_node_info.requests, "put", side_effect=OSError("no route")):
+            self.assertIsNone(_node_info._amazon_info())
 
     def test_rescan_dm_multipath_map(self):
         from simplyblock_web import node_utils
