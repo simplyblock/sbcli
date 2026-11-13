@@ -1,5 +1,5 @@
 SIMPLY_BLOCK_COMMAND_NAME=sbctl
-SIMPLY_BLOCK_VERSION=26.4.0-beta4
+SIMPLY_BLOCK_VERSION=26.4.0-beta6
 
-SIMPLY_BLOCK_DOCKER_IMAGE=quay.io/simplyblock-io/simplyblock:R26.4.0-beta5
-SIMPLY_BLOCK_SPDK_ULTRA_IMAGE=quay.io/simplyblock-io/ultra:26.4.0-beta4
+SIMPLY_BLOCK_DOCKER_IMAGE=quay.io/simplyblock-io/simplyblock:R26.4.0-beta6
+SIMPLY_BLOCK_SPDK_ULTRA_IMAGE=quay.io/simplyblock-io/ultra:26.4.0-beta6
