@@ -440,14 +440,18 @@ def create_backup(
 @instance_api.delete(
     '/backups',
     name='clusters:storage-pools:volumes:backups:delete',
-    status_code=204,
-    responses={204: {"content": None}},
+    status_code=202,
+    responses={202: {"content": None}},
 )
 def delete_backups(cluster: Cluster, pool: StoragePool, volume: Volume) -> Response:
+    """Start deleting every backup of this volume. Completed backups are
+    claimed and a task removes their S3 objects and then their records and
+    manifests; the request returns once they are claimed, not once they are
+    gone."""
     success, error = backup_controller.delete_backups(volume.get_id())
     if error:
-        raise HTTPException(400, error)
-    return Response(status_code=204)
+        raise HTTPException(409, error)
+    return Response(status_code=202)
 
 api.include_router(replication_collection_api)
 instance_api.include_router(replication_api, prefix='/replication')

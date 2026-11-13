@@ -1305,6 +1305,7 @@ class CLIWrapper(CLIWrapperBase):
         subparser = self.add_command('backup', 'Backup Commands')
         self.init_backup__list(subparser)
         self.init_backup__delete(subparser)
+        self.init_backup__delete_backup(subparser)
         self.init_backup__restore(subparser)
         self.init_backup__export(subparser)
         self.init_backup__discover(subparser)
@@ -1324,6 +1325,10 @@ class CLIWrapper(CLIWrapperBase):
     def init_backup__delete(self, subparser):
         subcommand = self.add_sub_command(subparser, 'delete', 'Delete all backups for a logical volume.')
         subcommand.add_argument('lvol_id', help='The logical volume id.', type=str)
+
+    def init_backup__delete_backup(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'delete-backup', 'Delete one backup. A backup nothing chains against is deleted; one something chains against is merged into that successor instead.')
+        subcommand.add_argument('backup_id', help='The backup id.', type=str)
 
     def init_backup__restore(self, subparser):
         subcommand = self.add_sub_command(subparser, 'restore', 'Restore a backup to a new logical volume.')
@@ -2012,6 +2017,8 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.backup__list(sub_command, args)
                 elif sub_command in ['delete']:
                     ret = self.backup__delete(sub_command, args)
+                elif sub_command in ['delete-backup']:
+                    ret = self.backup__delete_backup(sub_command, args)
                 elif sub_command in ['restore']:
                     ret = self.backup__restore(sub_command, args)
                 elif sub_command in ['export']:

@@ -1746,8 +1746,16 @@ class CLIWrapperBase:
         if error:
             print(f"Error: {error}")
             return False
-        print("Backups deleted")
-        return True
+        return f"Backups of volume {args.lvol_id} are being deleted"
+
+    def backup__delete_backup(self, sub_command, args):
+        try:
+            backup_controller.delete_backup(args.backup_id)
+        except KeyError:
+            return f"Delete failed: backup {args.backup_id} not found"
+        except PreconditionError as e:
+            return f"Delete failed: {e}"
+        return f"Backup {args.backup_id} is being deleted"
 
     def backup__restore(self, sub_command, args):
         try:

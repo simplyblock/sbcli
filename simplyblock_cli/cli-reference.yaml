@@ -3329,6 +3329,13 @@ commands:
             help: "The logical volume id."
             dest: lvol_id
             type: str
+      - name: delete-backup
+        help: "Delete one backup. A backup nothing chains against is deleted; one something chains against is merged into that successor instead."
+        arguments:
+          - name: "backup_id"
+            help: "The backup id."
+            dest: backup_id
+            type: str
       - name: restore
         help: "Restore a backup to a new logical volume."
         arguments:
