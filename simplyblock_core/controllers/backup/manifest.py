@@ -367,6 +367,7 @@ def s3_client(config: BackupConfig):
     Credentials are passed only when configured; omitting them lets boto3 fall
     back to its default provider chain (instance IAM role, environment,
     profile), which is what an absent ``credentials`` means.
+
     """
     return boto3.client("s3",
         region_name=config.region,
@@ -485,6 +486,15 @@ def delete_data_objects(config: BackupConfig, s3_id: int) -> None:
     this is a no-op, so retrying after a partial failure costs one empty list
     call and nothing else.
 
+    One ``delete_object`` per key rather than batching through
+    ``delete_objects``: that call's multi-object delete requires a legacy
+    Content-MD5 header botocore (1.36+) no longer computes by default, in
+    favour of the newer flexible checksums -- confirmed live against MinIO
+    (RELEASE.2024-01-16), which does not understand those and answers
+    ``MissingContentMD5``, including with ``request_checksum_calculation``
+    set back to ``"when_required"``. Single-object delete carries no such
+    requirement and needs no workaround.
+
     Raises:
         ManifestError: the bucket could not be listed, or an object under this
             prefix could not be removed.
@@ -495,16 +505,8 @@ def delete_data_objects(config: BackupConfig, s3_id: int) -> None:
         pages = client.get_paginator("list_objects_v2").paginate(
             Bucket=config.bucket_name, Prefix=prefix)
         for page in pages:
-            keys = [{"Key": entry["Key"]} for entry in page.get("Contents", [])]
-            if not keys:
-                continue
-            resp = client.delete_objects(
-                Bucket=config.bucket_name, Delete={"Objects": keys, "Quiet": True})
-            errors = resp.get("Errors") or []
-            if errors:
-                raise ManifestError(
-                    f"Failed to delete {len(errors)} object(s) under {prefix} in "
-                    f"{config.bucket_name}: {errors[0].get('Message')}")
+            for entry in page.get("Contents", []):
+                client.delete_object(Bucket=config.bucket_name, Key=entry["Key"])
     except (BotoCoreError, ClientError) as e:
         raise ManifestError(
             f"Failed to delete data objects under {prefix} in {config.bucket_name}") from e
