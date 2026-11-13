@@ -22,6 +22,11 @@ jobs:
         python-version: '3.11'
         cache: 'pip'
 
+    - name: Install FoundationDB client library
+      run: |
+        curl -fsSL https://github.com/apple/foundationdb/releases/download/7.3.63/foundationdb-clients_7.3.63-1_amd64.deb -o /tmp/fdb-clients.deb
+        sudo dpkg -i /tmp/fdb-clients.deb
+
     - name: Install tox
       run: pip install tox tox-uv
 
