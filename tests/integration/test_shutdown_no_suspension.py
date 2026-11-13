@@ -343,6 +343,12 @@ class TestShutdownStorageNodeGraceful(unittest.TestCase):
                 detach_calls.append(name)
                 return True
         peer.rpc_client = lambda **kwargs: _PeerRPC()
+        # A third node holding no controllers to the dying node: without it the
+        # cluster is a two-node one and the shutdown floor guard refuses
+        # (nodes online 1 < floor 2, simplyblock_core.floors).
+        bystander = _make_node("bystander", status=StorageNode.STATUS_ONLINE,
+                               mgmt_ip="10.0.0.3")
+        bystander.rpc_client = lambda **kwargs: _PeerRPC()
 
         # dying-node SPDK kill + bind sink
         kill_calls = []
@@ -362,7 +368,7 @@ class TestShutdownStorageNodeGraceful(unittest.TestCase):
         def _get_node(nid):
             return snode if nid == snode.get_id() else peer
         db.get_storage_node_by_id.side_effect = _get_node
-        db.get_storage_nodes_by_cluster_id.return_value = [snode, peer]
+        db.get_storage_nodes_by_cluster_id.return_value = [snode, peer, bystander]
         db.get_job_tasks.return_value = []
         db.kv_store = MagicMock()
 
@@ -401,7 +407,7 @@ class TestShutdownStorageNodeGraceful(unittest.TestCase):
             p.start()
             self.addCleanup(p.stop)
         fw_mock = MagicMock()  # MUST NOT be called: shutdown fences nothing
-        route_fences([snode, peer], fw_mock)
+        route_fences([snode, peer, bystander], fw_mock)
 
         return {
             "snode": snode, "peer": peer, "db": db,

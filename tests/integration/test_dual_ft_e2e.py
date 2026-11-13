@@ -672,9 +672,10 @@ def cluster_env(ensure_cluster, mock_rpc_servers):
         n.active_tcp = True
         n.active_rdma = False
         n.data_nics = [_make_nic("127.0.0.1")]
-        # Give each primary node 2 devices (need ndcs+npcs+1=4 total across cluster)
+        # Give each primary node 3 devices: 6 in all, at or above the 1+2
+        # scheme's data-device floor (n+2k = 5, simplyblock_core.floors).
         devs = []
-        for d in range(2):
+        for d in range(3):
             dev = NVMeDevice()
             dev.uuid = str(_uuid_mod.uuid4())
             dev.cluster_id = cluster.uuid

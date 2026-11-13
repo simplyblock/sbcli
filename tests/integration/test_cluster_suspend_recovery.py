@@ -143,8 +143,9 @@ class TestGetNextClusterStatusCountsNonOnline(unittest.TestCase):
     # ---- baseline behavior preserved ------------------------------------
 
     def test_all_online_active(self):
-        # Healthy 1x2 cluster: 4 online nodes, devices all online.
-        nodes = [_node(f"n{i}") for i in range(4)]
+        # Healthy 1x2 cluster: 5 online nodes (the n+2k node floor), devices
+        # all online.
+        nodes = [_node(f"n{i}") for i in range(5)]
         c = _cluster(distr_ndcs=1, distr_npcs=2)
         self.assertEqual(self._run(nodes, c), Cluster.STATUS_ACTIVE)
 
@@ -217,14 +218,14 @@ class TestGetNextClusterStatusCountsNonOnline(unittest.TestCase):
     def test_unreachable_without_data_plane_loss_not_counted(self):
         # The gate itself: mgmt-unreachable with the data plane still serving
         # (quorum says connected) must NOT suspend — an API blip or mgmt-NIC
-        # flap leaves clients unaffected.
+        # flap leaves clients unaffected. 5 ONLINE nodes keep the cluster at
+        # the resource floors (n+2k), so the verdict is the suspend rules'.
         from simplyblock_core.services import storage_node_monitor as mod
         nodes = [
             _node("n0", status=StorageNode.STATUS_UNREACHABLE),
             _node("n1", status=StorageNode.STATUS_UNREACHABLE),
             _node("n2", status=StorageNode.STATUS_UNREACHABLE),
-            _node("n3", status=StorageNode.STATUS_ONLINE),
-        ]
+        ] + [_node(f"on{i}", status=StorageNode.STATUS_ONLINE) for i in range(5)]
         c = _cluster(distr_ndcs=1, distr_npcs=2)
         with patch.object(mod, "is_node_data_plane_disconnected_quorum",
                           return_value=False):
@@ -254,9 +255,11 @@ class TestGetNextClusterStatusCountsNonOnline(unittest.TestCase):
             _node("n1", status=StorageNode.STATUS_ONLINE),
             _node("n2", status=StorageNode.STATUS_ONLINE),
             _node("n3", status=StorageNode.STATUS_ONLINE),
+            _node("n4", status=StorageNode.STATUS_ONLINE),
+            _node("n5", status=StorageNode.STATUS_ONLINE),
         ]
         c = _cluster(distr_ndcs=1, distr_npcs=2)
-        # 0 affected, 3 online -> ACTIVE
+        # 0 affected, 5 online (the n+2k node floor) -> ACTIVE
         self.assertEqual(self._run(nodes, c), Cluster.STATUS_ACTIVE)
 
 
@@ -303,20 +306,26 @@ class TestDownNeverCounts(unittest.TestCase):
             _node("on-1", status=StorageNode.STATUS_ONLINE, mgmt_ip="10.0.0.2"),
             _node("on-2", status=StorageNode.STATUS_ONLINE, mgmt_ip="10.0.0.3"),
             _node("on-3", status=StorageNode.STATUS_ONLINE, mgmt_ip="10.0.0.4"),
+            _node("on-4", status=StorageNode.STATUS_ONLINE, mgmt_ip="10.0.0.5"),
+            _node("on-5", status=StorageNode.STATUS_ONLINE, mgmt_ip="10.0.0.6"),
         ]
+        # 5 ONLINE besides the DOWN one: at the n+2k node floor.
         c = _cluster(distr_ndcs=1, distr_npcs=2)
         self.assertEqual(self._run(nodes, c), Cluster.STATUS_ACTIVE)
 
     def test_many_down_nodes_never_suspend(self):
         # Even several DOWN nodes never tip the cluster to SUSPENDED — they
-        # recover via port-unblock. 3 DOWN + 1 ONLINE on a 1x2 cluster -> ACTIVE.
+        # recover via port-unblock. 3 DOWN (> k) + 5 ONLINE (the n+2k node
+        # floor, so the floors do not degrade it) on a 1x2 cluster -> ACTIVE.
         nodes = [
             _node(f"down-{i}", status=StorageNode.STATUS_DOWN,
                   mgmt_ip=f"10.0.0.{i + 1}", n_online_devs=2, n_offline_devs=0)
             for i in range(3)
         ]
-        nodes.append(
-            _node("on-1", status=StorageNode.STATUS_ONLINE, mgmt_ip="10.0.0.9"))
+        nodes += [
+            _node(f"on-{i}", status=StorageNode.STATUS_ONLINE, mgmt_ip=f"10.0.0.{i + 10}")
+            for i in range(5)
+        ]
         c = _cluster(distr_ndcs=1, distr_npcs=2)
         self.assertEqual(self._run(nodes, c), Cluster.STATUS_ACTIVE)
 
