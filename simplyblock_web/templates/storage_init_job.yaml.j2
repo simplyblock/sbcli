@@ -1,3 +1,4 @@
+{% from 'kubelet_restart.j2' import restart_kubelet %}
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -136,27 +137,8 @@ spec:
 
                 if [ "$HUGEPAGES_AFTER_KB" -ne "$K8S_NODE_HUGEPAGES_KB" ]; then
                   echo "[INFO] Hugepages changed from Kubernetes-known value ($HUGEPAGES_AFTER_KB kB != $K8S_NODE_HUGEPAGES_KB kB), restarting kubelet..."
-                  # The unit the kubelet runs under depends on how the distribution
-                  # packages it: a systemd unit, the snap of the Canonical EKS image, or
-                  # the k3s or RKE2 process that embeds it. The first one the host has is
-                  # restarted. The server units come last, because restarting one also
-                  # restarts the API server it embeds.
                   nsenter --target 1 --mount --uts --ipc --net --pid -- /bin/sh -c '
-                    if command -v systemctl >/dev/null 2>&1; then
-                      KUBELET_UNITS="kubelet.service snap.kubelet-eks.daemon.service k3s-agent.service rke2-agent.service k3s.service rke2-server.service"
-                      KUBELET_UNIT=""
-                      for unit in $KUBELET_UNITS; do
-                        if systemctl cat "$unit" >/dev/null 2>&1; then
-                          KUBELET_UNIT="$unit"
-                          break
-                        fi
-                      done
-                      if [ -n "$KUBELET_UNIT" ]; then
-                        systemctl restart "$KUBELET_UNIT" && echo "$KUBELET_UNIT restarted" || echo "$KUBELET_UNIT restart failed"
-                      else
-                        echo "[WARN] None of $KUBELET_UNITS found: the kubelet is not restarted, and keeps reporting the huge pages it read when it started"
-                      fi
-                    fi
+                    {{ restart_kubelet() | trim | indent(20) }}
                   '
                 else
                   echo "[INFO] Hugepages not greater than what Kubernetes reports, skipping kubelet restart."
