@@ -168,20 +168,31 @@ class TestCreateCluster:
         assert response.status_code == 201
         assert cluster_ops.add_cluster.call_args.kwargs['hugepages_mem'] == 0
 
-    def test_passes_inline_checksum_and_atomic_4k(self, client, db, cluster, cluster_ops):
+    def test_passes_inline_checksum_atomic_4k_and_md_journal(self, client, db, cluster, cluster_ops):
         cluster_ops.add_cluster.return_value = CLUSTER_ID
 
         response = client.post('/api/v2/clusters/', json={
             'name': 'cluster-1', 'distr_ndcs': 1, 'distr_npcs': 2, **SIZING,
-            'inline_checksum': True, 'atomic_4k': True,
+            'inline_checksum': True, 'atomic_4k': True, 'md_journal': True,
         })
         response.raise_for_status()
 
         kwargs = cluster_ops.add_cluster.call_args.kwargs
         assert kwargs['inline_checksum'] is True
         assert kwargs['atomic_4k'] is True
+        assert kwargs['md_journal'] is True
 
-    def test_inline_checksum_and_atomic_4k_default_false(self, client, db, cluster, cluster_ops):
+    def test_refuses_atomic_4k_without_inline_checksum(self, client, db, cluster, cluster_ops):
+        response = client.post('/api/v2/clusters/', json={
+            'name': 'cluster-1', 'distr_ndcs': 1, 'distr_npcs': 2, **SIZING,
+            'atomic_4k': True,
+        })
+
+        assert response.status_code == 422
+        assert 'atomic_4k requires inline_checksum' in response.text
+        cluster_ops.add_cluster.assert_not_called()
+
+    def test_integrity_defaults(self, client, db, cluster, cluster_ops):
         cluster_ops.add_cluster.return_value = CLUSTER_ID
 
         response = client.post('/api/v2/clusters/', json={'name': 'cluster-1', 'distr_ndcs': 1, 'distr_npcs': 2, **SIZING})
@@ -190,7 +201,66 @@ class TestCreateCluster:
         kwargs = cluster_ops.add_cluster.call_args.kwargs
         assert kwargs['inline_checksum'] is False
         assert kwargs['atomic_4k'] is False
+        assert kwargs['md_journal'] is True
 
+    def test_md_journal_can_be_turned_off(self, client, db, cluster, cluster_ops):
+        cluster_ops.add_cluster.return_value = CLUSTER_ID
+
+        response = client.post('/api/v2/clusters/', json={
+            'name': 'cluster-1', 'distr_ndcs': 1, 'distr_npcs': 2, **SIZING, 'md_journal': False,
+        })
+        response.raise_for_status()
+
+        assert cluster_ops.add_cluster.call_args.kwargs['md_journal'] is False
+
+
+    def test_workload_names_are_passed_through(self, client, db, cluster, cluster_ops):
+        """A second cluster in a namespace, and a supercluster's members, are
+        reached through Services other than the constant ones, so the
+        operator names them at creation."""
+        cluster_ops.add_cluster.return_value = CLUSTER_ID
+        names = {
+            'snode_api_service': 'sb-prod-node-api',
+            'spdk_proxy_service': 'sb-prod-spdk-proxy',
+            'spdk_proxy_tls_secret': 'sb-prod-spdk-proxy-tls',
+            'node_label_suffix': '-abc',
+        }
+
+        response = client.post('/api/v2/clusters/', json={
+            'name': 'cluster-1', 'distr_ndcs': 1, 'distr_npcs': 2, **SIZING, **names})
+        response.raise_for_status()
+
+        kwargs = cluster_ops.add_cluster.call_args.kwargs
+        for field, value in names.items():
+            assert kwargs[field] == value
+
+    def test_omitted_workload_names_are_the_constant_names(self, client, db, cluster, cluster_ops):
+        cluster_ops.add_cluster.return_value = CLUSTER_ID
+
+        response = client.post('/api/v2/clusters/', json={
+            'name': 'cluster-1', 'distr_ndcs': 1, 'distr_npcs': 2, **SIZING})
+        response.raise_for_status()
+
+        kwargs = cluster_ops.add_cluster.call_args.kwargs
+        assert kwargs['snode_api_service'] == 'simplyblock-storage-node-api'
+        assert kwargs['spdk_proxy_service'] == 'simplyblock-spdk-proxy'
+        assert kwargs['spdk_proxy_tls_secret'] == 'simplyblock-spdk-proxy-tls'
+        assert kwargs['node_label_suffix'] == ''
+
+    @pytest.mark.parametrize('field,value', [
+        ('snode_api_service', 'Not_A_Service'),
+        ('snode_api_service', 'a' * 64),
+        ('spdk_proxy_service', ''),
+        ('spdk_proxy_tls_secret', 'has space'),
+        ('node_label_suffix', 'abc'),
+        ('node_label_suffix', '-abcd'),
+    ])
+    def test_an_invalid_workload_name_is_rejected(self, client, db, cluster_ops, field, value):
+        response = client.post('/api/v2/clusters/', json={
+            'name': 'cluster-1', 'distr_ndcs': 1, 'distr_npcs': 2, **SIZING, field: value})
+
+        assert response.status_code == 422
+        cluster_ops.add_cluster.assert_not_called()
 
 class TestGetCluster:
 
@@ -201,12 +271,49 @@ class TestGetCluster:
         assert response.json()['id'] == CLUSTER_ID
         db.get_cluster_by_id.assert_called_once_with(CLUSTER_ID)
 
+    def test_returns_the_recorded_workload_names(self, client, db, cluster):
+        """The operator reads the record back: a control plane that predates
+        the fields ignores them in the create body, and a cluster recorded
+        with the constant names must not be taken for one with its own."""
+        cluster.snode_api_service = 'sb-prod-node-api'
+        cluster.node_label_suffix = '-abc'
+
+        body = client.get(f'/api/v2/clusters/{CLUSTER_ID}/').json()
+
+        assert body['snode_api_service'] == 'sb-prod-node-api'
+        assert body['spdk_proxy_service'] == 'simplyblock-spdk-proxy'
+        assert body['spdk_proxy_tls_secret'] == 'simplyblock-spdk-proxy-tls'
+        assert body['node_label_suffix'] == '-abc'
+
     def test_unknown_cluster_returns_404(self, client, db):
         db.get_cluster_by_id.side_effect = KeyError('Cluster not found')
 
         response = client.get(f'/api/v2/clusters/{CLUSTER_ID}/')
 
         assert response.status_code == 404
+
+    def test_reports_the_sync_replication_site_record(self, client, db, cluster):
+        """Regression: 2026-10-22-cluster-dto-hides-site-record. The operators of
+        a stretched cluster project the monitor's site record (lost_site,
+        lost_site_state) and whether the cluster is a sync cluster into their
+        StorageCluster status; the model carried all three and the DTO dropped
+        them, so neither site could see a site being drained or fenced."""
+        cluster.sync_replication = True
+        cluster.lost_site = 'b'
+        cluster.lost_site_state = 'fencing'
+
+        body = client.get(f'/api/v2/clusters/{CLUSTER_ID}/').json()
+
+        assert body['sync_replication'] is True
+        assert body['lost_site'] == 'b'
+        assert body['lost_site_state'] == 'fencing'
+
+    def test_a_cluster_with_no_site_record_reports_empty_strings(self, client, db, cluster):
+        body = client.get(f'/api/v2/clusters/{CLUSTER_ID}/').json()
+
+        assert body['sync_replication'] is False
+        assert body['lost_site'] == ''
+        assert body['lost_site_state'] == ''
 
 
 class TestUpdateCluster:
@@ -230,7 +337,13 @@ class TestDeleteCluster:
         response = client.delete(f'/api/v2/clusters/{CLUSTER_ID}/')
 
         assert response.status_code == 204
-        cluster_ops.delete_cluster.assert_called_once_with(CLUSTER_ID)
+        cluster_ops.delete_cluster.assert_called_once_with(CLUSTER_ID, force=False)
+
+    def test_force_brings_the_cluster_down(self, client, cluster, cluster_ops):
+        response = client.delete(f'/api/v2/clusters/{CLUSTER_ID}/?force=true')
+
+        assert response.status_code == 204
+        cluster_ops.delete_cluster.assert_called_once_with(CLUSTER_ID, force=True)
 
     def test_conflict_maps_to_409(self, client, cluster, cluster_ops):
         cluster_ops.delete_cluster.side_effect = ValueError('cluster is not empty')

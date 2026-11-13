@@ -487,6 +487,7 @@ _CLUSTER_DISPATCH = {
     'bdev_nvme_set_options':                 _bdev_nvme_set_options,
     'bdev_PT_NoExcl_create':                 _bdev_PT_NoExcl_create,
     'alceml_set_qos_weights':                _alceml_set_qos_weights,
+    'bdev_distrib_set_qos_weights':          _alceml_set_qos_weights,
     'jc_get_jm_status':                      _jc_get_jm_status,
     'nvmf_get_blocked_ports_rdma':           _nvmf_get_blocked_ports_rdma,
     'bdev_distrib_force_to_non_leader':      _bdev_distrib_force_to_non_leader,
@@ -815,10 +816,10 @@ def _patch_externals():
               return_value=(True, None)),
         patch('simplyblock_core.controllers.health_controller._check_node_api', return_value=True),
         # Firewall always succeeds
-        patch('simplyblock_core.fw_api_client.FirewallClient.firewall_set_port',
-              return_value=(True, None)),
-        patch('simplyblock_core.fw_api_client.FirewallClient.get_firewall',
-              return_value=('', None)),
+        patch('simplyblock_core.rpc_client.RPCClient.nvmf_port_block', return_value=True),
+        patch('simplyblock_core.rpc_client.RPCClient.nvmf_port_unblock', return_value=True),
+        patch('simplyblock_core.rpc_client.RPCClient.nvmf_get_blocked_ports',
+              return_value=set()),
         # Port check always passes
         patch('simplyblock_core.controllers.health_controller.check_port_on_node',
               return_value=True),

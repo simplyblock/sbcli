@@ -36,6 +36,22 @@ class NvmeConnectEntry(BaseModel):
     # Set when the volume has been failed over; the CSI driver uses this UUID
     # for device lookup instead of the original source lvol UUID.
     target_lvol_id: str | None = None
+    # Two-node arbitrated cluster: the CSI driver passes keep_alive_tmo and
+    # fast_io_fail_tmo to nvme connect only then, so every other cluster keeps
+    # its hosts' current settings (docs/design/two-node-arbitration.md 9.1).
+    two_node: bool = False
+
+
+class HostNQNRequiredError(ValueError):
+    """The volume restricts hosts and the request named none."""
+
+
+class HostNotAllowedError(ValueError):
+    """The request named a host the volume does not allow. The volume exists;
+    the requester is not on its list -- an authorization refusal, never an
+    absence. Answered as 404, the CSI driver read it as a deleted volume and
+    every pod on an unregistered node hung in ContainerCreating with "the
+    control plane did not answer" (live 2026-10-20, TestBackupSecurityLvol)."""
 
 
 class HostConnectAuth(BaseModel):
@@ -67,17 +83,22 @@ class HostConnectAuth(BaseModel):
                 db: "DBController") -> "HostConnectAuth | None":
         """Resolve the connecting host's auth for *lvol*.
 
-        Returns None when the volume allows any host. Raises ValueError when the
-        volume restricts hosts but the request names none, or names one that is
-        not allowed.
+        Returns None when the volume allows any host. Raises
+        :class:`HostNQNRequiredError` when the volume restricts hosts but the
+        request names none, and :class:`HostNotAllowedError` when it names one
+        that is not allowed. Both are ``ValueError``s, so a caller that only
+        wants "refused" keeps catching that; a caller that answers HTTP tells
+        them apart (400 and 403), because neither is "the volume is gone".
         """
         if not lvol.allowed_hosts:
             return None
         if not host_nqn:
-            raise ValueError(f"Volume {lvol.get_id()} has allowed hosts configured; --host-nqn is required")
+            raise HostNQNRequiredError(
+                f"Volume {lvol.get_id()} has allowed hosts configured; --host-nqn is required")
         matched_entry = next((h for h in lvol.allowed_hosts if h["nqn"] == host_nqn), None)
         if matched_entry is None:
-            raise ValueError(f"Host NQN {host_nqn} not found in allowed hosts for volume {lvol.get_id()}")
+            raise HostNotAllowedError(
+                f"Host NQN {host_nqn} not found in allowed hosts for volume {lvol.get_id()}")
         return cls.from_entry(matched_entry, db.get_pool_by_id(lvol.pool_uuid))
 
 
@@ -102,6 +123,13 @@ def build_nvme_connect_entry(
     """
     keep_alive_tmo = (constants.LVOL_NVME_KEEP_ALIVE_TO_TCP
                       if transport == "tcp" else constants.LVOL_NVME_KEEP_ALIVE_TO)
+    if getattr(cluster, "two_node_arbitration", False):
+        # Two-node arbitration: a frozen node keeps its TCP connections open,
+        # so the host notices the dead path only via keep-alive (campaign c8,
+        # F20). Keep-alive 2 s with fast_io_fail 8 s, ctrl_loss 3600 s and
+        # reconnect 2 s (docs/design/two-node-arbitration.md, client
+        # requirements). Clusters without arbitration keep the defaults.
+        keep_alive_tmo = constants.TWO_NODE_CLIENT_KEEP_ALIVE_TO
     client_data_nic_str = f"--host-iface={cluster.client_data_nic}" if cluster.client_data_nic else ""
     tls_str = host_auth_str = ""
     if host_entry:
@@ -139,4 +167,5 @@ def build_nvme_connect_entry(
         connect=connect_cmd,
         tls=bool(host_entry and host_entry.psk.get_secret_value()),
         allowed_hosts=allowed_hosts if allowed_hosts is not None else [],
+        two_node=bool(getattr(cluster, "two_node_arbitration", False) is True),
     )

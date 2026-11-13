@@ -131,6 +131,36 @@ def test_the_peer_group_resolves_the_same_lineages(monkeypatch):
     assert res["members"] == [{"origin_handle": _h(original), "active_handle": _h(clone)}]
 
 
+def test_a_reprotect_source_still_holding_superseded_members_resolves_to_the_live_peer(monkeypatch):
+    """Regression: #33 -- after an UNPLANNED failover A->B the app runs on B, A is
+    healed, and Ramen re-protects it. A's members still EXIST (a re-protect deletes
+    them only once the demote completes, unlike a relocate, which deletes them up
+    front), but they are superseded failed-over SOURCES: the live data is in B's
+    clones. resolve_group(A) must name the live peer B, not A.
+
+    Before the fix, A's superseded members counted as open, so resolution named A
+    for the ~2 min until they were deleted. The CSI driver resolves a re-protect
+    resync to the group's active end, so the one ResyncVolume it issued resolved
+    to A's retired group and nothing pointed B's replication home -- the survivor
+    ran on B unprotected (run 20261014-1133-ebs)."""
+    db = _db(monkeypatch)
+    src_group, peer = _group("G_A", SRC), _group("G_B", TGT)
+    db._groups += [src_group, peer]
+    # A's superseded source is STILL PRESENT (not yet deleted) ...
+    superseded = _vol("ORIG", SRC, group="CL_A/G_A")
+    db._lvols.append(superseded)
+    # ... while B holds the live failed-over clone the app writes to.
+    clone = _vol("CLONE", TGT, group="CL_B/G_B")
+    db._lvols.append(clone)
+    db._replications.append(_rep(superseded, clone))   # FAILED_OVER: ORIG -> CLONE
+
+    res = rpc.resolve_group(src_group)
+
+    assert (res["active_cluster_id"], res["active_group_id"]) == (TGT, "G_B"), \
+        "a re-protect source still holding superseded members must resolve to the live peer (#33)"
+    assert res["members"] == [{"origin_handle": _h(superseded), "active_handle": _h(clone)}]
+
+
 def test_a_lineage_whose_volumes_are_all_gone_is_left_out(monkeypatch):
     db = _db(monkeypatch)
     g = _group("G_A", SRC)

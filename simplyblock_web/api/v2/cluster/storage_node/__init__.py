@@ -1,16 +1,18 @@
 import builtins
 from threading import Thread
-from typing import Union
+from typing import Annotated, Union
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, model_validator
 from sse_starlette import EventSourceResponse
 
 from simplyblock_core import storage_node_ops
 from simplyblock_core.controllers import node_drain_steps, tasks_controller
 from simplyblock_core.db_controller import DBController
+from simplyblock_core.exceptions import PromoteIncompleteError
 from simplyblock_core.models.storage_node import StorageNode as StorageNodeModel
+from simplyblock_core.storage_network import NetworkAttachment
 
 from ... import util as util
 from ..._dependencies import Cluster, StorageNode
@@ -67,12 +69,33 @@ class StorageNodeParams(BaseModel):
     spdk_proxy_image: str | None = None
     spdk_sys_mem: str | None = None
     failure_domain: int | None = None
+    site: str | None = None
     expand: bool = False
     force_format: bool = False
+    # The networks the SPDK pod attaches to. With any, the pod leaves the host network.
+    networks: Annotated[builtins.list[NetworkAttachment], Field(default_factory=builtins.list)]
+    # The SPDK pod serves on the pod network itself, fronted by a Service, with no
+    # attachment. Exclusive with networks.
+    pod_network: bool = False
+
+    @model_validator(mode="after")
+    def _one_way_off_the_host_network(self):
+        if self.networks and self.pod_network:
+            raise ValueError("a node is added with networks or on the pod network, not both")
+        # data_nics are host NIC names, which a pod off the host network does not see.
+        if self.data_nics and (self.networks or self.pod_network):
+            raise ValueError("data_nics are allowed only when the node is on the host network")
+        return self
 
 
 @api.post('/', name='clusters:storage-nodes:create', status_code=201, responses={201: {"content": None}})
 def add(request: Request, cluster: Cluster, parameters: StorageNodeParams, response_format: util.CreationResponseFormatParameter = "identifier"):
+    # Rejected here rather than by the add-node task, so the caller gets the
+    # reason instead of a task that ends in "invalid input".
+    try:
+        storage_node_ops.validate_node_site(cluster, parameters.site)
+    except storage_node_ops.NodeSiteError as e:
+        raise HTTPException(400, str(e))
     task_id_or_false = tasks_controller.add_node_add_task(
         cluster.get_id(),
         {
@@ -99,8 +122,11 @@ def add(request: Request, cluster: Cluster, parameters: StorageNodeParams, respo
             "spdk_proxy_image": parameters.spdk_proxy_image,
             "spdk_sys_mem": parameters.spdk_sys_mem,
             "failure_domain": parameters.failure_domain,
+            "site": parameters.site,
             "expansion": parameters.expand,
             "force_format": parameters.force_format,
+            **({"networks": [network.model_dump(exclude_defaults=True) for network in parameters.networks]} if parameters.networks else {}),
+            **({"pod_network": True} if parameters.pod_network else {}),
         }
     )
     if not task_id_or_false:
@@ -315,9 +341,15 @@ def restart(cluster: Cluster, storage_node: StorageNode, parameters: _RestartPar
     return Response(status_code=202)  # FIXME: Provide URL for checking task status
 
 
-@instance_api.post('/promote', name='clusters:storage-nodes:start', status_code=204, responses={204: {"content": None}})
+@instance_api.post('/promote', name='clusters:storage-nodes:promote', status_code=204, responses={
+    204: {"content": None},
+    409: {"description": "The promote did not finish: a device is still new or still removed; call again"},
+})
 def promote(cluster: Cluster, storage_node: StorageNode) -> Response:
-    storage_node_ops.make_sec_new_primary(storage_node.uuid)
+    try:
+        storage_node_ops.make_sec_new_primary(storage_node.uuid)
+    except PromoteIncompleteError as e:
+        raise HTTPException(409, str(e))
     return Response(status_code=204)
 
 

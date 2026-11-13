@@ -19,7 +19,7 @@ from simplyblock_core.kms import (
     lvol_dek_path,
     pool_kek_name,
 )
-from simplyblock_core.models.backup import Backup
+from simplyblock_core.models.backup import Backup, GroupBackup
 from simplyblock_core.models.backup_config import (
     BackupConfig,
     BackupLocation,
@@ -28,6 +28,7 @@ from simplyblock_core.models.backup_config import (
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.rpc_client import RPCException
 
 logger = logging.getLogger()
 
@@ -168,6 +169,7 @@ def build_manifest(backup: Backup) -> backup_manifest.BackupManifest:
         "snapshot_id": backup.snapshot_id,
         "snapshot_name": backup.snapshot_name,
         "size": backup.size,
+        "max_namespace_per_subsys": backup.max_namespace_per_subsys or None,
         **settings,
     })
 
@@ -483,6 +485,8 @@ def create_single_backup(snapshot, lvol, node_id, cluster_id, prev_backup, locat
     backup.created_at = int(time.time())
     backup.status = Backup.STATUS_PENDING
     backup.encrypted = bool(lvol.crypto_bdev)
+    # The subsystem sharing the restore reapplies (Backup.max_namespace_per_subsys).
+    backup.max_namespace_per_subsys = int(getattr(lvol, "max_namespace_per_subsys", 0) or 1)
 
     if backup.encrypted:
         cluster = db_controller.get_cluster_by_id(cluster_id)
@@ -629,6 +633,135 @@ def ensure_snapshot_chain_backed_up(snapshot, lvol, node_id, cluster_id,
     return final_backup_id
 
 
+#: Prefix on the name of the snapshot `backup_lvol` creates for itself.
+#: Fixed, and never influenced by a caller: a later cleanup pass that wants
+#: to find and prune a direct backup's own snapshot only gets to rely on a
+#: name shaped like this if nothing but `backup_lvol` ever produces one.
+#: Leading underscore so it cannot collide with a name a user supplies -- see
+#: `is_reserved_snapshot_name`, which every entry point taking a
+#: user-supplied snapshot name checks to enforce that.
+DIRECT_BACKUP_SNAPSHOT_PREFIX = "_backup_"
+
+#: Prefix on the name of the snapshot the scheduler's auto-backups create for
+#: themselves (`backup.policy._auto_backup_lvol`). Reserved for the same
+#: reason as `DIRECT_BACKUP_SNAPSHOT_PREFIX`.
+SCHEDULED_BACKUP_SNAPSHOT_PREFIX = "auto_"
+
+#: Every prefix a user-supplied snapshot name must not start with.
+RESERVED_SNAPSHOT_NAME_PREFIXES = (
+    DIRECT_BACKUP_SNAPSHOT_PREFIX,
+    SCHEDULED_BACKUP_SNAPSHOT_PREFIX,
+)
+
+#: Shared wording for every entry point's rejection of a reserved name, so
+#: the message is one string to update rather than one per entry point.
+RESERVED_SNAPSHOT_NAME_ERROR = (
+    f"Snapshot name must not start with any of {RESERVED_SNAPSHOT_NAME_PREFIXES} "
+    "(reserved for backups created by the system)"
+)
+
+
+def is_reserved_snapshot_name(name: str) -> bool:
+    """Whether ``name`` collides with a prefix reserved for the backup
+    subsystem's own snapshots.
+
+    A predicate, not a check: an entry point that takes a snapshot name from
+    a caller (CLI, v1, v2) decides what to do with a collision itself -- a
+    printed error, an HTTP response, a pydantic validator -- rather than this
+    function raising the same way for all of them. Never consulted inside
+    `snapshot_controller.add` itself, since the subsystem's own internal
+    callers (`backup_lvol`, `backup.policy._auto_backup_lvol`) go through
+    that same function to create exactly these reserved names.
+    """
+    return name.startswith(RESERVED_SNAPSHOT_NAME_PREFIXES)
+
+
+def _create_snapshot_and_back_up(lvol, snap_name: str) -> str:
+    """Create ``snap_name`` on ``lvol``, then back up its whole unbacked ancestry.
+
+    The shared core of `backup_lvol` (a direct user-requested backup) and
+    `backup.policy._auto_backup_lvol` (the scheduler's auto-backups): both
+    want "create a snapshot of this volume, then back it up" and nothing
+    more. The cluster is always the volume's own node's cluster -- derived
+    here, never taken from a caller -- so nothing can record this backup
+    under a cluster other than the one the snapshot actually lives in.
+    Refuses up front, via `chain_would_be_restorable`, if the chain the new
+    snapshot would join could never be restorable -- before taking it, so a
+    refusal never leaves an orphaned snapshot behind. The snapshot it creates
+    is then handed to `ensure_snapshot_chain_backed_up`, the function that
+    backs up an existing snapshot, rather than re-deriving that walk here: a
+    caller that already has a snapshot calls `backup_snapshot` directly and
+    this function is never on its path.
+
+    Takes the snapshot's name rather than generating one, because the two
+    callers use different, non-overridable naming schemes to stay tellable
+    apart afterwards (`auto_*` vs `DIRECT_BACKUP_SNAPSHOT_PREFIX`); neither
+    exposes this parameter to anything outside this package.
+
+    Returns the id of the backup covering the new snapshot.
+
+    Raises:
+        PreconditionError: the volume's node or cluster cannot be found or
+            used, or the chain would not be restorable.
+        RuntimeError: the snapshot itself could not be created -- a
+            data-plane failure, not a precondition, since every precondition
+            on taking it was already checked above.
+    """
+    from simplyblock_core.controllers import snapshot_controller
+
+    try:
+        node_id = lvol.node_id
+        snode = db_controller.get_storage_node_by_id(node_id)
+        if snode.status != StorageNode.STATUS_ONLINE:
+            raise PreconditionError(f"Node {node_id} is not online (status: {snode.status})")
+
+        cluster_id = snode.cluster_id
+
+        location = db_controller.get_cluster_by_id(cluster_id).get_backup_config().location()
+        chain_would_be_restorable(
+            lvol, location, what=f"The backup chain of volume {lvol.lvol_name}")
+    except (KeyError, ValueError) as e:
+        raise PreconditionError(str(e)) from e
+
+    snap_id, error = snapshot_controller.add(lvol.get_id(), snap_name)
+    if error:
+        raise RuntimeError(error)
+
+    try:
+        snapshot = db_controller.get_snapshot_by_id(snap_id)
+    except KeyError as e:
+        raise RuntimeError(f"Snapshot {snap_id} not found right after creation: {e}") from e
+
+    return ensure_snapshot_chain_backed_up(snapshot, lvol, node_id, cluster_id, location)
+
+
+def backup_lvol(lvol_id) -> str:
+    """Create a backup directly from a volume, without an existing snapshot.
+
+    The snapshot taken to do this is named here, under
+    `DIRECT_BACKUP_SNAPSHOT_PREFIX`, and a caller has no way to influence that
+    name -- unlike a snapshot a user takes directly, this one exists purely
+    to serve this backup, and a future cleanup pass needs to be able to find
+    and prune it by that marker alone. The cluster it backs up into is
+    likewise never a caller's choice: it is always the volume's own node's
+    cluster (see `_create_snapshot_and_back_up`).
+
+    Returns the id of the backup covering the new snapshot.
+
+    Raises:
+        PreconditionError: the volume, its node or its cluster cannot be
+            found or used, or the chain would not be restorable.
+        RuntimeError: the snapshot itself could not be created.
+    """
+    try:
+        lvol = db_controller.get_lvol_by_id(lvol_id)
+    except KeyError as e:
+        raise PreconditionError(str(e)) from e
+
+    snap_name = f"{DIRECT_BACKUP_SNAPSHOT_PREFIX}{lvol.lvol_name}_{int(time.time())}"
+    return _create_snapshot_and_back_up(lvol, snap_name)
+
+
 def backup_snapshot(snapshot_id, cluster_id=None):
     """Create a backup from an existing snapshot.
 
@@ -671,7 +804,8 @@ def backup_snapshot(snapshot_id, cluster_id=None):
 
 def restore_backup(backup_id: str, lvol_name: str, pool_id_or_name: str,
                    target_node_id: str | None = None,
-                   s3_credentials: S3Credentials | None = None):
+                   s3_credentials: S3Credentials | None = None,
+                   consistency_group: str | None = None):
     """Restore a backup chain into a new fully-accessible lvol.
 
     Creates the volume (with subsystem, listeners, namespace) via
@@ -679,7 +813,18 @@ def restore_backup(backup_id: str, lvol_name: str, pool_id_or_name: str,
     fill in the data from S3.  The volume is in STATUS_RESTORING
     until the data transfer completes.
 
+    The volume is created with the subsystem sharing its source had
+    (``Backup.max_namespace_per_subsys``): a member of a shared subsystem comes
+    back namespaced under the same cap, a volume that owned its subsystem comes
+    back owning one. A record from before the field was kept takes
+    add_lvol_ha's default.
+
     Args:
+        consistency_group: Name of the consistency group the restored volume
+            joins AT CREATION, which is what lets a namespaced member take the
+            group's own subsystem (cg_colocation) rather than any subsystem of
+            the pool with a free slot. A group restore passes the group it is
+            forming; a single-volume restore leaves it unset.
         s3_credentials: Credentials for the backup's bucket, when that is not
             the cluster's own. Omit to use the nodes' instance role.
         target_node_id: Optional node to restore onto. If not provided, a node
@@ -732,6 +877,9 @@ def restore_backup(backup_id: str, lvol_name: str, pool_id_or_name: str,
     # cannot run.
     s3_config = foreign_bucket_config(backup, cluster, s3_credentials)
 
+    # 0 is a record that predates the field: leave both unset, and add_lvol_ha
+    # gives the volume a subsystem of its own as it always did.
+    ns_cap = backup.max_namespace_per_subsys or 0
     lvol_id, error = lvol_controller.add_lvol_ha(
         name=lvol_name,
         size=size,
@@ -749,6 +897,9 @@ def restore_backup(backup_id: str, lvol_name: str, pool_id_or_name: str,
         distr_vuid=0,
         lvol_priority_class=0,
         fabric="tcp",
+        namespaced=ns_cap > 1,
+        max_namespace_per_subsys=ns_cap if ns_cap > 0 else None,
+        consistency_group=consistency_group,
     )
     if error or not lvol_id:
         raise RuntimeError(f"Failed to create restore volume: {error}")
@@ -843,9 +994,67 @@ def delete_backups(lvol_id):
     return True, None
 
 
-def list_backups(cluster_id=None):
-    """List all backups, optionally filtered by cluster."""
+def delete_backup(backup_id):
+    """Delete ONE backup: its record, its KMS keys and, best effort, its S3
+    objects -- the single-record form of :func:`delete_backups`, for a backup
+    that nothing chains against any more, such as a deleted group backup's
+    member that is the last link of its volume's chain.
+
+    Raises:
+        KeyError: no backup has this id.
+        PreconditionError: another backup names this one as its predecessor,
+            so deleting it would make every descendant unrestorable -- merge it
+            into its successor instead (``trigger_merge``), after which it is
+            MERGED, not deleted, and its objects are the survivor's; or it is a
+            member of a group backup that still exists, which deleting it would
+            tear.
+    """
+    backup = db_controller.get_backup_by_id(backup_id)
+    dependents = [b.uuid for b in db_controller.get_backups_by_lvol_id(backup.lvol_id)
+                  if b.prev_backup_id == backup.uuid]
+    if dependents:
+        raise PreconditionError(
+            f"backup {backup.uuid} is the predecessor of "
+            f"{', '.join(d[:8] for d in dependents)}; merge it into its "
+            "successor instead of deleting it")
+    if backup.group_backup_id:
+        try:
+            owner = db_controller.get_group_backup_by_id(backup.group_backup_id)
+        except KeyError:
+            owner = None    # its group backup is gone: an orphaned member copy
+        # A group backup being deleted retires its own members.
+        if owner is not None and owner.status != GroupBackup.STATUS_DELETING:
+            raise PreconditionError(
+                f"backup {backup.uuid} is a member of group backup "
+                f"{backup.group_backup_id}; delete the group backup instead")
+
+    _cleanup_backup_kms_keys([backup])
+    if backup.status == Backup.STATUS_COMPLETED:
+        try:
+            snode = db_controller.get_storage_node_by_id(backup.node_id)
+        except KeyError:
+            snode = None
+        if snode is not None and snode.status == StorageNode.STATUS_ONLINE:
+            try:
+                snode.rpc_client().bdev_lvol_s3_delete([backup.s3_id])
+            except RPCException as e:
+                # Best effort, as delete_backups: the data plane does not
+                # implement the S3 delete yet, and the record goes regardless.
+                logger.error(f"Error deleting S3 objects of backup {backup.uuid}: {e}")
+    backup_events.backup_deleted(backup.cluster_id, backup.node_id, backup)
+    backup.remove(db_controller.kv_store)
+
+
+def list_backups(cluster_id=None, show_all=False):
+    """List all backups, optionally filtered by cluster.
+    
+    Merged backups are hidden unless `show_all` is set -- a merge folds a
+    backup's data into its successor, so the record stays for chain history
+    but is no longer something an operator restores from.
+    """
     backups = db_controller.get_backups(cluster_id)
+    if not show_all:
+        backups = [b for b in backups if b.status != Backup.STATUS_MERGED]
     backups = sorted(backups, key=lambda b: (b.created_at, b.uuid), reverse=True)
     data = []
     for b in backups:
@@ -1018,6 +1227,7 @@ def import_backups(export: backup_manifest.BackupExport, cluster_id=None) -> int
         backup.node_id = str(manifest.source.node_id)
         backup.prev_backup_id = str(manifest.prev_backup_id) if manifest.prev_backup_id else ""
         backup.size = manifest.size
+        backup.max_namespace_per_subsys = manifest.volume.max_namespace_per_subsys or 0
         backup.created_at = manifest.created_at
         backup.completed_at = manifest.completed_at
         backup.status = Backup.STATUS_COMPLETED
@@ -1047,3 +1257,26 @@ def import_from_bucket(config: BackupConfig, cluster_id=None) -> int:
                 manifests=discover_backups(config)),
         ]),
         cluster_id=cluster_id)
+
+
+def trigger_merge(keep_backup, old_backup):
+    """Merge ``old_backup`` into ``keep_backup``, its successor in one volume's
+    chain: mark the old one merging and queue the merge task.
+
+    Both must be completed; otherwise nothing happens and a later pass retries.
+    Used by the single-volume retention (policy) and by the group backup's
+    retirement of a pruned generation's members (group_backup).
+    """
+    if old_backup.status != Backup.STATUS_COMPLETED:
+        return
+    if keep_backup.status != Backup.STATUS_COMPLETED:
+        return
+
+    old_backup.status = Backup.STATUS_MERGING
+    old_backup.write_to_db()
+
+    tasks_controller.add_backup_merge_task(
+        keep_backup.cluster_id,
+        keep_backup.node_id,
+        keep_backup.uuid,
+        old_backup.uuid)

@@ -65,7 +65,7 @@ class TestTheRemovalReassertsTheRoles(unittest.TestCase):
         rpcs = {}
         for n in (hbdzq, wnn6n):
             rpc = MagicMock()
-            rpc.bdev_lvol_get_lvstores.return_value = [answers[n.get_id()]]
+            rpc.get_lvstore.return_value = answers[n.get_id()]
             rpc.bdev_lvol_set_lvs_opts.return_value = True
             n.rpc_client = MagicMock(return_value=rpc)
             rpcs[n.get_id()] = rpc

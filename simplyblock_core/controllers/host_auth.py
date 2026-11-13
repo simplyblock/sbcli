@@ -2,6 +2,7 @@ from pydantic import SecretStr
 
 from simplyblock_core import constants, utils
 from simplyblock_core.db_controller import DBController
+from simplyblock_core.rpc_client import RPCRemoteError
 
 logger = utils.get_logger(__name__)
 
@@ -49,26 +50,24 @@ def _register_pool_dhchap_keys_on_node(pool, snode, rpc_client):
                          key_name, snode.get_id(), error)
             continue
         key_path = result
-        ret, err = rpc_client._request2("keyring_file_add_key",
-                                        {"name": key_name, "path": key_path})
-        if not ret and err:
-            if err.get("code") == -17:
-                logger.info("Pool key %s already in SPDK keyring on node %s, reusing",
-                            key_name, snode.get_id())
-            else:
-                logger.error("Failed to register pool key %s in SPDK keyring on node %s: %s",
-                             key_name, snode.get_id(), err.get("message", err))
-                continue
+        try:
+            rpc_client.keyring_file_add_key(key_name, key_path, allow_existing=True)
+        except RPCRemoteError as e:
+            logger.error("Failed to register pool key %s in SPDK keyring on node %s: %s",
+                         key_name, snode.get_id(), e)
+            continue
         key_names[key_type] = key_name
 
     return key_names
 
 
-def _register_dhchap_keys_on_node(snode, host_nqn, host_entry, rpc_client):
+def _register_dhchap_keys_on_node(snode, host_nqn, host_entry, rpc_client, scope=""):
     """Write DHCHAP key files to a storage node and register them in SPDK's keyring.
 
     Returns a dict mapping key type ('dhchap_key', 'dhchap_ctrlr_key', 'psk')
-    to the SPDK keyring name for use in subsystem_add_host.
+    to the SPDK keyring name for use in subsystem_add_host. ``scope`` is
+    appended to the key names (subsystem_access names keys per subsystem,
+    because the key material is per volume); empty keeps the host-scoped names.
     """
     snode_api = snode.client()
     # Sanitize host NQN for use as filename
@@ -79,7 +78,7 @@ def _register_dhchap_keys_on_node(snode, host_nqn, host_entry, rpc_client):
         key_value = host_entry.get(key_type)
         if not key_value:
             continue
-        key_name = f"{key_type}_{safe_host}"
+        key_name = f"{key_type}_{safe_host}" + (f"_{scope}" if scope else "")
         # allowed_hosts is a list of plain dicts, so the key material arrives
         # untyped; wrap it here or it reaches SNodeClient's request log in clear.
         result, error = snode_api.write_key_file(key_name, SecretStr(key_value))
@@ -89,16 +88,12 @@ def _register_dhchap_keys_on_node(snode, host_nqn, host_entry, rpc_client):
         key_path = result
         # Register in SPDK keyring — "File exists" (code -17) means the key
         # is already registered, which is fine (e.g. same host on another volume).
-        ret, err = rpc_client._request2("keyring_file_add_key",
-                                        {"name": key_name, "path": key_path})
-        if not ret and err:
-            if err.get("code") == -17:
-                logger.info("Key %s already in SPDK keyring on node %s, reusing",
-                            key_name, snode.get_id())
-            else:
-                logger.error("Failed to register key %s in SPDK keyring on node %s: %s",
-                             key_name, snode.get_id(), err.get("message", err))
-                continue
+        try:
+            rpc_client.keyring_file_add_key(key_name, key_path, allow_existing=True)
+        except RPCRemoteError as e:
+            logger.error("Failed to register key %s in SPDK keyring on node %s: %s",
+                         key_name, snode.get_id(), e)
+            continue
         key_names[key_type] = key_name
 
     return key_names

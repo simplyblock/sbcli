@@ -100,8 +100,9 @@ def ensure_listener(rpc_client, nqn, trtype, traddr, trsvcid, ana_state=None,
             listener = {}
         else:
             if not ret:
-                # listeners_create answers None on an RPC error instead of
-                # raising, so a lost race looks like a failure: look again.
+                # An RPC error raises and is handled above, so this only
+                # guards a falsy-but-non-error SPDK response: look again
+                # before calling it a failure.
                 listener = find_listener(rpc_client, nqn, trtype, traddr, trsvcid)
                 if listener is None:
                     raise RuntimeError(

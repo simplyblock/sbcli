@@ -126,9 +126,23 @@ def patched(monkeypatch):
         task_params["_node"] = node_id
         return "task-uuid"
     monkeypatch.setattr(lvol_controller.tasks_controller, "add_replication_final_task", _add_task)
+    monkeypatch.setattr(lvol_controller.tasks_controller, "get_replication_final_task",
+                        lambda cluster_id, lvol_id: False)
+    locks = []
+
+    class _Lock:
+        def __init__(self, name, timeout=None):
+            locks.append(name)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+    monkeypatch.setattr(lvol_controller, "DbLock", _Lock, raising=False)
 
     captured.update(snap_add=snap_add, create_calls=create_calls,
-                    suspended=suspended, task_params=task_params)
+                    suspended=suspended, task_params=task_params, locks=locks)
     return captured
 
 
@@ -172,3 +186,48 @@ def test_commit_does_not_depend_on_taking_a_snapshot(patched, monkeypatch):
                         lambda lid, name, snap_type="user": (None, "no space"))
     result = lvol_controller.replication_commit("LV1")
     assert result["cutover_task_queued"] is True
+
+
+def test_a_commit_while_a_cutover_runs_names_that_task(patched, monkeypatch):
+    """A second commit, sent by a caller that cannot tell whether its first
+    one arrived, names the running task and queues nothing."""
+    monkeypatch.setattr(lvol_controller.tasks_controller, "get_replication_final_task",
+                        lambda cluster_id, lvol_id: "running-task")
+
+    result = lvol_controller.replication_commit("LV1")
+
+    assert result == {"cutover_task_queued": False, "conflict": True, "task_id": "running-task"}
+    assert patched["task_params"] == {}, "a second cutover was queued"
+
+
+def test_a_commit_after_the_cutover_finished_names_that_task(patched, monkeypatch):
+    """A commit after the cutover finished, while the source still exists,
+    names the finished task instead of building a second clone."""
+    monkeypatch.setattr(lvol_controller.tasks_controller, "get_replication_final_task",
+                        lambda cluster_id, lvol_id: "finished-task")
+
+    result = lvol_controller.replication_commit("LV1")
+
+    assert result["conflict"] is True and result["task_id"] == "finished-task"
+    assert patched["task_params"] == {}
+
+
+def test_the_lookup_and_the_enqueue_hold_the_volumes_lock(patched):
+    """Two commits of one volume, from two API replicas, must not both pass the
+    lookup before either enqueues."""
+    lvol_controller.replication_commit("LV1")
+    assert patched["locks"] == ["replication_commit/LV1"]
+
+
+def test_a_commit_that_loses_the_enqueue_names_the_winners_task(patched, monkeypatch):
+    """The enqueue refused because another writer's task landed first: the
+    commit answers with that task rather than failing."""
+    answers = iter([False, "winner-task"])
+    monkeypatch.setattr(lvol_controller.tasks_controller, "get_replication_final_task",
+                        lambda cluster_id, lvol_id: next(answers))
+    monkeypatch.setattr(lvol_controller.tasks_controller, "add_replication_final_task",
+                        lambda cluster_id, node_id, params: False)
+
+    result = lvol_controller.replication_commit("LV1")
+
+    assert result == {"cutover_task_queued": False, "conflict": True, "task_id": "winner-task"}

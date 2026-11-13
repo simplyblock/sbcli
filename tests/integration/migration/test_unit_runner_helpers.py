@@ -413,7 +413,7 @@ class TestDeleteBdevBlocking(unittest.TestCase):
 
     def test_happy_path_calls_all_three_steps(self):
         primary_rpc = MagicMock()
-        primary_rpc.delete_lvol.return_value = (True, None)
+        primary_rpc.delete_lvol.return_value = True
         # status: 1 (in progress), then 0 (done)
         primary_rpc.bdev_lvol_get_lvol_delete_status.side_effect = [1, 0]
 
@@ -431,7 +431,7 @@ class TestDeleteBdevBlocking(unittest.TestCase):
 
     def test_already_deleted_status_2_still_finalizes(self):
         primary_rpc = MagicMock()
-        primary_rpc.delete_lvol.return_value = (True, None)
+        primary_rpc.delete_lvol.return_value = True
         primary_rpc.bdev_lvol_get_lvol_delete_status.return_value = 2  # not found
 
         with patch('simplyblock_core.services.tasks_runner_lvol_migration.time') as mock_time:
@@ -443,7 +443,7 @@ class TestDeleteBdevBlocking(unittest.TestCase):
 
     def test_secondary_rpc_called_on_sync_finalize(self):
         primary_rpc = MagicMock()
-        primary_rpc.delete_lvol.return_value = (True, None)
+        primary_rpc.delete_lvol.return_value = True
         primary_rpc.bdev_lvol_get_lvol_delete_status.return_value = 0
 
         secondary_rpc = MagicMock()
@@ -457,7 +457,7 @@ class TestDeleteBdevBlocking(unittest.TestCase):
 
     def test_no_secondary_rpc_does_not_call_secondary(self):
         primary_rpc = MagicMock()
-        primary_rpc.delete_lvol.return_value = (True, None)
+        primary_rpc.delete_lvol.return_value = True
         primary_rpc.bdev_lvol_get_lvol_delete_status.return_value = 0
 
         secondary_rpc = MagicMock()

@@ -7,10 +7,19 @@ from pydantic import BaseModel, Field, RootModel
 from sse_starlette import EventSourceResponse
 
 from simplyblock_core import utils as core_utils
-from simplyblock_core.controllers import lvol_controller, snapshot_controller
+from simplyblock_core.controllers import (
+    lvol_controller,
+    qos_controller,
+    snapshot_controller,
+)
 from simplyblock_core.controllers.backup import controller as backup_controller
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.lvol_model import LVol
+from simplyblock_core.utils.nvme import (
+    HostConnectAuth,
+    HostNotAllowedError,
+    HostNQNRequiredError,
+)
 
 from .... import util
 from ...._dependencies import Cluster, StoragePool, Volume
@@ -28,6 +37,7 @@ from .replication import (
 
 api = APIRouter()
 db = DBController()
+logger = core_utils.get_logger(__name__)
 
 
 @api.get('/', name='clusters:storage-pools:volumes:list', response_model=builtins.list[VolumeDTO], responses=WATCH_RESPONSES)
@@ -54,7 +64,8 @@ class _CreateParams(BaseModel):
     max_w_mbytes: util.Unsigned = 0
     ha_type: Literal['single', 'ha'] | None = None
     host_id: str | None = None
-    priority_class: Literal[0, 1] = 0
+    #: Service class, by id or name (see /clusters/{id}/qos); 0 is Default.
+    priority_class: int | str = 0
     namespaced: bool | None = False
     pvc_name: str | None = None
     ndcs: util.Unsigned = 0
@@ -74,6 +85,12 @@ class _CreateParams(BaseModel):
     # passes the PVC's storage.simplyblock.io/consistency-group label here.
     consistency_group: str | None = None
     encrypt: bool = False
+    # Sync replication (stretched clusters): the site the volume is born on.
+    # The owner node is chosen among the online nodes of that site; 400 for a
+    # site the cluster does not have (or on a cluster without sync
+    # replication), 409 when host_id names a node of another site. Ignored
+    # when a volume of that name exists (the existing-name answer stands).
+    site: str | None = None
 
 
 class _CloneParams(BaseModel):
@@ -106,33 +123,39 @@ def add(
         pass
 
     if isinstance(data, _CreateParams):
-        volume_id_or_false, error = lvol_controller.add_lvol_ha(
-            name=data.name,
-            size=data.size,
-            pool_id_or_name=pool.get_id(),
-            use_crypto=data.encrypt,
-            max_size=0,
-            max_rw_iops=data.max_rw_iops,
-            max_rw_mbytes=data.max_rw_mbytes,
-            max_r_mbytes=data.max_r_mbytes,
-            max_w_mbytes=data.max_w_mbytes,
-            host_id_or_name=data.host_id,
-            ha_type=data.ha_type if data.ha_type is not None else 'default',
-            use_comp=False,
-            distr_vuid=0,
-            lvol_priority_class=data.priority_class,
-            namespaced=data.namespaced,
-            pvc_name=data.pvc_name,
-            ndcs=data.ndcs,
-            npcs=data.npcs,
-            allowed_hosts=data.allowed_hosts,
-            fabric=data.fabric,
-            max_namespace_per_subsys=data.max_namespace_per_subsys,
-            do_replicate=data.do_replicate,
-            replication_cluster_id=data.replication_cluster_id,
-            replication_policy=data.replication_policy,
-            consistency_group=data.consistency_group,
-        )
+        try:
+            priority_class = qos_controller.resolve_class(cluster.get_id(), data.priority_class)
+        except ValueError as e:
+            raise HTTPException(422, str(e))
+        with util.sync_http_errors():
+            volume_id_or_false, error = lvol_controller.add_lvol_ha(
+                name=data.name,
+                size=data.size,
+                pool_id_or_name=pool.get_id(),
+                use_crypto=data.encrypt,
+                max_size=0,
+                max_rw_iops=data.max_rw_iops,
+                max_rw_mbytes=data.max_rw_mbytes,
+                max_r_mbytes=data.max_r_mbytes,
+                max_w_mbytes=data.max_w_mbytes,
+                host_id_or_name=data.host_id,
+                ha_type=data.ha_type if data.ha_type is not None else 'default',
+                use_comp=False,
+                distr_vuid=0,
+                lvol_priority_class=priority_class,
+                namespaced=data.namespaced,
+                pvc_name=data.pvc_name,
+                ndcs=data.ndcs,
+                npcs=data.npcs,
+                allowed_hosts=data.allowed_hosts,
+                fabric=data.fabric,
+                max_namespace_per_subsys=data.max_namespace_per_subsys,
+                do_replicate=data.do_replicate,
+                replication_cluster_id=data.replication_cluster_id,
+                replication_policy=data.replication_policy,
+                consistency_group=data.consistency_group,
+                site=data.site or None,
+            )
     elif isinstance(data, _CloneParams):
         volume_id_or_false, error = snapshot_controller.clone(
             data.snapshot_id,
@@ -215,7 +238,7 @@ def update(cluster: Cluster, pool: StoragePool, volume: Volume, body: UpdatableL
         lvol_controller.resize_lvol(volume.get_id(), body.size)
 
     if 'replication_policy_id' in body.model_fields_set:
-        apply_replication_policy(volume, body.replication_policy_id)
+        apply_replication_policy(cluster, volume, body.replication_policy_id)
 
     return Response(status_code=204)
 
@@ -271,9 +294,33 @@ def inflate(cluster: Cluster, pool: StoragePool, volume: Volume) -> Response:
 
 @instance_api.get('/connect', name='clusters:storage-pools:volumes:connect')
 def connect(cluster: Cluster, pool: StoragePool, volume: Volume, host_nqn: str | None = None):
+    """The volume's connection entries. On a sync-replication cluster the
+    paths are those of the site the volume's LVS is currently led from
+    (``lvs_active_site``, which promote and demote set); the caller does not
+    choose a site - leadership is control-plane state, so connect reads it
+    rather than being told it."""
+    # Authorization first, with its own status codes. This route used to answer
+    # 404 for EVERY failure of connect_lvol, so a host that was not on the
+    # volume's allowed list got the same answer as a volume that does not
+    # exist. The CSI driver reads a 404 here as a deleted volume, went looking
+    # for a fail-over clone, and reported "the control plane did not answer";
+    # pods scheduled on a node the pool does not allow hung for hours while the
+    # volume sat online (live 2026-10-20, TestBackupSecurityLvol: pool allowed
+    # worker-0, pod on worker-4). The volume exists by the time this runs (the
+    # Volume dependency resolved it), so only the volume record vanishing
+    # underneath remains a 404.
+    try:
+        HostConnectAuth.resolve(volume, host_nqn, db)
+    except HostNQNRequiredError as e:
+        raise HTTPException(400, str(e)) from e
+    except HostNotAllowedError as e:
+        logger.warning("connect refused for volume %s: %s", volume.get_id(), e)
+        raise HTTPException(403, str(e)) from e
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
     details, err = lvol_controller.connect_lvol(volume.get_id(), host_nqn=host_nqn)
     if err:
-        return Response(status_code=404, content=err)
+        raise HTTPException(404, err)
     return details
 
 
@@ -308,8 +355,7 @@ def snapshot(request: Request, cluster: Cluster, pool: StoragePool, volume: Volu
 
 
 class _SnapshotParams(BaseModel):
-    name: str
-    backup: bool = False
+    name: util.SnapshotName
 
 
 @instance_api.post('/snapshots', name='clusters:storage-pools:volumes:snapshots:create', status_code=201, responses={201: {"content": None}})
@@ -319,7 +365,7 @@ def create_snapshot(
         parameters: _SnapshotParams
 ) -> Response:
     snapshot_id, err_or_false = snapshot_controller.add(
-        volume.get_id(), parameters.name, backup=parameters.backup
+        volume.get_id(), parameters.name
     )
     if err_or_false:
         # FIXME: snapshot_controller.add() should raise a named exception directly
@@ -335,26 +381,20 @@ def create_snapshot(
     return Response(status_code=201, headers={'Location': entity_url})
 
 
-@instance_api.route(
-        '/suspend',
-        name='clusters:storage-pools:volumes:suspend',
-        methods=['GET', 'POST'],  # Support both until all clients have switched to POST
-)
+# FastAPI decorators, not the Starlette-level route(): a plain Starlette route gets
+# no dependency injection and is not carried into the app by include_router (404).
+@instance_api.post('/suspend', name='clusters:storage-pools:volumes:suspend')
 def suspend(cluster: Cluster, pool: StoragePool, volume: Volume) -> bool:
     return lvol_controller.suspend_lvol(volume.get_id())
 
-@instance_api.route(
-        '/resume',
-        name='clusters:storage-pools:volumes:resume',
-        methods=['GET', 'POST'],  # Support both until all clients have switched to POST
-)
+@instance_api.post('/resume', name='clusters:storage-pools:volumes:resume')
 def resume(cluster: Cluster, pool: StoragePool, volume: Volume) -> bool:
     return lvol_controller.resume_lvol(volume.get_id())
 
 @instance_api.post('/clone', name='clusters:storage-pools:volumes:clone', status_code=201, responses={201: {"content": None}})
 def clone(
         request: Request, cluster: Cluster, pool: StoragePool, volume: Volume,
-        clone_name: str,
+        clone_name: util.SnapshotName,
         new_size: str | None = None,
         pvc_name: str | None = None,
 ) -> Response:
@@ -381,6 +421,20 @@ def backups(volume: Volume) -> builtins.list[BackupDTO]:
     rows = db.get_backups_by_lvol_id(volume.get_id())
     rows = sorted(rows, key=lambda b: (b.created_at, b.uuid), reverse=True)
     return [BackupDTO.from_model(b) for b in rows]
+
+
+@instance_api.post('/backups', name='clusters:storage-pools:volumes:backups:create', status_code=201, responses={201: {"content": None}})
+def create_backup(
+        request: Request,
+        cluster: Cluster, pool: StoragePool, volume: Volume,
+) -> Response:
+    backup_id = backup_controller.backup_lvol(volume.get_id())
+
+    entity_url = request.app.url_path_for(
+        'clusters:backups:detail',
+        cluster_id=cluster.get_id(), backup_id=backup_id,
+    )
+    return Response(status_code=201, headers={'Location': str(entity_url)})
 
 
 @instance_api.delete(

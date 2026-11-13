@@ -8,6 +8,9 @@ import simplyblock_core.controllers.consistency_group_controller as cgc
 from simplyblock_core.controllers.consistency_group_controller import (
     ConsistencyGroupError,
 )
+from simplyblock_core.controllers.replication_policy_controller import (
+    ReplicationConfigError,
+)
 from tests.unit.web.api.v2 import _factories as factories
 
 BASE = (f'/api/v2/clusters/{factories.CLUSTER_ID}'
@@ -50,6 +53,21 @@ class TestGroupReplicationEnableDisable:
         resp = client.put(f'{BASE}/replication',
                           json={"replication_policy_id": factories.REPLICATION_POLICY_ID})
         assert resp.status_code == 409
+
+    def test_a_member_that_cannot_start_replicating_is_mapped_to_409(
+            self, client, db, cluster, consistency_group_controller):
+        # A member refused by replication_start (a policy whose target is the
+        # group's own cluster: #1502) surfaces from attach_group_policy as a
+        # ReplicationConfigError, not a ConsistencyGroupError. Unmapped, it was
+        # an unhandled 500 with a traceback and no access-log line (run
+        # 20261020-1300-ebs, test 2). Regression: 2026-10-20-attach-500.
+        db.get_consistency_group_by_id.return_value = factories.make_consistency_group()
+        consistency_group_controller.attach_group_policy.side_effect = \
+            ReplicationConfigError("Could not start replication of m1 to target t")
+        resp = client.put(f'{BASE}/replication',
+                          json={"replication_policy_id": factories.REPLICATION_POLICY_ID})
+        assert resp.status_code == 409
+        assert "Could not start replication" in resp.json()["detail"]
 
 
 class TestGroupDelete:
@@ -347,3 +365,41 @@ class TestGroupColocationRoutes:
         resp = client.post(f'{BASE}/migration', json={"target_node_id": "N2"})
         assert resp.status_code == 409
         mc.create_group_migration.assert_called_once_with(factories.VOLUME_ID, "N2", host_nqn=None)
+
+
+class TestTakeGeneration:
+    """POST /snapshots takes one generation. A request id makes a retry return
+    the generation the first call took, so the answer is that generation, not
+    whichever generation happens to be the latest."""
+
+    @staticmethod
+    def _row(seq):
+        return {"group_seq": seq, "created_at": 1, "expected": 1, "present": 1,
+                "complete": True, "members": []}
+
+    def _setup(self, db, consistency_group_controller, seq_taken):
+        db.get_consistency_group_by_id.return_value = factories.make_consistency_group()
+        consistency_group_controller.create_group_snapshot_for_group.return_value = (seq_taken, None)
+        consistency_group_controller.list_generations.return_value = [self._row(3), self._row(4)]
+
+    def test_the_request_id_is_passed_and_its_generation_answered(
+            self, client, db, cluster, consistency_group_controller):
+        self._setup(db, consistency_group_controller, seq_taken=3)
+
+        resp = client.post(f'{BASE}/snapshots', json={'request_id': 'sbk-uid-1'})
+
+        assert resp.status_code == 200
+        assert resp.json()['group_seq'] == 3
+        _, kwargs = consistency_group_controller.create_group_snapshot_for_group.call_args
+        assert kwargs['request_id'] == 'sbk-uid-1'
+
+    def test_no_body_still_takes_a_generation(
+            self, client, db, cluster, consistency_group_controller):
+        self._setup(db, consistency_group_controller, seq_taken=4)
+
+        resp = client.post(f'{BASE}/snapshots')
+
+        assert resp.status_code == 200
+        assert resp.json()['group_seq'] == 4
+        _, kwargs = consistency_group_controller.create_group_snapshot_for_group.call_args
+        assert kwargs['request_id'] == ''

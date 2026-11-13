@@ -280,7 +280,10 @@ class BaseModel:
                 return value.to_dict(unwrap_secrets=unwrap_secrets)
             if isinstance(value, (SecretStr, SecretBytes)):
                 return value.get_secret_value() if unwrap_secrets else value
-            if isinstance(value, dict):
+            # Mapping, not dict: a task handler's frozen_view() wraps
+            # function_params in a read-only MappingProxyType, and that view
+            # gets serialized too (e.g. as an event's object_dict).
+            if isinstance(value, Mapping):
                 return {k: _maybe_to_dict(v) for k, v in value.items()}
             if hasattr(value, "to_dict"):
                 return value.to_dict()
@@ -295,7 +298,7 @@ class BaseModel:
                 result[attr] = value.to_dict(unwrap_secrets=unwrap_secrets)
             elif hasattr(value, "to_dict"):
                 result[attr] = value.to_dict()
-            elif isinstance(value, dict):
+            elif isinstance(value, Mapping):
                 result[attr] = {k: _maybe_to_dict(v) for k, v in value.items()}
             elif isinstance(value, (SecretStr, SecretBytes)):
                 result[attr] = value.get_secret_value() if unwrap_secrets else value
@@ -568,17 +571,23 @@ class BaseModel:
         except indices.UniqueIndexViolation:
             # An invariant breach, not a write failure: the pre-check that
             # produces the clean "name already exists" error either did not run
-            # or the data is already inconsistent. It propagates (to a 500 and
-            # the cluster's error log) rather than being swallowed like a
-            # transport error — and rather than taking the process down.
+            # or the data is already inconsistent.
             from simplyblock_core import utils
             utils.get_logger(__name__).exception(
                 "Unique index violation writing %s", self.get_db_id())
             raise
         except Exception:
+            # Propagate, like read_from_db / remove / write_replacing. This used
+            # to exit(1), which in the threaded web API raised SystemExit out of
+            # the event loop: the loop died, the half-shut-down process kept
+            # its listen socket open, and the replica accepted connections it
+            # never served until restarted by hand. A failed write is the
+            # caller's error to handle (a 500 in the API, a retried pass in a
+            # service), not a reason to kill the process.
             from simplyblock_core import utils
-            utils.get_logger(__name__).exception("Error writing to FDB")
-            exit(1)
+            utils.get_logger(__name__).exception(
+                "Error writing %s to FDB", self.get_db_id())
+            raise
 
     def _watch_keys(self):
         """``(rollup_key, version_key)`` for a watched class, else ``(None, None)``."""
@@ -589,6 +598,30 @@ class BaseModel:
             watches.watch_index_rollup_key(type(self), scope),
             watches.watch_index_version_key(type(self), scope, self.get_id()),
         )
+
+    def write_replacing(self, old, kv_store):
+        """Write this record and remove *old*, the same entity under another id,
+        in one transaction.
+
+        A record that changes its id must hand its unique index keys over: as
+        two writes, the new one collided with the keys the old one still held.
+        """
+        index_list = self.active_indexes(kv_store)
+        if not (self._WATCHED or index_list):
+            old.remove(kv_store)
+            return self.write_to_db(kv_store)
+        import fdb
+        old_key = old.get_db_id().encode()
+        key = self.get_db_id().encode()
+        value = json.dumps(self.to_dict(unwrap_secrets=True)).encode()
+
+        @fdb.transactional
+        def _tx(tr):
+            BaseModel._remove_tx(tr, old_key, type(old), old, index_list, *old._watch_keys())
+            BaseModel._write_tx(tr, key, value, type(self), self, index_list, *self._watch_keys())
+
+        _tx(kv_store)
+        return True
 
     def remove(self, kv_store):
         key = self.get_db_id().encode()

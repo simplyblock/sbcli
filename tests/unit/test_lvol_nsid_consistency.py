@@ -33,7 +33,7 @@ class _Base(unittest.TestCase):
         # that always answers "7" hides a mismatch between the claim and the
         # persisted value.
         self.rpc.nvmf_subsystem_add_ns2.side_effect = (
-            lambda *a, **kw: (str(kw.get("nsid") or 7), None))
+            lambda *a, **kw: str(kw.get("nsid") or 7))
         self.rpc.nvmf_subsystem_add_ns.side_effect = (
             lambda *a, **kw: str(kw.get("nsid") or 7))
         self.rpc.bdev_get.return_value = {

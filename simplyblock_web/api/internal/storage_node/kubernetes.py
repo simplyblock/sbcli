@@ -3,18 +3,28 @@ import logging
 import os
 import time
 import traceback
+from typing import Annotated
 
 import yaml
 from flask_openapi3 import APIBlueprint
 from jinja2 import Environment, PackageLoader
 from kubernetes.client import ApiException, V1DeleteOptions
 from pydantic import BaseModel, Field
+from tenacity import (
+    RetryError,
+    Retrying,
+    retry_if_result,
+    stop_after_attempt,
+    wait_fixed,
+)
 
 from simplyblock_core import constants
 from simplyblock_core import utils as core_utils
 from simplyblock_core.settings import Settings
+from simplyblock_core.storage_network import NetworkAttachment
 from simplyblock_core.utils import shell as shell_utils
 from simplyblock_web import node_utils, node_utils_k8s, utils
+from simplyblock_web.api.internal.storage_node import network_attachments, pod_service
 from simplyblock_web.node_utils_k8s import namespace_id_file
 
 from .._node_info import get_static_node_info
@@ -27,6 +37,161 @@ api = APIBlueprint("snode", __name__, url_prefix="/snode")
 cluster_id_file = "/etc/foundationdb/sbcli_cluster_id"
 
 TOP_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+
+# The label the OpenShift master pool selects on. MCO keeps a node carrying it
+# in the master pool even when a custom pool selects it too ("defaulting to
+# master"), so the storage pool's settings reach such a node only through the
+# master pool. The CPU-topology job reads the same label.
+MASTER_POOL_LABEL = "node-role.kubernetes.io/master"
+
+
+def _mco_pool_name(node_labels, cluster_id):
+    """The MachineConfigPool whose render this node runs once its CPU-topology
+    settings have landed."""
+    if MASTER_POOL_LABEL in (node_labels or {}):
+        return "master"
+    return core_utils.storage_mco_names(cluster_id).pool
+
+
+def _pool_kubelet_config_name(pool_name, cluster_id):
+    """The KubeletConfig the CPU-topology job gives this pool its settings with.
+
+    The masters get one of their own that selects the master pool from the
+    start: MCO evaluates a KubeletConfig when it is created or its spec
+    changes, never when a pool's labels change.
+    """
+    names = core_utils.storage_mco_names(cluster_id)
+    return names.master_kubelet_config if pool_name == "master" else names.kubelet_config
+
+
+def _cfg_hash(name):
+    return name.rsplit("-", 1)[-1] if name else None
+
+
+def _kubelet_configs_owned_by(machine_configs, kubelet_config_name):
+    """Names of the MachineConfigs MCO generated from this KubeletConfig.
+
+    MCO names a generated kubelet config after its pool and a suffix only, so a
+    rerun's KubeletConfig can take the very name a previous cluster's carried;
+    the owner reference is what tells them apart.
+    """
+    return {
+        mc["metadata"]["name"]
+        for mc in machine_configs
+        if any(ref.get("kind") == "KubeletConfig" and ref.get("name") == kubelet_config_name
+               for ref in mc["metadata"].get("ownerReferences") or [])
+    }
+
+
+def _pool_kubelet_configs(co, pool_name, mcp, kubelet_config_name):
+    """The generated kubelet configs in the pool's target render that this
+    KubeletConfig owns.
+
+    The candidates are named in the render's sources, 99-<pool>-generated-kubelet
+    with an optional suffix, so only those are read: listing every
+    MachineConfig, rendered payloads included, on each poll is far more than
+    the gate needs. One deleted between the two reads is skipped.
+    """
+    configuration = (mcp.get("spec", {}) or {}).get("configuration", {}) or {}
+    prefix = f"99-{pool_name}-generated-kubelet"
+    machine_configs = []
+    for source in configuration.get("source", []) or []:
+        name = source.get("name", "")
+        if not name.startswith(prefix):
+            continue
+        try:
+            machine_configs.append(co.get_cluster_custom_object(
+                group="machineconfiguration.openshift.io", version="v1", plural="machineconfigs", name=name))
+        except ApiException as e:
+            if e.status != 404:
+                raise
+    return _kubelet_configs_owned_by(machine_configs, kubelet_config_name)
+
+
+def _converged_on_pool(pool_name, mcp, node_annotations, unschedulable, kubelet_configs):
+    """Whether the node runs its pool's render with the CPU-topology settings,
+    and MCO is done with it.
+
+    The storage pool's status render is its target: the job joins a host only
+    once that render is complete. Its hash, not its full name, is compared, so
+    a node under a previous cluster's pool with byte-identical config passes
+    without a pool migration or reboot.
+
+    The master pool is shared with the control plane and rolls one master at a
+    time. Its status names the old render until every master has rebooted, and
+    a master that has not rebooted yet matches it, so the target is the spec's
+    render, and that render must carry one of `kubelet_configs`, the generated
+    configs of the job's KubeletConfig. A master gate without them is an
+    error, not a render that has not arrived yet: that would wait out the
+    whole gate.
+    """
+    if pool_name == "master" and kubelet_configs is None:
+        raise ValueError("the master pool's gate needs the generated kubelet configs to look for")
+    if unschedulable:
+        return False
+    annotations = node_annotations or {}
+    if annotations.get("machineconfiguration.openshift.io/state") != "Done":
+        return False
+    if pool_name == "master":
+        configuration = (mcp.get("spec", {}) or {}).get("configuration", {}) or {}
+        sources = {s.get("name", "") for s in configuration.get("source", []) or []}
+        if not sources & set(kubelet_configs):
+            return False
+    else:
+        configuration = (mcp.get("status", {}) or {}).get("configuration", {}) or {}
+    target = configuration.get("name")
+    current = annotations.get("machineconfiguration.openshift.io/currentConfig")
+    return bool(target and _cfg_hash(current) and _cfg_hash(current) == _cfg_hash(target))
+
+def _wait_converged_on_pool(co, core_v1, node_name, cluster_id, wait=None, attempts=240):
+    """Wait for the node to run its pool's render with the CPU-topology
+    settings; False when it does not within the attempts, ~40 minutes at the
+    default 10 s, since reboots queue under the pool's maxUnavailable.
+
+    A pool that does not exist leaves nothing to gate on, which should not
+    happen once the job ensures membership; the wait then degrades to the node
+    being uncordoned rather than hang.
+    """
+    mcp_name = _mco_pool_name(core_v1.read_node(node_name).metadata.labels, cluster_id)
+    kubelet_config_name = _pool_kubelet_config_name(mcp_name, cluster_id)
+
+    def converged():
+        try:
+            mcp = co.get_cluster_custom_object(
+                group="machineconfiguration.openshift.io", version="v1",
+                plural="machineconfigpools", name=mcp_name)
+        except ApiException as e:
+            if e.status != 404:
+                raise
+            logger.warning(f"MCP '{mcp_name}' not found; cannot gate on "
+                           f"topology rollout — proceeding once uncordoned")
+            return not core_v1.read_node(node_name).spec.unschedulable
+        kubelet_configs = (_pool_kubelet_configs(co, mcp_name, mcp, kubelet_config_name)
+                           if mcp_name == "master" else None)
+        node_obj = core_v1.read_node(node_name)
+        ann = node_obj.metadata.annotations or {}
+        cur = ann.get("machineconfiguration.openshift.io/currentConfig")
+        if _converged_on_pool(mcp_name, mcp, ann, node_obj.spec.unschedulable, kubelet_configs):
+            logger.info(f"Node '{node_name}' carries MCP '{mcp_name}' config "
+                        f"(hash {_cfg_hash(cur)}), reboot done — starting SPDK")
+            return True
+        target = {side: ((mcp.get(side, {}) or {}).get("configuration", {}) or {}).get("name")
+                  for side in ("spec", "status")}
+        logger.info(f"Waiting for '{node_name}' to converge on MCP '{mcp_name}' "
+                    f"(cur={cur} target={target} "
+                    f"state={ann.get('machineconfiguration.openshift.io/state')} "
+                    f"cordoned={node_obj.spec.unschedulable})")
+        return False
+
+    # Only a False result is retried: an API error other than the pool's 404
+    # propagates, as it did from the hand-written loop this replaces.
+    retrying = Retrying(stop=stop_after_attempt(attempts), wait=wait or wait_fixed(10),
+                        retry=retry_if_result(lambda done: not done))
+    try:
+        return retrying(converged)
+    except RetryError:
+        return False
+
 
 def set_namespace(namespace):
     if not os.path.exists(namespace_id_file):
@@ -103,6 +268,17 @@ def get_nodes_config():
         return {}
 
 
+def reported_hostname(command_hostname: str) -> str:
+    """The name the control plane knows this worker by.
+
+    With the agent in the pod network, `hostname -s` answers the pod's name. The
+    DaemonSet hands the worker's name over as HOSTNAME and the worker's address as
+    HOST_IP, and the latter is what says the agent is off the host network."""
+    if os.environ.get("HOST_IP") and os.environ.get("HOSTNAME"):
+        return os.environ["HOSTNAME"].split(".")[0]
+    return command_hostname
+
+
 @api.get('/info', responses={
     200: {'content': {'application/json': {'schema': utils.response_schema({
         'type': 'object',
@@ -114,7 +290,7 @@ def get_info():
     return utils.get_response({
         "cluster_id": get_cluster_id(),
 
-        "hostname": node_info["hostname"],
+        "hostname": reported_hostname(node_info["hostname"]),
         "system_id": node_info["system_id"],
 
         "cpu_count": node_info["cpu_info"]['count'],
@@ -136,6 +312,8 @@ def get_info():
         "spdk_pcie_list": node_utils.get_spdk_pcie_list(),
 
         "network_interface": core_utils.get_nics_data(),
+        # Set by the DaemonSet: the agent's own interfaces may not be the host's.
+        "host_ip": os.environ.get("HOST_IP", ""),
 
         "cloud_instance": node_info["cloud_info"],
         "nodes_config": get_nodes_config(),
@@ -170,6 +348,56 @@ def wipe_block_device(body: _WipeBlockDeviceParams):
     if not ok:
         return utils.get_response(None, reason)
     return utils.get_response(True)
+
+
+class _RescanBlockDeviceParams(BaseModel):
+    device_path: str
+
+
+@api.post('/rescan_block_device', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'object',
+        'required': ['device', 'size', 'rescanned'],
+        'properties': {
+            'device': {'type': 'string'},
+            'size': {'type': 'integer'},
+            'rescanned': {'type': 'array', 'items': {'type': 'string'}},
+        },
+    })}}},
+})
+def rescan_block_device(body: _RescanBlockDeviceParams):
+    """Re-read the size of a whole-disk block device (a grown LUN) and
+    return the size in bytes the kernel reports afterwards."""
+    try:
+        return utils.get_response(node_utils.rescan_block_device(body.device_path))
+    except (ValueError, OSError) as e:
+        return utils.get_response(None, str(e))
+
+
+class _DeviceSmartQuery(BaseModel):
+    device_path: str
+
+
+@api.get('/device_smart', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'object',
+        'required': ['supported', 'source', 'device_path', 'data', 'reason'],
+        'properties': {
+            'supported': {'type': 'boolean'},
+            'source': {'type': 'string', 'enum': ['nvme-cli', 'smartctl', '']},
+            'device_path': {'type': 'string'},
+            'data': {'type': 'object', 'nullable': True, 'additionalProperties': True},
+            'reason': {'type': 'string'},
+        },
+    })}}},
+})
+def device_smart(query: _DeviceSmartQuery):
+    """Raw health log of a kernel block device (lblk / AIO devices), read
+    with nvme-cli or smartctl; `supported: false` when it has none."""
+    try:
+        return utils.get_response(node_utils.read_device_smart(query.device_path))
+    except ValueError as e:
+        return utils.get_response(None, str(e))
 
 
 @api.post('/join_swarm', responses={
@@ -290,9 +518,57 @@ class SPDKParams(BaseModel):
     cluster_ip: str = Field(pattern=utils.IP_PATTERN)
     cluster_mode: str
     socket: int | None = Field(None, ge=0)
-    firewall_port: int | None = Field(constants.FW_PORT_START)
     cluster_id: str
     mcp_max_unavailable: int | None = Field(None)
+    # The Secret the SPDK proxy serves and connects with: the cluster's
+    # recorded one, or the constant name from a control plane that sends none.
+    spdk_proxy_tls_secret: core_utils.K8S_DNS_SUBDOMAIN = constants.K8S_SPDK_PROXY_TLS_SECRET
+    # The networks the SPDK pod attaches to. With any, the pod leaves the host network.
+    networks: Annotated[list[NetworkAttachment], Field(default_factory=list)]
+    # The pod serves on the pod network itself, fronted by a Service, with no attachment.
+    pod_network: bool = False
+    # The ports the Service forwards at start: the node's known ports, which a restart
+    # has and a first add lacks. The RPC port is always forwarded.
+    published_ports: Annotated[list[Annotated[int, Field(ge=1, lt=65536)]], Field(default_factory=list)]
+
+
+class ServicePublishParams(BaseModel):
+    rpc_port: Annotated[int, Field(ge=1, lt=65536)]
+    cluster_id: str
+    ports: list[Annotated[int, Field(ge=1, lt=65536)]]
+
+
+@api.post('/spdk_service_publish', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'string'
+    })}}},
+})
+def spdk_service_publish(body: ServicePublishParams):
+    """Set the ports a pod-network node's Service forwards; answers its cluster address."""
+    try:
+        address = pod_service.ensure(core_utils.get_k8s_core_client(), node_utils_k8s.get_namespace(),
+                                     body.rpc_port, body.cluster_id, body.ports)
+    except ApiException as e:
+        return utils.get_response(False, f"Service for port {body.rpc_port} not published: {e.reason}")
+    return utils.get_response(address)
+
+
+@api.get('/spdk_service_delete', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'boolean'
+    })}}},
+})
+def spdk_service_delete(query: utils.RPCPortParams):
+    """Remove a pod-network node's Service. Only a node's removal does this: the
+    address is lost with it, and a restarted pod keeps it only while it exists."""
+    if not query.cluster_id:
+        return utils.get_response(False, "param required: cluster_id")
+    try:
+        pod_service.delete(core_utils.get_k8s_core_client(), node_utils_k8s.get_namespace(),
+                           query.rpc_port, query.cluster_id)
+    except ApiException as e:
+        return utils.get_response(False, f"Service for port {query.rpc_port} not deleted: {e.reason}")
+    return utils.get_response(True)
 
 
 @api.post('/spdk_process_start', responses={
@@ -387,7 +663,7 @@ def spdk_process_start(body: SPDKParams):
             'SPDK_MEM': core_utils.convert_size(body.spdk_mem, 'MiB'),
             'MEM_MEGA': (core_utils.convert_size(body.spdk_mem, 'MiB', round_up=True) // 2) * 2 + 512,
             'MEM2_MEGA': (core_utils.convert_size(body.system_mem, 'MiB', round_up=True) // 2) * 2,
-            'SERVER_IP': body.server_ip,
+            'SERVER_IP': network_attachments.server_ip(body.networks, body.pod_network) or body.server_ip,
             'RPC_PORT': body.rpc_port,
             'RPC_USERNAME': body.rpc_username,
             'RPC_PASSWORD': body.rpc_password,
@@ -401,11 +677,12 @@ def spdk_process_start(body: SPDKParams):
             'GRAYLOG_SERVER_IP': body.cluster_ip,
             'MODE': body.cluster_mode,
             'CLUSTER_ID': first_six_cluster_id,
+            # The names of the objects the CPU-topology job writes, spelled once.
+            'STORAGE_MCO': core_utils.storage_mco_names(body.cluster_id)._asdict(),
             'SSD_PCIE': ssd_pcie_params,
             'PCI_ALLOWED': ssd_pcie_list,
             'TOTAL_HP': total_mem_mib,
             'NSOCKET': body.socket,
-            'FW_PORT': body.firewall_port,
             'CPU_TOPOLOGY_ENABLED': cpu_topology_enabled,
             'RESERVED_SYSTEM_CPUS': reserved_system_cpus,
             'MCP_MAX_UNAVAILABLE': mcp_max_unavailable,
@@ -414,6 +691,14 @@ def spdk_process_start(body: SPDKParams):
             'TLS_CONNECT': settings.tls_connect,
             'TLS_CLIENT_AUTH': settings.model_dump()["tls_client_auth"],
             'TLS_PROVIDER': settings.tls_provider,
+            'SPDK_PROXY_TLS_SECRET': body.spdk_proxy_tls_secret,
+            # The operator sets POD_IP when the agent is off the host network, whatever the
+            # SPDK pod's network; the preparation job (host network) then calls it there.
+            'AGENT_IP': os.environ.get("POD_IP", ""),
+            'NETWORKS': network_attachments.annotation(body.networks),
+            'POD_NETWORK': body.pod_network,
+            'FULL_CLUSTER_ID': body.cluster_id,
+            'DEVICE_RESOURCES': network_attachments.device_resources(body.networks),
         }
 
         if ubuntu_host:
@@ -505,7 +790,13 @@ def spdk_process_start(body: SPDKParams):
             core_resp = batch_v1.create_namespaced_job(namespace=namespace, body=core_yaml)
             msg = f"Job created: '{core_resp.metadata.name}' in namespace '{namespace}"
             logger.info(msg)
-            node_utils_k8s.wait_for_job_completion(core_resp.metadata.name, namespace)
+            # The OpenShift CPU-topology Job's first-time path waits up to 5 min
+            # for the pool to render, sleeps 15 min for the MCO reboot, and after
+            # the reboot waits up to 6 min for the NUMA plugin, plus stale-pool
+            # retries and pod scheduling: ~35 min at 3 s per poll, above the
+            # default 24 min, which would time out a Job about to succeed and
+            # delete it.
+            node_utils_k8s.wait_for_job_completion(core_resp.metadata.name, namespace, timeout=700)
             logger.info(f"Job '{core_resp.metadata.name}' completed successfully")
             batch_v1.delete_namespaced_job(
                 name=core_resp.metadata.name,
@@ -526,50 +817,11 @@ def spdk_process_start(body: SPDKParams):
             # brings it up before cpuManagerPolicy=static is in effect (unpinned),
             # only to be killed by the reboot moments later.
             #
-            # Converge check compares the rendered-config CONTENT HASH
-            # (rendered-<pool>-<hash>), not the full name: a node still under an
-            # older pool (e.g. a previous cluster id) with byte-identical config
-            # has a different name but the same hash and must pass immediately —
-            # no false wait, no needless pool migration/reboot.
-            mcp_name = f"storage-{first_six_cluster_id}"
-
-            def _cfg_hash(name):
-                return name.rsplit("-", 1)[-1] if name else None
-
+            # The pool gated on is the one MCO keeps the node in: a master stays
+            # in the master pool, which the job gives the storage KubeletConfig.
             co = core_utils.get_k8s_custom_objects_client()
-            for attempt in range(240):  # ~40 min: reboots queue under MCP maxUnavailable
-                try:
-                    mcp = co.get_cluster_custom_object(
-                        group="machineconfiguration.openshift.io", version="v1",
-                        plural="machineconfigpools", name=mcp_name)
-                except ApiException as e:
-                    if e.status == 404:
-                        # No MCP to gate on (should not happen once the Job ensures
-                        # membership). Degrade to the old behaviour rather than hang:
-                        # proceed as soon as the node is uncordoned.
-                        logger.warning(f"MCP '{mcp_name}' not found; cannot gate on "
-                                       f"topology rollout — proceeding once uncordoned")
-                        node_obj = k8s_core_v1.read_node(node_name)
-                        if not node_obj.spec.unschedulable:
-                            break
-                        time.sleep(10)
-                        continue
-                    raise
-                target = (mcp.get("status", {}).get("configuration", {}) or {}).get("name")
-                node_obj = k8s_core_v1.read_node(node_name)
-                ann = node_obj.metadata.annotations or {}
-                cur = ann.get("machineconfiguration.openshift.io/currentConfig")
-                state = ann.get("machineconfiguration.openshift.io/state")
-                if (target and state == "Done" and not node_obj.spec.unschedulable
-                        and _cfg_hash(cur) and _cfg_hash(cur) == _cfg_hash(target)):
-                    logger.info(f"Node '{node_name}' carries MCP '{mcp_name}' config "
-                                f"(hash {_cfg_hash(cur)}), reboot done — starting SPDK")
-                    break
-                logger.info(f"Waiting for '{node_name}' to converge on MCP '{mcp_name}' "
-                            f"(cur={cur} target={target} state={state} "
-                            f"cordoned={node_obj.spec.unschedulable})... {attempt + 1}/240")
-                time.sleep(10)
-            else:
+            if not _wait_converged_on_pool(co, k8s_core_v1, node_name, body.cluster_id):
+                mcp_name = _mco_pool_name(k8s_core_v1.read_node(node_name).metadata.labels, body.cluster_id)
                 return utils.get_response(
                     False, f"Node '{node_name}' did not converge on MCP '{mcp_name}' config in time")
         else:
@@ -583,14 +835,27 @@ def spdk_process_start(body: SPDKParams):
                 logger.info(f"Node '{node_name}' is cordoned, waiting for uncordon... attempt {attempt + 1}/36")
                 time.sleep(10)
 
+        service_ip = ""
+        if body.pod_network:
+            # Before the pod: the Service's address is what the pod reports, and it
+            # has to exist for the control plane to reach the proxy at all.
+            service_ip = pod_service.ensure(k8s_core_v1, namespace, body.rpc_port, body.cluster_id,
+                                            body.published_ports)
+
         env = Environment(loader=PackageLoader('simplyblock_web', 'templates'), trim_blocks=True, lstrip_blocks=True)
         template = env.get_template('storage_deploy_spdk.yaml.j2')
         docs = yaml.safe_load_all(template.render(values))
         for dep in docs:
             logger.debug(dep)
-            resp = k8s_core_v1.create_namespaced_pod(body=dep, namespace=namespace)
-            msg = f"Pod created: '{resp.metadata.name}' in namespace '{namespace}'"
+            pod_name = k8s_core_v1.create_namespaced_pod(body=dep, namespace=namespace).metadata.name
+            msg = f"Pod created: '{pod_name}' in namespace '{namespace}'"
             logger.info(msg)
+        if body.networks or body.pod_network:
+            report = network_attachments.wait_for_report(
+                lambda: k8s_core_v1.read_namespaced_pod(pod_name, namespace), body.networks)
+            if service_ip:
+                report["service_ip"] = service_ip
+            return utils.get_response({"message": msg, **report})
     except Exception:
         return utils.get_response(False, f"Pod failed:\n{traceback.format_exc()}")
 
@@ -748,30 +1013,6 @@ def write_key_file(body: WriteKeyFileBody):
     finally:
         os.close(fd)
     return utils.get_response(key_path)
-
-
-class _FirewallParams(BaseModel):
-    port_id: int
-    port_type: str
-    action: str
-    rpc_port: int = Field(ge=1, le=65536)
-
-
-@api.post('/firewall_set_port', responses={
-    200: {'content': {'application/json': {'schema': utils.response_schema({
-        'type': 'string'
-    })}}},
-})
-def firewall_set_port(body: _FirewallParams):
-    return utils.get_response(False, "deprecated bath post snode/firewall_set_port")
-
-@api.get('/get_firewall', responses={
-    200: {'content': {'application/json': {'schema': utils.response_schema({
-        'type': 'string'
-    })}}},
-})
-def get_firewall():
-    return utils.get_response(False, "deprecated bath get snode/get_firewall")
 
 
 @api.post('/persist_node_config', responses={

@@ -1,9 +1,16 @@
 import time
 
-from simplyblock_core import db_controller, distr_controller, storage_node_ops, utils
+from simplyblock_core import (
+    constants,
+    db_controller,
+    distr_controller,
+    storage_node_ops,
+    utils,
+)
 from simplyblock_core.controllers import (
     device_controller,
     health_controller,
+    port_release_budget,
     storage_events,
     tasks_controller,
     tcp_ports_events,
@@ -20,7 +27,6 @@ from simplyblock_core.services.task_runner_base import (
     serve,
     set_result,
 )
-from simplyblock_core.utils import port_block
 
 logger = utils.get_logger(__name__)
 
@@ -152,7 +158,9 @@ def _verify_or_reconnect_peer_hublvol(peer_node, primary_node):
     """Up to _HUBLVOL_MAX_ATTEMPTS verify+reconnect attempts, with
     exponential backoff (1, 2, 4, 8, 16 s) between them. Returns True iff
     any attempt yields a verified-open hublvol from ``peer_node`` to
-    ``primary_node``; False on exhaustion.
+    ``primary_node``; False on exhaustion. Also True, with no attempt, when
+    ``peer_node`` is in the passive triplet of ``primary_node``'s LVS
+    (storage_node_ops.lvs_hublvol_expected): it connects to no hublvol.
 
     Each attempt runs in three steps:
 
@@ -176,6 +184,12 @@ def _verify_or_reconnect_peer_hublvol(peer_node, primary_node):
     On exhaustion the caller's port-allow path aborts the recovering
     node rather than risk unblocking with a half-open peer hublvol.
     """
+    if not storage_node_ops.lvs_hublvol_expected(primary_node, peer_node.get_id()):
+        logger.info("%s is led from site %s: %s connects to no hublvol",
+                    primary_node.lvstore, storage_node_ops.lvs_active_site_of(primary_node),
+                    peer_node.get_id())
+        return True
+
     label = f"{peer_node.get_id()[:8]} <- {primary_node.get_id()[:8]}"
     have_metadata = bool(primary_node.hublvol)
 
@@ -245,9 +259,13 @@ def _reconnect_own_sec_tert_hublvols(node):
       - if P is not reachable but P's secondary is the acting leader, the
         tertiary connects to that acting-leader secondary instead.
 
-    A connection is skipped only if its target peer is neither ONLINE nor
-    DOWN. INBOUND hublvols (peers -> this node) and ALL leadership changes are
-    handled separately in the inbound/leadership step — never here. A
+    A connection is skipped when the primary's record or its hublvol
+    metadata is missing, when no target peer is ONLINE or DOWN, or when the
+    node is in the PASSIVE triplet of that lvstore
+    (storage_node_ops.lvs_hublvol_expected) - the LVS is led from the other
+    site, and the passive triplet connects to no hublvol. INBOUND hublvols
+    (peers -> this node) and ALL leadership changes are handled separately
+    in the inbound/leadership step — never here. A
     network-outage recovery has no recreate_lvstore pass, so this must run
     before the port is allowed, or the node's follower listeners serve client
     IO they cannot forward.
@@ -266,6 +284,11 @@ def _reconnect_own_sec_tert_hublvols(node):
         except KeyError:
             logger.warning("Primary %s referenced by %s not found; skipping",
                            pid[:8], node.get_id()[:8])
+            continue
+        if not storage_node_ops.lvs_hublvol_expected(primary, node.get_id()):
+            logger.info("%s is led from site %s: %s connects to no hublvol",
+                        primary.lvstore, storage_node_ops.lvs_active_site_of(primary),
+                        node.get_id())
             continue
         if not primary.hublvol:
             logger.info("Skipping outbound hublvol toward %s (no hublvol metadata)",
@@ -476,6 +499,10 @@ def _reconnect_inbound_hublvols(node):
     connected, return False so the port stays blocked — a reopened secondary
     listener with no tertiary redirect path is a dual-writer risk once
     leadership sits on the tertiary. Returns ``(ok, msg)``.
+
+    Nothing is repaired when the node is in the PASSIVE triplet of the LVS
+    (storage_node_ops.lvs_hublvol_expected): the LVS is led from the other
+    site, and the passive triplet neither exposes nor connects a hublvol.
     """
     if not node.lvstore_stack_secondary:
         return True, ""
@@ -484,6 +511,11 @@ def _reconnect_inbound_hublvols(node):
     except KeyError:
         return True, ""
     if primary.secondary_node_id != node.get_id() or not primary.hublvol:
+        return True, ""
+    if not storage_node_ops.lvs_hublvol_expected(primary, node.get_id()):
+        logger.info("%s is led from site %s: no secondary hublvol on %s, and no tertiary "
+                    "path to it", primary.lvstore,
+                    storage_node_ops.lvs_active_site_of(primary), node.get_id())
         return True, ""
 
     # 1- re-expose this node's secondary hublvol (local to this node).
@@ -530,14 +562,59 @@ def _read_lvs_leadership(target_node, lvs_name):
     treat ``None`` as "unknown" and retry, never as "not leader".
     """
     try:
-        ret = target_node.rpc_client(timeout=5, retry=1).bdev_lvol_get_lvstores(lvs_name)
-        if not ret or len(ret) == 0:
+        lvs = target_node.rpc_client(timeout=5, retry=1).get_lvstore(lvs_name)
+        if not lvs:
             return False
-        return bool(ret[0].get("lvs leadership"))
+        return bool(lvs.get("lvs leadership"))
     except Exception as e:
         logger.warning("Leadership read for %s on %s failed: %s",
                        lvs_name, target_node.get_id()[:8], e)
         return None
+
+
+def _single_peer_jm_is_complete(db, node, remote_jm_devices):
+    """A two-node cluster has exactly one peer, so exactly one remote JM.
+
+    The "at least 2 remote JMs" requirement can never be met there: in
+    campaign c5 every port-allow task of the 2-node bed deferred forever,
+    and the arbiter's leadership restoration waited behind it. Only asked
+    when exactly one remote JM connected, i.e. on the path that defers
+    anyway: a cluster with 3 or more members still defers exactly as before
+    (and an extra member read on that path changes nothing for it)."""
+    if len(remote_jm_devices) != 1:
+        return False
+    try:
+        members = [n for n in db.get_storage_nodes_by_cluster_id(node.cluster_id)
+                   if n.status != StorageNode.STATUS_REMOVED]
+    except Exception as e:                      # noqa: BLE001 - defer as before
+        logger.warning("Could not read the members of %s: %s", node.cluster_id, e)
+        return False
+    return len(members) == 2
+
+
+def _two_node_fence_holds_ports(node):
+    """Why the node's client ports must stay blocked, or "".
+
+    Two-node arbitration only (campaign c6, F15): with the F14 fix the task
+    completed during fence_both and lifted the client ports of both nodes
+    25-35 s before the arbiter's unfence, bypassing the monitor's guard. The
+    block belongs to the HA fence until the arbiter unfences (and
+    ``spdk_lvs_ha_unfence`` lifts the fence's own block, SPDK #76). Deferring,
+    not completing without the unblock: a block SPDK set on the outage before
+    the fence is not the fence's, so only this task lifts it once the node is
+    unfenced. Same rule as the monitor and the restart flow
+    (``_two_node_peer_port_must_stay_blocked``): fenced, holding, or an HA
+    state that cannot be read keeps the ports blocked."""
+    if not storage_node_ops._cluster_two_node_arbitrated(node.cluster_id, db=db):
+        return ""
+    try:
+        status = node.rpc_client(timeout=1, retry=0).jc_ha_status() or {}
+    except Exception as e:                      # noqa: BLE001 - unknown: stay blocked
+        return "HA state unknown (%s)" % (e,)
+    for entry in status.get("lvs") or []:
+        if entry.get("state") in ("fenced", "holding"):
+            return "LVS %s is %s on the node" % (entry.get("jm_vuid"), entry.get("state"))
+    return ""
 
 
 def _abort_recovering_node(node, reason):
@@ -612,7 +689,7 @@ def exec_port_allow_task(task):
     for data_nic in node.data_nics:
         if data_nic.ip4_address:
             data_ping = health_controller._check_ping_from_node(
-                data_nic.ip4_address, ifname=data_nic.if_name, node=node)
+                data_nic.listen_address, ifname=data_nic.if_name, node=node)
             logger.info(f"Check: ping data nic {data_nic.ip4_address} ... {data_ping}")
             data_results.append(data_ping)
     if data_results and not any(r is True for r in data_results):
@@ -632,7 +709,8 @@ def exec_port_allow_task(task):
 
         logger.info("connect to remote JM devices")
         remote_jm_devices = storage_node_ops._connect_to_remote_jm_devs(node)
-        if not remote_jm_devices or len(remote_jm_devices) < 2:
+        if not remote_jm_devices or (len(remote_jm_devices) < 2
+                                     and not _single_peer_jm_is_complete(db, node, remote_jm_devices)):
             raise TaskDefer("Node unable to connect to remote JMs, retry task")
         else:
             # Re-read fresh before writing to avoid overwriting concurrent changes
@@ -646,6 +724,17 @@ def exec_port_allow_task(task):
     except Exception as e:
         logger.error(e)
         raise TaskDefer("Error when connect to remote devs, retry task")
+
+    # Two-node arbitration (campaign c6, F15): the node's client ports stay
+    # blocked while one of its LVS is HA-fenced or holding. Deferred here, right
+    # after the remote JMs are (re)connected, as the pre-F14 task did: that
+    # connect is what lets the remote JM turn healthy, which the arbiter's
+    # unfence waits for. Only a node with exactly one remote JM can be on a
+    # two-node cluster, so a cluster with 3 or more members never gets here.
+    if len(remote_jm_devices) == 1:
+        keep = _two_node_fence_holds_ports(node)
+        if keep:
+            raise TaskDefer(f"Client ports stay blocked: {keep}, retry task")
 
     # After a network outage every distrib in the cluster is working from a
     # stale device view: the recovering node's distribs have stale REMOTE
@@ -750,9 +839,8 @@ def exec_port_allow_task(task):
         sec_node = db.get_storage_node_by_id(sec_id)
         if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
             try:
-                ret = sec_node.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
-                if ret:
-                    lvs_info = ret[0]
+                lvs_info = sec_node.rpc_client().get_lvstore(snode.lvstore)
+                if lvs_info:
                     if lvs_info.get('lvs leadership'):
                         jc_compression_is_active = sec_node.rpc_client().jc_compression_get_status(snode.jm_vuid)
                         retries = 10
@@ -781,11 +869,12 @@ def exec_port_allow_task(task):
         if node.tertiary_node_id:
             sec_ids.append(node.tertiary_node_id)
         if sec_ids:
-            # Primary-side hublvol exposure is the precondition; if the
-            # primary hasn't (re)registered its hublvol subsystem yet there's
-            # nothing useful the port_allow runner can drive from the peer
-            # side. Stay with suspend-and-retry for this gate -- this is a
-            # primary-local recovery step, not a peer reconnect.
+            # Where a hublvol is expected, the primary must expose it first.
+            # If the primary has not registered its hublvol subsystem yet,
+            # reconnecting the peers cannot fix that, so the task is deferred
+            # and retried: this is a recovery step on the primary itself. A
+            # primary in the passive triplet (its LVS is led from the other
+            # site) exposes no hublvol, and the check returns success for it.
             primary_hublvol_check = health_controller._check_node_hublvol(node)
             if not primary_hublvol_check:
                 raise TaskDefer("Node hublvol check fail, retry later")
@@ -855,8 +944,13 @@ def exec_port_allow_task(task):
     # recovery path ever reconciles the ex-leader's state afterwards, its
     # redirect stays broken, and the monitor flips it DOWN, unable to
     # redirect IO to the primary.
+    #
+    # Sync replication: only while the LVS is led from its home triplet. Led
+    # from the other site's triplet, or being moved there, its leadership is
+    # not this node's to take back (storage_node_ops.lvs_active_triplet).
     node = db.get_storage_node_by_id(task.node_id)
     if node.lvstore and node.lvstore_status == "ready" and \
+            storage_node_ops.lvs_led_from_home(node) and \
             not tasks_controller.get_active_node_restart_task(task.cluster_id, task.node_id):
         failback_peers = []
         for sec_id in [node.secondary_node_id, node.tertiary_node_id]:
@@ -876,8 +970,8 @@ def exec_port_allow_task(task):
         leadership_read_failed = None
         for peer in failback_peers:
             try:
-                ret = peer.rpc_client(timeout=5, retry=2).bdev_lvol_get_lvstores(node.lvstore)
-                if ret and len(ret) > 0 and ret[0].get("lvs leadership"):
+                lvs = peer.rpc_client(timeout=5, retry=2).get_lvstore(node.lvstore)
+                if lvs and lvs.get("lvs leadership"):
                     current_leader = peer
                     logger.info("Current leader for %s is peer %s",
                                 node.lvstore, peer.get_id()[:8])
@@ -914,9 +1008,31 @@ def exec_port_allow_task(task):
     if port_number and port_number not in lvs_ports:
         lvs_ports.append(port_number)
     logger.info(f"Allow LVS ports {lvs_ports} on node {node.get_id()}")
+    # Release budget (models/fence_release.py): a port whose lvstore this
+    # control plane already reopened FENCE_RELEASE_BUDGET times inside the
+    # window is being re-fenced by SPDK on every IO. Skip it and reopen the
+    # others -- but never abort here: the ANA promotion and the device
+    # re-admit below are the last steps of the node's recovery and must run
+    # whatever happened to one port (review of #1580). The budget exempts the
+    # lvstore's preferred path and is reset by a restart, so a healthy node
+    # coming back is not what gets skipped.
+    looping = [p for p in lvs_ports if port_release_budget.exhausted(db, node, p)]
     for p in lvs_ports:
-        port_block.set_port(node, p, block=False, timeout=5, retry=2)
+        if p in looping:
+            logger.warning(
+                "Port %s on %s: its lvstore's paths were released %d times in the last "
+                "%ds and SPDK fenced them again each time; leaving it blocked",
+                p, node.get_id(), constants.FENCE_RELEASE_BUDGET, constants.FENCE_RELEASE_WINDOW_SEC)
+            continue
+        node.rpc_client(timeout=5, retry=2).nvmf_port_unblock(p)
+        port_release_budget.record_release(db, node, p)
         tcp_ports_events.port_allowed(node, p)
+    left_blocked = ""
+    if port_number in looping:
+        left_blocked = (
+            f" (port {port_number} left blocked: its lvstore's paths were released "
+            f"{constants.FENCE_RELEASE_BUDGET} times in {constants.FENCE_RELEASE_WINDOW_SEC}s "
+            f"and fenced again each time -- fence loop)")
 
     # Deferred ANA failover, AFTER the port release: a secondary recovering
     # while its primary is OFFLINE returns with non-optimized listeners
@@ -926,7 +1042,13 @@ def exec_port_allow_task(task):
     # tertiary to this secondary gradually rather than gating the recovery.
     # The tertiary→secondary hublvol hard gate above already guaranteed the
     # tertiary can redirect here before any client lands on this node.
-    if node.lvstore_stack_secondary:
+    if storage_node_ops._sync_site(node):
+        # Sync replication: this node may be the secondary of the ACTIVE
+        # triplet of several LVS (a local one, or another owner's remote
+        # triplet); each whose active primary is OFFLINE is promoted here,
+        # under the site rule.
+        storage_node_ops.promote_active_secondary_ana(node)
+    elif node.lvstore_stack_secondary:
         try:
             # reverse ref holds the primary's node id (str at runtime despite
             # the model's List[dict] annotation — see field-semantics note)
@@ -983,7 +1105,7 @@ def exec_port_allow_task(task):
     except Exception as e:
         logger.error(f"Device re-admit after port allow failed: {e}")
 
-    set_result(task, f"Port {port_number} allowed on node")
+    set_result(task, f"Port {port_number} allowed on node{left_blocked}")
 
 
 SPEC = RunnerSpec(

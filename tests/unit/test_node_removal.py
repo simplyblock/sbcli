@@ -57,6 +57,9 @@ def _node(node_id, status=StorageNode.STATUS_ONLINE, lvstore="",
     # dedicated-secondary-node / physical-label branches.
     n.is_secondary_node = is_secondary_node
     n.physical_label = physical_label
+    # A truthy child mock here would make every port change publish Service
+    # ports; these nodes are on the host network and have no Service.
+    n.pod_network = False
     # Same hazard: left as a child mock this reads truthy, and the removal
     # would skip phase 3b believing a drain had already reallocated the
     # replicas. A node that no drain has touched has it False.
@@ -76,6 +79,11 @@ def _node(node_id, status=StorageNode.STATUS_ONLINE, lvstore="",
     n.lvstore_stack_secondary = stack_secondary
     n.lvstore_stack_tertiary = stack_tertiary
     n.failure_domain = failure_domain
+    # Non-sync-replication defaults (no site, no remote triplet).
+    n.site = ""
+    n.remote_primary_node_id = ""
+    n.remote_secondary_node_id = ""
+    n.remote_tertiary_node_id = ""
     n.mgmt_ip = mgmt_ip or unique_ip(node_id)
     n.write_to_db = MagicMock()
     n.rpc_client = MagicMock(return_value=MagicMock())
@@ -1158,6 +1166,7 @@ class TestRecreateOnNonLeaderReconnectsRegardlessOfActivationMode(unittest.TestC
 
     def test_soft_reconnect_prelude_runs_with_activation_mode_false(self):
         snode = MagicMock(spec=StorageNode)
+        snode.pod_network = False  # on the host network: no Service ports to publish
         snode.get_id = MagicMock(return_value="snode-1")
         snode.lvstore = ""
         snode.lvstore_stack_secondary = ""
@@ -1169,6 +1178,8 @@ class TestRecreateOnNonLeaderReconnectsRegardlessOfActivationMode(unittest.TestC
         db = MagicMock()
         db.get_storage_node_by_id = MagicMock(return_value=snode)
         db.get_lvols_by_node_id = MagicMock(return_value=[])
+        # The prelude writes its fields through atomic_update: apply them.
+        db.atomic_update = MagicMock(side_effect=lambda node, fn: fn(node))
 
         primary_node = MagicMock()
         primary_node.get_id = MagicMock(return_value="primary-1")
@@ -3018,12 +3029,15 @@ class TestConnectToRemoteJmDevsDegradesOnRpcException(unittest.TestCase):
         owner_node.get_id = MagicMock(return_value="owner-node")
         owner_node.status = StorageNode.STATUS_ONLINE
         owner_node.jm_device = jm_dev
+        owner_node.site = ""
 
         this_node = MagicMock(spec=StorageNode)
         this_node.get_id = MagicMock(return_value=this_node_id)
         this_node.jm_ids = []
+        this_node.lvstore_stack = []
         this_node.lvstore_stack_secondary = ""
         this_node.lvstore_stack_tertiary = ""
+        this_node.site = ""
         this_node.remote_jm_devices = []
         rpc_client = MagicMock()
         this_node.rpc_client = MagicMock(return_value=rpc_client)
@@ -3123,12 +3137,15 @@ class TestConnectToRemoteJmDevsRecordsResolvedName(unittest.TestCase):
         owner_node.get_id = MagicMock(return_value="owner-node")
         owner_node.status = StorageNode.STATUS_ONLINE
         owner_node.jm_device = jm_dev
+        owner_node.site = ""
 
         this_node = MagicMock(spec=StorageNode)
         this_node.get_id = MagicMock(return_value=this_node_id)
         this_node.jm_ids = []
+        this_node.lvstore_stack = []
         this_node.lvstore_stack_secondary = ""
         this_node.lvstore_stack_tertiary = ""
+        this_node.site = ""
         this_node.remote_jm_devices = []
         rpc_client = MagicMock()
         this_node.rpc_client = MagicMock(return_value=rpc_client)
@@ -3173,7 +3190,7 @@ class TestShrinkStatusDoesNotDeadlockRemoval(unittest.TestCase):
         from simplyblock_core.models.job_schedule import JobSchedule
         from simplyblock_core.services import migration_task_common as mig
         from simplyblock_core.services import tasks_runner_failed_migration as runner
-        from simplyblock_core.services.task_runner_base import TaskRetry
+        from simplyblock_core.services.task_runner_base import TaskDefer, TaskRetry
 
         task = MagicMock(spec=JobSchedule)
         task.node_id, task.cluster_id, task.retry = "n1", "cl-1", 0
@@ -3192,12 +3209,15 @@ class TestShrinkStatusDoesNotDeadlockRemoval(unittest.TestCase):
         with patch.object(runner, "db", db), patch.object(mig, "db", db):
             try:
                 runner.task_runner(task)
-            except TaskRetry as e:
-                # The gate refuses by raising; the driver, not the handler, is
-                # what turns that into STATUS_SUSPENDED. Any other TaskRetry
-                # comes from the real device/RPC work past the gate, which this
+            except TaskDefer as e:
+                # The gate refuses by deferring (no retry consumed; the driver,
+                # not the handler, turns that into STATUS_SUSPENDED). Any other
+                # TaskDefer comes from the real work past the gate, which this
                 # test deliberately does not mock.
-                return "cluster is not active" not in str(e)
+                return "allows operations" not in str(e)
+            except TaskRetry:
+                # Real device/RPC work past the gate failing: the gate passed.
+                return True
             except Exception:
                 pass
         return True
@@ -3378,17 +3398,17 @@ class TestVerifyReplicaStacks(unittest.TestCase):
         cl = _cluster()
         p = _node("P", lvstore="LVS_P", secondary_id="A")
         a = _node("A", lvstore="LVS_A", stack_secondary="P")
-        a.rpc_client.return_value.bdev_lvol_get_lvstores = MagicMock(**probe_result)
+        a.rpc_client.return_value.get_lvstore = MagicMock(**probe_result)
         return FakeDB(cl, [p, a]), a
 
     def test_reports_a_missing_stack(self):
-        db, _a = self._db({"return_value": []})
+        db, _a = self._db({"return_value": None})
         self.assertEqual(
             storage_node_ops._verify_replica_stacks("cluster-1", db),
             [("A", "LVS_P", "P", "secondary")])
 
     def test_clean_when_the_probe_finds_the_stack(self):
-        db, _a = self._db({"return_value": [{"name": "LVS_P"}]})
+        db, _a = self._db({"return_value": {"name": "LVS_P"}})
         self.assertEqual(storage_node_ops._verify_replica_stacks("cluster-1", db), [])
 
     def test_an_unreachable_node_is_not_reported_as_a_violation(self):
@@ -3401,7 +3421,7 @@ class TestVerifyReplicaStacks(unittest.TestCase):
         cl = _cluster()
         p = _node("P", lvstore="LVS_P", secondary_id="A")
         a = _node("A", status=StorageNode.STATUS_OFFLINE, stack_secondary="P")
-        a.rpc_client.return_value.bdev_lvol_get_lvstores = MagicMock(return_value=[])
+        a.rpc_client.return_value.get_lvstore = MagicMock(return_value=None)
         db = FakeDB(cl, [p, a])
         self.assertEqual(storage_node_ops._verify_replica_stacks("cluster-1", db), [])
 
@@ -3988,7 +4008,8 @@ class TestAFailedBuildReleasesWhatItOpened(unittest.TestCase):
         snode.rpc_client = MagicMock(return_value=rpc)
         db = FakeDB(cl, [snode] + ([primary] if primary else []))
         with patch.object(storage_node_ops, "DBController", return_value=db), \
-             patch.object(storage_node_ops, "get_node_jm_names", return_value=["jm_H"]), \
+             patch.object(storage_node_ops, "get_node_jm_names",
+                          return_value=storage_node_ops.JMNames(["jm_H"], None)), \
              patch.object(storage_node_ops.distr_controller, "send_cluster_map_to_distr",
                           return_value=True), \
              patch.object(storage_node_ops, "_release_jm_contexts_of_deleted_vuid") as rel:
@@ -4024,28 +4045,32 @@ class TestAFailedBuildReleasesWhatItOpened(unittest.TestCase):
 class TestJcRemoveJmClient(unittest.TestCase):
     """The client wrapper's contract: success / unsupported / coded error."""
 
-    def _client(self, response):
+    def _client(self, result=None, error=None):
         from simplyblock_core import rpc_client as rc
         c = rc.RPCClient.__new__(rc.RPCClient)
-        c._request2 = MagicMock(return_value=response)  # type: ignore[method-assign]
+        if error is not None:
+            c._request = MagicMock(  # type: ignore[method-assign]
+                side_effect=RPCRemoteError(error.get("message", ""), error.get("code", 0)))
+        else:
+            c._request = MagicMock(return_value=result)  # type: ignore[method-assign]
         return c
 
     def test_success_returns_the_result(self):
-        self.assertTrue(self._client((True, None)).jc_remove_jm("remote_jm_xn1"))
+        self.assertTrue(self._client(result=True).jc_remove_jm("remote_jm_xn1"))
 
     def test_method_not_found_returns_the_unsupported_sentinel(self):
         from simplyblock_core.rpc_client import RPC_UNSUPPORTED
-        c = self._client((None, {"code": -32601, "message": "Method not found"}))
+        c = self._client(error={"code": -32601, "message": "Method not found"})
         self.assertEqual(c.jc_remove_jm("remote_jm_xn1"), RPC_UNSUPPORTED)
 
     def test_still_in_use_raises_with_code_22(self):
-        c = self._client((None, {"code": -22, "message": "still in use"}))
+        c = self._client(error={"code": -22, "message": "still in use"})
         with self.assertRaises(RPCRemoteError) as ctx:
             c.jc_remove_jm("remote_jm_xn1")
         self.assertEqual(ctx.exception.code, -22)
 
     def test_other_errors_raise_with_their_code(self):
-        c = self._client((None, {"code": -12, "message": "another removal in progress"}))
+        c = self._client(error={"code": -12, "message": "another removal in progress"})
         with self.assertRaises(RPCRemoteError) as ctx:
             c.jc_remove_jm("remote_jm_xn1")
         self.assertEqual(ctx.exception.code, -12)

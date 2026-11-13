@@ -10,7 +10,7 @@ the add fires directly (the duplicate re-entry is the rare case), and
 only a rejected add triggers the ``nvmf_get_subsystems`` probe — whose
 unfiltered response grows with total lvol count and used to be paid
 before every single add. A rejected duplicate resolves to the existing
-nsid; any other rejection propagates unchanged.
+nsid; any other rejection propagates unchanged (as ``RPCRemoteError``).
 """
 
 import unittest
@@ -18,7 +18,7 @@ from unittest.mock import patch
 
 from pydantic import SecretStr
 
-from simplyblock_core.rpc_client import RPCClient
+from simplyblock_core.rpc_client import RPCClient, RPCRemoteError
 
 
 def _client():
@@ -27,6 +27,10 @@ def _client():
 
 
 _DUP_ERR = {"code": -32602, "message": "Invalid parameters"}
+
+
+def _dup_err():
+    return RPCRemoteError(_DUP_ERR["message"], _DUP_ERR["code"])
 
 
 class TestAddNsIdempotent(unittest.TestCase):
@@ -45,7 +49,7 @@ class TestAddNsIdempotent(unittest.TestCase):
                     "nsid": 1, "bdev_name": bdev, "uuid": uuid,
                 }],
             }) as mock_get, \
-             patch.object(c, "_request2", return_value=(None, _DUP_ERR)) as mock_req:
+             patch.object(c, "_request", side_effect=_dup_err()) as mock_req:
             ret = c.nvmf_subsystem_add_ns(nqn, bdev, uuid=uuid, nsid=1)
 
         self.assertEqual(ret, 1)
@@ -58,7 +62,7 @@ class TestAddNsIdempotent(unittest.TestCase):
         """The happy path pays no nvmf_get_subsystems dump at all."""
         c = _client()
         with patch.object(c, "subsystem_get") as mock_get, \
-             patch.object(c, "_request2", return_value=(1, None)) as mock_req:
+             patch.object(c, "_request", return_value=1) as mock_req:
             ret = c.nvmf_subsystem_add_ns("nqn.test:lvol:abc", "bdev0", uuid="u1", nsid=1)
 
         self.assertEqual(ret, 1)
@@ -75,7 +79,7 @@ class TestAddNsIdempotent(unittest.TestCase):
                 "nqn": nqn,
                 "namespaces": [],
             }), \
-             patch.object(c, "_request2", return_value=(1, None)) as mock_req:
+             patch.object(c, "_request", return_value=1) as mock_req:
             ret = c.nvmf_subsystem_add_ns(nqn, bdev, uuid="u1", nsid=1)
 
         self.assertEqual(ret, 1)
@@ -88,11 +92,12 @@ class TestAddNsIdempotent(unittest.TestCase):
         original error must reach the caller (subsystem gone / full)."""
         c = _client()
         with patch.object(c, "subsystem_get", return_value=None), \
-             patch.object(c, "_request2", return_value=(None, _DUP_ERR)) as mock_req:
-            ret, err = c.nvmf_subsystem_add_ns2("nqn.test", "bdev0", uuid="u1")
+             patch.object(c, "_request", side_effect=_dup_err()) as mock_req:
+            with self.assertRaises(RPCRemoteError) as ctx:
+                c.nvmf_subsystem_add_ns2("nqn.test", "bdev0", uuid="u1")
         mock_req.assert_called_once()
-        self.assertIsNone(ret)
-        self.assertEqual(err, _DUP_ERR)
+        self.assertEqual(ctx.exception.code, _DUP_ERR["code"])
+        self.assertEqual(str(ctx.exception), _DUP_ERR["message"])
 
     def test_uuid_mismatch_keeps_error(self):
         """A bdev present at the same nsid but with a DIFFERENT uuid is a real
@@ -107,38 +112,39 @@ class TestAddNsIdempotent(unittest.TestCase):
                     "nsid": 1, "bdev_name": bdev, "uuid": "old-uuid",
                 }],
             }), \
-             patch.object(c, "_request2", return_value=(None, _DUP_ERR)) as mock_req:
-            ret, err = c.nvmf_subsystem_add_ns2(nqn, bdev, uuid="new-uuid", nsid=1)
+             patch.object(c, "_request", side_effect=_dup_err()) as mock_req:
+            with self.assertRaises(RPCRemoteError) as ctx:
+                c.nvmf_subsystem_add_ns2(nqn, bdev, uuid="new-uuid", nsid=1)
 
         mock_req.assert_called_once()
-        self.assertIsNone(ret)
-        self.assertEqual(err, _DUP_ERR)
+        self.assertEqual(ctx.exception.code, _DUP_ERR["code"])
 
     def test_idempotent_false_never_probes(self):
-        """Callers can opt out: a rejected add returns the error directly."""
+        """Callers can opt out: a rejected add raises directly."""
         c = _client()
         nqn = "nqn.test:lvol:abc"
         bdev = "LVS_345/LVOL_8403"
 
         with patch.object(c, "subsystem_get") as mock_get, \
-             patch.object(c, "_request2", return_value=(None, _DUP_ERR)) as mock_req:
-            ret, err = c.nvmf_subsystem_add_ns2(nqn, bdev, uuid="u1", nsid=1,
-                                                idempotent=False)
+             patch.object(c, "_request", side_effect=_dup_err()) as mock_req:
+            with self.assertRaises(RPCRemoteError) as ctx:
+                c.nvmf_subsystem_add_ns2(nqn, bdev, uuid="u1", nsid=1,
+                                         idempotent=False)
 
         mock_get.assert_not_called()
         mock_req.assert_called_once()
-        self.assertEqual(err, _DUP_ERR)
+        self.assertEqual(ctx.exception.code, _DUP_ERR["code"])
 
     def test_probe_failure_returns_original_error(self):
         """If the error-path probe itself raises, the original rejection is
-        returned rather than the probe's exception."""
+        raised rather than the probe's exception."""
         c = _client()
         with patch.object(c, "subsystem_get", side_effect=RuntimeError("rpc down")), \
-             patch.object(c, "_request2", return_value=(None, _DUP_ERR)) as mock_req:
-            ret, err = c.nvmf_subsystem_add_ns2("nqn.test", "bdev0")
+             patch.object(c, "_request", side_effect=_dup_err()) as mock_req:
+            with self.assertRaises(RPCRemoteError) as ctx:
+                c.nvmf_subsystem_add_ns2("nqn.test", "bdev0")
         mock_req.assert_called_once()
-        self.assertIsNone(ret)
-        self.assertEqual(err, _DUP_ERR)
+        self.assertEqual(ctx.exception.code, _DUP_ERR["code"])
 
     def test_rejected_same_bdev_different_nsid_resolves(self):
         """If the bdev is already attached at a different nsid (caller didn't
@@ -151,7 +157,7 @@ class TestAddNsIdempotent(unittest.TestCase):
                 "nqn": nqn,
                 "namespaces": [{"nsid": 2, "bdev_name": bdev, "uuid": "u1"}],
             }), \
-             patch.object(c, "_request2", return_value=(None, _DUP_ERR)) as mock_req:
+             patch.object(c, "_request", side_effect=_dup_err()) as mock_req:
             ret = c.nvmf_subsystem_add_ns(nqn, bdev, uuid="u1")  # no nsid pinned
 
         self.assertEqual(ret, 2)

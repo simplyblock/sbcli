@@ -32,12 +32,17 @@ import errno
 import unittest
 from unittest.mock import MagicMock, patch
 
-from simplyblock_core.rpc_client import RPCClient
+from simplyblock_core.rpc_client import RPCClient, RPCRemoteError
 
 
 def _client(result, error):
     client = RPCClient.__new__(RPCClient)
-    client._request2 = MagicMock(return_value=(result, error))
+    if error is not None:
+        client._request = MagicMock(
+            side_effect=RPCRemoteError(
+                error.get("message", ""), error.get("code", 0), error.get("data")))
+    else:
+        client._request = MagicMock(return_value=result)
     return client
 
 

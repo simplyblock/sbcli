@@ -46,15 +46,34 @@ def _parallel_restart_allowed(node):
     return storage_node_ops.fd_dead_recovery_allowed(db, node)
 
 
+def _deferred_by_drain(cluster, task) -> bool:
+    """Whether a queued node restart waits for a drain: a SUSPENDED cluster
+    still being drained to all-offline, or - sync replication - the node's site
+    being drained or any site being activated
+    (tasks_controller.is_auto_restart_paused). A node no longer in the
+    database is judged by the cluster-wide pause alone."""
+    try:
+        node = db.get_storage_node_by_id(task.node_id)
+    except KeyError:
+        node = None
+    if not tasks_controller.is_auto_restart_paused(cluster, node):
+        return False
+    logger.info("Cluster %s: a drain or a site activation is running (cluster suspended, "
+                "the node's site draining, or a site being activated); deferring "
+                "node-restart task %s", cluster.get_id(), task.uuid)
+    return True
+
+
 def _is_eligible(task, cluster):
     """Suspend recovery: while a SUSPENDED cluster is still being drained to
     all-offline, pause node restarts. Executing one now would fight the
     auto-shutdown and re-create the wedged half-restarted state we are fixing.
     The task re-polls without consuming a retry and runs once the drain
-    completes."""
+    completes. The same for a node of a sync-replication site being drained,
+    and for every node while a site activation runs (_deferred_by_drain)."""
     if task.function_name != JobSchedule.FN_NODE_RESTART:
         return True
-    return not tasks_controller.is_auto_restart_paused(db.get_cluster_by_id(cluster.get_id()))
+    return not _deferred_by_drain(db.get_cluster_by_id(cluster.get_id()), task)
 
 
 def _serialize(task, cluster):
@@ -418,10 +437,19 @@ def task_runner_node(task):
     logger.info(f"Check: ping mgmt ip {node.mgmt_ip} ... {ping_check}")
     node_api_check = health_controller._check_node_api(node)
     logger.info(f"Check: node API {node.mgmt_ip}:5000 ... {node_api_check}")
-    node_data_nic_ping_check = False
-    for data_nic in node.data_nics:
+    # A node on the pod network holds its data addresses inside the SPDK pod,
+    # and _check_ping_from_node asks that pod's proxy. A node that is down to
+    # be restarted has no pod to answer, so the probe can only be inconclusive
+    # and would hold the restart back forever (Talos lab, 2026-10-25: every
+    # node stayed "unreachable" after a reboot). The restart recreates the pod
+    # and verifies its attachment itself, so the host-side prerequisite is the
+    # management path alone.
+    node_data_nic_ping_check = node.on_pod_network
+    if node.on_pod_network:
+        logger.info("Check: data nic lives in the SPDK pod the restart recreates ... skipped")
+    for data_nic in ([] if node.on_pod_network else node.data_nics):
         if data_nic.ip4_address:
-            data_ping_check = health_controller._check_ping_from_node(data_nic.ip4_address, ifname=data_nic.if_name, node=node)
+            data_ping_check = health_controller._check_ping_from_node(data_nic.listen_address, ifname=data_nic.if_name, node=node)
             logger.info(f"Check: ping data nic {data_nic.ip4_address} ... {data_ping_check}")
             # data_ping_check is tri-state (True/False/None): None means the
             # SnodeAPI call itself errored/timed out (inconclusive), not that

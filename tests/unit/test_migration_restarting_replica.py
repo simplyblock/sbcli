@@ -78,7 +78,7 @@ class TestCreateRefusesARestartingTargetReplica(unittest.TestCase):
         self._refuse(StorageNode.STATUS_RESTARTING, ha_type="single")
 
     def test_the_refusal_runs_before_anything_is_built(self):
-        body = inspect.getsource(mc.create_migration)
+        body = inspect.getsource(mc._create_migration_impl)
         self.assertLess(body.index("_refuse_restarting_target_replicas(tgt_node, lvol)"),
                         body.index("create_lvol("))
 

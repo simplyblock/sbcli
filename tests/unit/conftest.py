@@ -55,3 +55,17 @@ def _reset_ttl_caches():
     for cache in (ttl_cache.capacity_scan_cache, ttl_cache.leader_cache,
                   ttl_cache.quorum_verdict_cache):
         cache.invalidate()
+
+
+@pytest.fixture(autouse=True)
+def _reset_two_node_arbitration_flag():
+    """storage_node_ops remembers each cluster's two_node_arbitration flag for a
+    while (module-level, keyed by cluster ids tests reuse): clear it per test."""
+    try:
+        from simplyblock_core import storage_node_ops
+    except Exception:
+        yield
+        return
+    storage_node_ops._ARBITRATION_FLAG.clear()
+    yield
+    storage_node_ops._ARBITRATION_FLAG.clear()

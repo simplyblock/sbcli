@@ -89,14 +89,20 @@ def _build_cluster_dto():
         node_affinity=False,
         anti_affinity=False,
         enable_failure_domain=False,
+        lvol_geometry_enabled=True,
         device_mode="nvme",
         inline_checksum=False,
         atomic_4k=False,
+        md_journal=False,
         secret=SecretStr("CLUSTER-SECRET"),
         tls_enabled=False,
         max_fault_tolerance=1,
         backup_enabled=False,
         capacity=_build_capacity(),
+        snode_api_service="simplyblock-storage-node-api",
+        spdk_proxy_service="simplyblock-spdk-proxy",
+        spdk_proxy_tls_secret="simplyblock-spdk-proxy-tls",
+        node_label_suffix="",
     )
 
 

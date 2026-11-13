@@ -153,3 +153,27 @@ def lvol_io_error_change(lvol, new_state, old_status, caused_by=ec.CAUSED_BY_CLI
 
 def lvol_replicated(lvol, new_lvol, caused_by=ec.CAUSED_BY_CLI):
     _lvol_event(lvol, f"LVol Replicated, {lvol.get_id()}, new lvol: {new_lvol.get_id()}", caused_by, ec.EVENT_STATUS_CHANGE)
+
+
+def replication_merge_failing(lvol, target_node_id, rc, fails, retry_in, caused_by=ec.CAUSED_BY_MONITOR):
+    """The landing merge of *lvol*'s replication keeps failing on the target.
+
+    An error-level event, without the CR bookkeeping of _lvol_event: it is
+    raised from the replication runner, possibly every few minutes."""
+    from simplyblock_core.models.events import EventObj
+    try:
+        cluster_id = DBController().get_pool_by_id(lvol.pool_uuid).cluster_id
+    except Exception as e:
+        logger.error(f"No cluster could be resolved for lvol {lvol.get_id()}; event not logged: {e}")
+        return
+    ec.log_event_cluster(
+        cluster_id=cluster_id,
+        domain=ec.DOMAIN_CLUSTER,
+        event=ec.EVENT_REPLICATION_STALLED,
+        db_object=lvol,
+        caused_by=caused_by,
+        message=(f"Replication of LVol {lvol.get_id()} is stalled: the landing merge on "
+                 f"target node {target_node_id} failed {fails} times in a row (rc {rc}); "
+                 f"retrying in {int(retry_in)}s"),
+        node_id=lvol.get_id(),
+        event_level=EventObj.LEVEL_ERROR)

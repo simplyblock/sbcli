@@ -19,21 +19,23 @@ worker-3 (primary of LVS_16, port 4442) began a graceful shutdown at
    on the observation: a fence nobody is looking at is a fence nobody can
    remediate.
 
-3. ``port_block.is_port_blocked`` tested ``port_id in
+3. The single-port check tested ``port_id in
    rpc.nvmf_get_blocked_ports()``, a ``{"blocked_ports": [...]}`` dict, so it
    compared against the dict's keys and returned False for every port.
+   ``RPCClient.nvmf_get_blocked_ports`` now returns the set of ports itself.
 
 The client budget this races is ctrl_loss_tmo = 30 x 2s = 60s, after which
 the kernel deletes the controller and the namespace fails IO.
 """
 
+import time
 import unittest
 from unittest.mock import MagicMock, patch
 
 from simplyblock_core.controllers import health_controller
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.rpc_client import RPCClient
 from simplyblock_core.services import storage_node_monitor
-from simplyblock_core.utils import port_block
 
 # --------------------------------------------------------------------------
 # 3. is_port_blocked parsed the wrong shape
@@ -42,49 +44,53 @@ from simplyblock_core.utils import port_block
 class TestIsPortBlockedParsesPayload(unittest.TestCase):
     """``nvmf_get_blocked_ports`` answers with a dict, not a list of ports."""
 
-    @staticmethod
-    def _node(payload):
+    def _node(self, payload):
+        from pydantic import SecretStr
+
+        client = RPCClient("127.0.0.1", 8080, "user", SecretStr("pass"), timeout=1, retry=0)
+        request = patch.object(client, "_request", return_value=payload)
+        request.start()
+        self.addCleanup(request.stop)
         node = MagicMock()
-        node.rpc_client.return_value.nvmf_get_blocked_ports.return_value = payload
+        node.rpc_client.return_value = client
         return node
 
     def test_blocked_port_reads_blocked(self):
         node = self._node({"blocked_ports": [{"port": 4442, "is_reject": False}]})
-        self.assertTrue(port_block.is_port_blocked(node, 4442))
+        self.assertFalse(health_controller.check_port_on_node(node, 4442))
 
     def test_open_port_reads_open(self):
         node = self._node({"blocked_ports": [{"port": 4436}]})
-        self.assertFalse(port_block.is_port_blocked(node, 4442))
+        self.assertTrue(health_controller.check_port_on_node(node, 4442))
 
     def test_no_blocked_ports_reads_open(self):
-        self.assertFalse(port_block.is_port_blocked(self._node({}), 4442))
-        self.assertFalse(
-            port_block.is_port_blocked(self._node({"blocked_ports": []}), 4442))
+        self.assertTrue(health_controller.check_port_on_node(self._node({}), 4442))
+        self.assertTrue(health_controller.check_port_on_node(
+            self._node({"blocked_ports": []}), 4442))
 
     def test_string_port_is_accepted(self):
         node = self._node({"blocked_ports": [{"port": 4442}]})
-        self.assertTrue(port_block.is_port_blocked(node, "4442"))
+        self.assertFalse(health_controller.check_port_on_node(node, "4442"))
 
     def test_agrees_with_the_batched_reader(self):
         # The batched path always parsed this correctly, which is why the
-        # monitor saw the fences and this function never did.
-        payload = {"blocked_ports": [{"port": 4442}, {"port": 4436}]}
-        node = self._node(payload)
-        batched = port_block.get_blocked_ports_set(node)
+        # monitor saw the fences and the single-port check never did.
+        node = self._node({"blocked_ports": [{"port": 4442}, {"port": 4436}]})
+        batched = health_controller.check_ports_on_node(node, [4434, 4436, 4442])
         for port in (4434, 4436, 4442):
-            self.assertEqual(port_block.is_port_blocked(node, port),
-                             port in batched, port)
+            self.assertEqual(health_controller.check_port_on_node(node, port),
+                             batched[port], port)
 
-    def test_falls_back_to_iptables_when_rpc_absent(self):
+    def test_rpc_absent_raises_instead_of_reading_iptables(self):
+        # There is no iptables fallback any more: the firewall API it went
+        # to does not exist on 26.3 hosts. See test_port_block_rpc_only.
         from simplyblock_core.rpc_client import RPCErrorCode, RPCRemoteError
 
         node = MagicMock()
         node.rpc_client.return_value.nvmf_get_blocked_ports.side_effect = (
             RPCRemoteError("no such method", RPCErrorCode.method_not_found))
-        with patch.object(port_block, "_is_port_blocked_iptables",
-                          return_value=True) as legacy:
-            self.assertTrue(port_block.is_port_blocked(node, 4442))
-        legacy.assert_called_once()
+        with self.assertRaises(RPCRemoteError):
+            health_controller.check_port_on_node(node, 4442)
 
 
 # --------------------------------------------------------------------------
@@ -111,6 +117,47 @@ def _node(node_id, *, status=StorageNode.STATUS_ONLINE, lvstore="LVS_1",
     return n
 
 
+def _run_port_check(owner_status, fenced_for=None):
+    """worker-5 is the tertiary for worker-3's LVS_16 (port 4442), and
+    4442 is fenced -- for ``fenced_for`` seconds already, or freshly when
+    None. Returns (verdict, port_results, owner_map)."""
+    if fenced_for is not None:
+        storage_node_monitor._blocked_port_since[("worker-5", 4442)] = (
+            time.monotonic() - fenced_for)
+    tertiary = _node("worker-5", lvstore="LVS_7", port=4436)
+    tertiary.lvstore_stack_tertiary = "stack"
+    owner = _node("worker-3", status=owner_status, lvstore="LVS_16",
+                  port=4442, secondary="worker-4", tertiary="worker-5")
+
+    db = MagicMock()
+    db.get_primary_storage_nodes_by_secondary_node_id.return_value = [owner]
+    db.get_storage_node_by_id.side_effect = lambda nid: {
+        "worker-3": owner,
+        "worker-4": _node("worker-4", status=StorageNode.STATUS_OFFLINE),
+        "worker-5": tertiary,
+    }[nid]
+
+    seen = {}
+
+    def _remediate(_db, _snode, port_results, port_lvs_owner):
+        seen["results"] = dict(port_results)
+        seen["owners"] = dict(port_lvs_owner)
+
+    # 4442 fenced, this node's own ports open.
+    results = {4420: True, 4436: True, 4442: False}
+    with patch.object(storage_node_monitor, "db", db), \
+         patch.object(storage_node_monitor.health_controller,
+                      "check_ports_on_node",
+                      side_effect=lambda _n, ports: {p: results[p] for p in ports}), \
+         patch.object(storage_node_monitor, "_remediate_stale_port_blocks",
+                      side_effect=_remediate), \
+         patch.object(storage_node_monitor.health_controller,
+                      "_check_ping_from_node", return_value=True):
+        tertiary.data_nics = []
+        verdict = storage_node_monitor.node_port_check_fun(tertiary)
+    return verdict, seen.get("results", {}), seen.get("owners", {})
+
+
 class TestPeerPortStaysObserved(unittest.TestCase):
     """A peer-owned LVS port is checked on every cycle. Whether it counts
     toward this node's health verdict is a separate question."""
@@ -119,41 +166,8 @@ class TestPeerPortStaysObserved(unittest.TestCase):
         storage_node_monitor._blocked_port_since.clear()
         self.addCleanup(storage_node_monitor._blocked_port_since.clear)
 
-    def _run(self, owner_status):
-        """worker-5 is the tertiary for worker-3's LVS_16 (port 4442), and
-        4442 is fenced. Returns (verdict, port_results, owner_map)."""
-        tertiary = _node("worker-5", lvstore="LVS_7", port=4436)
-        tertiary.lvstore_stack_tertiary = "stack"
-        owner = _node("worker-3", status=owner_status, lvstore="LVS_16",
-                      port=4442, secondary="worker-4", tertiary="worker-5")
-
-        db = MagicMock()
-        db.get_primary_storage_nodes_by_secondary_node_id.return_value = [owner]
-        db.get_storage_node_by_id.side_effect = lambda nid: {
-            "worker-3": owner,
-            "worker-4": _node("worker-4", status=StorageNode.STATUS_OFFLINE),
-            "worker-5": tertiary,
-        }[nid]
-
-        seen = {}
-
-        def _remediate(_db, _snode, port_results, port_lvs_owner):
-            seen["results"] = dict(port_results)
-            seen["owners"] = dict(port_lvs_owner)
-
-        # 4442 fenced, this node's own ports open.
-        results = {4420: True, 4436: True, 4442: False}
-        with patch.object(storage_node_monitor, "db", db), \
-             patch.object(storage_node_monitor.health_controller,
-                          "check_ports_on_node",
-                          side_effect=lambda _n, ports: {p: results[p] for p in ports}), \
-             patch.object(storage_node_monitor, "_remediate_stale_port_blocks",
-                          side_effect=_remediate), \
-             patch.object(storage_node_monitor.health_controller,
-                          "_check_ping_from_node", return_value=True):
-            tertiary.data_nics = []
-            verdict = storage_node_monitor.node_port_check_fun(tertiary)
-        return verdict, seen.get("results", {}), seen.get("owners", {})
+    def _run(self, owner_status, fenced_for=None):
+        return _run_port_check(owner_status, fenced_for)
 
     def test_restarting_owner_port_is_still_checked_and_remediated(self):
         """13:47:05 — worker-3 goes in_restart. 4442 must NOT vanish."""
@@ -174,11 +188,55 @@ class TestPeerPortStaysObserved(unittest.TestCase):
         self.assertTrue(verdict)
 
     def test_offline_owner_port_still_counts_against_the_verdict(self):
-        """Unchanged behaviour: with the owner offline and no other follower
-        online, nothing legitimises the fence and the node is flagged."""
-        verdict, results, _owners = self._run(StorageNode.STATUS_OFFLINE)
+        """With the owner offline and no other follower online, a fence that
+        has outlived the takeover grace is a leak and the node is flagged."""
+        verdict, results, _owners = self._run(
+            StorageNode.STATUS_OFFLINE,
+            fenced_for=storage_node_monitor.PEER_PORT_FENCE_GRACE_SEC + 1)
         self.assertIn(4442, results)
         self.assertFalse(verdict)
+
+
+class TestTakeoverFenceDoesNotCondemnFollower(unittest.TestCase):
+    """SFAM-2851, docker lab 2026-11-09 08:59. vm203 (primary of LVS_2, port
+    4430) was cut and went UNREACHABLE; vm204, its follower, fenced 4430 as it
+    took LVS_2 over. One sample of that fresh fence, 3.6s old, set vm204 DOWN
+    while every liveness probe passed, and LVS_2's volumes lost every path.
+    """
+
+    def setUp(self):
+        storage_node_monitor._blocked_port_since.clear()
+        self.addCleanup(storage_node_monitor._blocked_port_since.clear)
+
+    def _verdict(self, owner_status, fenced_for=None):
+        verdict, _results, _owners = _run_port_check(owner_status, fenced_for)
+        return verdict
+
+    def test_fresh_fence_with_unreachable_owner_is_not_counted(self):
+        self.assertTrue(self._verdict(StorageNode.STATUS_UNREACHABLE))
+
+    def test_fresh_fence_with_down_or_offline_owner_is_not_counted(self):
+        for status in (StorageNode.STATUS_DOWN, StorageNode.STATUS_OFFLINE):
+            storage_node_monitor._blocked_port_since.clear()
+            self.assertTrue(self._verdict(status), status)
+
+    def test_fence_inside_grace_is_not_counted(self):
+        self.assertTrue(self._verdict(
+            StorageNode.STATUS_UNREACHABLE,
+            fenced_for=storage_node_monitor.PEER_PORT_FENCE_GRACE_SEC - 2))
+
+    def test_fence_past_grace_counts_against_the_follower(self):
+        self.assertFalse(self._verdict(
+            StorageNode.STATUS_UNREACHABLE,
+            fenced_for=storage_node_monitor.PEER_PORT_FENCE_GRACE_SEC + 1))
+
+    def test_first_observation_starts_the_clock(self):
+        self._verdict(StorageNode.STATUS_UNREACHABLE)
+        self.assertIn(("worker-5", 4442), storage_node_monitor._blocked_port_since)
+
+    def test_grace_gives_remediation_a_chance_first(self):
+        self.assertGreater(storage_node_monitor.PEER_PORT_FENCE_GRACE_SEC,
+                           storage_node_monitor.STALE_PORT_BLOCK_SEC)
 
 
 # --------------------------------------------------------------------------

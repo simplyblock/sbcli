@@ -5,14 +5,17 @@ from datetime import datetime
 
 from simplyblock_core import constants, db_controller, storage_node_ops, utils
 from simplyblock_core.controllers import (
+    device_controller,
     device_events,
     health_controller,
+    port_release_budget,
     storage_events,
     tasks_controller,
 )
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.rpc_client import RPCException
 
 utils.init_sentry_sdk()
 logger = utils.get_logger(__name__)
@@ -257,7 +260,7 @@ def check_node(snode):
         node_rpc_check = _probe(f_rpc, "rpc")
     logger.info(f"Check: ping mgmt ip {snode.mgmt_ip} ... {ping_check}")
     logger.info(f"Check: node API {snode.mgmt_ip}:5000 ... {node_api_check}")
-    logger.info(f"Check: node RPC {snode.mgmt_ip}:{snode.rpc_port} ... {node_rpc_check}")
+    logger.info(f"Check: node RPC {snode.rpc_host}:{snode.rpc_port} ... {node_rpc_check}")
 
     is_node_online = ping_check and node_api_check and node_rpc_check
 
@@ -395,6 +398,11 @@ def check_node(snode):
                 if rpc_client.bdev_get(jm_device.jm_bdev):
                     logger.info(f"Checking jm bdev: {jm_device.jm_bdev} ... ok")
                     connected_jms.append(jm_device.get_id())
+                    if jm_device.stale_jm_legs:
+                        try:
+                            device_controller.clear_rebuilt_jm_legs(snode, rpc_client)
+                        except RPCException as e:
+                            logger.warning("JM raid rebuild check failed: %s", e)
                 else:
                     logger.info(f"Checking jm bdev: {jm_device.jm_bdev} ... not found")
 
@@ -550,9 +558,8 @@ def check_node(snode):
                                 repair_paths=True)
                             if not sec_node_check:
                                 if snode.status == StorageNode.STATUS_ONLINE:
-                                    ret = sec_node.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
-                                    if ret:
-                                        lvs_info = ret[0]
+                                    lvs_info = sec_node.rpc_client().get_lvstore(snode.lvstore)
+                                    if lvs_info:
                                         if lvs_info.get('lvs leadership'):
                                             jc_compression_is_active = sec_node.rpc_client().jc_compression_get_status(
                                                 snode.jm_vuid)
@@ -582,7 +589,19 @@ def check_node(snode):
                         logger.info(
                             f"Check: node {snode.mgmt_ip}, port: {port} ... {lvol_port_check}")
                         if not lvol_port_check and snode.status != StorageNode.STATUS_SUSPENDED:
-                            tasks_controller.add_port_allow_task(snode.cluster_id, snode.get_id(), port)
+                            # Release budget (models/fence_release.py): a
+                            # port the control plane already reopened
+                            # FENCE_RELEASE_BUDGET times this window is being
+                            # re-fenced by SPDK on every IO; another
+                            # port_allow task would only feed that loop.
+                            if port_release_budget.exhausted(db, snode, port):
+                                logger.warning(
+                                    "Port %s on %s is blocked but was released %d times in the "
+                                    "last %ds; not scheduling port_allow (fence loop)",
+                                    port, snode.get_id(), constants.FENCE_RELEASE_BUDGET,
+                                    constants.FENCE_RELEASE_WINDOW_SEC)
+                            else:
+                                tasks_controller.add_port_allow_task(snode.cluster_id, snode.get_id(), port)
                 except Exception as e:
                     for port in ports:
                         health_controller._log_port_check_failure(db, snode, port, e)

@@ -30,12 +30,16 @@ def _rep():
 
 
 class _FakeDB:
-    def __init__(self, reps, nodes):
+    def __init__(self, reps, nodes, lvol=None):
         self._reps = reps
         self._nodes = nodes
+        self._lvol = lvol
+        # No policy or target unless a test installs one.
+        self.policies: dict = {}
+        self.targets: dict = {}
 
     def get_lvol_by_id(self, lid):
-        return _failed_over_lvol()
+        return self._lvol if self._lvol is not None else _failed_over_lvol()
 
     def get_lvol_replication_objects(self):
         return self._reps
@@ -44,6 +48,19 @@ class _FakeDB:
         if nid not in self._nodes:
             raise KeyError(nid)
         return self._nodes[nid]
+
+    def get_consistency_group_by_id(self, gid):
+        raise KeyError(gid)
+
+    def get_replication_policy_by_id(self, pid):
+        if pid not in self.policies:
+            raise KeyError(pid)
+        return self.policies[pid]
+
+    def get_replication_target_by_id(self, tid):
+        if tid not in self.targets:
+            raise KeyError(tid)
+        return self.targets[tid]
 
 
 @pytest.fixture
@@ -122,3 +139,60 @@ def _node_offline():
     n.uuid = "N_src_orig"
     n.status = StorageNode.STATUS_OFFLINE
     return n
+
+
+def _node(uuid, cluster_id):
+    n = StorageNode()
+    n.uuid = uuid
+    n.cluster_id = cluster_id
+    n.status = StorageNode.STATUS_ONLINE
+    return n
+
+
+def test_own_cluster_as_source_recovers_to_the_relationships_source(monkeypatch, patched):
+    """#34: the CSI driver's group resync passed the class's sourceClusterID
+    through, and on the resyncing site that names the PEER -- the cluster the
+    failed-over clone itself sits on. Taken as a fresh source it configured the
+    clone to replicate to its own cluster (own node, every transfer beside the
+    live clone, status healthy, nothing shipped home). The volume's own cluster
+    can only mean "recover to where I came from": the delta branch."""
+    nodes = {"N_src_orig": _node("N_src_orig", "CL_src"), "N_tgt": _node("N_tgt", "CL_tgt")}
+    _install(monkeypatch, nodes)
+
+    lvol_controller.replication_failback("LV_TGT", source_cluster_id="CL_tgt")
+
+    assert patched["cluster"] == "CL_src", "must NOT replicate to its own cluster CL_tgt"
+    assert "N_src_orig" in patched["node_writes"], "delta fail-back to the original node"
+
+
+def test_own_cluster_as_source_on_a_demoted_primary_replicates_to_the_policy_target(
+        monkeypatch, patched):
+    """A plain relocate: Ramen demotes this site and resyncs it before promoting
+    the peer. The member is the demoted primary -- never a fail-over target, so
+    no relationship -- and the data is still here. Handed its own cluster, it
+    must replicate to its policy's target as the plain path always did; refusing
+    it stalled every relocate (run 20261019-1541-ebs, tests 1 and 3)."""
+    nodes = {"N_tgt": _node("N_tgt", "CL_tgt")}
+    lv = _failed_over_lvol()
+    lv.replication_policy_id = "P1"
+    db = _FakeDB([], nodes, lvol=lv)
+    db.policies = {"P1": type("P", (), {"target_id": "T1"})()}
+    db.targets = {"T1": type("T", (), {"target_cluster_id": "CL_peer"})()}
+    monkeypatch.setattr(lvol_controller, "DBController", lambda: db)
+
+    assert lvol_controller.replication_failback("LV_TGT", source_cluster_id="CL_tgt") is True
+
+    assert patched["cluster"] == "CL_peer", "the policy's target, never its own cluster"
+    assert patched["mode"] == "migration"
+
+
+def test_own_cluster_as_source_without_relationship_or_policy_is_refused(monkeypatch, patched):
+    nodes = {"N_tgt": _node("N_tgt", "CL_tgt")}
+    db = _FakeDB([], nodes)
+    monkeypatch.setattr(lvol_controller, "DBController", lambda: db)
+
+    result = lvol_controller.replication_failback("LV_TGT", source_cluster_id="CL_tgt")
+
+    assert result[0] is False
+    assert "own cluster" in result[1]
+    assert "cluster" not in patched, "replication_start must not be invoked"

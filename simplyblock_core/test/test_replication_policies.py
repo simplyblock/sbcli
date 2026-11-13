@@ -384,6 +384,46 @@ def test_detach_refused_while_a_cutover_is_in_flight(monkeypatch):
     assert db.get_lvol_by_id("LV1").replication_policy_id == "CL_SRC/P1", "must not be cleared"
 
 
+def test_detach_releases_a_cutover_that_is_not_freezing(monkeypatch):
+    """bf12 2026-11-03: after a failed final step the relationship stayed
+    cutover_pending and detach refused the volume for 15h+. Short of the IO
+    freeze the cutover is released: replication_stop cancels its task."""
+    import time as _time
+
+    from simplyblock_core.models.job_schedule import JobSchedule
+    from simplyblock_core.models.storage_node import StorageNode
+    lv = _lvol("LV1", policy_id="CL_SRC/P1")
+    lv.node_id = "N1"
+    rep = LVolReplication()
+    rep.source_lvol = lv
+    rep.state = LVolReplication.STATE_CUTOVER_PENDING
+    db = _FakeDB(lvols=[lv], replications=[rep])
+    _install(monkeypatch, db)
+    monkeypatch.setattr(LVol, "write_to_db", lambda self, kv=None: None)
+    node = StorageNode()
+    node.uuid = "N1"
+    node.cluster_id = "CL_SRC"
+    task = JobSchedule()
+    task.uuid = "T1"
+    task.function_name = JobSchedule.FN_REPLICATION_FINAL
+    task.status = JobSchedule.STATUS_SUSPENDED
+    task.function_params = {"lvol_id": "LV1", "tgt_lvol_composite": "x"}
+    monkeypatch.setattr(db, "get_storage_node_by_id", lambda nid: node, raising=False)
+    monkeypatch.setattr(db, "get_job_tasks", lambda cid: [task], raising=False)
+    stopped: list[str] = []
+    monkeypatch.setattr(rpc.lvol_controller, "replication_stop", _recording(stopped))
+    monkeypatch.setattr(rpc, "_purge_internal_replication_snapshots", lambda lvol_id: 0)
+
+    rpc.detach_policy("LV1")
+    assert stopped == ["LV1"]
+
+    # The same volume inside its freeze is refused.
+    lv.replication_policy_id = "CL_SRC/P1"
+    task.function_params["freeze_started_at"] = _time.time()
+    with pytest.raises(ReplicationConfigError, match="cutover in flight"):
+        rpc.detach_policy("LV1")
+
+
 def test_detach_of_a_demoted_volume_keeps_its_chain(monkeypatch):
     """Relocate, 2026-10-01: Ramen deletes the demoted side's
     VolumeReplication -> DisableVolumeReplication -> detach. The purge then
@@ -1013,6 +1053,135 @@ def _failback_scenario(monkeypatch, db, unshipped=()):
     return local, policy_id
 
 
+def _reprotect_scenario(monkeypatch, db):
+    """The DB state after an UNPLANNED failover X->Y, at the moment the recovered
+    site X is demoted back to Secondary (re-protect).
+
+    Origin group X on CL_SRC still holds its members -- now superseded failed-over
+    SOURCES (the peer's clones carry every post-failover write) -- and the peer
+    group Y on CL_TGT holds the live failed-over TARGET clones the app writes to.
+    This is bit-for-bit the replication state of a relocate fail-back
+    (``_failback_scenario``); the ONLY thing that separates them is that here the
+    peer is still the serving primary. Returns (origin_group, policy_id)."""
+    monkeypatch.setattr(LVol, "write_to_db", lambda self, kv=None: None)
+    target_id = rpc.add_target("CL_SRC", "site-a", "CL_TGT")
+    policy_id = rpc.add_policy("CL_SRC", "cg", target_id)
+
+    local = ConsistencyGroup()
+    local.uuid, local.cluster_id, local.group_name = "CG_SRC", "CL_SRC", "cg"
+    local.policy_id = policy_id
+    local.members = {"ORIG_PB1": {"joined_seq": 1, "removed_seq": 0},
+                     "ORIG_PB2": {"joined_seq": 1, "removed_seq": 0}}
+    db._groups.append(local)
+
+    peer = ConsistencyGroup()
+    peer.uuid, peer.cluster_id, peer.group_name = "CG_TGT", "CL_TGT", "cg"
+    peer.members = {"PB1": {"joined_seq": 1, "removed_seq": 0},
+                    "PB2": {"joined_seq": 1, "removed_seq": 0}}
+    db._groups.append(peer)
+
+    for src, tgt in (("ORIG_PB1", "PB1"), ("ORIG_PB2", "PB2")):
+        origin, clone = _lvol(src), _lvol(tgt)
+        origin.cluster_id, clone.cluster_id = "CL_SRC", "CL_TGT"
+        clone.group_id = peer.get_id()
+        db._lvols.extend([origin, clone])
+        rep = LVolReplication()
+        rep.source_lvol = origin                       # X's superseded source
+        rep.target_lvol = clone                        # Y's live clone
+        rep.state = LVolReplication.STATE_FAILED_OVER
+        db._replications.append(rep)
+    return local, policy_id
+
+
+def test_group_demote_leaves_the_serving_peer_untouched_on_reprotect(monkeypatch):
+    """Regression: #31 -- after an UNPLANNED failover X->Y the app runs on Y, and
+    healing X sends a group DemoteVolume to X. X's members are superseded
+    failed-over SOURCES, which is exactly the condition demote_group's
+    peer-resolution branch (written for a relocate fail-back) keys on, so it
+    resolved to the PEER group on Y -- the LIVE app -- and fenced its volumes and
+    took a demote cut, cutting the survivor off its disk the instant the recovered
+    site rejoined (WordPress on B, Gitea on A; run 20261013-0050-ebs).
+
+    The replication state is identical to a relocate fail-back, so state alone
+    cannot tell the two apart: the discriminator is that the peer is still being
+    served. When it is, the demote must leave the peer untouched and fence only
+    X's own superseded sources, returning done with nothing to ship."""
+    from simplyblock_core.controllers import consistency_group_controller as cgc
+    from simplyblock_core.controllers import lvol_controller as lc
+    from simplyblock_core.services import replication_final_step as rfs
+
+    db = _FakeDB()
+    _install(monkeypatch, db)
+    monkeypatch.setattr(cgc, "db", db)
+    monkeypatch.setattr(LVol, "write_to_db", lambda self, kv=None: None)
+    local, _ = _reprotect_scenario(monkeypatch, db)
+
+    # The peer (Y) is the serving primary: its clones have a connected host.
+    # raising=False so this test is runnable (and RED) against the unfixed tree,
+    # where the discriminator does not exist yet.
+    monkeypatch.setattr(cgc, "_peer_group_is_being_served",
+                        lambda members: True, raising=False)
+
+    snapped: list = []
+    failed_back: list = []
+    demoted: list = []
+    monkeypatch.setattr(rfs, "fence_source_paths", lambda *a, **k: None)
+
+    def _record_group_snapshot(group, **kwargs):
+        snapped.append(group.uuid)
+        return 1, None
+    monkeypatch.setattr(cgc, "create_group_snapshot_for_group", _record_group_snapshot)
+
+    def _record_demote(lvol_id):
+        demoted.append(lvol_id)
+        return {"demoted": True}
+    monkeypatch.setattr(lc, "demote_lvol", _record_demote)
+    monkeypatch.setattr(lc, "replication_failback", _recording(failed_back))
+
+    result = cgc.demote_group(local)
+
+    # The live peer must be untouched -- no group cut, no reverse-pipe reconfig.
+    assert snapped == [], \
+        "the serving peer's group must not be snapshotted -- fencing it cuts off " \
+        "the running app (#31)"
+    assert failed_back == [], \
+        "the serving peer's reverse pipe must not be reconfigured"
+    # Only X's own superseded sources are fenced-and-done.
+    assert sorted(demoted) == ["ORIG_PB1", "ORIG_PB2"], demoted
+    assert result["demoted"] is True, result
+    assert {m["lvol_id"] for m in result["members"]} == {"ORIG_PB1", "ORIG_PB2"}, \
+        result
+
+
+def test_failback_group_refuses_a_retired_group_with_no_live_members(monkeypatch):
+    """Regression: #33 -- a resync (group fail-back) addressed to the RETIRED group
+    after a re-protect must fail loudly, not silently succeed. The retired group
+    holds only superseded failed-over sources (the live data is in the peer's
+    clones), so failing it back configures nothing. Returning success there -- as
+    it did via a no-op replication_start, 204 -- masked the mis-resolution as a
+    healthy re-protect, so the survivor ran unprotected while Ramen saw PeerReady.
+
+    With resolve_group fixed the driver resolves a resync to the live peer, so this
+    is defense in depth: failback_group refuses a group that holds no live members
+    rather than no-op its way to success."""
+    from simplyblock_core.controllers import consistency_group_controller as cgc
+    from simplyblock_core.controllers import lvol_controller as lc
+    db = _FakeDB()
+    _install(monkeypatch, db)
+    monkeypatch.setattr(cgc, "db", db)
+    local, _ = _reprotect_scenario(monkeypatch, db)
+
+    failed_back: list = []
+    monkeypatch.setattr(lc, "replication_failback", _recording(failed_back))
+
+    result = cgc.failback_group(local)
+
+    assert result["configured"] is False, result
+    assert "no live members" in result.get("error", ""), result
+    assert failed_back == [], \
+        "a resync on the retired group must reconfigure nothing, never a silent no-op (#33)"
+
+
 def test_failback_group_clones_peer_members_home_pinned_to_the_demote_cut(monkeypatch):
     """Regression (2026-09-27): promoting an empty local group on fail-back cloned
     NOTHING -- the promote reported success while the workload kept writing to the
@@ -1059,6 +1228,48 @@ def test_failback_group_clones_settled_targets_not_skipped(monkeypatch):
     assert sorted(touched) == ["PB1", "PB2"], \
         "settled failed-over targets must still be cloned home, not skipped"
     assert all(r["status"] == "failed_over" for r in results), results
+
+
+def test_failback_group_refuses_a_cut_whose_copies_are_not_on_the_home_cluster(monkeypatch):
+    """#34: after a re-protect that aimed the peer's replication at ITSELF, every
+    generation's "home" copy is recorded on the peer's own cluster. Its task is
+    DONE and the copy is present, so the cut used to qualify -- and the clone on
+    the home node then failed with "No such device" (run 20261016-1108, WordPress
+    from LVS_13/LVOL_104 on B, Gitea from LVS_4 on A). A copy counts as shipped
+    home only when it is on the home cluster; otherwise refuse, naming why."""
+    db = _FakeDB()
+    _install(monkeypatch, db)
+    local, _ = _failback_scenario(monkeypatch, db)
+    for copy_id in ("H1_PB1", "H1_PB2"):
+        db.get_snapshot_by_id(copy_id).cluster_id = "CL_TGT"      # beside the live clone
+    touched: list = []
+
+    def _record(lvol_id, pin_snapshot_id=None):
+        touched.append(lvol_id)
+        return {"lvol_id": f"HOME_{lvol_id}", "connection_strings": []}
+
+    monkeypatch.setattr(rpc.lvol_controller, "replicate_lvol_on_target_cluster", _record)
+    results = rpc.failover_group(local)
+    assert touched == [], "no clone may be attempted from a copy that is not home"
+    assert all(r["status"] == "failed" for r in results), results
+    assert "not on the home cluster CL_SRC" in results[0]["detail"], results[0]["detail"]
+
+
+def test_failback_group_accepts_copies_recorded_on_the_home_cluster(monkeypatch):
+    db = _FakeDB()
+    _install(monkeypatch, db)
+    local, _ = _failback_scenario(monkeypatch, db)
+    for copy_id in ("H1_PB1", "H1_PB2"):
+        db.get_snapshot_by_id(copy_id).cluster_id = "CL_SRC"
+    pins: dict = {}
+
+    def _record(lvol_id, pin_snapshot_id=None):
+        pins[lvol_id] = pin_snapshot_id
+        return {"lvol_id": f"HOME_{lvol_id}", "connection_strings": []}
+
+    monkeypatch.setattr(rpc.lvol_controller, "replicate_lvol_on_target_cluster", _record)
+    rpc.failover_group(local)
+    assert pins == {"PB1": "D1_PB1", "PB2": "D1_PB2"}
 
 
 def test_failback_group_refuses_until_the_demote_cut_finished_shipping(monkeypatch):
@@ -1116,17 +1327,28 @@ def test_group_demote_resolves_to_peer_primary_and_ships_home(monkeypatch):
         rep.state = LVolReplication.STATE_FAILED_OVER
         db._replications.append(rep)
 
+    # Relocate precondition: Ramen stopped the workload on the peer before issuing
+    # the demote, so the peer's clones have no connected host. That is what makes
+    # resolving the demote here (and shipping the cut home) safe -- see #31 and
+    # test_group_demote_leaves_the_serving_peer_untouched_on_reprotect.
+    monkeypatch.setattr(cgc, "_peer_group_is_being_served", lambda members: False)
+
     failed_back: list = []
     monkeypatch.setattr(lc, "replication_failback", _recording(failed_back))
     monkeypatch.setattr(rfs, "fence_source_paths", lambda *a, **k: None)
 
+    cut = []
+
     def _group_snap_cut(group, **kw):
-        ids = []
         for src, sid in (("PB1", "DEMOTE_PB1"), ("PB2", "DEMOTE_PB2")):
-            db._snapshots.append(_snap(sid, db.get_lvol_by_id(src)))
-            ids.append(sid)
-        return ids, None
+            snap = _snap(sid, db.get_lvol_by_id(src))
+            db._snapshots.append(snap)
+            cut.append(snap)
+        return 7, None
     monkeypatch.setattr(cgc, "create_group_snapshot_for_group", _group_snap_cut)
+    # The fake has no group-snapshot lookup; the cut is generation 7.
+    monkeypatch.setattr(cgc, "generation_snapshots",
+                        lambda group, seq: cut if seq == 7 else [])
 
     result = cgc.demote_group(local)
 
@@ -1180,10 +1402,70 @@ def test_group_promote_is_idempotent_once_members_failed_home(monkeypatch):
     touched: list = []
     monkeypatch.setattr(rpc.lvol_controller, "replicate_lvol_on_target_cluster",
                         lambda lvol_id, **kw: touched.append(lvol_id))
+    # Home is up: the members answer, so this is the Ramen re-drive after a
+    # fail-back (the no-op case). The failed-home exit only applies when the
+    # members are reachable (finding #29); its unreachable counterpart is
+    # test_group_promote_fails_over_when_failed_home_members_are_unreachable.
+    monkeypatch.setattr(rpc.lvol_controller, "replication_source_online", lambda lvol: True)
     results = rpc.failover_group(group)
     assert {r["status"] for r in results} == {"failed_over"}, results
     assert {r["lvol_id"] for r in results} == {"HC1", "HC2"}, results
     assert touched == [], "an already-home group must clone nothing on re-promote"
+
+
+def test_group_promote_fails_over_when_failed_home_members_are_unreachable(monkeypatch):
+    """Regression: 2026-10-10-failed-home-noop-ignores-reachability (finding #29).
+
+    The "failed home" mark a fail-back leaves on a member is permanent. A later
+    UNPLANNED fail-over away from home -- home partitioned, the members' nodes
+    down -- used to hit the failed-home early exit and return success WITHOUT
+    promoting, so the target site attached the disk from the dead home site
+    (WordPress's DB VM hung 77 min). The failed-home no-op is correct only when
+    the members are REACHABLE (a re-drive after fail-back, home up); when they
+    are down it is a real fail-over and must reach _failover_group_members."""
+    db = _FakeDB()
+    _install(monkeypatch, db)
+    monkeypatch.setattr(LVol, "write_to_db", lambda self, kv=None: None)
+    target_id = rpc.add_target("CL_SRC", "site-a", "CL_TGT")
+    policy_id = rpc.add_policy("CL_SRC", "cg", target_id)
+
+    group = ConsistencyGroup()
+    group.uuid, group.cluster_id, group.group_name = "CG_HOME", "CL_SRC", "cg"
+    group.policy_id = policy_id
+    group.members = {"HC1": {"joined_seq": 1, "removed_seq": 0},
+                     "HC2": {"joined_seq": 1, "removed_seq": 0}}
+    db._groups.append(group)
+    for hc in ("HC1", "HC2"):
+        lv = _lvol(hc, policy_id=policy_id)
+        lv.group_id = group.get_id()
+        lv.cluster_id = "CL_SRC"
+        db._lvols.append(lv)
+        rep = LVolReplication()
+        rep.source_lvol = _lvol(f"PEER_{hc}")       # the peer clone on CL_TGT
+        rep.target_lvol = db.get_lvol_by_id(hc)     # the home clone == this member
+        rep.source_cluster_id = "CL_TGT"
+        rep.target_cluster_id = "CL_SRC"
+        rep.state = LVolReplication.STATE_FAILED_OVER
+        db._replications.append(rep)
+
+    # Home is partitioned: the members' nodes do not answer.
+    monkeypatch.setattr(rpc.lvol_controller, "replication_source_online", lambda lvol: False)
+    # A real fail-over is routed to _failover_group_members; capture that it is
+    # reached (the bug returned the failed-home no-op before ever getting here).
+    sentinel = [{"lvol_id": "HC1", "status": "failed_over"}]
+    reached = {}
+
+    def _fake_failover_members(policy_arg, members_arg, label):
+        reached["members"] = sorted(m.get_id() for m in members_arg)
+        return sentinel
+
+    monkeypatch.setattr(rpc, "_failover_group_members", _fake_failover_members)
+
+    results = rpc.failover_group(group)
+    assert results is sentinel, (
+        "a failed-home group whose home is DOWN must perform a real fail-over, "
+        "not return the failed-home no-op")
+    assert reached.get("members") == ["HC1", "HC2"], reached
 
 
 def test_relationship_resolves_source_to_target_and_back(monkeypatch):
@@ -1246,20 +1528,31 @@ def test_create_reports_when_the_policy_cannot_be_attached(monkeypatch):
         "the attach failure has to surface to the caller"
 
 
-def test_direct_replication_start_refused_on_a_policy_managed_volume(monkeypatch):
-    """Attaching a policy IS the way replication is started; calling the raw verb
-    would let a volume run on settings that diverge from its policy."""
+def test_replication_start_refuses_the_volumes_own_cluster(monkeypatch):
+    """#34: handed its own cluster as the destination, replication_start picked a
+    node ON that cluster (the chain picker found the volume's own snapshots) and
+    the volume replicated to itself with a healthy status. Refuse up front."""
     from simplyblock_core.controllers import lvol_controller
+    from simplyblock_core.models.storage_node import StorageNode
 
-    lv = _lvol("LV1", policy_id="CL_SRC/P1")
+    lv = _lvol("LV1")
+    lv.node_id = "N1"
+    node = StorageNode()
+    node.uuid, node.cluster_id, node.status = "N1", "CL_SRC", StorageNode.STATUS_ONLINE
+    writes: list = []
 
     class _DB:
         def get_lvol_by_id(self, lvol_id):
             return lv
 
+        def get_storage_node_by_id(self, node_id):
+            return node
+
     monkeypatch.setattr(lvol_controller, "DBController", lambda: _DB())
-    assert lvol_controller.replication_start("LV1", replication_cluster_id="CL_OTHER") is False
-    assert lvol_controller.replication_stop("LV1") is False
+    monkeypatch.setattr(LVol, "write_to_db", lambda self, kv=None: writes.append(self.do_replicate))
+    assert lvol_controller.replication_start("LV1", replication_cluster_id="CL_SRC",
+                                             from_policy=True) is False
+    assert writes == [], "nothing persisted for a refused start"
 
 
 def test_policy_controller_may_drive_the_raw_verbs(monkeypatch):

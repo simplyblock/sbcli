@@ -3,14 +3,21 @@ from threading import Thread
 from typing import Annotated, Literal, Union
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field, computed_field, model_validator
 from pydantic.networks import AnyUrl, UrlConstraints
 from sse_starlette import EventSourceResponse
 
-from simplyblock_core import cluster_ops
+from simplyblock_core import cluster_ops, constants
+from simplyblock_core import utils as core_utils
 from simplyblock_core.cluster_ops import SUPPORTED_ERASURE_CODING_SCHEMES
+from simplyblock_core.controllers import (
+    device_controller,
+    health_controller,
+    sync_replication_controller,
+)
 from simplyblock_core.db_controller import DBController
+from simplyblock_core.exceptions import ReachabilityAddressError
 from simplyblock_core.models.cluster import Cluster as ClusterModel
 from simplyblock_core.models.cluster import HashicorpVaultSettings as ModelVaultSettings
 
@@ -20,13 +27,19 @@ from .._dtos import (
     BackupConfigDTO,
     ClusterDTO,
     ClusterLogEntryDTO,
+    NodeReachabilityDTO,
     UnresolvedBackupConfigDTO,
 )
 from .._sse import WATCH_RESPONSES, WatchParam, sse_response
 from .alert import api as alert_api
+from .arbitration import api as arbitration_api
 from .backup import api as backup_api
 from .consistency_group import api as consistency_group_api
+from .group_backup import api as group_backup_api
+from .migration_plan import api as migration_plan_api
+from .qos import api as qos_api
 from .replication import api as replication_api
+from .site import api as site_api
 from .storage_node import api as storage_node_api
 from .storage_pool import api as pool_api
 from .subsystem import api as subsystem_api
@@ -57,7 +70,7 @@ class HashicorpVaultSettings(BaseModel):
 class ClusterParams(BaseModel):
     name: str = ""
     blk_size: Literal[512, 4096] = 512
-    page_size_in_blocks: int = Field(2097152, gt=0)
+    page_size_in_blocks: Annotated[int, Field(gt=0)] = 2097152
     cap_warn: util.Percent = 0
     cap_crit: util.Percent = 0
     prov_cap_warn: util.Unsigned = 0
@@ -84,6 +97,12 @@ class ClusterParams(BaseModel):
     backup_config: UnresolvedBackupConfigDTO | None = None
     hashicorp_vault_settings: HashicorpVaultSettings | None = None
     enable_failure_domain: bool = False
+    lvol_geometry_enabled: bool = True
+    sync_replication: bool = False
+    #: Stretched sync replication: the site whose operator leads the cluster
+    #: (Cluster.leader_site); only with sync_replication, "" = unset. Not
+    #: checked against node sites - no node exists yet.
+    leader_site: str = ""
     # max_subsys and spdk_vcpu_count are capacity decisions with real
     # consequences if silently defaulted (max_subsys=0 means the product
     # ceiling; spdk_vcpu_count=0 means no cluster-wide core requirement at
@@ -99,11 +118,27 @@ class ClusterParams(BaseModel):
     device_mode: Literal["nvme", "lblk"] = "nvme"
     inline_checksum: bool = False
     atomic_4k: bool = False
+    page_copy: bool = False
+    md_journal: bool = True
+    # The cluster's workload names: the Services its storage nodes are reached
+    # through, the SPDK proxy's certificate Secret, and the suffix on a node's
+    # hostname label in both Services. Omitted, they are the constant names a
+    # namespace's first cluster uses.
+    snode_api_service: core_utils.K8S_DNS_LABEL = constants.K8S_SNODE_API_SERVICE
+    spdk_proxy_service: core_utils.K8S_DNS_LABEL = constants.K8S_SPDK_PROXY_SERVICE
+    spdk_proxy_tls_secret: core_utils.K8S_DNS_SUBDOMAIN = constants.K8S_SPDK_PROXY_TLS_SECRET
+    node_label_suffix: Annotated[str, Field(pattern=r'^(-[a-z0-9]{1,3})?$')] = ""
 
     @model_validator(mode="after")
     def validate_erasure_coding_scheme(self):
         if (self.distr_ndcs, self.distr_npcs) not in SUPPORTED_ERASURE_CODING_SCHEMES:
             raise ValueError("Invalid erasure coding scheme selected")
+        return self
+
+    @model_validator(mode="after")
+    def validate_atomic_4k(self):
+        if self.atomic_4k and not self.inline_checksum:
+            raise ValueError("atomic_4k requires inline_checksum")
         return self
 
     @computed_field
@@ -138,7 +173,8 @@ def add(request: Request, parameters: ClusterParams, response_format: util.Creat
             params["hashicorp_vault_settings"] = ModelVaultSettings(params["hashicorp_vault_settings"])
         if parameters.backup_config is not None:
             params["backup_config"] = parameters.backup_config.model_dump(exclude_none=True)
-        cluster_id_or_false = cluster_ops.add_cluster(**params)
+        with util.sync_http_errors():
+            cluster_id_or_false = cluster_ops.add_cluster(**params)
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
     if not cluster_id_or_false:
@@ -175,12 +211,45 @@ def get(cluster: Cluster, watch: WatchParam = False) -> Union[ClusterDTO, EventS
 
 class UpdatableClusterParameters(BaseModel):
     name: str | None = None
+    #: Two-node arbitration (docs/design/two-node-arbitration.md); off by default.
+    two_node_arbitration: bool | None = None
+    #: Stretched sync replication: move the leader site (the hub's role swap,
+    #: design-stretched-sync-replication-ramen §11.1). 400 on a cluster
+    #: without sync replication, for "" and for a site no node of the cluster
+    #: has; 409 for the site the cluster records as lost. Same value: no-op.
+    leader_site: str | None = None
+    #: docs/design/two-node-kubernetes-fencing.md: "witness" or "pacemaker".
+    two_node_fencing_authority: Literal["witness", "pacemaker"] | None = None
+    #: Host fencing + Kubernetes integration (mode witness).
+    two_node_host_fencing: bool | None = None
 
 
-@instance_api.put('/', name='clusters:update')
+@instance_api.put('/', name='clusters:update',
+                  responses={400: {"description": "A refused field (detail.message)"},
+                             409: {"description": "leader_site names the lost site (detail.message)"}})
 def update(cluster: Cluster, parameters: UpdatableClusterParameters):
+    flag = parameters.two_node_arbitration
+    leader_site = parameters.leader_site
+    # Every field is validated before any is applied, so a refused request
+    # changes nothing.
+    with util.sync_http_errors():
+        if leader_site is not None:
+            sync_replication_controller.check_leader_site(cluster, leader_site)
+        if flag is not None:
+            cluster_ops.check_two_node_arbitration(cluster, flag)
     if parameters.name is not None:
         cluster_ops.set_name(cluster.get_id(), parameters.name)
+    with util.sync_http_errors():
+        if flag is not None:
+            cluster_ops.set_two_node_arbitration(cluster.get_id(), flag)
+        if leader_site is not None:
+            sync_replication_controller.set_leader_site(cluster.get_id(), leader_site)
+    if parameters.two_node_fencing_authority is not None:
+        authority = parameters.two_node_fencing_authority
+        db.atomic_update(cluster, lambda fresh: setattr(fresh, "two_node_fencing_authority", authority))
+    if parameters.two_node_host_fencing is not None:
+        host_fencing = parameters.two_node_host_fencing
+        db.atomic_update(cluster, lambda fresh: setattr(fresh, "two_node_host_fencing", host_fencing))
 
     return Response(status_code=204)
 
@@ -199,9 +268,12 @@ def get_backup_config(cluster: Cluster) -> BackupConfigDTO:
 
 
 @instance_api.delete('/', name='clusters:delete', status_code=204, responses={204: {"content": None}})
-def delete(cluster: Cluster) -> Response:
+def delete(cluster: Cluster, force: bool = False) -> Response:
+    """Delete an empty cluster, or with force bring it down completely: every
+    storage node shut down and deleted without migration, every pool deleted
+    with its volumes, then the cluster."""
     try:
-        cluster_ops.delete_cluster(cluster.get_id())
+        cluster_ops.delete_cluster(cluster.get_id(), force=force)
     except ValueError as e:
         raise HTTPException(409, str(e)) from e
     return Response(status_code=204)
@@ -235,6 +307,43 @@ def logs(cluster: Cluster, limit: int = 50, watch: WatchParam = False) -> Union[
             ClusterLogEntryDTO.from_model,
         )
     return [ClusterLogEntryDTO.from_model(e) for e in cluster_ops.get_log_events(cluster.get_id(), limit)]
+
+
+@instance_api.get('/reachability', name='clusters:reachability',
+                  responses={400: {"description": "A bad site, site with address, a non-literal address, "
+                                                  "or too many addresses (detail.message)"}})
+def reachability(
+        cluster: Cluster,
+        site: Annotated[str | None, Query(description='Sync replication: only the nodes of this site')] = None,
+        address: Annotated[builtins.list[str] | None, Query(
+            description='Probe these management addresses (IP literals, repeatable, at most '
+                        f'{health_controller.MAX_REACHABILITY_ADDRESSES}) instead of the nodes; '
+                        'not with site')] = None,
+) -> builtins.list[NodeReachabilityDTO]:
+    """Run the storage-node monitor's management-address probe once, now,
+    against the nodes of ``site`` (every node of the cluster without one;
+    removed nodes excepted) and answer, per node, whether it answered. Reads
+    nothing the monitor recorded and records nothing. 400 for a site the
+    cluster does not have, and for any site on a cluster without sync
+    replication.
+
+    With ``address`` (repeatable), probe exactly those addresses instead -
+    hosts that are not storage nodes yet, such as the workers a follower
+    operator's preflight checks (design-stretched §5.4) - one row per
+    address in request order, ``id`` and ``site`` empty. 400 together with
+    ``site``, for an address that is not an IPv4/IPv6 literal (no name is
+    ever resolved), and for more than MAX_REACHABILITY_ADDRESSES."""
+    if address:
+        if site:
+            raise util.sync_error(400, 'site and address cannot be given together')
+        try:
+            rows = health_controller.address_reachability(address)
+        except ReachabilityAddressError as e:
+            raise util.sync_error(400, str(e)) from e
+    else:
+        with util.sync_http_errors():
+            rows = health_controller.cluster_reachability(cluster.get_id(), site or None)
+    return [NodeReachabilityDTO.from_model(row) for row in rows]
 
 
 @instance_api.post('/start', name='clusters:start', status_code=202, responses={202: {"content": None}})
@@ -299,12 +408,44 @@ def rebalance_cluster( cluster: Cluster) -> Response:
     return Response(status_code=204)
 
 
+class DeviceRebalanceDTO(BaseModel):
+    weights_updated: bool
+    started: bool
+    reason: str
+
+
+class DeviceGrowthDTO(BaseModel):
+    devices: builtins.list[dict]
+    errors: dict[str, str]
+    uniform: bool
+    rebalance: DeviceRebalanceDTO | None = None
+
+
+@instance_api.post('/grow-devices', name='clusters:grow_devices', response_model=DeviceGrowthDTO)
+def grow_devices(cluster: Cluster, rebalance: bool = True) -> DeviceGrowthDTO:
+    """Grow every online lblk data device of the cluster to the size of its
+    block device, one device at a time. Used after the LUNs of the cluster
+    were grown on the storage array. If they have grown unevenly, the device
+    weights are set to the new sizes and the cluster is rebalanced, unless
+    ``rebalance`` is false."""
+    if cluster.device_mode != constants.DEVICE_MODE_LBLK:
+        raise HTTPException(409, 'Online device growth needs a cluster in lblk device mode')
+    return DeviceGrowthDTO(**device_controller.grow_cluster_devices(cluster.get_id(), rebalance=rebalance))
+
+
 instance_api.include_router(alert_api, prefix='/alerts')
+instance_api.include_router(arbitration_api, prefix='/arbitration')
 instance_api.include_router(storage_node_api, prefix='/storage-nodes')
 instance_api.include_router(task_api, prefix='/tasks')
 instance_api.include_router(pool_api, prefix='/storage-pools')
+# Ahead of the single-volume backups, whose /backups/{backup_id}/ would
+# otherwise take "groups" for a backup id.
+instance_api.include_router(group_backup_api, prefix='/backups/groups')
 instance_api.include_router(backup_api, prefix='/backups')
 instance_api.include_router(subsystem_api, prefix='/subsystems')
 instance_api.include_router(replication_api, prefix='/replication')
 instance_api.include_router(consistency_group_api, prefix='/consistency-groups')
+instance_api.include_router(site_api, prefix='/sites')
+instance_api.include_router(migration_plan_api, prefix='/migration-plans')
+instance_api.include_router(qos_api, prefix='/qos')
 api.include_router(instance_api)

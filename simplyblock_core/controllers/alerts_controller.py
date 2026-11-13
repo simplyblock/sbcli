@@ -17,7 +17,13 @@ neither property, so this module derives alerts from two sources:
   "this happened"; only the journal does. These are windowed
   (``EVENT_WINDOW_SEC``) and resolve by ageing out.
 
-Plus one metric-derived alert, the API's own request-latency histogram.
+Plus one metric-derived alert, the API's own request-latency histogram, and
+two **reported** ones: a device that is slow against its fleet, or whose
+health log says it is wearing out or failing. The control plane can judge
+neither -- it has no fleet-wide view of device latency and draws no
+conclusion from a SMART log -- so an outside assessor (the Kubernetes
+operator) records its verdict on the device, and the alert stands only while
+that report is fresh.
 
 Suppression is the point of the whole exercise. Every one of these conditions
 is also produced deliberately, many times a day, by ordinary operations: an
@@ -64,6 +70,8 @@ NODE_IO_ERROR = "node_unrecoverable_io_error"
 NODE_JC_ERROR = "node_unrecoverable_jc_error"
 CLUSTER_CAPACITY_CRITICAL = "cluster_capacity_critical"
 CLUSTER_PROV_CAPACITY_CRITICAL = "cluster_provisioned_capacity_critical"
+DEVICE_SLOW = "device_slow"
+DEVICE_UNHEALTHY = "device_unhealthy"
 
 SEVERITY_CRITICAL = "critical"
 SEVERITY_WARNING = "warning"
@@ -98,6 +106,19 @@ EVENT_WINDOW_SEC = 3600.0
 #: Mean API request latency above this is the "critically slow" alert. Matches
 #: the API_request_latency_high Grafana rule so the two cannot disagree.
 API_SLOW_MEAN_SEC = 15.0
+
+#: How long a health assessment is believed when the report does not say.
+#: Matches the operator's own default report validity.
+HEALTH_ASSESSMENT_DEFAULT_VALID_SEC = 900.0
+
+#: Device statuses in which a health verdict is worth raising: the device is
+#: serving. Every other status is already DEVICE_UNAVAILABLE (or is new and
+#: not yet in the data path), and one fault must not be two alerts.
+_DEVICE_SERVING_STATUSES = (
+    NVMeDevice.STATUS_ONLINE,
+    NVMeDevice.STATUS_READONLY,
+    NVMeDevice.STATUS_CANNOT_ALLOCATE,
+)
 
 #: Statuses that mean a peer is deliberately mid-operation. A node DOWN while
 #: one of these is happening elsewhere in the cluster is the expected
@@ -293,6 +314,84 @@ def _device_alerts(cluster_id, nodes) -> list[dict]:
     return alerts
 
 
+def _fresh_assessment(dev, now) -> dict | None:
+    """The device's recorded health assessment while it is still believed.
+
+    The assessment is written by an assessor outside the control plane (the
+    Kubernetes operator) and only it can say the device recovered. An assessor
+    that stops reporting -- uninstalled, crashed, partitioned away -- must not
+    leave its last verdict firing forever, so a report is believed for its
+    ``valid_seconds`` and then ages out. An unparseable ``reported_at`` cannot
+    be placed in that window and is not believed at all.
+    """
+    assessment = getattr(dev, "health_assessment", None) or {}
+    if not assessment:
+        return None
+    age = _age_seconds(assessment.get("reported_at", ""), now)
+    if age is None:
+        return None
+    try:
+        valid = float(assessment.get("valid_seconds") or HEALTH_ASSESSMENT_DEFAULT_VALID_SEC)
+    except (TypeError, ValueError):
+        valid = HEALTH_ASSESSMENT_DEFAULT_VALID_SEC
+    if age > valid:
+        return None
+    return assessment
+
+
+def _device_health_alerts(cluster_id, nodes, now) -> list[dict]:
+    """Slow and unhealthy devices, as their assessor last reported them.
+
+    Suppressed on exactly the grounds ``_device_alerts`` uses, for the same
+    reasons: only on an ONLINE node (a node that is down or restarting is the
+    alert, and one node condition must not become N device alerts); never for
+    an ``admin_removed`` device (the operator asked for it to go); and only
+    for a device that is serving -- an unavailable, failed or removed device
+    already raises DEVICE_UNAVAILABLE. Plus one of their own: the report must
+    be fresh (see ``_fresh_assessment``).
+    """
+    alerts = []
+    for node in nodes:
+        if node.status != StorageNode.STATUS_ONLINE:
+            continue
+        label = _node_label(node)
+        for dev in (node.nvme_devices or []):
+            if dev.status not in _DEVICE_SERVING_STATUSES:
+                continue
+            if getattr(dev, "admin_removed", False):
+                continue
+            assessment = _fresh_assessment(dev, now)
+            if assessment is None:
+                continue
+            serial = getattr(dev, "serial_number", "")
+            since = assessment.get("reported_at", "")
+
+            perf = assessment.get("performance") or {}
+            if perf.get("verdict") == "slow":
+                alerts.append(_alert(
+                    DEVICE_SLOW, SEVERITY_WARNING,
+                    f"device {dev.get_id()} on node {label} is slow compared to "
+                    f"its fleet: {perf.get('reason', '')}".rstrip(": "),
+                    cluster_id, node_id=node.get_id(), device_id=dev.get_id(),
+                    since=perf.get("since") or since,
+                    performance=perf, serial_number=serial,
+                    reporter=assessment.get("reporter", "")))
+
+            smart = assessment.get("smart") or {}
+            verdict = smart.get("verdict")
+            if verdict in ("failing", "warning"):
+                alerts.append(_alert(
+                    DEVICE_UNHEALTHY,
+                    SEVERITY_CRITICAL if verdict == "failing" else SEVERITY_WARNING,
+                    f"device {dev.get_id()} on node {label} health log reports "
+                    f"{verdict}: {smart.get('reason', '')}".rstrip(": "),
+                    cluster_id, node_id=node.get_id(), device_id=dev.get_id(),
+                    since=smart.get("checked_at") or since,
+                    smart=smart, serial_number=serial,
+                    reporter=assessment.get("reporter", "")))
+    return alerts
+
+
 # ==========================================================================
 # Event-derived rules
 # ==========================================================================
@@ -442,6 +541,7 @@ def evaluate_alerts(cluster, nodes, events, now=None, api_mean_seconds=None) -> 
     alerts += _cluster_alerts(cluster, nodes)
     alerts += _node_alerts(cid, nodes, now)
     alerts += _device_alerts(cid, nodes)
+    alerts += _device_health_alerts(cid, nodes, now)
     alerts += _event_alerts(cid, events, now_ms)
     alerts += _api_alerts(cid, api_mean_seconds)
 

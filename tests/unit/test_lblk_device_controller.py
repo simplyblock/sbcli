@@ -15,7 +15,6 @@ Covered:
     bdev_get on the base bdev; a present bdev skips the late event.
 """
 
-import json
 import unittest
 from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
@@ -82,17 +81,19 @@ class TestResetStorageDeviceAio(unittest.TestCase):
 
 class TestHealthInfoAio(unittest.TestCase):
 
-    def test_aio_returns_stub_without_nvme_rpc(self):
+    def test_aio_is_read_by_the_node_agent_not_the_nvme_rpc(self):
+        # SPDK cannot see an AIO device's controller; the host can.
         device = _aio_dev()
         snode = MagicMock()
+        snode.client.return_value.device_smart.return_value = (
+            {"supported": False, "source": "", "data": None, "reason": "virtio"}, None)
         db = MagicMock()
         db.get_storage_device_by_id.return_value = device
         db.get_storage_node_by_id.return_value = snode
         with patch.object(device_controller, "DBController", return_value=db):
-            ret = device_controller.get_device_health_info("dev-1")
-        data = json.loads(ret)
-        self.assertEqual(data["bdev_type"], "aio")
-        self.assertIsNone(data["smart"])
+            data = device_controller.get_device_health_info("dev-1")
+        self.assertFalse(data["supported"])
+        snode.client.return_value.device_smart.assert_called_once()
         snode.rpc_client.assert_not_called()
 
 

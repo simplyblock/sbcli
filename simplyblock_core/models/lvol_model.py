@@ -106,6 +106,21 @@ class LVol(BaseModel):
     # sync delete — a repeat walks the replica blob tree again and errors on
     # every entry the first pass cleaned.
     sync_deleted_nodes: list[str] = default_factory(list)
+    # Sync replication: the site this volume is served from (set at creation
+    # to the LVS's active site) and the sites it has been demoted on. Empty /
+    # [] on non-sync clusters.
+    sync_active_site: str = ""
+    sync_demoted_sites: list[str] = default_factory(list)
+    # Sync replication: True from the volume's creation until connect_lvol
+    # first hands out its paths - a volume no consumer can have attached yet.
+    # False by default: a record that never set it counts as served.
+    sync_never_connected: bool = False
+    # Sync replication: the latest failed promote of this volume per target
+    # site not yet reported to a caller, ``{site: {"task_id", "reason"}}``.
+    # Written with the task's DONE (DBController.finish_sync_promote_task),
+    # removed by the first promote of this volume to that site
+    # (consume_sync_promote_failure) or by a later successful one.
+    sync_promote_failures: dict = default_factory(dict)
     pool_uuid: str = ""
     pool_name: str = ""
     pvc_name: str = ""
@@ -124,6 +139,10 @@ class LVol(BaseModel):
     delete_snap_on_lvol_delete: bool = False
     do_replicate: bool = False
     replication_node_id: str = ""
+    # The pool on the destination cluster the copies land in, when the caller
+    # of replication start named one. Used only while the destination is that
+    # pool's cluster; otherwise the destination's pool is resolved as before.
+    replication_pool_uuid: str = ""
     from_source: bool = True
     # Declared intent, NOT a behaviour switch: this field is only ever copied
     # onto the LVolReplication record (lvol_controller, tasks_runner_replication
@@ -150,6 +169,10 @@ class LVol(BaseModel):
     #: Denormalized pointer set at join and cleared on detach; the group's
     #: members map remains the authoritative generation-membership record.
     group_id: str = ""
+    #: When this volume entered migration-mode replication (epoch seconds).
+    #: Orders a node's migrating volumes: only the earliest replicates at a
+    #: time (simplyblock_core/migration_turn.py).
+    migration_queued_at: int = 0
 
     # Planned-swap demote state (P0-3, design-csi-addons-replication.md §5.2).
     # Lives on the SOURCE volume directly, not on an LVolReplication record:
@@ -194,6 +217,16 @@ class LVol(BaseModel):
             lvol_mini.remove(kv_store)
         except Exception as e:
             print(f"Failed to remove snapshot mini from DB: {e}")
+
+    def write_replacing(self, old, kv_store):
+        super().write_replacing(old, kv_store)
+        LVolMini().from_lvol(self).write_to_db(kv_store)
+        try:
+            lvol_mini = LVolMini().read_from_db(kv_store, old.uuid)[0]
+            lvol_mini.remove(kv_store)
+        except Exception as e:
+            print(f"Failed to remove lvol mini from DB: {e}")
+        return True
 
 
 

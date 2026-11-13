@@ -9,6 +9,7 @@ on:
 env:
   IMAGE_NAME: simplyblock/simplyblock
   ECR_IMAGE_NAME: public.ecr.aws/simply-block/simplyblock
+  INTERNAL_IMAGE_NAME: registry.simplyblock.ai/simplyblock/simplyblock
 
 jobs:
 
@@ -44,6 +45,13 @@ jobs:
         username: hamdysimplyblock
         password: ${{ secrets.DOCKER_PASS }}
 
+    - name: Login to Internal Registry
+      uses: docker/login-action@v4
+      with:
+        registry: registry.simplyblock.ai
+        username: ${{ secrets.INTERNAL_USERNAME }}
+        password: ${{ secrets.INTERNAL_PASSWORD }}
+
     - name: Configure AWS Credentials
       uses: aws-actions/configure-aws-credentials@v4
       with:
@@ -70,6 +78,7 @@ jobs:
         images: |
           ${{ env.IMAGE_NAME }}
           ${{ env.ECR_IMAGE_NAME }}
+          ${{ env.INTERNAL_IMAGE_NAME }}
         tags: |
           type=raw,value=${{ env.TAG }}
           type=raw,value=${{ env.TAG }}-${{ env.SHORT_SHA }}
@@ -91,3 +100,4 @@ jobs:
       run: |
         echo "::notice title=Docker.com::${{ env.IMAGE_NAME }}:${{ env.TAG }}"
         echo "::notice title=AWS-ECR::${{ env.ECR_IMAGE_NAME }}:${{ env.TAG }}"
+        echo "::notice title=Internal::${{ env.INTERNAL_IMAGE_NAME }}:${{ env.TAG }}"

@@ -1,6 +1,13 @@
 """Unit tests for /api/v2/.../volumes endpoints (lvol/snapshot controllers mocked)."""
 
+import pytest
+
 from simplyblock_core import utils as core_utils
+from simplyblock_core.exceptions import (
+    SyncReplicationSiteError,
+    SyncReplicationUnsupportedError,
+    SyncSiteConflictError,
+)
 from simplyblock_core.models.lvol_model import LVol
 from tests.unit.web.api.v2._factories import (
     CLUSTER_ID,
@@ -62,6 +69,7 @@ class TestCreateVolume:
             replication_cluster_id=None,
             replication_policy=None,
             consistency_group=None,
+            site=None,
         )
         assert response.headers['Location'].endswith(f'/volumes/{VOLUME_ID}/')
 
@@ -114,6 +122,68 @@ class TestCreateVolume:
         response = client.post(f'{BASE}/', json={'name': 'volume-1', 'size': '10G'})
 
         assert response.status_code == 409
+        lvol_controller.add_lvol_ha.assert_not_called()
+
+
+class TestCreateVolumeSite:
+    """``site`` on the create body (stretched sync replication, design
+    §9.5): forwarded to add_lvol_ha, which restricts the owner-node choice to
+    that site; its refusals answer as the other sync-replication refusals do."""
+
+    def test_site_is_forwarded(self, client, db, pool, lvol_controller):
+        db.get_lvol_by_name.side_effect = KeyError('LVol not found')
+        lvol_controller.add_lvol_ha.return_value = (VOLUME_ID, None)
+
+        response = client.post(f'{BASE}/', json={'name': 'volume-1', 'size': '10G', 'site': 'site-a'})
+
+        assert response.status_code == 201
+        assert lvol_controller.add_lvol_ha.call_args.kwargs['site'] == 'site-a'
+
+    def test_an_empty_site_is_no_site(self, client, db, pool, lvol_controller):
+        db.get_lvol_by_name.side_effect = KeyError('LVol not found')
+        lvol_controller.add_lvol_ha.return_value = (VOLUME_ID, None)
+
+        response = client.post(f'{BASE}/', json={'name': 'volume-1', 'size': '10G', 'site': ''})
+
+        assert response.status_code == 201
+        assert lvol_controller.add_lvol_ha.call_args.kwargs['site'] is None
+
+    @pytest.mark.parametrize('error', [
+        SyncReplicationSiteError("site 'site-x' is not a site of cluster c (sites: ['site-a', 'site-b'])"),
+        SyncReplicationUnsupportedError('cluster c is not a sync-replication cluster; a site applies only there'),
+    ], ids=['unknown-site', 'not-a-sync-cluster'])
+    def test_a_bad_site_is_400(self, client, db, pool, lvol_controller, error):
+        db.get_lvol_by_name.side_effect = KeyError('LVol not found')
+        lvol_controller.add_lvol_ha.side_effect = error
+
+        response = client.post(f'{BASE}/', json={'name': 'volume-1', 'size': '10G', 'site': 'site-x'})
+
+        assert response.status_code == 400
+        assert response.json()['detail']['message'] == str(error)
+
+    def test_a_host_on_another_site_is_409_naming_both(self, client, db, pool, lvol_controller):
+        db.get_lvol_by_name.side_effect = KeyError('LVol not found')
+        lvol_controller.add_lvol_ha.side_effect = SyncSiteConflictError(
+            'storage node n1 is on site site-b, the volume was requested on site site-a',
+            node_id='n1', node_site='site-b', site='site-a')
+
+        response = client.post(f'{BASE}/', json={
+            'name': 'volume-1', 'size': '10G', 'site': 'site-a', 'host_id': 'n1'})
+
+        assert response.status_code == 409
+        detail = response.json()['detail']
+        assert detail['node_id'] == 'n1'
+        assert detail['node_site'] == 'site-b'
+        assert detail['site'] == 'site-a'
+        assert 'site-b' in detail['message'] and 'site-a' in detail['message']
+
+    def test_an_existing_name_ignores_the_site(self, client, db, pool, volume, lvol_controller):
+        db.get_lvol_by_name.return_value = volume
+
+        response = client.post(f'{BASE}/', json={'name': 'volume-1', 'size': '10G', 'site': 'site-x'})
+
+        assert response.status_code == 409
+        assert response.json()['detail'] == 'Volume volume-1 exists'
         lvol_controller.add_lvol_ha.assert_not_called()
 
 
@@ -190,12 +260,34 @@ class TestConnectVolume:
         assert response.json() == details
         lvol_controller.connect_lvol.assert_called_once_with(VOLUME_ID, host_nqn=None)
 
-    def test_error_returns_404(self, client, volume, lvol_controller):
-        lvol_controller.connect_lvol.return_value = (None, 'volume offline')
+    def test_a_volume_gone_underneath_returns_404(self, client, volume, lvol_controller):
+        lvol_controller.connect_lvol.return_value = (None, 'Failed to find volume')
 
         response = client.get(f'{BASE}/{VOLUME_ID}/connect')
 
         assert response.status_code == 404
+
+    def test_a_host_not_on_the_allowed_list_is_403_not_404(self, client, volume, lvol_controller):
+        """The volume exists; the requester is not allowed. Answered as 404, the
+        CSI driver read it as a deleted volume and pods on an unregistered node
+        hung with "the control plane did not answer" (live 2026-10-20)."""
+        volume.allowed_hosts = [{'nqn': 'nqn.2014-08.io.simplyblock:uuid:worker-0'}]
+
+        response = client.get(f'{BASE}/{VOLUME_ID}/connect',
+                              params={'host_nqn': 'nqn.2014-08.io.simplyblock:uuid:worker-4'})
+
+        assert response.status_code == 403
+        assert 'not found in allowed hosts' in response.json()['detail']
+        lvol_controller.connect_lvol.assert_not_called()
+
+    def test_a_missing_host_nqn_on_a_restricted_volume_is_400(self, client, volume, lvol_controller):
+        volume.allowed_hosts = [{'nqn': 'nqn.2014-08.io.simplyblock:uuid:worker-0'}]
+
+        response = client.get(f'{BASE}/{VOLUME_ID}/connect')
+
+        assert response.status_code == 400
+        assert 'host-nqn is required' in response.json()['detail']
+        lvol_controller.connect_lvol.assert_not_called()
 
 
 class TestVolumeStats:
@@ -227,7 +319,7 @@ class TestCreateVolumeSnapshot:
             f'{BASE}/{VOLUME_ID}/snapshots', json={'name': 'snapshot-1'})
 
         assert response.status_code == 201
-        snapshot_controller.add.assert_called_once_with(VOLUME_ID, 'snapshot-1', backup=False)
+        snapshot_controller.add.assert_called_once_with(VOLUME_ID, 'snapshot-1')
         assert response.headers['Location'].endswith(f'/snapshots/{SNAPSHOT_ID}/')
 
     def test_duplicate_name_returns_409(self, client, volume, snapshot_controller):
@@ -237,6 +329,34 @@ class TestCreateVolumeSnapshot:
             f'{BASE}/{VOLUME_ID}/snapshots', json={'name': 'snapshot-1'})
 
         assert response.status_code == 409
+
+    def test_reserved_name_is_rejected_before_reaching_the_controller(
+            self, client, volume, snapshot_controller):
+        response = client.post(
+            f'{BASE}/{VOLUME_ID}/snapshots', json={'name': '_backup_mine'})
+
+        assert response.status_code == 422
+        snapshot_controller.add.assert_not_called()
+
+
+class TestCloneVolume:
+
+    def test_calls_clone_lvol(self, client, volume, lvol_controller):
+        lvol_controller.clone_lvol.return_value = (VOLUME_ID, None)
+
+        response = client.post(
+            f'{BASE}/{VOLUME_ID}/clone', params={'clone_name': 'clone-1'})
+
+        assert response.status_code == 201
+        lvol_controller.clone_lvol.assert_called_once_with(VOLUME_ID, 'clone-1', None, None)
+
+    def test_reserved_clone_name_is_rejected_before_reaching_the_controller(
+            self, client, volume, lvol_controller):
+        response = client.post(
+            f'{BASE}/{VOLUME_ID}/clone', params={'clone_name': 'auto_mine'})
+
+        assert response.status_code == 422
+        lvol_controller.clone_lvol.assert_not_called()
 
 
 class TestVolumeHosts:

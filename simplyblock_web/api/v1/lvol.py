@@ -6,6 +6,7 @@ from flask import Blueprint, request
 from simplyblock_core import db_controller
 from simplyblock_core import utils as core_utils
 from simplyblock_core.controllers import lvol_controller, snapshot_controller
+from simplyblock_core.controllers.backup import controller as backup_controller
 from simplyblock_core.exceptions import PreconditionError
 from simplyblock_web import utils
 
@@ -267,9 +268,16 @@ def resize_lvol(uuid):
 @bp.route('/lvol/connect/<string:uuid>', methods=['GET'])
 def connect_lvol(uuid):
     try:
-        db.get_lvol_by_id(uuid)
+        lvol = db.get_lvol_by_id(uuid)
+        cluster = db.get_cluster_by_id(db.get_storage_node_by_id(lvol.node_id).cluster_id)
     except KeyError as e:
         return utils.get_response_error(str(e), 404)
+    if cluster.sync_replication:
+        # A sync-replication volume is connected through the site its LVS is
+        # led from; only the v2 route resolves that.
+        return utils.get_response_error(
+            "lvol connect is not supported on a sync-replication cluster by the v1 API: "
+            "use the v2 volume connect", 400)
 
     host_nqn = request.args.get('host_nqn')
     ret, err = lvol_controller.connect_lvol(uuid, host_nqn=host_nqn)
@@ -286,10 +294,12 @@ def create_snapshot():
     if 'snapshot_name' not in cl_data:
         return utils.get_response(None, "missing required param: snapshot_name", 400)
 
+    if backup_controller.is_reserved_snapshot_name(cl_data['snapshot_name']):
+        return utils.get_response(None, backup_controller.RESERVED_SNAPSHOT_NAME_ERROR, 400)
+
     snapID, err = snapshot_controller.add(
         cl_data['lvol_id'],
-        cl_data['snapshot_name'],
-        backup=cl_data.get('backup', False))
+        cl_data['snapshot_name'])
     return utils.get_response(snapID, err, http_code=400)
 
 
@@ -332,6 +342,8 @@ def clone():
     cl_data = request.get_json()
     lvol_id = cl_data['lvol_id']
     clone_name = cl_data['clone_name']
+    if backup_controller.is_reserved_snapshot_name(clone_name):
+        return utils.get_response(None, backup_controller.RESERVED_SNAPSHOT_NAME_ERROR, 400)
     pvc_name = cl_data.get('pvc_name', None)
     new_size = 0
     if 'new_size' in cl_data:

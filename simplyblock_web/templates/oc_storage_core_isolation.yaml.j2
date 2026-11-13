@@ -4,6 +4,9 @@ metadata:
   name: {{ CORE_JOBNAME }}
   namespace: {{ NAMESPACE }}
 spec:
+  # A refusal is final: retried in place it only crash-loops until the
+  # agent's wait times out, with the reason in a dead pod's log.
+  backoffLimit: 0
   template:
     spec:
       restartPolicy: OnFailure
@@ -23,7 +26,7 @@ spec:
             path: /var/simplyblock
       containers:
         - name: init-setup
-          image: alpine/kubectl:1.34.1
+          image: quay.io/simplyblock-io/kubectl:1.34.1
           securityContext:
             privileged: true
           volumeMounts:
@@ -38,13 +41,6 @@ spec:
 
               echo "--- Installing jq ---"
               apk add --no-cache jq
-
-              echo "--- Checking if node was already configured ---"
-
-              if [[ -f "$MARKER" ]]; then
-                  echo "[INFO] Node already configured. Skipping sleep and exiting..."
-                  exit 0
-              fi
 
               echo "--- Reading isolated cores from config ---"
               CONFIG_FILE="/var/simplyblock/sn_config_file"
@@ -62,7 +58,100 @@ spec:
 
               echo "[INFO] Isolated cores to apply: $ISOLATED_CORES"
 
-              cat <<EOF | kubectl apply -f -
+              # MCO keeps a node carrying the master pool's label in the master pool
+              # even when a custom pool selects it, so a pool of its own never reaches
+              # a master, and on a compact cluster every storage node is one. A master
+              # is isolated through the master pool: one MachineConfig and one
+              # KubeletConfig for every master, which reboot into them one at a time.
+              # One set of kernel arguments applies to every master, so a master whose
+              # cores differ stops here rather than reboot the others into its cores.
+              # The MachineConfig records the cluster that wrote it: a torn-down
+              # cluster leaves its own behind, and a rerun replaces that one.
+              IS_MASTER=$(kubectl get nodes -l node-role.kubernetes.io/master \
+                --field-selector "metadata.name={{ HOSTNAME }}" -o name)
+              if [ -n "$IS_MASTER" ]; then
+                MASTER_MC="simplyblock-master-isolated"
+                KERNEL_ARGS="[\"nohz_full=${ISOLATED_CORES}\",\"rcu_nocbs=${ISOLATED_CORES}\",\"isolcpus=${ISOLATED_CORES}\",\"intel_iommu=on\",\"iommu=pt\"]"
+                cat <<EOF > /tmp/master-isolated.yaml
+              apiVersion: machineconfiguration.openshift.io/v1
+              kind: MachineConfig
+              metadata:
+                name: $MASTER_MC
+                labels:
+                  machineconfiguration.openshift.io/role: master
+                annotations:
+                  simplyblock.io/cluster-id: "{{ CLUSTER_ID }}"
+              spec:
+                kernelArguments: $KERNEL_ARGS
+              EOF
+                # Two masters' jobs can both find no isolation, or both find a previous
+                # cluster's. Each write lets one of them win: a create fails on the one
+                # that exists, and a replace tests the cluster it replaces. The loser
+                # compares with what the winner wrote.
+                ATTEMPT=0
+                while :; do
+                  ATTEMPT=$((ATTEMPT + 1))
+                  if [ $ATTEMPT -gt 5 ]; then
+                    echo "[ERROR] Could not settle MachineConfig $MASTER_MC in 5 attempts"
+                    exit 1
+                  fi
+                  APPLIED=$(kubectl get machineconfig "$MASTER_MC" -o jsonpath='{.spec.kernelArguments}' 2>/dev/null || true)
+                  if [ -z "$APPLIED" ]; then
+                    if CREATE_OUT=$(kubectl create -f /tmp/master-isolated.yaml 2>&1); then
+                      echo "[INFO] Created MachineConfig $MASTER_MC isolating $ISOLATED_CORES on every master"
+                      break
+                    fi
+                    case "$CREATE_OUT" in
+                      *AlreadyExists*) echo "[INFO] Another master created MachineConfig $MASTER_MC a moment ago"; continue ;;
+                      *) echo "[ERROR] Creating MachineConfig $MASTER_MC failed: $CREATE_OUT"; exit 1 ;;
+                    esac
+                  fi
+                  # The version is read before the cluster it records, so a replace
+                  # that lands in between fails the patch's test rather than being
+                  # overwritten. That holds for an isolation written before the
+                  # annotation existed too, which has no cluster to test.
+                  APPLIED_RV=$(kubectl get machineconfig "$MASTER_MC" -o jsonpath='{.metadata.resourceVersion}' 2>/dev/null || true)
+                  APPLIED_BY=$(kubectl get machineconfig "$MASTER_MC" \
+                    -o jsonpath='{.metadata.annotations.simplyblock\.io/cluster-id}' 2>/dev/null || true)
+                  if [ "$APPLIED_BY" != "{{ CLUSTER_ID }}" ]; then
+                    echo "[INFO] MachineConfig $MASTER_MC is from a previous simplyblock cluster (${APPLIED_BY:-unrecorded}); replacing it"
+                    # add on /metadata/annotations sets the whole map, so it works
+                    # whether or not the old MachineConfig has annotations at all.
+                    if kubectl patch machineconfig "$MASTER_MC" --type=json -p "[
+                        {\"op\": \"test\", \"path\": \"/metadata/resourceVersion\", \"value\": \"$APPLIED_RV\"},
+                        {\"op\": \"add\", \"path\": \"/metadata/annotations\", \"value\": {\"simplyblock.io/cluster-id\": \"{{ CLUSTER_ID }}\"}},
+                        {\"op\": \"replace\", \"path\": \"/spec/kernelArguments\", \"value\": $KERNEL_ARGS}]"; then
+                      break
+                    fi
+                    echo "[INFO] Another master replaced MachineConfig $MASTER_MC a moment ago"
+                    continue
+                  fi
+                  if ! echo "$APPLIED" | grep -q "\"isolcpus=${ISOLATED_CORES}\""; then
+                    echo "[ERROR] {{ HOSTNAME }} is a master and needs cores $ISOLATED_CORES isolated, but MachineConfig $MASTER_MC applies $APPLIED to every master"
+                    exit 1
+                  fi
+                  echo "[INFO] MachineConfig $MASTER_MC already isolates $ISOLATED_CORES"
+                  break
+                done
+
+                # Only the static CPU manager: reservedSystemCPUs on the masters belongs
+                # to the CPU-topology job's master KubeletConfig, and this one must never
+                # set it.
+                cat <<EOF | kubectl apply -f -
+              apiVersion: machineconfiguration.openshift.io/v1
+              kind: KubeletConfig
+              metadata:
+                name: simplyblock-master-static-cpu-manager
+              spec:
+                machineConfigPoolSelector:
+                  matchLabels:
+                    pools.operator.machineconfiguration.openshift.io/master: ""
+                kubeletConfig:
+                  cpuManagerPolicy: static
+                  cpuManagerReconcilePeriod: 5s
+              EOF
+              else
+                cat <<EOF | kubectl apply -f -
               apiVersion: machineconfiguration.openshift.io/v1
               kind: MachineConfigPool
               metadata:
@@ -83,8 +172,8 @@ spec:
                     kubernetes.io/hostname: {{ HOSTNAME }}
               EOF
 
-              # Create the MachineConfig for CPU isolation and IOMMU settings
-              cat <<EOF | kubectl apply -f -
+                # Create the MachineConfig for CPU isolation and IOMMU settings
+                cat <<EOF | kubectl apply -f -
               apiVersion: machineconfiguration.openshift.io/v1
               kind: MachineConfig
               metadata:
@@ -100,8 +189,8 @@ spec:
                   - "iommu=pt"
               EOF
 
-              # Create the KubeletConfig to enable static CPU manager
-              cat <<EOF | kubectl apply -f -
+                # Create the KubeletConfig to enable static CPU manager
+                cat <<EOF | kubectl apply -f -
               apiVersion: machineconfiguration.openshift.io/v1
               kind: KubeletConfig
               metadata:
@@ -114,8 +203,18 @@ spec:
                   cpuManagerPolicy: static
                   cpuManagerReconcilePeriod: 5s
               EOF
+              fi
 
               echo "[INFO] Init setup and CPU isolation complete."
+
+              # The configuration above is ensured on every run, and the marker only
+              # says this node has been through the reboot wait. An earlier version
+              # isolated a master through a pool of its own, which MCO ignores, and
+              # marked it: exiting before the configuration would have left it there.
+              if [[ -f "$MARKER" ]]; then
+                  echo "[INFO] Node already configured. Skipping sleep and exiting..."
+                  exit 0
+              fi
 
               echo "[INFO] Marking node as configured."
               touch "$MARKER"

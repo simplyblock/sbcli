@@ -247,7 +247,7 @@ class TestAddNodeToAutoRestartK8sAdoptionGuard(unittest.TestCase):
     check's data-nic ping builds a k8s-service hostname from
     node.cr_namespace. An empty cr_namespace (a node mid-adoption, whose
     CR refs get patched in a later step) produces an unresolvable
-    "..svc.cluster.local" hostname, which the runner treats as
+    "..svc" hostname, which the runner treats as
     "unreachable, retry" forever — and the resulting task's mere
     existence blocks any manual `sn restart`/`sn shutdown` on the node,
     crash or no crash. Refusing to queue the task at all is what actually

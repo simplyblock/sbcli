@@ -655,7 +655,7 @@ def _bdev_lvol_get_lvols(s: NodeState, p: dict):
     if lvs_name != s.lvstore:
         return []
     result = []
-    for composite, entry in s.all_bdevs().items():
+    for entry in s.all_bdevs().values():
         result.append({
             'name': entry['composite'],
             'lvol_name': entry['name'],

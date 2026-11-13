@@ -1,11 +1,11 @@
 """On a primary restart, block non-leader ports BEFORE the leader, and start
 the demote only once every port is blocked.
 
-The leader path (_recreate_lvstore_impl) used to block the leader first,
-suspend its replication, and only then block the non-leaders. That left a
-window between the leader's replication-disable and the non-leader block in
-which a non-leader (e.g. the tertiary) kept serving client IO and redirected it
-through the hublvol to a leader whose leadership was mid-transition ->
+The leader path is _fence_and_demote_leader. Blocking the leader first,
+suspending its replication, and only then blocking the non-leaders would leave
+a window between the leader's replication-disable and the non-leader block in
+which a non-leader (e.g. the tertiary) keeps serving client IO and redirects it
+through the hublvol to a leader whose leadership is mid-transition ->
 writer_conflict on the journal.
 
 Correct order:
@@ -20,7 +20,9 @@ from simplyblock_core import storage_node_ops
 
 
 def _src():
-    return inspect.getsource(storage_node_ops._recreate_lvstore_impl)
+    # The leader path's block / suspend / demote section: the fenced
+    # hand-off _recreate_lvstore_impl runs through (transfer_lvs_leadership).
+    return inspect.getsource(storage_node_ops._fence_and_demote_leader)
 
 
 def _code(src):
@@ -36,7 +38,7 @@ class TestPortBlockOrder:
         # pre-fence JM-replication wait guards on that same condition and is
         # deliberately earlier, so the string is not unique.
         i_nonleader = src.index(
-            "port_block.set_port(sec_node, snode_lvs_port, block=True")
+            "sec_node.rpc_client(timeout=0.5, retry=1).nvmf_port_block(snode_lvs_port)")
         i_leader_open = src.index("_REPL_SUSPEND_MAX_ATTEMPTS = 10")
         assert i_nonleader < i_leader_open, \
             "non-leader ports must be blocked before the leader block opens"
@@ -44,7 +46,7 @@ class TestPortBlockOrder:
     def test_demote_starts_after_all_ports_blocked(self):
         src = _code(_src())
         i_nonleader = src.index(
-            "port_block.set_port(sec_node, snode_lvs_port, block=True")
+            "sec_node.rpc_client(timeout=0.5, retry=1).nvmf_port_block(snode_lvs_port)")
         # the demote == suspend replication then drop leadership
         i_disable_repl = src.index(".jc_disable_replication(lvs_jm_vuid)")
         i_drop = src.index("bdev_lvol_set_leader(lvs_name, leader=False")
@@ -67,7 +69,7 @@ class TestPortBlockOrder:
     def test_nonleader_block_still_aborts_on_failure(self):
         """The reorder must keep the abort-on-failure behaviour."""
         src = _code(_src())
-        i = src.index("port_block.set_port(sec_node, snode_lvs_port, block=True")
+        i = src.index("sec_node.rpc_client(timeout=0.5, retry=1).nvmf_port_block(snode_lvs_port)")
         window = src[i:i + 1100]
         assert "_abort_restart_and_unblock(" in window
 
@@ -75,7 +77,7 @@ class TestPortBlockOrder:
         src = _code(_src())
         # anchor on the non-leader block's own port_block, then look at the
         # loop head just above it (there are several sec_node loops).
-        j = src.index("port_block.set_port(sec_node, snode_lvs_port, block=True")
+        j = src.index("sec_node.rpc_client(timeout=0.5, retry=1).nvmf_port_block(snode_lvs_port)")
         i = src.rfind("for sec_node in sec_nodes:", 0, j)
         window = src[i:j]
         assert "sec_node is current_leader" in window
@@ -86,7 +88,7 @@ class TestPortBlockOrder:
         """The block must have MOVED, not been copied."""
         src = _src()
         assert src.count(
-            "port_block.set_port(sec_node, snode_lvs_port, block=True") == 1
+            "sec_node.rpc_client(timeout=0.5, retry=1).nvmf_port_block(snode_lvs_port)") == 1
 
 
 class TestJmReplicationWaitStaysOutsideTheFence:
@@ -113,7 +115,7 @@ class TestJmReplicationWaitStaysOutsideTheFence:
         lines and its exact formatting is not the invariant."""
         src = _code(_src())
         i_fence = src.index(
-            "port_block.set_port(sec_node, snode_lvs_port, block=True")
+            "sec_node.rpc_client(timeout=0.5, retry=1).nvmf_port_block(snode_lvs_port)")
         patient = [
             m.start() for m in re.finditer(
                 r"wait_for_jm_rep_tasks_to_finish\((.*?)\)", src, re.DOTALL)
@@ -130,7 +132,7 @@ class TestJmReplicationWaitStaysOutsideTheFence:
     def test_every_wait_inside_the_fence_is_explicitly_bounded(self):
         src = _code(_src())
         i_fence = src.index(
-            "port_block.set_port(sec_node, snode_lvs_port, block=True")
+            "sec_node.rpc_client(timeout=0.5, retry=1).nvmf_port_block(snode_lvs_port)")
         calls = re.findall(
             r"wait_for_jm_rep_tasks_to_finish\((.*?)\)",
             src[i_fence:], re.DOTALL)
@@ -144,7 +146,7 @@ class TestJmReplicationWaitStaysOutsideTheFence:
         """The clock went unchecked from the fence to the inflight drain."""
         src = _code(_src())
         i_fence = src.index(
-            "port_block.set_port(sec_node, snode_lvs_port, block=True")
+            "sec_node.rpc_client(timeout=0.5, retry=1).nvmf_port_block(snode_lvs_port)")
         i_check = src.index('_check_fence_deadline("jm replication confirm")')
         i_disable = src.index(".jc_disable_replication(lvs_jm_vuid)")
         assert i_fence < i_check < i_disable, (

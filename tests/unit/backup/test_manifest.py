@@ -137,6 +137,16 @@ class TestSchema:
         assert volume.rw_ios_per_sec is None
         assert volume.pool_name is None
 
+    def test_subsystem_sharing_round_trips(self):
+        """The namespace cap is what a restore reapplies, so it has to survive
+        the bucket; absent when the backup predates the field."""
+        assert _manifest().volume.max_namespace_per_subsys is None
+        shared = _manifest(volume=ManifestVolume(
+            lvol_id=VOLUME_ID, lvol_name="vol", snapshot_id=SNAPSHOT_ID,
+            snapshot_name="snap", size=4096, max_namespace_per_subsys=10))
+        parsed = backup_manifest._parse(shared.model_dump_json().encode(), "k")
+        assert parsed.volume.max_namespace_per_subsys == 10
+
 
 class TestParse:
     def test_rejects_a_newer_schema_version(self):

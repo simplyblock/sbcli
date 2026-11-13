@@ -27,8 +27,10 @@ import simplyblock_web.api.v2._dependencies as dependencies_module
 import simplyblock_web.api.v2._dtos as dtos_module
 import simplyblock_web.api.v2.cluster as cluster_module
 import simplyblock_web.api.v2.cluster.alert as alert_module
+import simplyblock_web.api.v2.cluster.arbitration as arbitration_module
 import simplyblock_web.api.v2.cluster.backup as backup_module
 import simplyblock_web.api.v2.cluster.consistency_group as consistency_group_module
+import simplyblock_web.api.v2.cluster.group_backup as group_backup_module
 import simplyblock_web.api.v2.cluster.replication as replication_module
 import simplyblock_web.api.v2.cluster.storage_node as storage_node_module
 import simplyblock_web.api.v2.cluster.storage_node.device as device_module
@@ -80,6 +82,7 @@ def db(monkeypatch):
         cluster_module,
         backup_module,
         consistency_group_module,
+        group_backup_module,
         replication_module,
         storage_node_module,
         device_module,
@@ -88,6 +91,7 @@ def db(monkeypatch):
         volume_module,
         task_module,
         alert_module,
+        arbitration_module,
         management_node_module,
         metrics_module,
     ):
@@ -188,6 +192,7 @@ def lvol_controller(monkeypatch):
     mock = MagicMock()
     mock.get_replication_info.return_value = None
     mock.get_replication_info_bulk.return_value = {}
+    mock.replication_start_error.return_value = None
     monkeypatch.setattr(volume_module, 'lvol_controller', mock)
     monkeypatch.setattr(volume_replication_module, 'lvol_controller', mock)
     monkeypatch.setattr(replication_module, 'lvol_controller', mock)
@@ -222,6 +227,15 @@ def backup_controller(monkeypatch):
     monkeypatch.setattr(volume_module, 'backup_controller', mock)
     monkeypatch.setattr(backup_module, 'backup_controller', mock)
     monkeypatch.setattr(backup_module, 'backup_policy', mock)
+    return mock
+
+
+@pytest.fixture()
+def group_backup_controller(monkeypatch):
+    """The CG-backup controller, reached as ``group_backup_controller`` from the
+    group-backups router."""
+    mock = MagicMock()
+    monkeypatch.setattr(group_backup_module, 'group_backup_controller', mock)
     return mock
 
 
@@ -337,6 +351,14 @@ def backup(db, cluster):
     db.get_backups.return_value = [backup]
     db.get_backup_by_id.return_value = backup
     return backup
+
+
+@pytest.fixture()
+def group_backup(db, cluster):
+    group_backup = factories.make_group_backup()
+    db.get_group_backups.return_value = [group_backup]
+    db.get_group_backup_by_id.return_value = group_backup
+    return group_backup
 
 
 @pytest.fixture()

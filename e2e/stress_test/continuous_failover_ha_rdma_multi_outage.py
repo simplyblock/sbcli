@@ -84,8 +84,7 @@ class RandomRDMAMultiFailoverTest(RandomMultiClientMultiFailoverTest):
                         n for n in self.sn_primary_secondary_map
                         if self.sn_primary_secondary_map[n] in self.current_outage_nodes
                     ]
-                    for n in self.current_outage_nodes:
-                        skip_nodes.append(n)
+                    skip_nodes += self.current_outage_nodes
                     host_id = [n for n in self.sn_nodes_with_sec if n not in skip_nodes]
                     self.sbcli_utils.add_lvol(
                         lvol_name=lvol_name, pool_name=self.pool_name, size=self.lvol_size,

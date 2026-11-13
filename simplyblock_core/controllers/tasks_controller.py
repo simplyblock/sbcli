@@ -6,12 +6,18 @@ import threading
 import time
 import uuid
 from collections.abc import Callable
+from typing import NamedTuple
 
-from simplyblock_core import constants, db_controller, utils
-from simplyblock_core.controllers import device_controller, tasks_events
+from simplyblock_core import constants, db_controller, storage_node_ops, utils
+from simplyblock_core.controllers import (
+    activation_gate,
+    device_controller,
+    tasks_events,
+)
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lock import DbLock, DbLockBusyError
+from simplyblock_core.models.lvol_model import LVolReplication
 from simplyblock_core.models.storage_node import StorageNode
 
 logger = logging.getLogger()
@@ -313,18 +319,26 @@ def _add_task(function_name, cluster_id, node_id, device_id,
         if not _validate_new_task_dev_restart(cluster_id, node_id, device_id):
             return False
 
+    if function_name == JobSchedule.FN_FAILED_DEV_MIG and mig_scope_node(node_id, function_params) is None:
+        task_id = get_failed_device_mig_task(cluster_id, device_id, function_params['distr_name'])
+        if task_id:
+            logger.info(f"Task found, skip adding new task: {task_id}")
+            return False
+
     if function_name == JobSchedule.FN_NODE_RESTART:
         task_id = _validate_new_task_node_restart(cluster_id, node_id)
         if task_id:
             logger.info(f"Task found, skip adding new task: {task_id}")
             return False
     elif function_name == JobSchedule.FN_NEW_DEV_MIG:
-        task_id = get_new_device_mig_task(cluster_id, node_id, function_params['distr_name'])
+        task_id = get_new_device_mig_task(cluster_id, mig_scope_node(node_id, function_params),
+                                          function_params['distr_name'])
         if task_id:
             logger.info(f"Task found, skip adding new task: {task_id}")
             return False
     elif function_name == JobSchedule.FN_DEV_MIG:
-        task_id = get_device_mig_task(cluster_id, node_id, device_id, function_params['distr_name'])
+        task_id = get_device_mig_task(cluster_id, mig_scope_node(node_id, function_params), device_id,
+                                      function_params['distr_name'])
         if task_id:
             logger.info(f"Task found, skip adding new task: {task_id}")
             return False
@@ -413,6 +427,119 @@ def _add_task(function_name, cluster_id, node_id, device_id,
     return task_obj.uuid
 
 
+#: Why migration_role_node returned no node to run the migrations.
+PLACEMENT_MOVING = "moving"
+PLACEMENT_DEPARTING = "departing"
+
+
+class MigrationPlacement(NamedTuple):
+    """The node that runs the migrations of an LVS (migration_role_node)."""
+    node: StorageNode | None
+    #: Why ``node`` is None: PLACEMENT_MOVING or PLACEMENT_DEPARTING; "" with a node.
+    reason: str = ""
+
+
+def migration_role_node(owner: StorageNode, function_name: str) -> MigrationPlacement:
+    """Return the node that runs ``function_name`` for the distribs of
+    ``owner``'s LVS on a sync-replication cluster. ``function_name`` is one of
+    the device-migration tasks.
+
+    On a cluster without sync replication, a migration of a distrib runs on
+    the owner, which is the primary of the LVS's triplet. It never runs on a
+    secondary or tertiary. On a sync-replication cluster, the primary of the
+    active triplet (storage_node_ops.lvs_active_triplet) takes the owner's
+    place. This holds on either site. The passive triplet runs no migrations.
+    The active triplet comes from ``owner.lvs_active_site``, and only a
+    promote changes that field.
+
+    - While the leadership is being moved (``moving:<site>``), no triplet is
+      active. The result has no node and the reason PLACEMENT_MOVING.
+    - A departing primary runs no migrations. A cluster without sync
+      replication treats a departing owner the same way. The result has no
+      node and the reason PLACEMENT_DEPARTING.
+    - Failed-device migrations are the exception. While the primary is in
+      ``pending_removal``, they stay on it and wait, because a migration runs
+      only on an ONLINE node. When the removal sets a status in
+      REMOVAL_SHUT_DOWN_STATUSES, they go to the secondary of the active
+      triplet, or to the tertiary if the secondary is also departing
+      (migration_task_common.place_on_role_node moves existing tasks).
+
+    Callers use this only on a sync-replication cluster. The secondary and
+    the tertiary are read only for the failed-device exception.
+
+    Raises:
+        KeyError: the active triplet has no primary, or a node that this
+            function reads does not exist.
+    """
+    if owner.lvs_active_site.startswith(storage_node_ops.LVS_MOVING_PREFIX):
+        return MigrationPlacement(None, PLACEMENT_MOVING)
+    primary_id, *member_ids = storage_node_ops.active_triplet_ids(owner)
+    if not primary_id:
+        raise KeyError(f"LVS {owner.lvstore} ({owner.get_id()}) has no primary in its active triplet")
+    primary = db.get_storage_node_by_id(primary_id)
+    if primary.status not in StorageNode.DEPARTING_STATUSES:
+        return MigrationPlacement(primary)
+    if function_name != JobSchedule.FN_FAILED_DEV_MIG:
+        return MigrationPlacement(None, PLACEMENT_DEPARTING)
+    if primary.status not in StorageNode.REMOVAL_SHUT_DOWN_STATUSES:
+        return MigrationPlacement(primary)
+    for member_id in member_ids:
+        if not member_id:
+            continue
+        member = db.get_storage_node_by_id(member_id)
+        if member.status not in StorageNode.DEPARTING_STATUSES:
+            return MigrationPlacement(member)
+    return MigrationPlacement(None, PLACEMENT_DEPARTING)
+
+
+def _sync_mig_node(owner: StorageNode, function_name: str) -> str | None:
+    """Return the id of the node that gets the ``function_name`` tasks of
+    ``owner``'s distribs on a sync-replication cluster.
+
+    This is the node that migration_role_node returns. While the LVS is being
+    moved, it is the owner, and the runner moves the tasks after the move
+    ends. The result is None when no node may run the tasks, or when the
+    active triplet cannot be resolved. The callers queue tasks for every
+    owner in one loop, so a broken triplet skips only its own owner."""
+    try:
+        placement = migration_role_node(owner, function_name)
+    except KeyError as e:
+        logger.warning(f"Not queueing {function_name} for {owner.lvstore} (owner {owner.get_id()}): "
+                       f"its active triplet cannot be resolved: {e}")
+        return None
+    if placement.node is not None:
+        return placement.node.get_id()
+    if placement.reason == PLACEMENT_MOVING:
+        return owner.get_id()
+    logger.info(f"Not queueing {function_name} for {owner.lvstore}: the primary of its active triplet "
+                f"(owner {owner.get_id()}) is departing")
+    return None
+
+
+def _sync_mig_params(owner: StorageNode, distr_name: str) -> dict:
+    """Return the parameters of a migration task for ``owner``'s distrib on a
+    sync-replication cluster. They hold the LVS name and the owner id, so
+    the task keeps them when it moves to another node."""
+    return {'distr_name': distr_name, 'lvs_name': owner.lvstore, 'lvs_owner': owner.get_id()}
+
+
+def _sync_distribs(owner: StorageNode) -> list[str]:
+    return [bdev['name'] for bdev in owner.lvstore_stack if bdev['type'] == "bdev_distr"]
+
+
+def mig_scope_node(node_id, function_params):
+    """Return the node that limits the duplicate check and the "one
+    migration at a time" check of a device-migration task.
+
+    For most tasks this is the task's own node. For a sync-replication task
+    (it has ``lvs_owner``), the result is None, which means all nodes. After
+    a promote, the tasks of one distrib can be on two nodes: a started task
+    stays on its node, and the other tasks move to the new primary. Checking
+    all nodes keeps one open task per distrib, and lets only one of them run
+    at a time."""
+    return None if "lvs_owner" in (function_params or {}) else node_id
+
+
 def add_device_mig_task_for_node(node_id):
     sub_tasks = []
     node = db.get_storage_node_by_id(node_id)
@@ -468,6 +595,18 @@ def add_device_mig_task_for_node(node_id):
         # present but no longer returning, inside the gap. The sibling queuing
         # functions above read the same set for the same reason.
         if node.status in StorageNode.DEPARTING_STATUSES:
+            continue
+
+        if storage_node_ops._sync_site(node):
+            distribs = _sync_distribs(node)
+            target_id = _sync_mig_node(node, JobSchedule.FN_DEV_MIG) if distribs else None
+            if target_id:
+                for distr_name in distribs:
+                    task_id = _add_task(JobSchedule.FN_DEV_MIG, cluster_id, target_id, distr_name, max_retry=-1,
+                                        function_params=_sync_mig_params(node, distr_name),
+                                        send_to_cluster_log=False)
+                    if task_id:
+                        sub_tasks.append(task_id)
             continue
 
         for bdev in node.lvstore_stack:
@@ -529,7 +668,7 @@ def is_suspension_operator_caused(cluster):
     return deliberate_down > 0 and other_not_online <= ftt
 
 
-def is_auto_restart_paused(cluster):
+def is_auto_restart_paused(cluster, node=None):
     """Auto-restart is paused while a SUSPENDED cluster is still being drained
     to a clean all-offline slate by the suspend-recovery auto-shutdown
     (storage_node_monitor). Recovering a suspended cluster by restarting nodes
@@ -544,10 +683,51 @@ def is_auto_restart_paused(cluster):
     ``is_suspension_operator_caused``) never drains, so the drain marker would
     pause restarts forever. The surviving nodes are still up in that state —
     restarting a genuinely-failed node one-by-one onto up peers is the normal
-    restart path, not the strand-prone post-drain path — so don't pause."""
-    return (cluster.status == Cluster.STATUS_SUSPENDED
+    restart path, not the strand-prone post-drain path — so don't pause.
+
+    Sync replication, with ``node`` given: the same pause for one site - the
+    node's site is recorded ``draining`` (cluster.lost_site_state), i.e. the
+    storage-node monitor is shutting down what is left of it
+    (storage_node_monitor._drive_site_drain); restarts of the site resume once
+    it is ``down``. And for every node, while a site activation runs
+    (activation_gate.site_activation_blocks), as main holds every restart
+    while the cluster is IN_ACTIVATION."""
+    if (cluster.status == Cluster.STATUS_SUSPENDED
             and not cluster.suspend_drain_complete
-            and not is_suspension_operator_caused(cluster))
+            and not is_suspension_operator_caused(cluster)):
+        return True
+    if activation_gate.site_activation_blocks(cluster):
+        return True
+    return (cluster.sync_replication is True and node is not None
+            and bool(cluster.lost_site) and node.site == cluster.lost_site
+            and cluster.lost_site_state == Cluster.LOST_SITE_DRAINING)
+
+
+def site_activation_holds(cluster, owner_id) -> str:
+    """activation_gate.site_activation_blocks for the LVS owned by the node
+    ``owner_id``: "" or why a task on it waits for the running site activation.
+    The owner is read only while one runs; an owner that is not found is held
+    like a node-level operation."""
+    if not activation_gate.site_activation_blocks(cluster):
+        return ""
+    try:
+        owner = db.get_storage_node_by_id(owner_id)
+    except KeyError:
+        return activation_gate.site_activation_blocks(cluster)
+    return activation_gate.site_activation_blocks(cluster, owner)
+
+
+def site_activation_holds_lvs(cluster, lvs_name) -> str:
+    """activation_gate.site_activation_blocks for the LVS named ``lvs_name``,
+    owned by the node of the cluster that carries that lvstore. The nodes are
+    read only while a site activation runs; an LVS whose owner is not found is
+    held like a node-level operation."""
+    if not activation_gate.site_activation_blocks(cluster):
+        return ""
+    for node in db.get_storage_nodes_by_cluster_id(cluster.get_id()):
+        if node.lvstore and node.lvstore == lvs_name:
+            return activation_gate.site_activation_blocks(cluster, node)
+    return activation_gate.site_activation_blocks(cluster)
 
 
 def add_node_to_auto_restart(node):
@@ -618,11 +798,14 @@ def add_node_to_auto_restart(node):
     # auto-shutdown has drained the whole cluster offline. Restarting nodes
     # one-by-one before the drain completes is exactly what wedged the cluster
     # (stale ONLINE peers / stuck lvstore "in_creation"). Once
-    # suspend_drain_complete flips true, the normal path below runs.
-    if is_auto_restart_paused(cluster):
+    # suspend_drain_complete flips true, the normal path below runs. The same
+    # for a sync-replication site being drained (record ``draining``), and for
+    # every node while a site activation runs.
+    if is_auto_restart_paused(cluster, node):
         logger.info(
-            "Cluster %s is SUSPENDED and not yet drained; pausing auto-restart "
-            "for node %s until all nodes are offline",
+            "Cluster %s: auto-restart paused while a drain or a site activation "
+            "runs (cluster suspended, the node's site draining, or a site being "
+            "activated); not queuing node %s",
             node.cluster_id, node.get_id())
         return False
     # IN_SHRINK: a PEER failing mid-removal must still get an auto-restart —
@@ -654,7 +837,13 @@ def add_node_to_auto_restart(node):
     # means "tolerated, go ahead and restart"; the SUSPENDED-not-drained case
     # is already held by is_auto_restart_paused above. Only apply the flat
     # node-count guard to non-FD clusters.
-    if not cluster.enable_failure_domain:
+    #
+    # The same holds on a sync-replication cluster: its verdict is taken per
+    # site, a site beyond its FTT is drained and recorded (restarts paused
+    # until it is ``down``), and SUSPENDED is written only when no site is
+    # healthy - so a whole site offline while the other one serves is the
+    # tolerated case, and its nodes must restart.
+    if not cluster.enable_failure_domain and cluster.sync_replication is not True:
         offline_nodes = 0
         for sn in db.get_storage_nodes_by_cluster_id(node.cluster_id):
             if node.get_id() != sn.get_id() and sn.status != StorageNode.STATUS_ONLINE and node.mgmt_ip != sn.mgmt_ip:
@@ -719,13 +908,18 @@ def cancel_node_tasks(cluster_id, node_id, function_names):
 
     Returns how many tasks this call canceled.
     """
+    def _flag_if_still_on_node(fresh: JobSchedule) -> bool:
+        # A sync-replication migration task can move to another node after the
+        # scan. Cancel it only if the stored task is still on this node.
+        return fresh.node_id == node_id and _flag_canceled_if_pending(fresh)
+
     canceled = 0
     for task in db.get_job_tasks(cluster_id):
         if task.node_id != node_id or task.function_name not in function_names:
             continue
         if task.status == JobSchedule.STATUS_DONE or task.canceled:
             continue
-        if _cancel_atomically(task, _flag_canceled_if_pending) is None:
+        if _cancel_atomically(task, _flag_if_still_on_node) is None:
             continue
         canceled += 1
         logger.info(f"Canceled task {task.get_id()} ({task.function_name}) on node {node_id}")
@@ -860,10 +1054,12 @@ def get_active_dev_restart_task(cluster_id, device_id):
 
 
 def get_active_node_mig_task(cluster_id, node_id, distr_name=None):
+    """A running device-migration family task on ``node_id`` (any node when
+    None), of ``distr_name`` when given."""
     tasks = db.get_job_tasks(cluster_id)
     for task in tasks:
         if task.function_name in [JobSchedule.FN_FAILED_DEV_MIG, JobSchedule.FN_DEV_MIG,
-                                  JobSchedule.FN_NEW_DEV_MIG] and task.node_id == node_id:
+                                  JobSchedule.FN_NEW_DEV_MIG] and (node_id is None or task.node_id == node_id):
             if task.status == JobSchedule.STATUS_RUNNING and task.canceled is False:
                 if distr_name:
                     if "distr_name" in task.function_params and task.function_params["distr_name"] == distr_name:
@@ -893,6 +1089,16 @@ def add_device_failed_mig_task(device_id):
         #
         # The departing node's distribs still have to be migrated; the block
         # below queues them onto its secondary or tertiary, which can run them.
+        #
+        # On a sync-replication cluster, migration_role_node picks the node for
+        # each owner. It is the primary of the LVS's active triplet. When the
+        # removal has shut that primary down, it is the secondary, or the
+        # tertiary if the secondary is also departing. A primary in
+        # pending_removal keeps its tasks. They wait until the removal sets a
+        # shut-down status, and then the runner moves them.
+        if storage_node_ops._sync_site(node):
+            _add_sync_mig_tasks(JobSchedule.FN_FAILED_DEV_MIG, node, device)
+            continue
         if node.status in StorageNode.DEPARTING_STATUSES:
             continue
         for bdev in node.lvstore_stack:
@@ -902,6 +1108,8 @@ def add_device_failed_mig_task(device_id):
 
     # add device migration tasks for device host distribs on other nodes (secondary) in case the host is in removal process
     device_node = db.get_storage_node_by_id(device.node_id)
+    if storage_node_ops._sync_site(device_node):
+        return True
     if device_node.status in StorageNode.DEPARTING_STATUSES and device_node.status != StorageNode.STATUS_REMOVED:
         secondary_node = db.get_storage_node_by_id(device_node.secondary_node_id)
         if secondary_node and secondary_node.status not in StorageNode.DEPARTING_STATUSES:
@@ -924,6 +1132,11 @@ def add_new_device_mig_task(device_id):
     for node in db.get_storage_nodes_by_cluster_id(device.cluster_id):
         # Same reason as add_device_failed_mig_task: a departing node cannot
         # run the task, so queueing it strands work nothing will ever do.
+        # On a sync-replication cluster, migration_role_node checks whether
+        # the primary of the LVS's active triplet is departing.
+        if storage_node_ops._sync_site(node):
+            _add_sync_mig_tasks(JobSchedule.FN_NEW_DEV_MIG, node, device)
+            continue
         if node.status in StorageNode.DEPARTING_STATUSES:
             continue
         for bdev in node.lvstore_stack:
@@ -931,6 +1144,18 @@ def add_new_device_mig_task(device_id):
                 _add_task(JobSchedule.FN_NEW_DEV_MIG, device.cluster_id, node.get_id(), device.get_id(),
                           max_retry=-1, function_params={'distr_name': bdev['name']})
     return True
+
+
+def _add_sync_mig_tasks(function_name, owner, device):
+    """Queue the ``function_name`` task of ``device`` for each distrib of
+    ``owner``'s LVS on a sync-replication cluster (_sync_mig_node)."""
+    distribs = _sync_distribs(owner)
+    target_id = _sync_mig_node(owner, function_name) if distribs else None
+    if not target_id:
+        return
+    for distr_name in distribs:
+        _add_task(function_name, device.cluster_id, target_id, device.get_id(),
+                  max_retry=-1, function_params=_sync_mig_params(owner, distr_name))
 
 
 def add_node_add_task(cluster_id, function_params):
@@ -1059,10 +1284,30 @@ def get_active_node_tasks(cluster_id, node_id):
     return out
 
 
+# Data movement on a node that JC compression waits for: migration and
+# restart work, after which the journal stops growing and one compression
+# pass is effective. Not every active task: replication, backup and sync
+# tasks are always open on a node that replicates, and counting them kept
+# the resume from ever firing (bf7 2026-10-30: the 16:39 rebalancing
+# finished, no node's own journal was resumed, the JMs filled by 19:20).
+_JC_COMP_WAITS_FOR = (
+    JobSchedule.FN_DEV_MIG, JobSchedule.FN_FAILED_DEV_MIG, JobSchedule.FN_NEW_DEV_MIG,
+    JobSchedule.FN_NODE_RESTART, JobSchedule.FN_DEV_RESTART, JobSchedule.FN_NODE_ADD,
+    JobSchedule.FN_LVOL_MIG, JobSchedule.FN_LVOL_BATCH_MIG, JobSchedule.FN_CLUSTER_EXPAND,
+)
+
+
+def get_jc_comp_blocking_node_tasks(cluster_id, node_id):
+    return [t for t in get_active_node_tasks(cluster_id, node_id)
+            if t.function_name in _JC_COMP_WAITS_FOR]
+
+
 def get_new_device_mig_task(cluster_id, node_id, distr_name, dev_id=None):
+    """The open new-device migration of ``distr_name`` on ``node_id``; on any
+    node when ``node_id`` is None."""
     tasks = db.get_job_tasks(cluster_id)
     for task in tasks:
-        if task.function_name == JobSchedule.FN_NEW_DEV_MIG and task.node_id == node_id:
+        if task.function_name == JobSchedule.FN_NEW_DEV_MIG and node_id in (None, task.node_id):
             if dev_id:
                 if task.device_id != dev_id:
                     continue
@@ -1073,9 +1318,11 @@ def get_new_device_mig_task(cluster_id, node_id, distr_name, dev_id=None):
 
 
 def get_device_mig_task(cluster_id, node_id, device_id, distr_name):
+    """The open device migration of ``distr_name`` on ``node_id``; on any
+    node when ``node_id`` is None."""
     tasks = db.get_job_tasks(cluster_id)
     for task in tasks:
-        if task.function_name == JobSchedule.FN_DEV_MIG and task.node_id == node_id:
+        if task.function_name == JobSchedule.FN_DEV_MIG and node_id in (None, task.node_id):
             if task.status != JobSchedule.STATUS_DONE and task.canceled is False \
                     and "distr_name" in task.function_params and task.function_params["distr_name"] == distr_name:
                 return task.uuid
@@ -1091,10 +1338,14 @@ def get_new_device_mig_task_for_device(cluster_id):
     return False
 
 
-def get_failed_device_mig_task(cluster_id, device_id):
+def get_failed_device_mig_task(cluster_id, device_id, distr_name=None):
+    """An open failed-device migration of ``device_id`` on any node; of the
+    distrib ``distr_name`` only, when given."""
     tasks = db.get_job_tasks(cluster_id)
     for task in tasks:
         if task.function_name == JobSchedule.FN_FAILED_DEV_MIG and task.device_id == device_id:
+            if distr_name and task.function_params.get("distr_name") != distr_name:
+                continue
             if task.status != JobSchedule.STATUS_DONE and task.canceled is False:
                 return task.uuid
     return False
@@ -1282,6 +1533,51 @@ def add_backup_task(backup):
     )
 
 
+def add_group_backup_delete_task(group_backup):
+    """Create the task that retires a deleting group backup's members, unless
+    one is already open for it.
+
+    Like the commit task it does no data-plane RPC of its own (a member's merge
+    is its own FN_BACKUP_MERGE task), so it carries no node. Returns the task
+    id, or False when one is already open.
+    """
+    for task in db.get_job_tasks_by_function(group_backup.cluster_id,
+                                            JobSchedule.FN_GROUP_BACKUP_DELETE):
+        if ((task.function_params or {}).get("group_backup_id") == group_backup.uuid
+                and not task.canceled and task.status != JobSchedule.STATUS_DONE):
+            logger.info(f"Task found, skip adding new task: {task.uuid}")
+            return False
+    return _add_task(
+        JobSchedule.FN_GROUP_BACKUP_DELETE,
+        group_backup.cluster_id,
+        "",
+        "",
+        max_retry=constants.BACKUP_TASK_MAX_RETRIES,
+        function_params={
+            "group_backup_id": group_backup.uuid,
+        },
+    )
+
+
+def add_group_backup_commit_task(group_backup):
+    """Create the task that commits a consistency-group backup.
+
+    The task does no data-plane RPC: it watches the member backups (which the
+    FN_BACKUP runner drives) and publishes the group manifest once every member
+    has completed, so it carries no node and only the group backup id.
+    """
+    return _add_task(
+        JobSchedule.FN_GROUP_BACKUP_COMMIT,
+        group_backup.cluster_id,
+        "",
+        "",
+        max_retry=constants.BACKUP_TASK_MAX_RETRIES,
+        function_params={
+            "group_backup_id": group_backup.uuid,
+        },
+    )
+
+
 def add_backup_restore_task(cluster_id, node_id, backup_id, lvol_name, chain_ids,
                             lvol_id="", s3_config=None):
     """Create the task that restores an S3 backup chain into a new lvol.
@@ -1327,6 +1623,16 @@ def add_backup_merge_task(cluster_id, node_id, keep_backup_id, old_backup_id):
 
 def _check_snap_instance_on_node(snapshot_id: str , node_id: str):
     snapshot = db.get_snapshot_by_id(snapshot_id)
+    # Nothing to queue when the base already has its copy on the target, or a
+    # replication of it is already queued. Without these checks every
+    # replication task of a clone (every migrated volume is one) queued its
+    # base again: bf8 2026-11-02, 66 tasks for one repl_commit base, each
+    # answering "already replicated" after ~3.6 s, ~16 % of the serial
+    # replication runner -- enough to keep migrations above the cutover gate.
+    if snapshot.target_replicated_snap_uuid:
+        return
+    if _active_snapshot_replication_task(snapshot.cluster_id, snapshot.get_id()):
+        return
     for sn_inst in snapshot.instances:
         if sn_inst["lvol"]["node_id"] == node_id:
             logger.info("Snapshot instance found on node, skip adding replication task")
@@ -1340,6 +1646,16 @@ def _check_snap_instance_on_node(snapshot_id: str , node_id: str):
               function_params={"snapshot_id": snapshot.get_id(), "replicate_to_source": False,
                                "replicate_as_snap_instance": True},
               send_to_cluster_log=False)
+
+
+def _active_snapshot_replication_task(cluster_id, snapshot_id):
+    """An open (not done, not canceled) replication task of *snapshot_id*."""
+    for task in db.get_job_tasks(cluster_id):
+        if (task.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION
+                and task.status != JobSchedule.STATUS_DONE and not task.canceled
+                and (task.function_params or {}).get("snapshot_id") == snapshot_id):
+            return task.uuid
+    return False
 
 
 def add_snapshot_replication_task(cluster_id, node_id, snapshot_id, replicate_to_source=False,
@@ -1374,6 +1690,86 @@ def get_active_replication_final_task(cluster_id, lvol_id):
     return False
 
 
+def cutover_is_freezing(task, now=None):
+    """True while a replication cutover task may be inside its IO freeze, or
+    has already moved the volume -- either way it must not be canceled.
+
+    The runner stamps ``freeze_started_at`` right before it fences the source
+    and drops it when a final step fails. A freeze is bounded by SPDK's final
+    step limit, so a stamp older than REPL_CUTOVER_FREEZE_GUARD_SEC is a pass
+    that died mid-freeze, not one still freezing.
+    """
+    params = task.function_params or {}
+    if params.get("end_time"):
+        return True
+    started = params.get("freeze_started_at")
+    if not started:
+        return False
+    now = time.time() if now is None else now
+    return now - float(started) < constants.REPL_CUTOVER_FREEZE_GUARD_SEC
+
+
+def replication_final_task_freezing(tasks, lvol_id):
+    """True when an active cutover task of *lvol_id* among *tasks* is freezing."""
+    return any(
+        t.function_name == JobSchedule.FN_REPLICATION_FINAL
+        and not t.canceled and t.status != JobSchedule.STATUS_DONE
+        and (t.function_params or {}).get("lvol_id") == lvol_id
+        and cutover_is_freezing(t)
+        for t in tasks)
+
+
+def cancel_cutover_unless_freezing(task):
+    """Cancel a replication cutover task unless it is freezing; atomically, so
+    a freeze that starts between the caller's read and this write wins.
+
+    Returns True if this call canceled it. The runner then ends the task and
+    its on_finish reverts the relationship and deletes the clone.
+    """
+    def _guard(fresh):
+        if fresh.status == JobSchedule.STATUS_DONE or cutover_is_freezing(fresh):
+            return False
+        return _flag_canceled(fresh)
+
+    return _cancel_atomically(task, _guard) is not None
+
+
+def get_replication_final_task(cluster_id, lvol_id):
+    """Return the UUID of the replication cutover task a new commit of *lvol_id*
+    would repeat, or False: one queued or running, or one that finished the
+    cutover while the relationship it cut over still stands. A finished
+    cutover leaves the source in place until delete_source retires it, and a
+    commit then would build a second clone. A fail-back back to the source
+    removes that relationship, and a later commit of the same volume is a new
+    cutover. A task that ended without the cutover is not returned either.
+
+    One indexed read of the cluster's cutover tasks serves both checks."""
+    finished = []
+    for task in db.get_job_tasks_by_function(cluster_id, JobSchedule.FN_REPLICATION_FINAL):
+        if task.canceled is not False or task.function_params.get("lvol_id") != lvol_id:
+            continue
+        if task.status != JobSchedule.STATUS_DONE:
+            return task.uuid
+        if task.function_result == "cutover done":
+            finished.append(task)
+    for task in finished:
+        if _cutover_stands(task.function_params.get("replication_id")):
+            return task.uuid
+    return False
+
+
+def _cutover_stands(replication_id):
+    """Whether the relationship a cutover cut over is still recorded as cut
+    over. A fail-back removes the prior relationship when it completes."""
+    if not replication_id:
+        return False
+    try:
+        rep = db.get_lvol_replication_by_id(replication_id)
+    except KeyError:
+        return False
+    return rep.state == LVolReplication.STATE_CUTOVER_DONE
+
+
 def add_replication_final_task(cluster_id, src_node_id, function_params):
     """Create the JobSchedule task that drives a cross-cluster replication
     cutover (freeze + final delta + ANA flip).
@@ -1384,6 +1780,95 @@ def add_replication_final_task(cluster_id, src_node_id, function_params):
     """
     return _add_task(JobSchedule.FN_REPLICATION_FINAL, cluster_id, src_node_id, "",
                      function_params=function_params, send_to_cluster_log=False)
+
+
+def add_sync_resync_task(cluster_id, owner_node_id, lvs_name):
+    """Queue the catch-up of ``lvs_name`` (owned by ``owner_node_id``) after a
+    zone desync, unless the LVS has an active one - every instance of a volume
+    pushes its own zone-unavailable event, and they all ask for the same
+    resync. Returns the new task's UUID, or False when one exists.
+
+    Check and create are one transaction over the LVS's sync state
+    (DBController.ensure_sync_resync_task), which the resync runner's DONE
+    decision also takes (DBController.finish_sync_resync): concurrent callers
+    never create two, and an event recorded before this call is either seen
+    by that decision or finds the task DONE here.
+    """
+    task_obj = JobSchedule()
+    task_obj.uuid = str(uuid.uuid4())
+    task_obj.cluster_id = cluster_id
+    task_obj.node_id = owner_node_id
+    task_obj.date = int(time.time())
+    task_obj.function_name = JobSchedule.FN_SYNC_RESYNC
+    task_obj.function_params = {"lvs_name": lvs_name}
+    task_obj.max_retry = -1
+    task_obj.status = JobSchedule.STATUS_NEW
+    task_id, created = db.ensure_sync_resync_task(task_obj, lvs_name)
+    if not created:
+        logger.info(f"Task found, skip adding new task: {task_id}")
+        return False
+    tasks_events.task_create(task_obj)
+    return task_id
+
+
+def add_sync_promote_task(cluster_id, owner_node_id, *, site, lvol_ids, owners, lost_site="",
+                          fence=False):
+    """Queue the promote of ``lvol_ids`` to ``site`` (sync replication,
+    FN_SYNC_PROMOTE); ``owners`` maps each LVS the promote may move to its
+    owner id; ``lost_site`` names the site whose disaster gate judges the
+    promote ("" for a planned promote); ``fence``: the request is a disaster
+    fail-over of ``lost_site``, which the runner fences first - without it a
+    promote queued while a site is recorded never fences it. Returns
+    ``(task_id, created)``: when one of those LVS already has an active (not
+    done, not canceled) promote task, that task's id and False - checked and
+    created in one transaction (DBController.ensure_sync_promote_task)."""
+    task_obj = JobSchedule()
+    task_obj.uuid = str(uuid.uuid4())
+    task_obj.cluster_id = cluster_id
+    task_obj.node_id = owner_node_id
+    task_obj.date = int(time.time())
+    task_obj.function_name = JobSchedule.FN_SYNC_PROMOTE
+    task_obj.function_params = {"site": site, "lvol_ids": list(lvol_ids),
+                                "lvs_names": sorted(owners), "owners": dict(owners),
+                                "moves": {}, "transferring": [], "lost_site": lost_site,
+                                "fence": fence}
+    # A pass ends the task itself; max_retry, enforced by the shared task
+    # driver, bounds only the passes an unexpected error interrupts
+    # (tasks_runner_sync_promote).
+    task_obj.max_retry = constants.SYNC_PROMOTE_MAX_UNEXPECTED_ERRORS
+    task_obj.status = JobSchedule.STATUS_NEW
+    task_id, created = db.ensure_sync_promote_task(task_obj, sorted(owners))
+    if created:
+        tasks_events.task_create(task_obj)
+    else:
+        logger.info(f"Sync promote task found, skip adding new task: {task_id}")
+    return task_id, created
+
+
+def add_sync_site_fence_task(cluster_id, site):
+    """Queue the site-level fence of ``site`` (sync replication,
+    FN_SYNC_SITE_FENCE): the disaster site steps, run once for the whole
+    site by the promote runner. Returns ``(task_id, created)``: when the site
+    already has a fence task in progress, that task's id and False - checked
+    and created in one transaction (DBController.ensure_sync_site_fence_task)."""
+    task_obj = JobSchedule()
+    task_obj.uuid = str(uuid.uuid4())
+    task_obj.cluster_id = cluster_id
+    task_obj.date = int(time.time())
+    task_obj.function_name = JobSchedule.FN_SYNC_SITE_FENCE
+    # ``lvol_ids`` empty: the site steps fence every volume led from the site,
+    # none excepted (a promote excepts the volumes it moves).
+    task_obj.function_params = {"site": site, "lvol_ids": []}
+    # As a promote: a pass ends the task itself, max_retry bounds only the
+    # passes an unexpected error interrupts.
+    task_obj.max_retry = constants.SYNC_PROMOTE_MAX_UNEXPECTED_ERRORS
+    task_obj.status = JobSchedule.STATUS_NEW
+    task_id, created = db.ensure_sync_site_fence_task(task_obj, site)
+    if created:
+        tasks_events.task_create(task_obj)
+    else:
+        logger.info(f"Sync site fence task found, skip adding new task: {task_id}")
+    return task_id, created
 
 
 def get_active_lvol_migration(node_id):

@@ -62,8 +62,8 @@ class TestLeaderIndependentFinish:
         i = src.index("if leader_independent:")
         end = src.index(chr(10)+"    else:"+chr(10)+"        leader_node = None", i)
         window = src[i:end]
-        # no get_lvstores leadership probe inside the independent branch
-        assert "bdev_lvol_get_lvstores" not in window
+        # no get_lvstore leadership probe inside the independent branch
+        assert "get_lvstore" not in window
 
     def test_it_never_raises_no_leader_in_the_independent_path(self):
         """The old finish raised 'Failed to get leader node'; that must be
@@ -101,7 +101,7 @@ class TestLeaderIndependentFinish:
     def test_the_normal_path_still_probes_leadership_and_can_raise(self):
         """leader_independent=False must behave exactly as before."""
         src = _finish_src()
-        assert "bdev_lvol_get_lvstores" in src
+        assert "get_lvstore" in src
         assert 'raise Exception("Failed to get leader node")' in src
 
     def test_the_normal_primary_delete_is_not_forced(self):

@@ -829,7 +829,7 @@ class RandomFailoverTest(TestLvolHACluster):
             if lvol in self.lvols_without_sec_connect:
                 self.lvols_without_sec_connect.remove(lvol)
             del self.lvol_mount_details[lvol]
-            for _, lvols in self.node_vs_lvol.items():
+            for lvols in self.node_vs_lvol.values():
                 if lvol in lvols:
                     lvols.remove(lvol)
                     break
@@ -1002,11 +1002,11 @@ class RandomFailoverTest(TestLvolHACluster):
             if not self.sbcli_utils.is_secondary_node(self.current_outage_node):
                 self.validate_migration_for_node(self.outage_start_time, 2000, None, 60, no_task_ok=no_task_ok)
 
-            for clone, clone_details in self.clone_mount_details.items():
+            for clone_details in self.clone_mount_details.values():
                 self.common_utils.validate_fio_test(self.fio_node,
                                                     log_file=clone_details["Log"])
 
-            for lvol, lvol_details in self.lvol_mount_details.items():
+            for lvol_details in self.lvol_mount_details.values():
                 self.common_utils.validate_fio_test(self.fio_node,
                                                     log_file=lvol_details["Log"])
 
@@ -1033,12 +1033,12 @@ class RandomFailoverTest(TestLvolHACluster):
                 self.validate_migration_for_node(self.outage_start_time, 2000, None, 60, no_task_ok=no_task_ok)
             self.common_utils.manage_fio_threads(self.fio_node, self.fio_threads, timeout=5000)
 
-            for lvol_name, lvol_details in self.lvol_mount_details.items():
+            for lvol_details in self.lvol_mount_details.values():
                 self.common_utils.validate_fio_test(
                     self.fio_node,
                     lvol_details["Log"]
                 )
-            for clone_name, clone_details in self.clone_mount_details.items():
+            for clone_details in self.clone_mount_details.values():
                 self.common_utils.validate_fio_test(
                     self.fio_node,
                     clone_details["Log"]

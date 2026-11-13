@@ -9,15 +9,22 @@ inline on the owning node at the time it was requested:
 - ``FN_LVOL_SYNC_DEL`` — delete a replica bdev on a secondary node, holding the
   primary's del-sync lock until the task ends.
 """
+import errno
 import time
 from typing import NoReturn
 
 from simplyblock_core import constants, db_controller, storage_node_ops, utils
-from simplyblock_core.controllers import events_controller, snapshot_controller
+from simplyblock_core.controllers import (
+    activation_gate,
+    events_controller,
+    snapshot_controller,
+    tasks_controller,
+)
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.rpc_client import RPCException, RPCRemoteError
 from simplyblock_core.services.task_runner_base import (
     RunnerSpec,
     TaskAbort,
@@ -41,6 +48,32 @@ def get_primary_node(task) -> StorageNode | None:
     if nodes:
         return nodes[0]
     return None
+
+
+def _site_activation_holds(cl, task) -> str:
+    """activation_gate.site_activation_blocks for the LVS a sync task works
+    on: the owner of its volume (FN_LVOL_SYNC_OP) or the LVS its bdev belongs
+    to (FN_LVOL_SYNC_DEL) - not ``primary_node``, which is the leader that
+    acted on the delete and may own another LVS. A sync delete whose LVS has no
+    owner is held like a node-level operation; a sync op whose volume is gone
+    is not - the task itself finishes it without an RPC."""
+    if not activation_gate.site_activation_blocks(cl):
+        return ""
+    if task.function_name == JobSchedule.FN_LVOL_SYNC_OP:
+        try:
+            lvol = db.get_lvol_by_id(task.function_params["lvol_id"])
+        except KeyError:
+            return ""
+        return tasks_controller.site_activation_holds(cl, lvol.node_id)
+    lvs_name = task.function_params.get("lvol_bdev_name", "").split("/")[0]
+    return tasks_controller.site_activation_holds_lvs(cl, lvs_name)
+
+
+def _is_eligible(task, cluster):
+    """Left untouched while the cluster is in_activation, or while a site
+    activation holds the LVS the task works on."""
+    return (cluster.status != Cluster.STATUS_IN_ACTIVATION
+            and not _site_activation_holds(cluster, task))
 
 
 def _is_already_gone(err):
@@ -140,6 +173,11 @@ def _run_sync_op(task):
         raise TaskAbort("node no longer hosts this lvol (topology moved)")
     if node.status != StorageNode.STATUS_ONLINE:
         raise TaskDefer(f"node is {node.status}, retrying")
+    if storage_node_ops._sync_site(node) and storage_node_ops.member_absent_on_recorded_site(
+            db.get_cluster_by_id(node.cluster_id), node):
+        # Sync replication: an ONLINE node of the site the cluster records
+        # lost holds no instance until its site activation builds them.
+        raise TaskDefer(f"node is on the recorded site {node.site} and holds no instance, retrying")
     if storage_node_ops.get_restart_phase(task.node_id, lvol.lvs_name):
         # The owning flow (restart/activation/expansion) re-registers
         # lvols itself; re-check once it has released the LVS.
@@ -162,8 +200,14 @@ def _run_sync_op(task):
         # size after the fan-out, so this always applies the latest
         # target even if the lvol was resized again meanwhile.
         size_in_mib = utils.convert_size(lvol.size, 'MiB')
-        if not node.rpc_client(timeout=10, retry=2).bdev_lvol_resize(
-                f"{lvol.lvs_name}/{lvol.lvol_bdev}", size_in_mib):
+        try:
+            ok = node.rpc_client(timeout=10, retry=2).bdev_lvol_resize(
+                f"{lvol.lvs_name}/{lvol.lvol_bdev}", size_in_mib)
+        except RPCException as e:
+            # Uncounted, like a falsy result: a raise used to count against
+            # max_retry and the replica was left smaller than the leader.
+            raise TaskDefer(f"resize RPC failed, retrying: {e}") from e
+        if not ok:
             raise TaskDefer("resize RPC failed, retrying")
         set_result(task, f"resized lvol {lvol_id} on {task.node_id} to {size_in_mib} MiB")
     else:
@@ -233,20 +277,19 @@ def _run_sync_del(task):
                 node.cluster_id,
                 lvol_bdev_name.split("/")[0],
                 node_id=node.get_id()):
-            ret, err = node.rpc_client().delete_lvol(lvol_bdev_name, sync=True)
+            node.rpc_client().delete_lvol(lvol_bdev_name, sync=True)
+    except RPCRemoteError as e:
+        if e.code != -errno.ENODEV:
+            # ENODEV never reaches here: it is handled below as success (the
+            # peer is already clean), so it is never counted.
+            _fail_sync_del(
+                task, node, lvol_bdev_name,
+                f"Failed to sync delete bdev: {lvol_bdev_name} from node: {node.get_id()}")
+        logger.error(f"Sync delete completed with error: {e}")
     except Exception as e:
         _fail_sync_del(
             task, node, lvol_bdev_name,
             f"Sync delete of {lvol_bdev_name} on {node.get_id()} failed: {e}; will retry")
-
-    if not ret:
-        if "code" not in err or err["code"] != -19:
-            # -19 never reaches here: it is handled below as success (the peer
-            # is already clean), so it is never counted.
-            _fail_sync_del(
-                task, node, lvol_bdev_name,
-                f"Failed to sync delete bdev: {lvol_bdev_name} from node: {node.get_id()}")
-        logger.error(f"Sync delete completed with error: {err}")
 
     set_result(task, f"bdev {lvol_bdev_name} deleted")
 
@@ -277,7 +320,7 @@ SPEC = RunnerSpec(
     handler=process_task,
     on_finish=release_del_sync_lock,
     on_failure=alert_sync_delete_failure,
-    is_eligible=lambda task, cluster: cluster.status != Cluster.STATUS_IN_ACTIVATION,
+    is_eligible=_is_eligible,
     interval=3,
 )
 

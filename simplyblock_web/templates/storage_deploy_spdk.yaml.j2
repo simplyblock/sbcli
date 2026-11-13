@@ -6,17 +6,29 @@ metadata:
   labels:
     app: spdk-app-{{ RPC_PORT }}
     role: simplyblock-storage-node
-  {% if MODE == "kubernetes" %}
+    {% if FULL_CLUSTER_ID %}
+    simplyblock.io/cluster: {{ FULL_CLUSTER_ID }}
+    {% endif %}
+  {% if MODE == "kubernetes" or NETWORKS %}
   annotations:
+    {% if MODE == "kubernetes" %}
     log-collector/enabled: "true"
+    {% endif %}
+    {% if NETWORKS %}
+    k8s.v1.cni.cncf.io/networks: {{ NETWORKS | tojson }}
+    {% endif %}
   {% endif %}
 spec:
   restartPolicy: Never
   serviceAccountName: simplyblock-storage-node-sa
   nodeSelector:
     kubernetes.io/hostname: {{ HOSTNAME }}
+  {% if NETWORKS or POD_NETWORK %}
+  dnsPolicy: ClusterFirst
+  {% else %}
   hostNetwork: true
   dnsPolicy: ClusterFirstWithHostNet
+  {% endif %}
   tolerations:
     - effect: NoSchedule
       operator: Exists
@@ -46,6 +58,13 @@ spec:
     - name: host-modules
       hostPath:
         path: /lib/modules
+    # dev-vol bind-mounts the whole host /dev into the container (needed for
+    # block/NVMe device access), which brings along the host's existing
+    # /dev/hugepages hugetlbfs mount. There is no dedicated hugepage volume:
+    # the container shares the host's hugepage pool rather than an isolated,
+    # kubelet-provisioned one. The hugepages-2Mi resource limit still bounds
+    # allocation via the kernel hugetlb cgroup controller, independent of
+    # which mount is used to reach it.
     - name: dev-vol
       hostPath:
         path: /dev
@@ -53,9 +72,6 @@ spec:
       hostPath:
         path: /var/crash
         type: DirectoryOrCreate
-    - name: hugepage
-      emptyDir:
-        medium: HugePages
     - name: script-volume
       emptyDir: {}
     - name: varlog
@@ -68,12 +84,12 @@ spec:
     - name: tls
     {% if TLS_PROVIDER == "cert-manager" %}
       secret:
-        secretName: simplyblock-spdk-proxy-tls
+        secretName: "{{ SPDK_PROXY_TLS_SECRET }}"
     {% else %}
       projected:
         sources:
           - secret:
-              name: simplyblock-spdk-proxy-tls
+              name: "{{ SPDK_PROXY_TLS_SECRET }}"
           - configMap:
               name: simplyblock-certificate-authority
               items:
@@ -105,8 +121,6 @@ spec:
           value: "{{ RPC_PORT }}"
         - name: NSOCKET
           value: "{{ NSOCKET }}"
-        - name: FW_PORT
-          value: "{{ FW_PORT }}"
       lifecycle:
         postStart:
           exec:
@@ -140,17 +154,27 @@ spec:
           memory: {{ MEM2_MEGA }}Mi
           numa-align/numa-{{ NSOCKET }}: 1
           {% endif %}
+          {% for name, count in (DEVICE_RESOURCES or {}).items() %}
+          {{ name }}: {{ count }}
+          {% endfor %}
         requests:
-          hugepages-2Mi: {{ MEM_MEGA }}Mi
           {% if CPU_TOPOLOGY_ENABLED %}
           memory: {{ MEM2_MEGA }}Mi
           numa-align/numa-{{ NSOCKET }}: 1
           {% endif %}
+          {% for name, count in (DEVICE_RESOURCES or {}).items() %}
+          {{ name }}: {{ count }}
+          {% endfor %}
 
     - name: spdk-proxy-container
       image: {{ SIMPLYBLOCK_DOCKER_IMAGE }}
       imagePullPolicy: "Always"
       command: ["python3", "simplyblock_core/services/spdk_http_proxy_server.py"]
+      ports:
+        # Descriptive for introspection, e.g. automated prometheus scraping
+        - name: proxy-http
+          containerPort: {{ RPC_PORT }}
+          protocol: TCP
       securityContext:
         privileged: true
         runAsUser: 0
@@ -165,6 +189,12 @@ spec:
           readOnly: true
         {% endif %}
       env:
+        {% if NETWORKS or POD_NETWORK %}
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        {% endif %}
         - name: SERVER_IP
           value: "{{ SERVER_IP }}"
         - name: RPC_PORT

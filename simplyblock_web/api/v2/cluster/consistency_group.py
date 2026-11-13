@@ -12,21 +12,25 @@ import logging
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Response
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
+from simplyblock_core import constants
 from simplyblock_core.controllers import (
     cg_colocation,
     consistency_group_controller,
     lvol_controller,
     migration_controller,
     replication_policy_controller,
+    sync_replication_controller,
 )
 from simplyblock_core.controllers.consistency_group_controller import (
     ConsistencyGroupError,
 )
 from simplyblock_core.db_controller import DBController
 
+from .. import util
 from .._dependencies import Cluster, ConsistencyGroupResource
 from .._dtos import (
     ConsistencyGroupColocateDTO,
@@ -43,6 +47,8 @@ from .._dtos import (
     ConsistencyGroupReplicationIntentDTO,
     ConsistencyGroupReplicationStatusDTO,
     ConsistencyGroupResolutionDTO,
+    SyncPromoteResultDTO,
+    SyncReplicationStatusDTO,
 )
 
 logger = logging.getLogger(__name__)
@@ -238,16 +244,31 @@ def list_generations(cluster: Cluster, group: ConsistencyGroupResource) -> built
             for r in consistency_group_controller.list_generations(group)]
 
 
+class _GenerationTakeParams(BaseModel):
+    #: The caller's id for this take. A retry with the same id answers with the
+    #: generation the first call took instead of taking another.
+    request_id: str = Field('', max_length=128)
+
+
 @instance_api.post('/snapshots', name='clusters:consistency-groups:snapshots:take',
                    response_model=ConsistencyGroupGenerationDTO)
-def take_generation(cluster: Cluster, group: ConsistencyGroupResource) -> ConsistencyGroupGenerationDTO:
-    """Take one crash-consistent generation across every current member (§5)."""
-    _ids, err = consistency_group_controller.create_group_snapshot_for_group(group)
+def take_generation(cluster: Cluster, group: ConsistencyGroupResource,
+                    body: _GenerationTakeParams | None = None) -> ConsistencyGroupGenerationDTO:
+    """Take one crash-consistent generation across every current member.
+
+    With a ``request_id``, a retry of a take whose answer was lost returns the
+    generation already taken under that id.
+    """
+    request_id = body.request_id if body is not None else ''
+    seq, err = consistency_group_controller.create_group_snapshot_for_group(
+        group, request_id=request_id)
     if err is not None:
         raise HTTPException(422, err)
     fresh = db.get_consistency_group_by_id(group.get_id())
-    rows = consistency_group_controller.list_generations(fresh)
-    return _generation_dto(rows[-1])
+    for row in consistency_group_controller.list_generations(fresh):
+        if row["group_seq"] == seq:
+            return _generation_dto(row)
+    raise HTTPException(404, f'generation {seq} not found')
 
 
 @instance_api.get('/snapshots/{seq}', name='clusters:consistency-groups:snapshots:detail',
@@ -276,28 +297,46 @@ def configure_replication(cluster: Cluster, group: ConsistencyGroupResource,
     """Enable or disable group replication (design-csi-addons-replication.md
     §14.4): a policy id attaches the whole group to that group replication
     policy; ``null`` detaches it (the group and its members stay grouped by
-    label). A refused attach (not a consistency-group policy, missing policy) is
-    a 409.
+    label). A refused attach is a 409: not a consistency-group policy, a missing
+    policy, or a member that cannot start replicating under it (a policy whose
+    target is the group's own cluster, refused by replication_start). Unmapped,
+    the last was an unhandled 500 (run 20261020-1300-ebs, test 2). A no-op on a
+    sync-replication cluster, where every volume is replicated to the other site.
     """
+    if cluster.sync_replication:
+        return Response(status_code=204)
     if body.replication_policy_id is None:
         consistency_group_controller.detach_group_policy(group)
     else:
         try:
             consistency_group_controller.attach_group_policy(
                 group, str(body.replication_policy_id))
-        except ConsistencyGroupError as e:
+        except (ConsistencyGroupError,
+                replication_policy_controller.ReplicationConfigError) as e:
             raise HTTPException(409, str(e))
     return Response(status_code=204)
 
 
 @instance_api.get('/replication/status', name='clusters:consistency-groups:replication:status',
                   response_model=ConsistencyGroupReplicationStatusDTO)
-def replication_status(cluster: Cluster, group: ConsistencyGroupResource) -> ConsistencyGroupReplicationStatusDTO:
+def replication_status(cluster: Cluster, group: ConsistencyGroupResource,
+                       site: util.SiteParameter = None) -> ConsistencyGroupReplicationStatusDTO:
     """The group's replication status as one unit: oldest recovery point, worst
     member lag and health, summed backlog (design-csi-addons-replication.md
     §14.4/§14.6). Never 404s -- a group with no replicating member reports
     ``state: not_replicating``.
+
+    On a sync-replication cluster: the cluster-wide site replication status
+    (the same for every member, not summed) and the group's role on ``site`` -
+    ``source`` only when every member is served there. ``site`` is optional (a
+    status read is cluster-wide; a missing one resolves to the members' led
+    site), the read the csi-addons adapter makes with no site to assert.
     """
+    if cluster.sync_replication:
+        with util.sync_http_errors():
+            status = sync_replication_controller.group_sync_status(
+                group.get_id(), site or None, max_age=constants.SYNC_STATUS_CACHE_SEC)
+        return ConsistencyGroupReplicationStatusDTO.from_sync_status(status)
     members = consistency_group_controller.list_members(group)
     present = []
     for member in members:
@@ -333,6 +372,23 @@ def replication_status(cluster: Cluster, group: ConsistencyGroupResource) -> Con
     return ConsistencyGroupReplicationStatusDTO.from_info(agg)
 
 
+@instance_api.get('/replication/sync-status', name='clusters:consistency-groups:replication:sync-status',
+                  response_model=SyncReplicationStatusDTO)
+def replication_sync_status(cluster: Cluster, group: ConsistencyGroupResource,
+                            site: util.SiteParameter = None) -> SyncReplicationStatusDTO:
+    """The sync-replication status of the group seen from ``site``: its role
+    there (``primary`` only when every member is served there) and the
+    cluster-wide state. ``site`` is optional (a status read is cluster-wide; a
+    missing one resolves to the members' led site). 400 on a cluster without
+    sync replication."""
+    if not cluster.sync_replication:
+        raise util.sync_error(400, f'cluster {cluster.get_id()} is not a sync-replication cluster')
+    with util.sync_http_errors():
+        status = sync_replication_controller.group_sync_status(
+            group.get_id(), site or None, max_age=constants.SYNC_STATUS_CACHE_SEC)
+    return SyncReplicationStatusDTO.from_status(status)
+
+
 @instance_api.get('/replication/resolution', name='clusters:consistency-groups:replication:resolution',
                   response_model=ConsistencyGroupResolutionDTO)
 def replication_resolution(cluster: Cluster, group: ConsistencyGroupResource) -> ConsistencyGroupResolutionDTO:
@@ -354,8 +410,10 @@ def replication_resolution(cluster: Cluster, group: ConsistencyGroupResource) ->
     )
 
 
-@instance_api.post('/replication/failover', name='clusters:consistency-groups:replication:failover')
-def replication_failover(cluster: Cluster, group: ConsistencyGroupResource) -> dict:
+@instance_api.post('/replication/failover', name='clusters:consistency-groups:replication:failover',
+                   response_model=None)
+def replication_failover(cluster: Cluster, group: ConsistencyGroupResource,
+                         planned: bool = False, site: util.SiteParameter = None) -> dict | JSONResponse:
     """Fail the whole group over as ONE unit (design-csi-addons-replication.md
     §14.4): every member is pinned to the same group generation, all-or-nothing.
 
@@ -363,7 +421,21 @@ def replication_failover(cluster: Cluster, group: ConsistencyGroupResource) -> d
     and the demoted source volumes were deleted, the group is detached and empty,
     and the promote on the peer restores it from its newest replicated generation
     there (failover_group). Only when nothing can be promoted is it a 409.
+
+    On a sync-replication cluster: the promote of every member on ``site``
+    (required) as one, forced unless ``planned``
+    (``sync_replication_controller.sync_promote_group``) - 200
+    ``{"members": [{lvol_id, connection_strings}]}`` once all are served
+    there; 409 in progress / gate / refused, 412 as for a volume.
     """
+    if cluster.sync_replication:
+        site = util.require_site(site)
+        with util.sync_http_errors():
+            result = sync_replication_controller.sync_promote_group(group.get_id(), site, force=not planned)
+        if result.in_progress:
+            raise util.sync_error(409, 'promote in progress; call again', task_id=result.task_id)
+        members = SyncPromoteResultDTO.from_result(result.connection_strings or {})
+        return JSONResponse(status_code=200, content={"members": jsonable_encoder(members)})
     members = replication_policy_controller.failover_group(group)
     # A group fail-over/-back is all-or-nothing: surface any member failure -- or
     # an empty result, which means nothing was promoted at all -- as a non-2xx so
@@ -397,12 +469,21 @@ def replication_failover(cluster: Cluster, group: ConsistencyGroupResource) -> d
 
 @instance_api.post('/replication/demote', name='clusters:consistency-groups:replication:demote',
                    status_code=204, responses={204: {"content": None}, 202: {"content": None}})
-def replication_demote(cluster: Cluster, group: ConsistencyGroupResource) -> Response:
+def replication_demote(cluster: Cluster, group: ConsistencyGroupResource,
+                       site: util.SiteParameter = None) -> Response:
     """Demote the whole group: fence every member and confirm each one's last
     write replicated (design-csi-addons-replication.md §14.4). Re-drivable, not
     queued: 204 once every member is demoted, 202 (with per-member detail) while
     any is still converging, 500 on a hard failure.
+
+    On a sync-replication cluster: fence every member on ``site`` (required),
+    one gate for all - 204, 409 when the gate fails.
     """
+    if cluster.sync_replication:
+        site = util.require_site(site)
+        with util.sync_http_errors():
+            sync_replication_controller.sync_demote_group(group.get_id(), site)
+        return Response(status_code=204)
     result = consistency_group_controller.demote_group(group)
     if result.get("error"):
         logger.error("group demote failed for %s: %s", group.get_id(), result["error"])
@@ -422,8 +503,11 @@ def replication_failback(cluster: Cluster, group: ConsistencyGroupResource,
                          body: GroupFailbackParams) -> Response:
     """Fail the whole group back: point every member's replication back at the
     source cluster (design-csi-addons-replication.md §14.4). The cutover itself is
-    each member's own commit.
+    each member's own commit. A no-op on a sync-replication cluster (its resync
+    is automatic).
     """
+    if cluster.sync_replication:
+        return Response(status_code=204)
     result = consistency_group_controller.failback_group(
         group,
         source_cluster_id=str(body.source_cluster_id) if body.source_cluster_id else None,

@@ -17,7 +17,7 @@ from simplyblock_core.models.hublvol import HubLVol
 from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.storage_node import StorageNode
-from tests._mocks import assert_hublvol_wired, unique_ip
+from tests._mocks import assert_hublvol_wired, route_fences, unique_ip
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -223,16 +223,16 @@ class TestRecreateLvstoreDualSecondary(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.health_controller")
     @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
     @patch("simplyblock_core.storage_node_ops.storage_events")
-    @patch("simplyblock_core.utils.port_block.set_port")
     @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._connect_to_remote_jm_devs")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.DBController")
     def test_both_secondaries_get_firewall_blocked(
             self, mock_db_cls, mock_create_bdev, mock_connect_jm,
-            mock_rpc_cls, mock_fw_cls, mock_storage_events, mock_tcp_events,
+            mock_rpc_cls, mock_storage_events, mock_tcp_events,
             mock_health, mock_recreate_on_non_leader, _mock_disc, _mock_phase, _mock_handle):
         """Both sec1 and sec2 should have their ports blocked during primary restart."""
+        mock_fw_cls = MagicMock()
         from simplyblock_core.storage_node_ops import recreate_lvstore
 
         nodes = self._build_4node_cluster()
@@ -251,7 +251,7 @@ class TestRecreateLvstoreDualSecondary(unittest.TestCase):
 
         # RPC client mock
         rpc = MagicMock()
-        rpc.bdev_lvol_get_lvstores.return_value = [{"lvs leadership": True}]
+        rpc.get_lvstore.return_value = {"lvs leadership": True}
         rpc.bdev_get.return_value = None
         rpc.bdev_lvol_set_lvs_opts.return_value = True
         rpc.bdev_lvol_set_leader.return_value = True
@@ -281,6 +281,7 @@ class TestRecreateLvstoreDualSecondary(unittest.TestCase):
             n.recreate_hublvol = MagicMock()
             n.connect_to_hublvol = MagicMock()
             n.write_to_db = MagicMock()
+        route_fences(nodes.values(), mock_fw_cls)
 
         mock_recreate_on_non_leader.return_value = True
         mock_health.check_bdev.return_value = True
@@ -292,10 +293,7 @@ class TestRecreateLvstoreDualSecondary(unittest.TestCase):
 
         # Both sec1 (node-2) and sec2 (node-3) should have firewall blocked/allowed
         # Collect all firewall_set_port calls
-        fw_calls = []
-        for fw in fw_instances:
-            for c in fw.firewall_set_port.call_args_list:
-                fw_calls.append(c)
+        fw_calls = [c for fw in fw_instances for c in fw.firewall_set_port.call_args_list]
 
         # There should be block + allow calls for BOTH secondaries = 4 total
         self.assertEqual(len(fw_calls), 4,
@@ -314,16 +312,16 @@ class TestRecreateLvstoreDualSecondary(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.health_controller")
     @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
     @patch("simplyblock_core.storage_node_ops.storage_events")
-    @patch("simplyblock_core.utils.port_block.set_port")
     @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._connect_to_remote_jm_devs")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.DBController")
     def test_both_secondaries_get_hublvol_connection(
             self, mock_db_cls, mock_create_bdev, mock_connect_jm,
-            mock_rpc_cls, mock_fw_cls, mock_storage_events, mock_tcp_events,
+            mock_rpc_cls, mock_storage_events, mock_tcp_events,
             mock_health, mock_recreate_on_non_leader, _mock_disc, _mock_phase, _mock_handle):
         """Both secondaries should connect to hublvol after primary restart."""
+        mock_fw_cls = MagicMock()
         from simplyblock_core.storage_node_ops import recreate_lvstore
 
         nodes = self._build_4node_cluster()
@@ -341,7 +339,7 @@ class TestRecreateLvstoreDualSecondary(unittest.TestCase):
         mock_create_bdev.return_value = (True, None)
 
         rpc = MagicMock()
-        rpc.bdev_lvol_get_lvstores.return_value = [{"lvs leadership": True}]
+        rpc.get_lvstore.return_value = {"lvs leadership": True}
         rpc.bdev_get.return_value = None
         rpc.bdev_lvol_set_lvs_opts.return_value = True
         rpc.bdev_lvol_set_leader.return_value = True
@@ -365,6 +363,7 @@ class TestRecreateLvstoreDualSecondary(unittest.TestCase):
             # HublvolReconnectCoordinator.
             n.add_hublvol_failover_path = MagicMock(return_value=True)
             n.write_to_db = MagicMock()
+        route_fences(nodes.values(), mock_fw_cls)
 
         mock_recreate_on_non_leader.return_value = True
         mock_health.check_bdev.return_value = True
@@ -394,16 +393,16 @@ class TestRecreateLvstoreDualSecondary(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.health_controller")
     @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
     @patch("simplyblock_core.storage_node_ops.storage_events")
-    @patch("simplyblock_core.utils.port_block.set_port")
     @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._connect_to_remote_jm_devs")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.DBController")
     def test_both_secondaries_get_lvstore_status_ready(
             self, mock_db_cls, mock_create_bdev, mock_connect_jm,
-            mock_rpc_cls, mock_fw_cls, mock_storage_events, mock_tcp_events,
+            mock_rpc_cls, mock_storage_events, mock_tcp_events,
             mock_health, mock_recreate_on_non_leader, _mock_disc, _mock_phase, _mock_handle):
         """Both online secondaries should get lvstore_status='ready' at the end."""
+        mock_fw_cls = MagicMock()
         from simplyblock_core.storage_node_ops import recreate_lvstore
 
         nodes = self._build_4node_cluster()
@@ -438,7 +437,7 @@ class TestRecreateLvstoreDualSecondary(unittest.TestCase):
         mock_create_bdev.return_value = (True, None)
 
         rpc = MagicMock()
-        rpc.bdev_lvol_get_lvstores.return_value = [{"lvs leadership": True}]
+        rpc.get_lvstore.return_value = {"lvs leadership": True}
         rpc.bdev_get.return_value = None
         rpc.bdev_lvol_set_lvs_opts.return_value = True
         rpc.bdev_lvol_set_leader.return_value = True
@@ -456,6 +455,7 @@ class TestRecreateLvstoreDualSecondary(unittest.TestCase):
             n.wait_for_jm_rep_tasks_to_finish = MagicMock(return_value=True)
             n.recreate_hublvol = MagicMock()
             n.connect_to_hublvol = MagicMock()
+        route_fences(nodes.values(), mock_fw_cls)
 
         mock_recreate_on_non_leader.return_value = True
         mock_health.check_bdev.return_value = True
@@ -474,17 +474,17 @@ class TestRecreateLvstoreDualSecondary(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.health_controller")
     @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
     @patch("simplyblock_core.storage_node_ops.storage_events")
-    @patch("simplyblock_core.utils.port_block.set_port")
     @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._connect_to_remote_jm_devs")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.DBController")
     def test_offline_secondary2_skipped_gracefully(
             self, mock_db_cls, mock_create_bdev, mock_connect_jm,
-            mock_rpc_cls, mock_fw_cls, mock_storage_events, mock_tcp_events,
+            mock_rpc_cls, mock_storage_events, mock_tcp_events,
             mock_health, mock_recreate_on_non_leader, _mock_phase, _mock_handle):
         """If tertiary_node_id is offline, it should be skipped for
         firewall/hublvol but not crash."""
+        mock_fw_cls = MagicMock()
         from simplyblock_core.storage_node_ops import recreate_lvstore
 
         nodes = self._build_4node_cluster()
@@ -505,7 +505,7 @@ class TestRecreateLvstoreDualSecondary(unittest.TestCase):
         mock_create_bdev.return_value = (True, None)
 
         rpc = MagicMock()
-        rpc.bdev_lvol_get_lvstores.return_value = [{"lvs leadership": True}]
+        rpc.get_lvstore.return_value = {"lvs leadership": True}
         rpc.bdev_get.return_value = None
         rpc.bdev_lvol_set_lvs_opts.return_value = True
         rpc.bdev_lvol_set_leader.return_value = True
@@ -527,6 +527,7 @@ class TestRecreateLvstoreDualSecondary(unittest.TestCase):
             n.connect_to_hublvol = MagicMock()
             n.create_secondary_hublvol = MagicMock()
             n.write_to_db = MagicMock()
+        route_fences(nodes.values(), mock_fw_cls)
 
         mock_recreate_on_non_leader.return_value = True
         mock_health.check_bdev.return_value = True
@@ -553,16 +554,16 @@ class TestRecreateLvstoreDualSecondary(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.health_controller")
     @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
     @patch("simplyblock_core.storage_node_ops.storage_events")
-    @patch("simplyblock_core.utils.port_block.set_port")
     @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._connect_to_remote_jm_devs")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.DBController")
     def test_suspend_when_any_secondary_unreachable(
             self, mock_db_cls, mock_create_bdev, mock_connect_jm,
-            mock_rpc_cls, mock_fw_cls, mock_storage_events, mock_tcp_events,
+            mock_rpc_cls, mock_storage_events, mock_tcp_events,
             mock_health, mock_recreate_on_non_leader, _mock_disc, _mock_phase, _mock_handle):
         """If any secondary is UNREACHABLE, primary should be suspended."""
+        mock_fw_cls = MagicMock()
         from simplyblock_core.storage_node_ops import recreate_lvstore
 
         nodes = self._build_4node_cluster()
@@ -584,7 +585,7 @@ class TestRecreateLvstoreDualSecondary(unittest.TestCase):
         mock_create_bdev.return_value = (True, None)
 
         rpc = MagicMock()
-        rpc.bdev_lvol_get_lvstores.return_value = [{"lvs leadership": True}]
+        rpc.get_lvstore.return_value = {"lvs leadership": True}
         rpc.bdev_get.return_value = None
         rpc.bdev_lvol_set_lvs_opts.return_value = True
         rpc.bdev_lvol_set_leader.return_value = True
@@ -605,6 +606,7 @@ class TestRecreateLvstoreDualSecondary(unittest.TestCase):
             n.recreate_hublvol = MagicMock()
             n.connect_to_hublvol = MagicMock()
             n.write_to_db = MagicMock()
+        route_fences(nodes.values(), mock_fw_cls)
 
         mock_recreate_on_non_leader.return_value = True
         mock_health.check_bdev.return_value = True

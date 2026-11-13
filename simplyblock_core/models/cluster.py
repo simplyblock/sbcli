@@ -35,6 +35,17 @@ class Cluster(BaseModel):
     #: clear out from under a live rebuild.
     STATUS_IN_SHRINK = "in_shrink"
 
+    #: ``lost_site_state`` values (sync replication). Written by the
+    #: storage-node monitor: the site is beyond its FTT and what is left of it
+    #: is being shut down (DRAINING), or every node of it is gone and it may
+    #: return (DOWN). Written by a disaster fail-over (a forced promote): its
+    #: site steps are running - a retry redoes them (FENCING) - or they are
+    #: complete (DONE). The one definition - every reader compares against these.
+    LOST_SITE_DRAINING = "draining"
+    LOST_SITE_DOWN = "down"
+    LOST_SITE_FENCING = "fencing"
+    LOST_SITE_DONE = "done"
+
     STATUS_CODE_MAP: ClassVar[dict] = {
         STATUS_ACTIVE: 1,
         STATUS_INACTIVE: 2,
@@ -160,6 +171,14 @@ class Cluster(BaseModel):
     cr_name: str = ""
     cr_namespace: str = ""
     cr_plural: str = ""
+    # The Services a storage node is reached through, the SPDK proxy's
+    # certificate Secret, and the suffix on a node's hostname label in both
+    # Services. The operator names them at creation; a record without them
+    # predates them and uses the constant names.
+    snode_api_service: str = constants.K8S_SNODE_API_SERVICE
+    spdk_proxy_service: str = constants.K8S_SPDK_PROXY_SERVICE
+    spdk_proxy_tls_secret: str = constants.K8S_SPDK_PROXY_TLS_SECRET
+    node_label_suffix: str = ""
     disable_monitoring: bool = False
     strict_node_anti_affinity: bool = False
     tls: bool = False
@@ -183,6 +202,14 @@ class Cluster(BaseModel):
     # (its devices are not all rebuilt yet); without that node it would be
     # ACTIVE. A removal driver must not pause on that degraded state.
     is_degraded_by_removal: bool = False
+    # Migrations that ended with errors while every node and device was online,
+    # so retrying them would only hit the same errors: "<node_id>/<distr_name>"
+    # -> {"error", "ft_impacted_pages", "time"}. Only entries whose pages are not
+    # fully fault tolerant are kept (ft_impacted_pages None: the data plane does
+    # not report it, counted as impacted); while any is kept the cluster is
+    # DEGRADED instead of ACTIVE. A later migration of the distrib that completes
+    # without error removes its entry.
+    migration_ft_impact: dict = default_factory(dict)
     # Suspend-recovery drain phase marker.
     #
     # When a cluster becomes SUSPENDED, recovering it by auto-restarting nodes
@@ -258,6 +285,24 @@ class Cluster(BaseModel):
     #: falls back to the per-device record when it is still empty.
     jm_raid_layout: str = ""
     is_single_node: bool = False
+    # Whether the cluster's fresh activation made it non-HA: set when it was
+    # flagged single-node or activated with exactly one online node. Volume
+    # creation reads it to default a volume's ha_type the way the activation
+    # decided, without deciding again from how many nodes are online now.
+    activated_single_node: bool = False
+    # Two-node arbitration (docs/design/two-node-arbitration.md). Off by default:
+    # a dual-node cluster then keeps today's tolerance without the hold.
+    two_node_arbitration: bool = False
+    # Share (percent) of the data plane's IO scheduling given to the service
+    # class reserved for snapshot replication (constants.QOS_REPLICATION_CLASS_ID).
+    qos_replication_weight: int = constants.qos_class_replication_weight_percent
+    # Who decides on a two-node cluster (docs/design/two-node-kubernetes-fencing.md):
+    # "witness" (the arbiter) or "pacemaker" (the nodes follow Pacemaker's fence;
+    # the arbiter does not act on the cluster).
+    two_node_fencing_authority: str = "witness"
+    # Mode witness: revoke a lost node's client host NQN on the winner and let
+    # Kubernetes remediate it (StorageFenced condition, out-of-service taint).
+    two_node_host_fencing: bool = False
     # Failure-domain anti-affinity. When True, every storage node carries an
     # operator-supplied failure_domain tag (rack/cabinet/DC) and placement
     # spreads data/parity chunks, HA journal copies and secondary/tertiary
@@ -266,6 +311,45 @@ class Cluster(BaseModel):
     # Deploy-time only — set at cluster create/add, never toggled at runtime;
     # an existing cluster must be redeployed to gain the feature.
     enable_failure_domain: bool = False
+    # LVol geometry: new lvols inherit distr_ndcs/distr_npcs (or the values
+    # passed at create). When False every new lvol is created with
+    # ndcs=npcs=0, i.e. the distrib's own layout. Toggled at runtime with
+    # `cluster set-lvol-geometry`; existing lvols keep their geometry.
+    lvol_geometry_enabled: bool = True
+    # Site-level synchronous replication (two sites, one cluster). Deploy-time
+    # only, like enable_failure_domain: set at cluster create, never toggled.
+    # Every storage node then carries a `site`, and every LVS is replicated to
+    # the other site.
+    sync_replication: bool = False
+    # The site recorded as out ("" = both sites in service) and its state:
+    # LOST_SITE_DRAINING / LOST_SITE_DOWN when the storage-node monitor judged
+    # it beyond its FTT / gone as a whole (no fail-over involved), or how far
+    # the site-level fencing of a disaster fail-over got - LOST_SITE_FENCING
+    # while its steps run (a retry redoes them, they are idempotent),
+    # LOST_SITE_DONE once they completed. One site at a time; only the site
+    # return clears a record, except that a suspension clears the monitor's.
+    lost_site: str = ""
+    lost_site_state: str = ""
+    # The site whose Kubernetes operator leads the cluster's cluster-scoped
+    # lifecycle (activate, expand, cluster-wide restarts) on a stretched
+    # deployment ("" = unset); the other site's operator follows
+    # (design-stretched-sync-replication-ramen §5.1). Set by the create, read
+    # by a follower's adoption, moved by the hub's role swap (§11.1) through
+    # sync_replication_controller.set_leader_site - only to a site the cluster
+    # has and never to the recorded lost site. A record for the operators:
+    # the data plane never reads it.
+    leader_site: str = ""
+    # The site activation running for the recorded site ("" = none): the site
+    # it builds, the ISO time it began - the token its holder checks at every
+    # step and ends with - and the heartbeat its wrapper stamps every ~60s.
+    # Written only by sync_replication_controller.begin_site_activation /
+    # stamp_site_activation / end_site_activation, and by
+    # clear_site_activation, the storage-node monitor's watchdog. While it is
+    # set, the monitor's handling of a stored SUSPENDED waits for it, as it
+    # waits behind IN_ACTIVATION.
+    site_activation_site: str = ""
+    site_activation_since: str = ""
+    site_activation_heartbeat: str = ""
     # Storage-device mode for the whole cluster. "nvme" (default): NVMe PCIe
     # controllers auto-detected and attached through the SPDK nvme bdev.
     # "lblk": arbitrary Linux block devices wrapped in SPDK AIO bdevs (one
@@ -276,11 +360,23 @@ class Cluster(BaseModel):
     # Inline CRC checksum validation for silent-data-error protection.
     # Frozen at cluster create time; no upgrade path for existing clusters.
     inline_checksum: bool = False
+    # Page copy: a snapshot copy-on-write is done in the distribution layer as
+    # a metadata-only page copy (no data copy), merged back when the snapshot
+    # is deleted. Frozen at cluster create time: create_lvstore sets it on every
+    # distrib stack entry, so restarts re-create the distribs the same way.
+    page_copy: bool = False
     # Device guarantees 4K write atomicity despite a <4K logical block size
     # (e.g. AWS NVMe, which is 512B but atomic at 4K). When set, alceml creation
     # sends force_4k_atomic so the data plane skips its >=4K block-size gate for
     # fallback-mode inline checksum. Frozen at cluster create time.
     atomic_4k: bool = False
+    # Journal blobstore metadata pages so a write torn by a power loss cannot
+    # leave a half-written page behind. Needed when a device is not 4K-write
+    # atomic. The lvstore records it in its super block at creation, so it is
+    # frozen at cluster create time. Both create paths turn it on unless told
+    # otherwise; False here is what a record written before the field existed
+    # reads as, a cluster whose lvstores were created without it.
+    md_journal: bool = False
     snapshot_replication_target_cluster: str = ""
     snapshot_replication_target_pool: str = ""
     snapshot_replication_timeout: int = 60*10
@@ -299,6 +395,11 @@ class Cluster(BaseModel):
     # ``simplyblock_core.controllers.cluster_expansion.planner``. See the feature plan
     # ``single_node_expansion_plan.md`` for the schema.
     expand_state: dict = default_factory(dict)
+    # Set while new device weights (placement sizes after an uneven growth of
+    # lblk devices) are written but not yet pushed to every node and handed to
+    # a rebalance. A re-run of `cluster grow-devices` finishes the job. See
+    # device_controller.rebalance_after_growth.
+    reweight_pending: bool = False
     # State owned by release-specific upgrade plug-ins (see
     # simplyblock_core/release_upgrades/). Keys are plugin STATE_KEYs; a key
     # is set by the plugin's pre_update step (first thing `cluster update`
@@ -331,9 +432,8 @@ class Cluster(BaseModel):
         from simplyblock_core.db_controller import DBController
         db_controller = DBController()
         qos_classes = db_controller.get_qos(self.get_id())
-        if len(qos_classes) > 1:
-            return True
-        return False
+        # Any user class: Default alone, or nothing at all, is no QoS.
+        return any(c.class_name != "Default" for c in qos_classes)
 
     def default_backup_bucket_name(self) -> str:
         """The bucket this cluster backs up to when its configuration names none.

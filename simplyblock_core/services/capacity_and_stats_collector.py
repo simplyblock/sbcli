@@ -141,12 +141,15 @@ def detect_latency_outliers(device_records):
             logger.error(f"Failed to log latency-outlier event for {dev_id}: {e}")
 
 
-def add_device_stats(cl, device, capacity_dict, stats_dict):
+def add_device_stats(cl, device, capacity_dict, stats_dict, tick_rate=0):
     now = int(time.time())
     data = {
         "cluster_id": cl.get_id(),
         "uuid": device.get_id(),
-        "date": now}
+        "date": now,
+        # Hz of the SPDK tick the *_latency_ticks counters are measured in;
+        # 0 when the iostat reply did not carry it (see DeviceStatObject).
+        "tick_rate": int(tick_rate or 0)}
 
     if capacity_dict and capacity_dict['res'] == 1:
         # alceml reports RAW pages: parity chunks occupy them just as data
@@ -405,7 +408,10 @@ def main():
                         continue
                     if ret:
                         stats_dict = ret['bdevs'][0]
-                        record = add_device_stats(cl, device, capacity_dict, stats_dict)
+                        # tick_rate sits at the top level of the
+                        # bdev_get_iostat reply, next to `bdevs`.
+                        record = add_device_stats(cl, device, capacity_dict, stats_dict,
+                                                  tick_rate=ret.get('tick_rate') or 0)
                         if record:
                             devices_records.append(record)
                             cluster_device_records.append((device, record))

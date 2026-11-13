@@ -377,7 +377,7 @@ class TestStressLvolCloneClusterFioRun(TestLvolHACluster):
             self.ssh_obj.delete_files(self.lvol_mount_details[lvol]["Client"], [f"{self.log_path}/local-{lvol}_fio*"])
             self.ssh_obj.delete_files(self.lvol_mount_details[lvol]["Client"], [f"{self.log_path}/{lvol}_fio_iolog*"])
             del self.lvol_mount_details[lvol]
-            for _, lvols in self.node_vs_lvol.items():
+            for lvols in self.node_vs_lvol.values():
                 if lvol in lvols:
                     lvols.remove(lvol)
                     break

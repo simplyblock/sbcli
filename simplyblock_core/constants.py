@@ -68,6 +68,27 @@ PROT_STAT_COLLECTOR_INTERVAL_SEC = 10
 SPDK_STAT_COLLECTOR_INTERVAL_SEC = 30
 DISTR_EVENT_COLLECTOR_INTERVAL_SEC = 5
 DISTR_EVENT_COLLECTOR_NUM_OF_EVENTS = 10
+#: A distrib ``error_read``/``error_write``/... event names an IO the distrib
+#: could not serve from the chunks it can reach -- a stripe that has lost its
+#: redundancy. The raw event goes to the cluster log every time; the operator
+#: alert naming the owning LVS is raised at most once per (distrib, error)
+#: in this many seconds, so a client retrying the same read every 20 s does
+#: not turn one defect into hundreds of alerts.
+DISTR_ERROR_ALERT_DEBOUNCE_SEC = 600
+#: How far back ``sbctl volume check`` / ``sbctl cluster check`` look for
+#: those events when reporting an lvstore's distrib read errors.
+DISTR_ERROR_LOOKBACK_SEC = 7 * 24 * 3600
+#: A distrib error newer than this fails ``volume check`` / ``cluster check``;
+#: an older one inside the lookback is reported as a warning only.
+DISTR_ERROR_ACTIVE_SEC = 3600
+#: Fence-release budget (models/fence_release.py). A client LVS port that
+#: SPDK fenced may be reopened by the control plane this many times inside
+#: FENCE_RELEASE_WINDOW_SEC; the next refusal leaves it fenced and raises an
+#: event. Three is well above anything legitimate -- a leaked fence is lifted
+#: once -- and stops the leader/peer ping-pong of an unreadable stripe within
+#: a minute instead of letting it run until the missing node returns.
+FENCE_RELEASE_BUDGET = 3
+FENCE_RELEASE_WINDOW_SEC = 600
 #: JM events are polled on their own cadence. Unlike the distrib source there
 #: is no discard counterpart -- jm_get_events returns every event it holds on
 #: every call -- so the collector filters what it has already logged and the
@@ -389,7 +410,7 @@ SIMPLY_BLOCK_DOCKER_IMAGE = get_config_var(
 SIMPLY_BLOCK_CLI_NAME = get_config_var(
         "SIMPLY_BLOCK_COMMAND_NAME", "sbcli")
 SIMPLY_BLOCK_SPDK_ULTRA_IMAGE = get_config_var(
-        "SIMPLY_BLOCK_SPDK_ULTRA_IMAGE", "public.ecr.aws/simply-block/ultra:main-latest")
+        "SIMPLY_BLOCK_SPDK_ULTRA_IMAGE", "registry.simplyblock.ai/ultra:main-latest")
 SIMPLY_BLOCK_VERSION = __version__
 
 GELF_PORT = 12202
@@ -398,6 +419,22 @@ MIN_HUGE_PAGE_MEMORY_FOR_LVOL = 209715200
 MIN_SYS_MEMORY_FOR_LVOL = 524288000
 EXTRA_SMALL_POOL_COUNT = 30000
 EXTRA_LARGE_POOL_COUNT = 10240
+# iobuf pools (calculate_pool_count). Large buffers are not used in the data
+# path (NVMe-oF io_unit_size is 8 KiB, no zcopy, bdev callers supply buffers):
+# a fixed 100 MiB reserve instead of ~490 MiB. Small buffers get 300 MiB more,
+# for replication's transfers and merges (chains of 8 KiB). bed bf18
+# 2026-11-09: the hugepage heap ran out (5816 DMA allocation failures).
+IOBUF_SMALL_BUFSIZE = 8 * 1024
+IOBUF_LARGE_BUFSIZE = 132 * 1024
+IOBUF_LARGE_POOL_BYTES = 100 * 1024 * 1024
+IOBUF_SMALL_POOL_EXTRA_BYTES = 300 * 1024 * 1024
+# Per-thread iobuf caches of modules that do not draw buffers in the data
+# path: they only park pool buffers (bdev default 128/16, accel was 512/64).
+# The NVMe-oF poll-group cache (buf_cache_size) is kept: it is used.
+BDEV_IOBUF_SMALL_CACHE_SIZE = 16
+BDEV_IOBUF_LARGE_CACHE_SIZE = 2
+ACCEL_SMALL_CACHE_SIZE = 32
+ACCEL_LARGE_CACHE_SIZE = 2
 EXTRA_HUGE_PAGE_MEMORY = 3221225472
 EXTRA_SYS_MEMORY = 0.10
 
@@ -487,7 +524,16 @@ MAX_NAMESPACES_PER_SUBSYSTEM = 50
 # reserved huge pages for subsystems it could never serve and operators
 # believed a limit that did not hold. Ingress now rejects anything above
 # this; internal readers of an already-stored config clamp with a warning.
-MAX_SUBSYSTEMS_PER_NODE = 75
+# Raised 75 -> 500 on 2026-10-29.
+MAX_SUBSYSTEMS_PER_NODE = 500
+
+# Subsystems per node a host is sized for when nothing asks for more: what
+# `sn configure` prices huge pages for, and so what a cluster created without
+# --max-subsys (max_subsys = 0, the product default) runs with. Kept apart
+# from the ceiling above, which costs ~35 MiB of huge pages per subsystem:
+# sizing every host for the ceiling would reserve ~17 GiB on nodes that never
+# carry more than this.
+DEFAULT_SUBSYSTEMS_PER_NODE = 75
 
 # Hard cap on open-epoch members of one consistency group. The group snapshot
 # freezes I/O across every member with one bdev_lvol_snapshot_group call, so a
@@ -512,8 +558,96 @@ REPL_CUTOVER_PROCEED_TIMEOUT_SEC = 120
 # stops.
 REPL_CUTOVER_CONVERGE_TARGET_SEC = 2.0
 # Safety bound: a volume written faster than it replicates never converges, so
-# stop and freeze rather than looping forever.
+# stop and freeze rather than looping forever -- but only when the freeze can
+# succeed (REPL_CUTOVER_FREEZE_MAX_ROUND_SEC); otherwise rounds continue until
+# shrink_deadline.
 REPL_CUTOVER_MAX_SHRINK_ROUNDS = 12
+# A volume whose snapshots are not being deleted as fast as replication takes
+# them takes no new internal replication snapshot while this many are pending
+# deletion (in deletion, or replicated beyond what retention keeps). Sized to
+# match the endgame's round bound (2026-11-04).
+REPL_MAX_DELETION_BACKLOG = REPL_CUTOVER_MAX_SHRINK_ROUNDS
+# Hard limit SPDK puts on bdev_lvol_transfer_final_step: the final step's
+# terminate_timeout is armed when it starts and fails the transfer ("Task
+# transfer terminate timeout ...", transfer_state 'Failed') once it passes.
+# It is a compile-time constant in the SPDK fork
+# (SPDK_LVOL_TRANSFER_TERMINATE_TIMEOUT, lib/lvol/lvol.c), NOT an RPC
+# parameter: keep this mirror in sync with it.
+REPL_CUTOVER_FINAL_STEP_LIMIT_SEC = 12
+# Freeze only when the last convergence round took at most this fraction of the
+# final-step limit. The last round's duration is the best available estimate of
+# how long the frozen final delta takes to copy, but the final delta also
+# carries everything written between that round and the freeze (clone build,
+# preconnect gate), and the final step does metadata work of its own. Half the
+# limit (6s) leaves that margin and also stays inside the client's 8s
+# fast_io_fail_tmo. bf12 2026-11-03: rounds of 16-30s froze "anyway" and every
+# final step failed at the 12s limit.
+REPL_CUTOVER_FREEZE_SAFE_FRACTION = 0.5
+REPL_CUTOVER_FREEZE_MAX_ROUND_SEC = (REPL_CUTOVER_FINAL_STEP_LIMIT_SEC
+                                     * REPL_CUTOVER_FREEZE_SAFE_FRACTION)
+# A shrink deadline reached without a round short enough to freeze abandons
+# the endgame instead of freezing into a certain failure: the lvstore claim is
+# released, the volume replicates on its ordinary cadence, and the endgame is
+# retried after this long (the abandon burns one attempt of the task's budget).
+REPL_CUTOVER_ENDGAME_BACKOFF_SEC = 300
+# --- cutover source throttle ----------------------------------------------
+# A round converges to overhead / (1 - W/T): with the application writing at
+# W and the delta transferring at T, no number of rounds gets under the
+# per-round fixed cost divided by that factor (bed bf13 2026-11-05: W/T = 0.4,
+# ~5 s of fixed cost, rounds settled at 6-13 s against a 2 s target for 34
+# rounds). Once the first rounds show the delta is not shrinking, the source
+# volume's write bandwidth is capped for the rest of the endgame -- including
+# the clone build and the preconnect wait, whose writes the frozen final step
+# must copy -- and restored when the endgame ends (cutover done, abandoned or
+# failed). A volume whose pool carries QoS of its own is not throttled.
+REPL_CUTOVER_THROTTLE_AFTER_ROUND = 2
+REPL_CUTOVER_THROTTLE_W_MBPS = 8
+# Each failed or abandoned attempt of the same cutover halves the cap (8, 4,
+# 2, 1 MB/s), never below this.
+REPL_CUTOVER_THROTTLE_MIN_MBPS = 1
+# Endgame rounds send each round snapshot's dirty pages straight into the
+# cutover clone (cow_landing, like the final step) instead of replicating it
+# into a landing volume that the target then merges with its base whole
+# cluster by whole cluster (bf18, 2026-11-09: 9.2-9.8 GB, 35-44 s per round of
+# a randomly written 10 GiB volume, whatever the source cap). Needs the
+# early-prepared clone and an SPDK whose bdev_lvol_transfer takes cow_landing
+# (no completion signal into a clone, spdk #89).
+REPL_CUTOVER_DIRECT_ROUNDS = True
+# Sends of one direct round (a failed or vanished transfer is sent again)
+# before the endgame is abandoned.
+REPL_CUTOVER_DIRECT_ROUND_SUBMITS = 3
+# --- catch-up throttle ------------------------------------------------------
+# A volume whose replication persistently cannot catch up never reaches the
+# endgame: the target cannot absorb what the source writes (bf17, 2026-11-08:
+# the last volume of eight waited for hours behind seven already migrated
+# onto the same saturated target). Whatever the cause, it is detected from
+# the volume's own replication alone: the catch-up wait is cut into windows
+# of this length, and a window in which neither the lowest lag nor the
+# lowest byte backlog improved on the previous window's by
+# REPL_CATCHUP_PROGRESS_FRACTION is a window without progress. The first
+# window is a baseline.
+# 120 s (was 300): the throttle now engages after ~6 min instead of >= 15.
+# Bed bf20 (2026-11-10, heavy fio): three volumes that started late shared the
+# replication bandwidth and sat 13-23 min at 90-280 s lag before reaching the
+# endgame, which then cut each over in ~3 min; round 1 took 36 min instead of
+# ~18 (bf21). A delta round under that load takes ~75-150 s, so a window still
+# normally sees the lag's low point; a window without one is a single strike.
+REPL_CATCHUP_WINDOW_SEC = 120
+REPL_CATCHUP_PROGRESS_FRACTION = 0.1
+# After this many windows in a row without progress the source volume's
+# writes are capped: first at REPL_CATCHUP_THROTTLE_FACTOR of its measured
+# write rate (or REPL_CATCHUP_THROTTLE_START_MBPS when there is no measurement),
+# then halved after every further run of windows without progress, never below
+# REPL_CUTOVER_THROTTLE_MIN_MBPS. The cap stays until the cutover ends (done,
+# failed for good or canceled): a failed endgame does not lift it.
+REPL_CATCHUP_STRIKES = 2
+REPL_CATCHUP_THROTTLE_FACTOR = 0.5
+REPL_CATCHUP_THROTTLE_START_MBPS = 64
+# How long after its freeze_started_at stamp a cutover counts as freezing (and
+# so is spared by a plan cancel or a policy detach). A freeze is bounded by the
+# final-step limit plus fence/restore RPCs; a stamp older than this is a pass
+# that died mid-freeze.
+REPL_CUTOVER_FREEZE_GUARD_SEC = 120
 # When to stop converging in the open and take the lvstore for the endgame.
 # A round completing within this multiple of the target means the delta is
 # nearly converged, so the exclusive window that follows will be short. Claiming
@@ -523,12 +657,44 @@ REPL_CUTOVER_MAX_SHRINK_ROUNDS = 12
 # seconds. Before that the cutover waits and takes NO snapshots of its own --
 # the iterative snapshots ARE the endgame.
 REPL_CUTOVER_ENDGAME_LAG_SEC = 50
+# ... or once it keeps up in bytes: at most one replication snapshot is still
+# outstanding and that snapshot plus what the live volume wrote since the
+# newest snapshot is at most this much (dirty-page counts of the source
+# leader). A volume written gigabytes per cadence interval keeps pace with an
+# RPO of minutes and never meets the time gate (bf14, 2026-11-06: 5 of 8
+# volumes never entered the endgame in two hours). The shrink deadline and
+# the abandon/back-off rules still end an endgame that does not converge.
+REPL_CUTOVER_ENDGAME_BACKLOG_BYTES = 8 * 1024 ** 3
+# The cutover's final step sends the dirty-page delta written since the
+# clone's base snapshot (cow_landing into the clone) instead of every dirty
+# cluster whole, when SPDK and the write-count check allow it. Off: whole
+# clusters, as before.
+REPL_FINAL_STEP_DELTA = True
+# Timeout of each member's write-count / dirty-count read made for the
+# delta decisions above. The final step's read runs with the source fenced,
+# so it must stay short; a member that does not answer means "no delta".
+REPL_FINAL_DELTA_COUNTS_TIMEOUT_SEC = 2
+# Migration-plan forecast fallbacks, used until the plan's own transfers and
+# cutovers have been measured (simplyblock_core/migration_forecast.py).
+REPL_FORECAST_DEFAULT_BYTES_PER_SEC = 200 * 1024 * 1024
+REPL_FORECAST_DEFAULT_CUTOVER_SEC = 60
+# An lvstore whose volumes are written at this fraction of its replication
+# throughput or more is reported as not converging: the remaining margin is
+# eaten by snapshot and convert overhead, and the lag never closes.
+REPL_CONVERGENCE_MARGIN = 0.9
+# Cadence a migration plan gives a volume that has none: the initial copy and
+# the catch-up ride the cadence snapshots, so without one nothing ever ships.
+REPL_MIGRATION_DEFAULT_INTERVAL_MIN = 1
 # Rounds must follow each other within MILLISECONDS. Returning to the task
 # scheduler between them costs TASK_EXEC_INTERVAL_SEC (10s) of fresh writes
 # each time, which puts a floor under the delta no number of rounds can beat.
 REPL_CUTOVER_POLL_INTERVAL_SEC = 0.2
 # How long a single runner pass may stay inside the convergence loop.
 REPL_CUTOVER_CONVERGE_BUDGET_SEC = 60
+# ... and however short its rounds, one pass never stays inline longer than
+# this: the window above is re-armed per round, and the runner is single
+# threaded (other cutovers wait to freeze, their dirty sets growing).
+REPL_CUTOVER_PASS_MAX_INLINE_SEC = 120
 # Always worth polling inline for at least this long: a round that finishes
 # just after the pass is handed back costs a full TASK_EXEC_INTERVAL_SEC of
 # writes in the next round.
@@ -572,8 +738,54 @@ REPL_MAX_NODE_SWITCHES = 6
 REPL_LEADER_SETTLED_FOR_SEC = 30.0
 # How long the submitting pass may wait inline for the transfer. The runner is
 # single-threaded, so this is a starvation budget, not a timeout: exceeding it
-# just falls back to being noticed on a later pass.
-REPL_XFER_INLINE_WAIT_SEC = 5.0
+# just falls back to being noticed on a later pass, REPL_ACTIVE_PASS_SEC later.
+REPL_XFER_INLINE_WAIT_SEC = 1.0
+# A delta's landing volume is merged with its base on the target as a job
+# (bdev_lvol_merge_base): how long the finish waits for it inline, and how
+# often it polls, before leaving it to the next pass. No inline wait: merges
+# take minutes, and every second spent here blocks the single-threaded runner
+# for every other task -- with three volumes merging, a pass took ~50 s and a
+# finished merge was acted on that much later (bed run 4, 2026-10-24). The
+# pass interval (REPL_ACTIVE_PASS_SEC) notices a finished merge instead.
+REPL_MERGE_INLINE_WAIT_SEC = 0.0
+REPL_MERGE_POLL_SEC = 1.0
+# A landing merge that failed (e.g. -ENOMEM: the target could not get its
+# DMA buffers) is not relaunched every pass: it waits REPL_MERGE_RETRY_MIN_SEC,
+# doubling per consecutive failure up to REPL_MERGE_RETRY_MAX_SEC, and raises
+# a REPLICATION_STALLED event from REPL_MERGE_FAIL_ALERT failures on, at most
+# every REPL_MERGE_ALERT_EVERY_SEC (bed bf18 2026-11-09: 1883 relaunches in
+# 37 min, every one failing with -12 within 5 ms, with no event).
+REPL_MERGE_RETRY_MIN_SEC = 5.0
+REPL_MERGE_RETRY_MAX_SEC = 120.0
+REPL_MERGE_FAIL_ALERT = 3
+REPL_MERGE_ALERT_EVERY_SEC = 600.0
+# Pass interval of the snapshot replication runner while any transfer or
+# merge is in flight; TASK_EXEC_INTERVAL_SEC when idle. Not sub-second: each
+# pass reads the task table (see test_transfer_completion_latency).
+REPL_ACTIVE_PASS_SEC = 1.0
+# Worker pool of the snapshot replication runner: how many replication tasks
+# run at the same time. One runner used to execute every task of every volume
+# of every cluster one after the other, and a task holds it for its whole
+# transfer (a cutover round waits inline up to REPL_XFER_INLINE_WAIT_CUTOVER_SEC)
+# and for every slow metadata RPC on the target (bed bf13 2026-11-05: landing
+# creates of 20-47 s, converts of 32 s, so four replicating volumes got 1.7-way
+# concurrency and a converging cutover waited 22-34 s for its round to start).
+# 0 runs the tasks inline on the pass loop (tests, single-volume debugging).
+REPL_RUNNER_WORKERS = int(os.getenv("REPL_RUNNER_WORKERS", "8"))
+# Pause before a task that returned a failure is dispatched again.
+REPL_RUNNER_RETRY_PAUSE_SEC = 3.0
+# Requests a replication transfer keeps in flight. A full transfer sends one
+# whole cluster per request (16 x 2 MiB = 32 MiB in flight); a delta
+# (allow_partial) sends at most 64 KiB per request, so it needs a deeper window
+# for the same in-flight bytes (256 x 64 KiB = 16 MiB). Powers of two (SPDK
+# rings).
+REPL_XFER_BATCH = 16
+REPL_XFER_PARTIAL_BATCH = 256
+# The next snapshot of a volume may transfer while the target still merges the
+# previous copy: the cycle then takes the longer of transfer and merge, not
+# their sum. Its landing volume is chained onto that copy once the copy exists
+# (snapshot_replication._finishing_predecessor).
+REPL_OVERLAP_MERGE = True
 # A volume in its final cutover already owns its lvstore and every other
 # transfer on it is held, so there is nothing to starve -- wait as long as the
 # transfer needs, because this is exactly the window the client freeze pays for.
@@ -590,6 +802,25 @@ REPL_RETRY_BACKOFF_MAX_SEC = 600
 # the task table per pass, and polling a database at 5Hz to detect an event is
 # the wrong shape. Sub-second reaction lives in the RPC-based inline wait.
 REPL_CUTOVER_ACTIVE_POLL_SEC = 1.0
+# How often the snapshot replication runner looks for a converging cutover's
+# next shrink snapshot (snapshot_replication._EndgameWake). A point read of
+# each converging cutover's own task row -- never the task table -- and only
+# while one converges. Without it the snapshot waited for the runner's next
+# pass: TASK_EXEC_INTERVAL_SEC, ~12 s of every ~21 s round on bed bf12
+# (2026-11-03).
+REPL_ENDGAME_WAKE_POLL_SEC = 0.2
+# Build the cutover clone (and the replication record the operator's preconnect
+# keys on) when the endgame STARTS instead of after the last round, so the
+# operator's preconnect runs in parallel with the convergence rounds and the
+# freeze follows the last round immediately. The clone is then based on an
+# older copy than the last round's; the final step re-chains it onto the
+# newest copy (bdev_lvol_transfer_final_step's snapshot_name ->
+# spdk_lvol_chain on the receiver, bdev_lvol_add_clone on the peers), and the
+# record follows. Off by default until verified on a bed: the re-chain of a
+# clone onto a newer snapshot leaves the open reference spdk_bs_chain_snapshot
+# _clone never drops on the old parent, which the post-cutover prune then
+# deletes (see the special_delete open_ref history).
+REPL_CUTOVER_EARLY_PREPARE = False
 
 SPDK_PROXY_MULTI_THREADING_ENABLED=True
 SPDK_PROXY_TIMEOUT=60*5
@@ -761,6 +992,17 @@ FENCE_DEADLINE_SEC = 7.5
 # budget. 6s is above the 0.5s norm but still inside the 8s reject threshold,
 # and overrunning it releases the fence rather than stretching the block.
 FENCE_WAIT_EXAMINE_TIMEOUT_SEC = 6
+# bdev_lvol_set_leader on the recovering node is the other in-fence call that
+# does real work: it replays the journal and re-levels the blobstore before it
+# returns, so its latency scales with how much the lvstore has outstanding
+# rather than with a healthy node's RPC round trip. 2026-10-14 run 63: a
+# survivor holding a departing node's orphaned replica took 669ms against the
+# 0.5s norm (the other survivors: 74ms and 153ms) and the restart aborted on
+# every cycle, each one draining the cluster back to all-offline. 2s absorbs
+# that with margin; two attempts (FENCE_RPC_RETRY) still fit the 7.5s deadline
+# next to the rest of the window, and the clamp in _fenced() bounds the call to
+# the time actually left on the fence.
+FENCE_SET_LEADER_TIMEOUT_SEC = 2
 
 NVMF_MAX_SUBSYSTEMS=50000
 KATO=5000
@@ -830,6 +1072,7 @@ GRAFANA_EVENT_ALERTS_PLUGIN_URL = (
 # prometheus.yml.j2 scrapes /cluster/metrics from.
 MONITORING_CONTROL_PLANE_ADDR = "http://HAProxy"
 MONITORING_GRAFANA_SERVICE = "monitoring_grafana"
+MONITORING_PROMETHEUS_SERVICE = "monitoring_prometheus"
 
 GRAFANA_K8S_ENDPOINT = "http://simplyblock-grafana:3000"
 GRAYLOG_K8S_ENDPOINT = "http://simplyblock-graylog:9000"
@@ -838,6 +1081,13 @@ OS_K8S_ENDPOINT = "http://opensearch-cluster-master:9200"
 WEBAPI_K8S_ENDPOINT = "http://simplyblock-webappapi:5000/api/v2"
 
 K8S_NAMESPACE = os.getenv('K8S_NAMESPACE', 'simplyblock')
+# The names a cluster's workload is reached by when its record names none: a
+# cluster created before the record existed, and the first cluster in a
+# namespace. A storage node's hostname is <node>.<service>.<namespace>.svc, so
+# these are part of every such node's identity.
+K8S_SNODE_API_SERVICE = "simplyblock-storage-node-api"
+K8S_SPDK_PROXY_SERVICE = "simplyblock-spdk-proxy"
+K8S_SPDK_PROXY_TLS_SECRET = "simplyblock-spdk-proxy-tls"
 OS_STATEFULSET_NAME = "simplyblock-opensearch"
 MONGODB_STATEFULSET_NAME = "simplyblock-mongo"
 GRAYLOG_STATEFULSET_NAME = "simplyblock-graylog"
@@ -896,8 +1146,48 @@ prometheus_patch = {
 
 qos_class_meta_and_migration_weight_percent = 25
 
+# Service (QoS) classes travel in the top NBITS_PRIORITY_CLASS=3 bits of every
+# lvol IO's LBA, so distrib schedules 8 wire classes: 0 = Default, 1 = internal
+# metadata/migration, 2..7 = lvol_priority_class 1..6 (wire = class id + 1).
+# Class id 6 (wire 7) is reserved for cross-cluster snapshot replication
+# traffic, which leaves users Default plus class ids 1..QOS_MAX_USER_CLASS_ID.
+QOS_MAX_USER_CLASS_ID = 5
+QOS_REPLICATION_CLASS_ID = 6
+QOS_REPLICATION_WIRE_CLASS = QOS_REPLICATION_CLASS_ID + 1
+qos_class_replication_weight_percent = 10
+
 MIG_PARALLEL_JOBS = 64
 MIG_JOB_SIZE = 64
+
+# Sync-replication resync (tasks_runner_sync_resync): the shared task driver
+# re-runs a failed catch-up after BASE * 2^(runs-1) seconds, capped at MAX (its
+# backoff, held in memory: a restarted runner re-runs at once once the lagging
+# zone is up), and one alert is raised once ALERT_RUNS runs have not converged.
+# A catch-up held back by an open device migration on the leader for HELD_ALERT_SEC raises that alert once.
+SYNC_RESYNC_RETRY_BASE_SEC = 30
+SYNC_RESYNC_RETRY_MAX_SEC = 600
+SYNC_RESYNC_ALERT_RUNS = 5
+SYNC_RESYNC_HELD_ALERT_SEC = 1800
+
+# Sync-replication promote (tasks_runner_sync_promote): a failed or canceled
+# pass ends its task; a pass interrupted by an unexpected error is a retry of the
+# shared task driver, which enforces this as the task's max_retry - at the
+# ceiling the task ends failed (its leadership moves settled).
+SYNC_PROMOTE_MAX_UNEXPECTED_ERRORS = 5
+
+# Sync-replication status (sync_replication_controller): the status endpoints
+# may serve an answer this many seconds old (the gates never do); one status
+# query per storage node is bounded by the RPC timeout.
+SYNC_STATUS_CACHE_SEC = 5
+SYNC_STATUS_RPC_TIMEOUT_SEC = 5
+
+#: Fewest ONLINE nodes of a site a site activation needs: a site-aware journal needs this many local JMs
+#: (ultra alg_journal.hpp:108 c_jc_ha_min_required_jms; jc_open refuses fewer, the JC aborts the node).
+SYNC_JC_MIN_LOCAL_JMS = 2
+
+#: ``StorageNode.lvs_active_site`` of an LVS whose leadership is being moved to
+#: the site after the prefix (sync replication promote): ``moving:<site>``.
+LVS_MOVING_PREFIX = "moving:"
 
 # Live volume migration constants
 LVOL_MIG_MAX_RETRIES = 5          # max retries before entering cleanup_target
@@ -970,7 +1260,6 @@ if LVOL_NVMF_PORT_ENV:
 
 # Backward compatibility aliases
 RPC_PORT_RANGE_START = RPC_BASE_PORT
-FW_PORT_START = SNODE_API_PORT
 LVOL_NVMF_PORT_START = NVMF_BASE_PORT
 NODE_NVMF_PORT_START = NVMF_BASE_PORT
 NODE_HUBLVOL_PORT_START = NVMF_BASE_PORT
@@ -1011,12 +1300,16 @@ BACKUP_MAX_S3_ID = (1 << 30) - 1
 
 TASKS_RETENTION_PERIOD_SEC = 60*60*24*30 # 30 days
 # --- Failback-cutover constants from PR #1276 (reconcile-1276) ---
-# Cooldown between hub-attach retry attempts when the target node is down or
-# recovering (covers control-plane lag before the DB reflects the down state).
+# Cooldown between cutover attempts while the target is unreachable: down or
+# recovering, before the DB reflects the down state.
 REPL_CUTOVER_HUB_RETRY_COOLDOWN_SEC = 30
-# Max consecutive hub-attach failures with the node still appearing online
-# before we give up and burn a task.retry.  30s × 20 = 10 min of coverage.
-REPL_CUTOVER_MAX_HUB_ATTEMPTS = 10
+# How long, from the first unreachable attempt, an unreachable target is
+# waited out without burning a task.retry. One window per task: a burned retry
+# does not open another, so the window and max_retry do not multiply.
+REPL_CUTOVER_TRANSIENT_WINDOW_SEC = 600
+# How long a commit waits for another commit of the same volume to finish
+# queuing its cutover: a couple of database round trips.
+REPL_COMMIT_LOCK_WAIT_TIMEOUT_SEC = 10
 # Delete the superseded original volume BEFORE building the fail-back clone
 # (_retire_superseded_original). Disabled 2026-09-01: that delete frees the
 # original's blob id while its parent snapshot's clone registry is already
@@ -1028,3 +1321,130 @@ REPL_CUTOVER_MAX_HUB_ATTEMPTS = 10
 # successful cutover by _swap_failback_lvol_uuid. Re-enable once the fork's
 # clone-entry/blob-id-reuse defect is fixed.
 REPL_FAILBACK_RETIRE_ORIGINAL_BEFORE_CUTOVER = False
+
+# ---- Two-node arbitration (docs/design/two-node-arbitration.md, section 10) ----
+# Hold deadline on the node; must stay below the hosts' KATO.
+TWO_NODE_HOLD_MS = 2500
+TWO_NODE_LEASE_TTL_MS = 1500
+TWO_NODE_LEASE_RENEW_MS = 250
+TWO_NODE_LEASE_MARGIN_MS = 500
+TWO_NODE_STABLE_FOR_S = 30
+TWO_NODE_WAIT_TIMEOUT_MS = 20000
+TWO_NODE_VERDICT_HISTORY = 50
+#: Arbiter decision loop period (events are folded and decided every tick).
+TWO_NODE_DECISION_TICK_MS = 100
+#: With no cluster that has ``two_node_arbitration`` on, the arbiter (and the
+#: Go event collector) re-scan the cluster list only this often instead of every
+#: tick, so deployments without two-node clusters carry almost no FDB load.
+TWO_NODE_IDLE_RESCAN_S = 30
+#: How often the arbiter re-reads each node's ``jc_ha_status`` and replaces its
+#: per-node, per-LVS view (holding/solo/fenced) with it. Also done at once after
+#: a reconnect and on an instance change or a sequence gap.
+TWO_NODE_RECONCILE_MS = 1000
+#: Consecutive HTTP 500 answers from a node's SPDK proxy that count as positive
+#: evidence that its SPDK is gone (the proxy runs, SPDK behind it does not).
+#: Two, not one: a single 500 can be a transient SPDK timeout.
+TWO_NODE_SPDK_DOWN_HTTP500_STREAK = 2
+#: Seconds between two leadership reconciliation passes, and how long an LVS
+#: must stay leaderless (two passes) before leadership is restored.
+TWO_NODE_LEADERSHIP_RECONCILE_S = 10
+#: Client keep-alive for clusters with two-node arbitration. A frozen storage
+#: node keeps its TCP connections open, so a host notices the dead path only
+#: through the NVMe keep-alive, 1-2 KATO intervals after the last answered
+#: keep-alive (campaign c8, F20: 7.1 s with KATO 4). KATO 2 bounds that to
+#: 2-4 s, inside the client-path stall limit of KATO + 1 s = 3 s.
+TWO_NODE_CLIENT_KEEP_ALIVE_TO = 2
+#: The node RPCs a storage node must expose before the arbiter drives it.
+TWO_NODE_ARBITRATION_RPCS = (
+    "jc_wait_events", "jc_ha_status", "jc_lease_renew",
+    "jc_grant_solo", "jc_fence", "jc_unfence",
+)
+#: Taint the edge operator applies to the Kubernetes node of a fenced storage node.
+TWO_NODE_FENCED_TAINT = "storage.simplyblock.io/fenced"
+#: ``jc_set_dual_node`` field: a remote JM that has not acknowledged for this
+#: long counts as unavailable and the node starts holding (campaign c2, F5: a
+#: frozen peer keeps its TCP connections, so connection loss alone is too late).
+TWO_NODE_REMOTE_JM_TIMEOUT_MS = 1000
+#: Minimum interval between two unfence attempts of a self-fenced node (F4).
+TWO_NODE_SELF_FENCE_READMIT_MS = 2000
+#: A planned loss (CP-initiated restart/shutdown, F3) ends when the node comes
+#: back with a new SPDK instance, at the latest after this many seconds.
+TWO_NODE_PLANNED_LOSS_MAX_S = 900
+#: Partitioned pair (F6): with the node-to-node link answering again, the
+#: arbiter reconnects the remote JMs every this many seconds ...
+TWO_NODE_JM_RECONNECT_S = 30
+#: ... and after this long with the link up but remote JMs still unavailable,
+#: hands one node to the restart flow (the manual c1/c2 remedy).
+TWO_NODE_PARTITION_RESTART_AFTER_S = 120
+#: How often the link between the two nodes is probed while partitioned.
+TWO_NODE_LINK_PROBE_S = 10
+#: Campaign c3 (02a): lease renewals and jc_ha_status polls run on a bounded
+#: pool, one call per node in flight, so a frozen node (each call blocks for
+#: its full timeout) never delays the renewal of, or a decision about, its
+#: peer. The decision itself stays on the decision loop.
+TWO_NODE_RPC_WORKERS = 4
+#: How long a tick waits for the status polls it started before it decides on
+#: what has arrived; a poll still running is applied on a later tick.
+TWO_NODE_POLL_WAIT_MS = 150
+#: Campaign c7 (F16): the decision thread never makes a blocking RPC to a
+#: node. Node work that is not a renewal or status poll (jc_set_dual_node,
+#: device check + jc_unfence, the leadership reconciliation probe) runs on a
+#: second bounded pool, one call per node (or cluster) in flight, so it can
+#: neither delay a verdict nor starve the renewals of a healthy peer.
+TWO_NODE_WORK_WORKERS = 4
+#: Timeout of the leadership reconciliation's ``get_lvstore`` probe (B6),
+#: no retry: a frozen node is "unknown", never waited for (c7, F16).
+TWO_NODE_LEADER_PROBE_TIMEOUT_S = 1
+#: Timeout of a best-effort fence (planned loss, operator override): the
+#: grant to the peer does not depend on it (c7, F16).
+TWO_NODE_BEST_EFFORT_FENCE_TIMEOUT_S = 1
+#: Campaign c3 (F10): after a node is re-admitted (it was fenced while its
+#: peer may have written alone), the arbiter schedules the data rebuild and
+#: checks every this many seconds whether it has finished ...
+TWO_NODE_REBUILD_CHECK_S = 5
+#: ... and schedules it again this often while nothing was queued (e.g. the
+#: node was not ONLINE yet).
+TWO_NODE_REBUILD_SCHEDULE_RETRY_S = 30
+#: Campaign c4, F12: a rebuild whose migration tasks keep failing because a
+#: source or destination device is not available for this long is stuck; the
+#: arbiter flags it and hands the node to the restart flow.
+TWO_NODE_REBUILD_STUCK_S = 120
+#: Campaign c4, F12: at most one device recovery (restart) per node in this window.
+TWO_NODE_DEVICE_RECOVERY_RETRY_S = 300
+#: How long the arbiter's leadership restoration (after an unfence) waits for
+#: the leadership to be confirmed after bdev_lvol_set_leader.
+TWO_NODE_PROMOTE_VERIFY_S = 3
+#: Campaign c5, 07/08: after a heal or a re-admission unfences, the arbiter
+#: puts each LVS's leadership back on its primary; a failed attempt is
+#: retried after this long.
+TWO_NODE_LEADERSHIP_RETRY_MS = 3000
+#: Campaign c5: a port-allow task open longer than this no longer holds back
+#: the arbiter's leadership restoration (it targets the same primary).
+TWO_NODE_LEADERSHIP_TASK_STALE_S = 120
+#: Who decides which node of a two-node cluster continues alone
+#: (docs/design/two-node-kubernetes-fencing.md): the arbiter on the control
+#: plane, or Pacemaker on the nodes (the arbiter then stays out entirely).
+TWO_NODE_AUTHORITY_WITNESS = "witness"
+TWO_NODE_AUTHORITY_PACEMAKER = "pacemaker"
+TWO_NODE_AUTHORITIES = (TWO_NODE_AUTHORITY_WITNESS, TWO_NODE_AUTHORITY_PACEMAKER)
+#: Host fencing (kubernetes-fencing contract, section 3.2): a revocation is
+#: applied again this often, covering subsystems recreated with allow_any_host.
+TWO_NODE_HOST_FENCE_REASSERT_S = 10
+#: Timeout of each subsystem RPC of a host-fence revocation or release.
+TWO_NODE_HOST_FENCE_RPC_TIMEOUT_S = 5
+#: Node condition the operator sets on a host-fenced node's Kubernetes Node.
+TWO_NODE_STORAGE_FENCED_CONDITION = "StorageFenced"
+#: Restart flow (F1): how long the jc_compression precheck on the LVS leader is
+#: retried while it fails (a journal re-level in progress) before the restart aborts.
+RESTART_JC_COMPRESSION_RETRY_S = 60
+
+# Before the control plane makes any node leader of an lvstore, every other
+# member must be proven non-leader (its RPC) or dead (its node agent) -- twice,
+# this far apart -- so a slow or recovering old leader cannot become a second
+# writer (storage_node_ops._leadership_proven_free).
+LEADERSHIP_SAFETY_WINDOW_SEC = 10
+
+# A snapshot record still in_creation after this long belongs to a create
+# whose process died: snapshot_controller.reap_snapshot_intents rolls it back.
+# Far above any create (lock waits included).
+SNAPSHOT_INTENT_REAP_SEC = 600

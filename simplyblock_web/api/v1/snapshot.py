@@ -6,6 +6,7 @@ from flask import Blueprint, request
 from simplyblock_core import db_controller
 from simplyblock_core import utils as core_utils
 from simplyblock_core.controllers import snapshot_controller
+from simplyblock_core.controllers.backup import controller as backup_controller
 from simplyblock_web import utils
 
 logger = logging.getLogger(__name__)
@@ -22,10 +23,12 @@ def create_snapshot():
     if 'snapshot_name' not in cl_data:
         return utils.get_response(None, "missing required param: snapshot_name", 400)
 
+    if backup_controller.is_reserved_snapshot_name(cl_data['snapshot_name']):
+        return utils.get_response(None, backup_controller.RESERVED_SNAPSHOT_NAME_ERROR, 400)
+
     snapID, err = snapshot_controller.add(
         cl_data['lvol_id'],
-        cl_data['snapshot_name'],
-        backup=cl_data.get('backup', False))
+        cl_data['snapshot_name'])
     return utils.get_response(snapID, err, http_code=400)
 
 

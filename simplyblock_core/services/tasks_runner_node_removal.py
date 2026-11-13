@@ -2,6 +2,7 @@ import copy
 import time
 
 from simplyblock_core import constants, db_controller, storage_node_ops, utils
+from simplyblock_core.controllers import activation_gate
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.storage_node import StorageNode
@@ -75,14 +76,15 @@ def process_task(task):
     and the next removal was refused with "Task found" while it lingered.
     """
     cluster = db.get_cluster_by_id(task.cluster_id)
-    if cluster.status == Cluster.STATUS_IN_ACTIVATION:
+    site_activation = activation_gate.site_activation_blocks(cluster)
+    if cluster.status == Cluster.STATUS_IN_ACTIVATION or site_activation:
         # Checked here rather than through is_eligible: the wait also has to
         # park the node in PENDING_REMOVAL, and eligibility must stay pure.
         # Forward only: a node past pending_removal keeps its place while the
         # activation runs, instead of being rewound to the start.
         storage_node_ops.advance_removal_status(
             task.node_id, StorageNode.STATUS_PENDING_REMOVAL, caused_by="remove", db_controller=db)
-        raise TaskDefer("cluster is in_activation, waiting")
+        raise TaskDefer(site_activation or "cluster is in_activation, waiting")
 
     force_remove = bool(task.function_params.get("force_remove", False))
     # The cursor reads its position out of the task and writes it back as the

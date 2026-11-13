@@ -15,7 +15,6 @@ Tests cover:
   - RPC client bdev_s3_create / bdev_lvol_s3_bdev methods
   - CLI argument registration
   - Cluster model backup_config field
-  - snapshot_controller.add with backup=True
   - Task runner dispatch
 
 All external dependencies (FDB, RPC) are mocked.
@@ -333,15 +332,19 @@ class TestCreateS3Bdev(unittest.TestCase):
 
         MockRPC.assert_not_called()
 
+    @patch("simplyblock_core.controllers.backup.manifest.boto3.client")
     @patch("simplyblock_core.models.storage_node.RPCClient")
-    def test_bdev_s3_create_fails(self, MockRPC):
+    def test_bdev_s3_create_fails(self, MockRPC, _mock_boto3_client):
+        from simplyblock_core.rpc_client import RPCRemoteError
         mock_rpc = MockRPC.return_value
-        mock_rpc.bdev_s3_create.return_value = None
+        # The RPC client reports a failed call by raising, never by a None return.
+        mock_rpc.bdev_s3_create.side_effect = RPCRemoteError("error", code=-1)
 
         from simplyblock_core.controllers.backup.device import create_s3_bdev
         node = _node()
         with pytest.raises(RuntimeError):
             create_s3_bdev(node, _backup_config())
+        mock_rpc.bdev_s3_create.assert_called_once()
         mock_rpc.bdev_lvol_s3_bdev.assert_not_called()
 
     @patch("simplyblock_core.controllers.backup.manifest.boto3.client")
@@ -807,6 +810,28 @@ class TestListBackups(unittest.TestCase):
         self.assertEqual([row["ID"] for row in data], ["newer", "older"])
         self.assertEqual(data[0]["Created"], time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(1710000005)))
 
+    @patch("simplyblock_core.controllers.backup.controller.db_controller")
+    def test_merged_hidden_by_default(self, mock_db):
+        merged = _backup(uuid="merged-1", status=Backup.STATUS_MERGED)
+        completed = _backup(uuid="completed-1")
+        mock_db.get_backups.return_value = [merged, completed]
+
+        from simplyblock_core.controllers.backup.controller import list_backups
+        data = list_backups()
+
+        self.assertEqual([row["ID"] for row in data], ["completed-1"])
+
+    @patch("simplyblock_core.controllers.backup.controller.db_controller")
+    def test_merged_shown_with_show_all(self, mock_db):
+        merged = _backup(uuid="merged-1", status=Backup.STATUS_MERGED)
+        completed = _backup(uuid="completed-1")
+        mock_db.get_backups.return_value = [merged, completed]
+
+        from simplyblock_core.controllers.backup.controller import list_backups
+        data = list_backups(show_all=True)
+
+        self.assertEqual({row["ID"] for row in data}, {"merged-1", "completed-1"})
+
 
 # ===========================================================================
 # 11. Policy management
@@ -948,7 +973,7 @@ class TestPolicyDetach(unittest.TestCase):
 
 class TestEvaluatePolicy(unittest.TestCase):
 
-    @patch("simplyblock_core.controllers.backup.policy.tasks_controller")
+    @patch("simplyblock_core.controllers.backup.controller.tasks_controller")
     @patch("simplyblock_core.controllers.backup.policy.db_controller")
     def test_no_policy(self, mock_db, mock_tasks):
         mock_db.get_policy_for_lvol.return_value = None
@@ -960,7 +985,7 @@ class TestEvaluatePolicy(unittest.TestCase):
         mock_tasks.add_backup_merge_task.assert_not_called()
 
     @patch.object(Backup, 'write_to_db')
-    @patch("simplyblock_core.controllers.backup.policy.tasks_controller")
+    @patch("simplyblock_core.controllers.backup.controller.tasks_controller")
     @patch("simplyblock_core.controllers.backup.policy.db_controller")
     def test_version_limit_exceeded(self, mock_db, mock_tasks, _mock_write):
         policy = _policy(max_versions=2, max_age_seconds=0)
@@ -978,7 +1003,7 @@ class TestEvaluatePolicy(unittest.TestCase):
 
         mock_tasks.add_backup_merge_task.assert_called_once()
 
-    @patch("simplyblock_core.controllers.backup.policy.tasks_controller")
+    @patch("simplyblock_core.controllers.backup.controller.tasks_controller")
     @patch("simplyblock_core.controllers.backup.policy.db_controller")
     def test_under_version_limit(self, mock_db, mock_tasks):
         policy = _policy(max_versions=5, max_age_seconds=0)
@@ -996,7 +1021,7 @@ class TestEvaluatePolicy(unittest.TestCase):
         mock_tasks.add_backup_merge_task.assert_not_called()
 
     @patch.object(Backup, 'write_to_db')
-    @patch("simplyblock_core.controllers.backup.policy.tasks_controller")
+    @patch("simplyblock_core.controllers.backup.controller.tasks_controller")
     @patch("simplyblock_core.controllers.backup.policy.db_controller")
     def test_age_limit_exceeded(self, mock_db, mock_tasks, _mock_write):
         policy = _policy(max_versions=0)
@@ -1015,7 +1040,7 @@ class TestEvaluatePolicy(unittest.TestCase):
         mock_tasks.add_backup_merge_task.assert_called_once()
 
     @patch.object(Backup, 'write_to_db')
-    @patch("simplyblock_core.controllers.backup.policy.tasks_controller")
+    @patch("simplyblock_core.controllers.backup.controller.tasks_controller")
     @patch("simplyblock_core.controllers.backup.policy.db_controller")
     def test_both_conditions_required(self, mock_db, mock_tasks, _mock_write):
         """When both versions and age are set, either limit can trigger a merge."""
@@ -1035,7 +1060,7 @@ class TestEvaluatePolicy(unittest.TestCase):
         mock_tasks.add_backup_merge_task.assert_called_once()
 
     @patch.object(Backup, 'write_to_db')
-    @patch("simplyblock_core.controllers.backup.policy.tasks_controller")
+    @patch("simplyblock_core.controllers.backup.controller.tasks_controller")
     @patch("simplyblock_core.controllers.backup.policy.db_controller")
     def test_both_conditions_met(self, mock_db, mock_tasks, _mock_write):
         """When both limits set and both exceeded, merge triggers."""
@@ -1055,7 +1080,7 @@ class TestEvaluatePolicy(unittest.TestCase):
 
         mock_tasks.add_backup_merge_task.assert_called_once()
 
-    @patch("simplyblock_core.controllers.backup.policy.tasks_controller")
+    @patch("simplyblock_core.controllers.backup.controller.tasks_controller")
     @patch("simplyblock_core.controllers.backup.policy.db_controller")
     def test_fewer_than_two_backups(self, mock_db, mock_tasks):
         """Never merge with fewer than 2 completed backups."""
@@ -1108,25 +1133,7 @@ class TestJobScheduleBackupConstants(unittest.TestCase):
 
 
 # ===========================================================================
-# 16. snapshot_controller.add with backup=True
-# ===========================================================================
-
-class TestSnapshotAddWithBackup(unittest.TestCase):
-
-    @patch("simplyblock_core.controllers.snapshot_controller.snapshot_events")
-    @patch("simplyblock_core.controllers.snapshot_controller.db_controller")
-    def test_add_signature_accepts_backup(self, mock_db, mock_events):
-        """Verify snapshot_controller.add accepts backup parameter."""
-        import inspect
-
-        from simplyblock_core.controllers.snapshot_controller import add
-        sig = inspect.signature(add)
-        self.assertIn("backup", sig.parameters)
-        self.assertEqual(sig.parameters["backup"].default, False)
-
-
-# ===========================================================================
-# 17. RPC client methods
+# 16. RPC client methods
 # ===========================================================================
 
 class TestRPCClientBackupMethods(unittest.TestCase):
@@ -1178,7 +1185,7 @@ class TestRPCClientBackupMethods(unittest.TestCase):
 
 
 # ===========================================================================
-# 18. CLI argument registration
+# 17. CLI argument registration
 # ===========================================================================
 
 class TestCLIBackupArgs(unittest.TestCase):
@@ -1221,7 +1228,7 @@ class TestCLIBackupArgs(unittest.TestCase):
 
 
 # ===========================================================================
-# 19. CLIBase handler methods exist
+# 18. CLIBase handler methods exist
 # ===========================================================================
 
 class TestCLIBaseHandlers(unittest.TestCase):
@@ -1241,7 +1248,7 @@ class TestCLIBaseHandlers(unittest.TestCase):
 
 
 # ===========================================================================
-# 20. Backup.get_location
+# 19. Backup.get_location
 # ===========================================================================
 
 class TestBackupLocationAccessor(unittest.TestCase):
@@ -1280,31 +1287,31 @@ class TestBackupLocationAccessor(unittest.TestCase):
 
 
 # ===========================================================================
-# 21. _trigger_merge
+# 20. trigger_merge
 # ===========================================================================
 
 class TestTriggerMerge(unittest.TestCase):
 
-    @patch("simplyblock_core.controllers.backup.policy.tasks_controller")
+    @patch("simplyblock_core.controllers.backup.controller.tasks_controller")
     def test_trigger_merge_marks_old_as_merging(self, mock_tasks):
-        from simplyblock_core.controllers.backup.policy import _trigger_merge
+        from simplyblock_core.controllers.backup.controller import trigger_merge
         keep = _backup(uuid="keep")
         old = _backup(uuid="old")
         old.write_to_db = MagicMock()
 
-        _trigger_merge(keep, old)
+        trigger_merge(keep, old)
 
         self.assertEqual(old.status, Backup.STATUS_MERGING)
         old.write_to_db.assert_called_once()
         mock_tasks.add_backup_merge_task.assert_called_once()
 
-    @patch("simplyblock_core.controllers.backup.policy.tasks_controller")
+    @patch("simplyblock_core.controllers.backup.controller.tasks_controller")
     def test_skip_if_not_completed(self, mock_tasks):
-        from simplyblock_core.controllers.backup.policy import _trigger_merge
+        from simplyblock_core.controllers.backup.controller import trigger_merge
         keep = _backup(uuid="keep")
         old = _backup(uuid="old", status=Backup.STATUS_PENDING)
 
-        _trigger_merge(keep, old)
+        trigger_merge(keep, old)
 
         mock_tasks.add_backup_merge_task.assert_not_called()
 

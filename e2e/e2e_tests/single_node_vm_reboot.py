@@ -121,7 +121,12 @@ class TestRebootNodeHost(TestClusterBase):
                 }
 
         # Step 2: Shutdown original node via Proxmox
-        node_details = self.sbcli_utils.get_storage_node_details(restart_target["node_uuid"])[0]
+        _nd = self.sbcli_utils.get_storage_node_details(
+            restart_target["node_uuid"])
+        if not _nd:
+            raise RuntimeError(
+                f"No storage node details for {restart_target['node_uuid']}")
+        node_details = _nd[0]
         old_ip = node_details["mgmt_ip"]
         proxmox_id, vm_id = proxmox.get_proxmox(old_ip)
         self.logger.info(f"Stopping VM {vm_id} on proxmox {proxmox_id}")

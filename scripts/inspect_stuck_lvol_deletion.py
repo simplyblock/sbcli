@@ -24,11 +24,11 @@ for lvid in LVIDS:
                 s for s in subs
                 if s.get("nqn") == lvol.nqn or s.get("nqn", "").endswith(f":lvol:{lvid}")
             ]
-            lvstores = node.rpc_client().bdev_lvol_get_lvstores(lvol.lvs_name) or []
+            lvstore = node.rpc_client().get_lvstore(lvol.lvs_name)
             print(
                 f"  node={node_id} ip={node.mgmt_ip} status={node.status} "
                 f"top={lvol.top_bdev in bdev_names} base={lvol.base_bdev in bdev_names} "
-                f"subsys={len(matching_subs)} lvstores={lvstores}"
+                f"subsys={len(matching_subs)} lvstore={lvstore}"
             )
         except Exception as exc:
             print(f"  node={node_id} ip={node.mgmt_ip} RPC_FAIL {exc}")

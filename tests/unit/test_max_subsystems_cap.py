@@ -1,4 +1,4 @@
-"""The 75-subsystems-per-node limit is enforced at every max_lvol ingress.
+"""The 500-subsystems-per-node limit is enforced at every max_lvol ingress.
 
 Before this, `--max-subsys` was accepted unchecked at `sn configure` /
 `sn restart`: the value sized huge pages and landed in the node record, while
@@ -39,9 +39,16 @@ def _restart_args():
 
 
 def test_cap_is_the_documented_product_limit():
-    # Lowering/raising this is a product decision — every ingress below and the
-    # CI bootstrap defaults are written against it.
-    assert CAP == 75
+    # Lowering/raising this is a product decision — every ingress below is
+    # written against it.
+    assert CAP == 500
+
+
+def test_hosts_are_sized_for_the_default_not_the_cap():
+    # The cap costs ~35 MiB of huge pages per subsystem; a host is priced for
+    # the default unless its cluster asks for more.
+    assert constants.DEFAULT_SUBSYSTEMS_PER_NODE == 75
+    assert constants.DEFAULT_SUBSYSTEMS_PER_NODE <= CAP
 
 
 # --- CLI: the node-level knobs are gone -------------------------------------
@@ -62,16 +69,16 @@ def test_configure_no_longer_takes_cores_percentage():
         w.parser.parse_args(["storage-node", "configure", "--cores-percentage", "50"])
 
 
-def test_configure_sizes_for_the_product_ceiling():
+def test_configure_sizes_for_the_product_default():
     """configure runs on the host before it belongs to a cluster, so it cannot
-    read the cluster's value. Sizing for the ceiling keeps every cluster
-    setting usable; sizing smaller would leave the node unable to honour one."""
+    read the cluster's value. It sizes for the default a cluster without
+    --max-subsys runs with; add-node resizes it to a larger cluster value."""
     w = _wrapper()
     args = w.parser.parse_args(["storage-node", "configure"])
     with patch.object(clibase.storage_ops, "generate_automated_deployment_config",
                       return_value=True) as gen:
         assert w.storage_node__configure("configure", args) is True
-    assert gen.call_args.args[0] == CAP
+    assert gen.call_args.args[0] == constants.DEFAULT_SUBSYSTEMS_PER_NODE
 
 
 def test_restart_no_longer_takes_max_subsys():

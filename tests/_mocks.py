@@ -77,3 +77,62 @@ def unique_ip(host_key):
         ip = f"10.200.{index // 254}.{index % 254 + 1}"
         _UNIQUE_IPS[host_key] = ip
     return ip
+
+
+class _FenceRoutingClient:
+    """An RPC client that sends fences to a test callback and everything else
+    to the wrapped client."""
+
+    def __init__(self, client, node, fence):
+        self._client = client
+        self._node = node
+        self._fence = fence
+
+    def nvmf_port_block(self, port, is_reject=False):
+        return self._fence(self._node, port, block=True, is_reject=is_reject)
+
+    def nvmf_port_unblock(self, port):
+        return self._fence(self._node, port, block=False)
+
+    def __getattr__(self, name):
+        return getattr(self._client, name)
+
+
+def route_fences(nodes, fence):
+    """Send every fence issued through ``node.rpc_client(...)`` for ``nodes``
+    to ``fence(node, port, block=..., is_reject=...)``.
+
+    Production fences a peer with ``node.rpc_client(timeout=..,
+    retry=..).nvmf_port_block(port)`` / ``.nvmf_port_unblock(port)``. Tests
+    usually hand every node the same mocked RPC client, which loses which
+    node a fence was meant for; this keeps it. Each node's ``rpc_client`` is
+    wrapped, so call it after the test has installed its own ``rpc_client``
+    on the nodes. Every other RPC goes to the client the node returned.
+    """
+    for node in nodes:
+        original = node.rpc_client
+
+        def _client(*args, _original=original, _node=node, **kwargs):
+            return _FenceRoutingClient(_original(*args, **kwargs), _node, fence)
+
+        node.rpc_client = _client
+
+
+def patch_fences(fence, client=None):
+    """Patch ``StorageNode.rpc_client`` so every node's fences go to
+    ``fence(node, port, block=..., is_reject=...)`` and every other RPC to
+    ``client``.
+
+    The class-level counterpart of ``route_fences``, for integration tests:
+    code under test reads its nodes back from FDB, so the instances a test
+    built never reach it and an instance-level wrapper is never called.
+    Returns the (unstarted) patcher.
+    """
+    from unittest.mock import patch
+
+    from simplyblock_core.models.storage_node import StorageNode
+
+    client = client if client is not None else MagicMock()
+    return patch.object(
+        StorageNode, "rpc_client",
+        lambda self, *args, **kwargs: _FenceRoutingClient(client, self, fence))

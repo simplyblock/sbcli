@@ -3,8 +3,14 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
-from simplyblock_core import constants, db_controller, utils
-from simplyblock_core.controllers import snapshot_controller, snapshot_events
+from simplyblock_core import constants, db_controller, migration_turn, utils
+from simplyblock_core.controllers import (
+    lvol_controller,
+    replication_delta,
+    replication_snapshot_retire,
+    snapshot_controller,
+    snapshot_events,
+)
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
@@ -40,13 +46,14 @@ def sync_delete_peer_ids(lvol_ha_type, snode, primary_node_id):
     """Node ids owing a phase-2 sync delete: every LVS member other than the
     phase-1 node. ha_type=single snapshots were never registered on peers —
     deriving the sync-delete set from node topology would send peers deletes
-    for registrations they never had, so their peer set is empty."""
+    for registrations they never had, so their peer set is empty.
+
+    The members are the ones a snapshot is registered on
+    (lvol_controller.role_secondary_ids): on a sync-replication cluster the
+    LVS's remote triplet too."""
     secondary_ids = []
     if lvol_ha_type != "single":
-        if snode.secondary_node_id:
-            secondary_ids.append(snode.secondary_node_id)
-        if snode.tertiary_node_id:
-            secondary_ids.append(snode.tertiary_node_id)
+        secondary_ids = lvol_controller.role_secondary_ids(snode)
     peer_ids = []
     if snode.get_id() != primary_node_id:
         peer_ids.append(snode.get_id())
@@ -54,6 +61,20 @@ def sync_delete_peer_ids(lvol_ha_type, snode, primary_node_id):
         if sec_id != primary_node_id:
             peer_ids.append(sec_id)
     return peer_ids
+
+
+def _instance_has_live_clone(instance):
+    """True when a volume that is not being deleted is cloned from *instance*
+    (a SnapShot or its dict form from ``SnapShot.instances``)."""
+    uuid = instance.get("uuid") if isinstance(instance, dict) else instance.uuid
+    if not uuid:
+        return False
+    for lvol in db.get_mini_lvols():
+        if lvol.cloned_from_snap == uuid and lvol.status != LVol.STATUS_IN_DELETION:
+            logger.info("Keeping snapshot copy %s: volume %s is cloned from it",
+                        uuid, lvol.get_id())
+            return True
+    return False
 
 
 def process_snap_delete_finish(snap, completed_node):
@@ -131,6 +152,15 @@ def process_snap_delete_finish(snap, completed_node):
     # and keeps the gate only while some remain.
     primary_node.lvol_del_sync_lock_reset()
 
+    # A replicated snapshot lists its copy on the other cluster among its
+    # instances, and a migrated or failed-over volume is a clone of that copy.
+    # Handing the delete on to it would mark the live volume's base in_deletion:
+    # the finalisation below refuses to delete it (live clone), but the record
+    # stays in_deletion and every replication of that volume stops on "chain
+    # ancestor ... is mid-deletion" (bf5 2026-10-28 round 2: three of six
+    # volumes never started). delete_replicated keeps such a copy for the same
+    # reason; this path has to honour it too.
+    snap.instances = [i for i in snap.instances if not _instance_has_live_clone(i)]
     if snap.instances:
         # Hand the delete on to the next copy. The instance is a DIFFERENT
         # record (its own uuid, node and bdev) and it inherits the rest of the
@@ -158,13 +188,56 @@ def process_snap_delete_finish(snap, completed_node):
         # between loses nothing: worst case the hand-off is repeated. No delete
         # event here -- the snapshot is not gone until its last copy is, which
         # is the branch below.
+        _unlink_from_chain(snap)
         snap.remove(db.kv_store)
         snode = db.get_storage_node_by_id(new_main_instance.lvol.node_id)
         logger.info(f"Process Snapshot delete on node {snode.get_id()}")
         process_snap_delete(new_main_instance, snode)
     else:
         snapshot_events.snapshot_delete(snap)
+        _unlink_from_chain(snap)
         snap.remove(db.kv_store)
+
+
+def _unlink_from_chain(snap):
+    """Close the gap a deleted snapshot leaves in its volume's chain.
+
+    A snapshot's prev/next links are set when it is taken or lands and were
+    never updated when a neighbour went. After a cutover prunes the endgame's
+    landing copies, the copy the migrated volume is cloned from still named a
+    deleted predecessor, so walking its lineage (retirement after the next
+    migration) stopped there, and every older copy -- including chain
+    ancestors a return trip re-sent -- was never retired (bf6 2026-10-29: 65
+    snapshots, 74 GiB, on a cluster with no volumes). The successor now takes
+    over the deleted snapshot's predecessor, and the predecessor its
+    successor."""
+    from simplyblock_core.controllers import replication_snapshot_retire
+    snap_id = snap.get_id()
+    prev_id = getattr(snap, "prev_snap_uuid", "") or ""
+    next_id = getattr(snap, "next_snap_uuid", "") or ""
+    if not prev_id and not next_id:
+        return
+
+    def relink(neighbour_id, field, expected, replacement):
+        if not neighbour_id:
+            return
+        try:
+            neighbour = db.get_snapshot_by_id(neighbour_id)
+        except KeyError:
+            return
+        if getattr(neighbour, field, "") != expected:
+            return
+
+        def apply(s):
+            if getattr(s, field, "") == expected:
+                setattr(s, field, replacement)
+
+        fresh = db.atomic_update(neighbour, apply)
+        if fresh is not None:
+            replication_snapshot_retire._sync_mini(db, fresh)
+
+    relink(next_id, "prev_snap_uuid", snap_id, prev_id)
+    relink(prev_id, "next_snap_uuid", snap_id, next_id)
 
 
 def process_snap_delete_try_again(snap):
@@ -180,17 +253,21 @@ def set_snap_offline(snap):
     sn.write_to_db()
 
 
-# Rate-limited leaderless diagnostics: lvs_name -> (last_warn_monotonic,
-# suppressed_count). Run 20260725: the per-snapshot "Failed to get leader
-# node" raise fired 244,072 times in one hour — one line per in-deletion
-# snapshot per cycle — while phase-2 work that needed no leader sat undone.
+# Rate-limited leaderless diagnostics: (lvs_name, deferred work) ->
+# (last_warn_monotonic, suppressed_count). Run 20260725: the per-snapshot
+# "Failed to get leader node" raise fired 244,072 times in one hour — one line
+# per in-deletion snapshot per cycle — while phase-2 work that needed no
+# leader sat undone.
 _leaderless_warn_memo: dict = {}
 _LEADERLESS_WARN_INTERVAL_SEC = 60
 
 
-def _warn_leaderless(lvs_name):
+def _warn_leaderless(lvs_name, deferred="snapshot deletes needing phase-1"):
+    """Rate-limited "no leader, ``deferred`` are deferred" for ``lvs_name``.
+    Each kind of deferred work has its own line and its own count."""
     now = time.monotonic()
-    entry = _leaderless_warn_memo.get(lvs_name)
+    key = (lvs_name, deferred)
+    entry = _leaderless_warn_memo.get(key)
     # An unseen lvs must warn NOW. Seeding "last" with 0.0 instead suppressed
     # the FIRST warning whenever monotonic() itself was still under the
     # interval — i.e. for the first 60s after boot, which is exactly when a
@@ -198,12 +275,12 @@ def _warn_leaderless(lvs_name):
     if entry is None or now - entry[0] >= _LEADERLESS_WARN_INTERVAL_SEC:
         suppressed = entry[1] if entry else 0
         logger.warning(
-            f"No confirmed leader for {lvs_name} — snapshot deletes needing "
-            f"phase-1 are deferred ({suppressed} similar messages suppressed "
+            f"No confirmed leader for {lvs_name} — {deferred} are deferred "
+            f"({suppressed} similar messages suppressed "
             f"in the last {_LEADERLESS_WARN_INTERVAL_SEC}s)")
-        _leaderless_warn_memo[lvs_name] = (now, 0)
+        _leaderless_warn_memo[key] = (now, 0)
     else:
-        _leaderless_warn_memo[lvs_name] = (entry[0], entry[1] + 1)
+        _leaderless_warn_memo[key] = (entry[0], entry[1] + 1)
 
 
 def _poll_delete_status(node, bdev_name):
@@ -228,43 +305,46 @@ def process_snap_delete(snap, snode, all_mini_lvols=None, leader_cache=None):
     # Leadership moves mid-cycle are handled by the poll's error codes
     # (-35/4 reset deletion_status and re-resolve next cycle).
     leader_node = None
-    if leader_cache is not None and snode.get_id() in leader_cache:
-        leader_node = leader_cache[snode.get_id()]
+    # Sync replication: the cached leader is only valid for the triplet that
+    # led when it was found - the key carries the owner's lvs_active_site (a
+    # promote in the same cycle changes it), and nothing is cached while the
+    # leadership is being moved.
+    cache_key = snode.get_id()
+    if leader_cache is not None and snode.site:
+        from simplyblock_core.storage_node_ops import LVS_MOVING_PREFIX
+        active_site = db.get_storage_node_by_id(snode.get_id()).lvs_active_site
+        cache_key = None if active_site.startswith(LVS_MOVING_PREFIX) else (snode.get_id(), active_site)
+    if leader_cache is not None and cache_key in leader_cache:
+        leader_node = leader_cache[cache_key]
     if leader_node is None:
-        if snode.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED,
-                            StorageNode.STATUS_DOWN]:
+        # The members that may lead snode's LVS: its home triplet, or on a
+        # sync-replication cluster the active triplet
+        # (storage_node_ops._lvs_leader_candidates). Every member is asked
+        # about snode's LVS - a peer's own lvstore says nothing about it.
+        from simplyblock_core.storage_node_ops import _lvs_leader_candidates
+        members = [snode]
+        for peer_id in [snode.secondary_node_id, snode.tertiary_node_id]:
+            if not peer_id:
+                continue
             try:
-                ret = snode.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
+                members.append(db.get_storage_node_by_id(peer_id))
+            except KeyError:
+                continue
+        for member in _lvs_leader_candidates(members, snode.lvstore).nodes:
+            if member.status not in [StorageNode.STATUS_ONLINE,
+                                     StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
+                continue
+            try:
+                lvs_info = member.rpc_client().get_lvstore(snode.lvstore)
             except Exception:
-                ret = None
-            if ret:
-                lvs_info = ret[0]
-                if lvs_info.get('lvs leadership'):
-                    leader_node = snode
-
-        if not leader_node:
-            for peer_id in [snode.secondary_node_id, snode.tertiary_node_id]:
-                if not peer_id:
-                    continue
-                try:
-                    sec_node = db.get_storage_node_by_id(peer_id)
-                except KeyError:
-                    continue
-                if sec_node.status not in [StorageNode.STATUS_ONLINE,
-                                           StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
-                    continue
-                try:
-                    ret = sec_node.rpc_client().bdev_lvol_get_lvstores(sec_node.lvstore)
-                except Exception:
-                    continue
-                if not ret:
-                    continue
-                lvs_info = ret[0]
-                if lvs_info.get('lvs leadership'):
-                    leader_node = sec_node
-                    break
-        if leader_node is not None and leader_cache is not None:
-            leader_cache[snode.get_id()] = leader_node
+                continue
+            if not lvs_info:
+                continue
+            if lvs_info.get('lvs leadership'):
+                leader_node = member
+                break
+        if leader_node is not None and leader_cache is not None and cache_key is not None:
+            leader_cache[cache_key] = leader_node
 
     if all_mini_lvols is None:
         all_mini_lvols = db.get_mini_lvols()
@@ -496,6 +576,27 @@ def _due_for_internal_snapshot(lvol, all_snaps, now_ts):
     return (now_ts - last_ts) >= interval_sec
 
 
+def _deletion_backlog(lvol):
+    """How many of *lvol*'s snapshots are waiting to be deleted: those already
+    in deletion, plus the replicated internal snapshots beyond what retention
+    keeps (retention should have removed them). Read only for a volume that is
+    due, so at most once per volume per interval.
+
+    Replication must not run ahead of snapshot deletion by more than a few
+    rounds: every snapshot kept adds a copy generation behind every page
+    rewritten since, and the deletes left behind pile up (2026-11-03)."""
+    from simplyblock_core.services.snapshot_replication import _keep_replicated_for
+    in_deletion = 0
+    replicated = 0
+    for s in db.get_snapshots_by_lvol_id(lvol.get_id()):
+        if s.status == SnapShot.STATUS_IN_DELETION:
+            in_deletion += 1
+        elif (s.snap_type == SnapShot.TYPE_INTERNAL and s.status == SnapShot.STATUS_ONLINE
+              and s.target_replicated_snap_uuid):
+            replicated += 1
+    return in_deletion + max(0, replicated - _keep_replicated_for(lvol))
+
+
 def _outstanding_internal_snapshot(lvol, all_snaps):
     """The newest internal snapshot of *lvol* that has NOT reached the remote
     side yet, or None when the last one completed.
@@ -531,6 +632,10 @@ def _outstanding_internal_snapshot(lvol, all_snaps):
         full = db.get_snapshot_by_id(newest.get_id())
     except KeyError:
         return None                       # vanished under us: nothing outstanding
+    if getattr(full, "status", "") == SnapShot.STATUS_IN_CREATION:
+        # Still being created, or its creator died and the intent reaper will
+        # roll it back: outstanding either way, and nothing to queue for it.
+        return full
     # Either direction counts as delivered: to-target replication records the
     # target copy, fail-back records the source copy.
     if full.target_replicated_snap_uuid or full.source_replicated_snap_uuid:
@@ -546,23 +651,70 @@ def _outstanding_internal_snapshot(lvol, all_snaps):
     # rest of the run (case 4: outstanding=0 and not one new snapshot in 20
     # minutes). The chaining bug is fixed, but the guard must not be able to
     # convert ANY future terminal failure into a silent halt.
-    if not _replication_task_is_live(full):
+    task = _live_replication_task(full)
+    if task is None:
+        # Re-queue the transfer before giving up on it. Resuming the cadence at
+        # once stacked a new snapshot behind every transfer that gave up (bf6
+        # 2026-10-29: 36 resumes in round 4, 14 unreplicated snapshots on one
+        # volume, each a layer and each counted as a full region of backlog),
+        # while the next attempt at the SAME snapshot would have carried the
+        # same data. Only a snapshot that keeps failing releases the cadence.
+        attempts = _replication_attempts(full)
+        if attempts <= _CADENCE_REQUEUE_LIMIT:
+            logger.warning(
+                "Internal snapshot %s of lvol %s has not replicated and its "
+                "replication task ended; queueing it again (attempt %d of %d) "
+                "instead of taking another snapshot",
+                full.get_id(), lvol.get_id(), attempts + 1, _CADENCE_REQUEUE_LIMIT + 1)
+            from simplyblock_core.controllers import tasks_controller
+            tasks_controller.add_snapshot_replication_task(
+                full.cluster_id, full.lvol.node_id, full.get_id())
+            return full
         logger.error(
-            "Internal snapshot %s of lvol %s never replicated and has no live "
-            "replication task; resuming the cadence. Replication for this "
-            "volume is NOT making progress -- investigate the transfer.",
-            full.get_id(), lvol.get_id())
+            "Internal snapshot %s of lvol %s never replicated after %d attempts "
+            "and has no live replication task; resuming the cadence. "
+            "Replication for this volume is NOT making progress -- investigate "
+            "the transfer.", full.get_id(), lvol.get_id(), attempts)
+        return None
+    # Its transfer is complete and only the merge and convert on the target
+    # remain: the next snapshot may transfer meanwhile (constants.
+    # REPL_OVERLAP_MERGE), but no further -- the one before it must have its
+    # copy, so at most two snapshots of a volume are in flight.
+    if (constants.REPL_OVERLAP_MERGE and task is not _UNKNOWN_TASK
+            and task.function_params.get("transfer_done")
+            and not _older_internal_outstanding(lvol, all_snaps, newest)):
         return None
     return full
 
 
-def _replication_task_is_live(snapshot):
-    """Whether a replication task for *snapshot* can still make progress.
+#: _live_replication_task's answer when the tasks cannot be read
+_UNKNOWN_TASK = object()
+
+#: How often the cadence re-queues the transfer of an outstanding snapshot
+#: whose task ended before it gives up on it and takes the next snapshot.
+_CADENCE_REQUEUE_LIMIT = 3
+
+
+def _replication_attempts(snapshot):
+    """How many replication tasks *snapshot* has had (ended or not)."""
+    try:
+        node = db.get_storage_node_by_id(snapshot.lvol.node_id)
+        tasks = db.get_job_tasks(node.cluster_id)
+    except Exception:                                   # noqa: BLE001
+        return _CADENCE_REQUEUE_LIMIT + 1   # unknown: keep the old behaviour
+    return sum(1 for t in tasks
+               if t.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION
+               and t.function_params.get("snapshot_id") == snapshot.get_id())
+
+
+def _live_replication_task(snapshot):
+    """The replication task for *snapshot* that can still make progress, or
+    None.
 
     A task that is DONE (successfully or having given up) or cancelled will
     never set the replicated marker, so waiting on it is waiting for ever.
-    When the tasks cannot be read at all, assume live: back-pressure staying on
-    is the conservative side of that guess.
+    When the tasks cannot be read at all, assume one is live (_UNKNOWN_TASK):
+    back-pressure staying on is the conservative side of that guess.
     """
     try:
         node = db.get_storage_node_by_id(snapshot.lvol.node_id)
@@ -570,15 +722,35 @@ def _replication_task_is_live(snapshot):
     except Exception as e:
         logger.warning("Cannot read replication tasks for %s (%s); keeping "
                        "back-pressure on", snapshot.get_id(), e)
-        return True
+        return _UNKNOWN_TASK
     for task in tasks:
         if task.function_name != JobSchedule.FN_SNAPSHOT_REPLICATION:
             continue
         if task.function_params.get("snapshot_id") != snapshot.get_id():
             continue
         if task.status != JobSchedule.STATUS_DONE and not task.canceled:
-            return True
-    return False
+            return task
+    return None
+
+
+def _older_internal_outstanding(lvol, all_snaps, newest):
+    """Whether the internal snapshot of *lvol* before *newest* has no copy on
+    the remote side yet."""
+    prev = None
+    for s in all_snaps:
+        if (s.lvol.get_id() == lvol.get_id()
+                and s.snap_type == SnapShot.TYPE_INTERNAL
+                and s.status != SnapShot.STATUS_IN_DELETION
+                and s.created_at < newest.created_at
+                and (prev is None or s.created_at > prev.created_at)):
+            prev = s
+    if prev is None:
+        return False
+    try:
+        full = db.get_snapshot_by_id(prev.get_id())
+    except KeyError:
+        return False
+    return not (full.target_replicated_snap_uuid or full.source_replicated_snap_uuid)
 
 
 def partition_by_group(pairs):
@@ -599,6 +771,100 @@ def partition_by_group(pairs):
     return grouped, ungrouped
 
 
+def _cadence_waits_for_leader(node_id, lvs_name, leaderless):
+    """Whether a cadence snapshot on the LVS ``lvs_name`` of ``node_id`` (its
+    owner) has to wait because nobody leads the LVS. Sync replication only.
+
+    Between a promote and the first client IO a sync LVS has no leader, and
+    that is not a fault. The snapshot's own lookup (snapshot_controller.add,
+    create_group_snapshot_for_group) would answer it with the leaderless
+    recovery - an RPC grant. A timer must never make a leader, so it asks
+    first, without recovery (find_leader_with_failover ``recover=False``).
+
+    ``leaderless`` is the tick's memo of "nobody leads", keyed like
+    process_snap_delete's leader cache: by the owner's lvs_active_site, read
+    fresh for every snapshot, and never while the leadership is being moved.
+    A leader found is not remembered at all: a promote can complete between
+    two volumes of one tick."""
+    from simplyblock_core.storage_node_ops import (
+        LVS_MOVING_PREFIX,
+        find_leader_with_failover,
+    )
+    owner = db.get_storage_node_by_id(node_id)
+    active_site = owner.lvs_active_site
+    key = None if active_site.startswith(LVS_MOVING_PREFIX) else (node_id, active_site)
+    if key is None or key not in leaderless:
+        leader, _ = find_leader_with_failover([owner], lvs_name, recover=False)
+        if leader is not None:
+            return False
+        if key is not None:
+            leaderless.add(key)
+    _warn_leaderless(lvs_name, "scheduled snapshots")
+    return True
+
+
+def _cutover_endgame_lvol_ids(cluster_id):
+    """Ids of the volumes whose cutover endgame is in progress: a live
+    FN_REPLICATION_FINAL task that took its first shrink snapshot or holds the
+    lvstore claim (snapshot_replication._cutover_holds_retention, for all of
+    them in one task read). Empty when the tasks cannot be read."""
+    try:
+        tasks = db.get_job_tasks(cluster_id)
+    except Exception as e:                                # noqa: BLE001
+        logger.warning("Cannot read tasks to find cutover endgames: %s", e)
+        return set()
+    ids = set()
+    for task in tasks:
+        if (task.function_name != JobSchedule.FN_REPLICATION_FINAL
+                or task.status == JobSchedule.STATUS_DONE or task.canceled):
+            continue
+        params = task.function_params or {}
+        if params.get("lvol_id") and (params.get("shrink_snap_id") or params.get("cutover_lvs")):
+            ids.add(params["lvol_id"])
+    return ids
+
+
+def _cadence_capacity_hold(cluster_id):
+    """Why no cadence snapshot may be taken on *cluster_id* now, or "".
+
+    A cadence snapshot pins every block overwritten while it is outstanding,
+    and under sustained overwrites faster than replication ships them one
+    outstanding snapshot per volume pins up to the volume's whole used size
+    (twice that raw, with 1+1). Past the cluster's capacity warning threshold
+    another one only adds to that, so the cadence holds and retention can
+    reclaim what already replicated. A missing capacity reading never holds:
+    the guard must not stop replication on a cluster it cannot measure.
+    """
+    try:
+        cluster = db.get_cluster_by_id(cluster_id)
+        records = db.get_cluster_capacity(cluster, 1)
+    except Exception:                                     # noqa: BLE001
+        return ""
+    if not records:
+        return ""
+    util = getattr(records[0], "size_util", None)
+    warn = getattr(cluster, "cap_warn", 0) or 0
+    if util is None or not warn or util < warn:
+        return ""
+    return (f"cluster {cluster_id} is at {util}% capacity, at or above its "
+            f"warning threshold of {warn}%")
+
+
+def _exempt_from_capacity_hold(repl_lvols, cluster_id):
+    """The volumes among *repl_lvols* whose policy is a migration: they keep
+    their cadence through a capacity hold (see take_due_internal_snapshots)."""
+    try:
+        policies = {p.get_id(): p for p in db.get_replication_policies(cluster_id)}
+    except Exception:                                     # noqa: BLE001
+        return []
+    out = []
+    for lv in repl_lvols:
+        pol = policies.get(getattr(lv, "replication_policy_id", "") or "")
+        if pol is not None and getattr(pol, "mode", "") == "migration":
+            out.append(lv)
+    return out
+
+
 def take_due_internal_snapshots(cluster_id, now_ts):
     """Create an internal snapshot for every replicated volume whose interval
     has elapsed. The snapshot's creation auto-enqueues a replication task.
@@ -608,12 +874,56 @@ def take_due_internal_snapshots(cluster_id, now_ts):
     everything ``_due_for_internal_snapshot`` reads (lvol id, snap_type,
     created_at). The previous unconditional full-SnapShot scan here ran twice
     per monitor cycle and was a steady multi-second FDB load at 10k+
-    snapshots (mass-snapshot run 2026-07-21) with zero replicated volumes."""
+    snapshots (mass-snapshot run 2026-07-21) with zero replicated volumes.
+
+    Sync replication: a volume or a consistency group whose LVS nobody leads
+    is deferred to a later tick (_cadence_waits_for_leader), checked right
+    before each snapshot. The check and the snapshot's own leader lookup are
+    two lookups: a promote that completes between them still reaches the
+    leaderless recovery of the snapshot."""
     repl_lvols = [lv for lv in db.get_lvols(cluster_id)
                   if lv.do_replicate and lv.replication_interval_min > 0]
     if not repl_lvols:
         return
+    # One migrating volume per source node: the others take no snapshot
+    # until the volume ahead of them on their node has cut over.
+    waiting = migration_turn.waiting_lvol_ids(db, cluster_id, repl_lvols)
+    if waiting:
+        logger.debug("Waiting for their node's migration turn: %s", sorted(waiting))
+        repl_lvols = [lv for lv in repl_lvols if lv.get_id() not in waiting]
+        if not repl_lvols:
+            return
+    # A volume in its cutover endgame takes its own snapshots (the shrink
+    # rounds), and its cutover clone sits on the copy of the last one. A
+    # cadence snapshot taken meanwhile moves the live volume's dirty tracking
+    # onto a snapshot the clone does not sit on: bf15 (2026-11-07) took three
+    # while a prepared cutover waited for the runner, and its final step had
+    # to send every cluster those snapshots own whole -- the 12 s limit, twice.
+    in_endgame = _cutover_endgame_lvol_ids(cluster_id)
+    if in_endgame:
+        skipped = [lv.get_id() for lv in repl_lvols if lv.get_id() in in_endgame]
+        if skipped:
+            logger.info("No cadence snapshot for %s: cutover endgame in progress",
+                        ", ".join(sorted(skipped)))
+            repl_lvols = [lv for lv in repl_lvols if lv.get_id() not in in_endgame]
+            if not repl_lvols:
+                return
+    hold = _cadence_capacity_hold(cluster_id)
+    if hold:
+        # A migrating volume is exempt: its snapshots are how it leaves the
+        # cluster, and holding them locked every migration of bed bf12/bf13
+        # (2026-11-04/05): the retention held for a cutover keeps the usage
+        # above the threshold, the hold keeps the cutover from ever catching
+        # up. Fail-over replication is held as before.
+        migrating = _exempt_from_capacity_hold(repl_lvols, cluster_id)
+        logger.warning("Holding internal replication snapshots: %s%s", hold,
+                       f" (except {len(migrating)} migrating volume(s))" if migrating else "")
+        repl_lvols = migrating
+        if not repl_lvols:
+            return
     all_snaps = db.get_mini_snapshots()
+    sync = db.get_cluster_by_id(cluster_id).sync_replication
+    leaderless: set = set()
 
     # Members of a consistency group snapshot together as ONE crash-consistent
     # generation — a single group-snapshot call per tick, never per-volume.
@@ -670,9 +980,12 @@ def take_due_internal_snapshots(cluster_id, now_ts):
                     group_id, blocked[0].get_id(), blocked[1].get_id())
                 continue
             group = db.get_consistency_group_by_id(group_id)
+            # A group is pinned to one LVS: one lookup defers it as a whole.
+            if sync and _cadence_waits_for_leader(group.node_id, group.lvs_name, leaderless):
+                continue
             logger.info("Taking consistency-group snapshot for group %s "
                         "(%d members)", group_id, len(members))
-            _ids, err = consistency_group_controller.create_group_snapshot_for_group(group)
+            _seq, err = consistency_group_controller.create_group_snapshot_for_group(group)
             if err:
                 logger.warning("Group snapshot for group %s failed: %s",
                                group_id, err)
@@ -692,10 +1005,20 @@ def take_due_internal_snapshots(cluster_id, now_ts):
                     lvol.get_id(), outstanding.get_id(),
                     max(0, now_ts - outstanding.created_at))
                 continue
+            if sync and _cadence_waits_for_leader(lvol.node_id, lvol.lvs_name, leaderless):
+                continue
+            backlog = _deletion_backlog(lvol)
+            if backlog >= constants.REPL_MAX_DELETION_BACKLOG:
+                logger.warning(
+                    "Skipping internal replication snapshot for lvol %s: %d of its "
+                    "snapshots are waiting to be deleted (limit %d); replication "
+                    "waits for deletion to catch up",
+                    lvol.get_id(), backlog, constants.REPL_MAX_DELETION_BACKLOG)
+                continue
             name = f"repl_internal_{lvol.get_id()[:8]}_{now_ts}"
             logger.info(f"Taking internal replication snapshot for lvol {lvol.get_id()}: {name}")
-            _id, err = snapshot_controller.add(
-                lvol.get_id(), name, snap_type=SnapShot.TYPE_INTERNAL)
+            _id, err = replication_delta.add_snapshot(
+                lvol, name, snap_type=SnapShot.TYPE_INTERNAL)
             if err:
                 logger.warning(f"Internal snapshot for {lvol.get_id()} failed: {err}")
         except Exception as e:
@@ -722,6 +1045,18 @@ def main():
                 take_due_internal_snapshots(cluster.get_id(), int(time.time()))
             except Exception as e:
                 logger.error(f"Internal snapshot scheduling failed for cluster {cluster.get_id()}: {e}")
+
+            try:
+                snapshot_controller.reap_snapshot_intents(cluster.get_id())
+            except Exception as e:
+                logger.error(f"Snapshot intent reaping failed for cluster {cluster.get_id()}: {e}")
+
+            try:
+                deletions_in_flight += replication_snapshot_retire.reap_retired(
+                    db, cluster.get_id())
+            except Exception as e:
+                logger.error(f"Retired replication snapshot cleanup failed for cluster "
+                             f"{cluster.get_id()}: {e}")
 
             # Only in-deletion snapshots need any processing. Find them via
             # the mini table (cheap; no embedded LVol dict) and fetch the few

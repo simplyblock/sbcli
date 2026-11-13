@@ -33,7 +33,7 @@ from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.hublvol import HubLVol
 from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.storage_node import StorageNode
-from tests._mocks import unique_ip
+from tests._mocks import route_fences, unique_ip
 
 # --------------------------------------------------------------------------
 # Helpers
@@ -327,7 +327,6 @@ class TestRecreateLvstoreRoleDerivation(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.health_controller")
     @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
     @patch("simplyblock_core.storage_node_ops.storage_events")
-    @patch("simplyblock_core.utils.port_block.set_port")
     @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._connect_to_remote_jm_devs", return_value=[])
     @patch("simplyblock_core.storage_node_ops._connect_to_remote_devs", return_value=[])
@@ -335,9 +334,10 @@ class TestRecreateLvstoreRoleDerivation(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.DBController")
     def _run_takeover(self, snode_role,
                       mock_db_cls, mock_create_bdev, mock_connect_devs,
-                      mock_connect_jm, mock_rpc_cls, mock_fw_cls,
+                      mock_connect_jm, mock_rpc_cls,
                       mock_storage_events, mock_tcp_events, mock_health,
                       mock_failback, mock_phase, mock_disc):
+        mock_fw_cls = MagicMock()
         from simplyblock_core import storage_node_ops
 
         snode, lvs_owner = self._build_takeover_nodes(snode_role)
@@ -354,9 +354,9 @@ class TestRecreateLvstoreRoleDerivation(unittest.TestCase):
         db.get_cluster_by_id.return_value = _cluster()
 
         rpc = MagicMock()
-        rpc.bdev_lvol_get_lvstores.return_value = [
-            {"lvs leadership": True, "uuid": "u", "lvs_primary": False}
-        ]
+        rpc.get_lvstore.return_value = {
+            "lvs leadership": True, "uuid": "u", "lvs_primary": False
+        }
         rpc.bdev_get.return_value = None
         rpc.bdev_lvol_set_lvs_opts.return_value = True
         rpc.bdev_lvol_set_leader.return_value = True
@@ -379,6 +379,7 @@ class TestRecreateLvstoreRoleDerivation(unittest.TestCase):
             n.adopt_hublvol = MagicMock()
             n.write_to_db = MagicMock()
             n.client = MagicMock(return_value=MagicMock())
+        route_fences(nodes.values(), mock_fw_cls)
 
         storage_node_ops.recreate_lvstore(snode, lvs_primary=lvs_owner)
 
@@ -542,9 +543,9 @@ class TestRecreateLvstoreStep8bHublvolWiring(unittest.TestCase):
         for n in nodes.values():
             n.write_to_db = MagicMock()
             n.rpc_client = MagicMock(return_value=MagicMock(
-                bdev_lvol_get_lvstores=MagicMock(return_value=[
-                    {"lvs leadership": True, "uuid": "u",
-                     "lvs_primary": False}]),
+                get_lvstore=MagicMock(return_value={
+                    "lvs leadership": True, "uuid": "u",
+                    "lvs_primary": False}),
                 bdev_get=MagicMock(return_value=None),
                 bdev_lvol_set_lvs_opts=MagicMock(return_value=True),
                 bdev_lvol_set_leader=MagicMock(return_value=True),
@@ -581,12 +582,10 @@ class TestRecreateLvstoreStep8bHublvolWiring(unittest.TestCase):
              patch("simplyblock_core.storage_node_ops.health_controller") as mh, \
              patch("simplyblock_core.storage_node_ops.tcp_ports_events"), \
              patch("simplyblock_core.storage_node_ops.storage_events"), \
-             patch("simplyblock_core.utils.port_block.set_port",
-                   return_value=MagicMock()), \
              patch("simplyblock_core.rpc_client.RPCClient",
                    return_value=MagicMock(
-                       bdev_lvol_get_lvstores=MagicMock(return_value=[
-                           {"lvs leadership": True}]))), \
+                       get_lvstore=MagicMock(return_value=
+                           {"lvs leadership": True}))), \
              patch("simplyblock_core.storage_node_ops._connect_to_remote_jm_devs",
                    return_value=[]), \
              patch("simplyblock_core.storage_node_ops._connect_to_remote_devs",

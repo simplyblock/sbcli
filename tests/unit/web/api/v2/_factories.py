@@ -7,7 +7,7 @@ the entity without a live database.
 
 from pydantic import SecretStr
 
-from simplyblock_core.models.backup import Backup, BackupPolicy
+from simplyblock_core.models.backup import Backup, BackupPolicy, GroupBackup
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.events import EventObj
 from simplyblock_core.models.job_schedule import JobSchedule
@@ -42,6 +42,7 @@ TARGET_CLUSTER_ID = 'eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee'
 TARGET_POOL_ID = 'ffffffff-ffff-ffff-ffff-ffffffffffff'
 VOLUME_NQN = 'nqn.2023-02.io.simplyblock:volume-1'
 CONSISTENCY_GROUP_ID = 'c9c9c9c9-c9c9-c9c9-c9c9-c9c9c9c9c9c9'
+GROUP_BACKUP_ID = 'a7a7a7a7-a7a7-a7a7-a7a7-a7a7a7a7a7a7'
 
 
 def _apply(model, attrs):
@@ -179,6 +180,21 @@ def make_backup(**attrs) -> Backup:
     backup.created_at = 1700000000
     backup.completed_at = 1700000100
     return _apply(backup, attrs)
+
+
+def make_group_backup(**attrs) -> GroupBackup:
+    group_backup = GroupBackup()
+    group_backup.uuid = GROUP_BACKUP_ID
+    group_backup.cluster_id = CLUSTER_ID
+    group_backup.consistency_group_id = f'{CLUSTER_ID}/{CONSISTENCY_GROUP_ID}'
+    group_backup.consistency_group_name = 'app-group-cg'
+    group_backup.group_seq = 7
+    group_backup.status = GroupBackup.STATUS_IN_PROGRESS
+    group_backup.member_backup_ids = [f'{CLUSTER_ID}/{BACKUP_ID}']
+    group_backup.size = 1024 ** 3
+    group_backup.created_at = 1700000000
+    group_backup.completed_at = 0
+    return _apply(group_backup, attrs)
 
 
 def make_backup_policy(**attrs) -> BackupPolicy:

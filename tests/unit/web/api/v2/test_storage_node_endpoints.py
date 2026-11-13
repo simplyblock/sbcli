@@ -71,6 +71,7 @@ class TestCreateStorageNode:
             'spdk_proxy_image': None,
             'spdk_sys_mem': None,
             'failure_domain': None,
+            'site': None,
             'expansion': False,
             'force_format': False,
         })
@@ -170,6 +171,20 @@ class TestGetStorageNode:
         storage_node.tertiary_node_id = ''
 
         assert client.get(f'{BASE}/{STORAGE_NODE_ID}/').json()['tertiary_node_id'] is None
+
+    def test_the_node_site_is_reported(self, client, db, storage_node):
+        """Regression: 2026-10-22-node-dto-hides-site. On a stretched cluster each
+        site's operator lists the other site's nodes as remote records, and it
+        can tell them apart only by the node's site; the model carried it and the
+        DTO dropped it."""
+        storage_node.site = 'b'
+
+        assert client.get(f'{BASE}/{STORAGE_NODE_ID}/').json()['site'] == 'b'
+
+    def test_a_node_without_a_site_reports_an_empty_string(self, client, db, storage_node):
+        storage_node.site = ''
+
+        assert client.get(f'{BASE}/{STORAGE_NODE_ID}/').json()['site'] == ''
 
 
 class TestDeleteStorageNode:
@@ -382,3 +397,29 @@ class TestRemovalSteps:
         body = client.post(f'{BASE}/{STORAGE_NODE_ID}/verify-drained').json()
 
         assert body == {'drained': False, 'lvols': ['lv-1'], 'snapshots': []}
+
+
+class TestPromoteStorageNode:
+    """The promote finishes a node's relocation. A promote that left devices
+    unsettled is the caller's to retry, so it is answered 409 with the reason,
+    not 204 (the operator's Migrate reported Succeeded over a refused
+    retirement of the old host's devices, 2026-11-12)."""
+
+    def test_a_finished_promote_is_204(self, client, storage_node, storage_node_ops):
+        storage_node_ops.make_sec_new_primary.return_value = True
+
+        response = client.post(f'{BASE}/{STORAGE_NODE_ID}/promote')
+
+        assert response.status_code == 204
+        storage_node_ops.make_sec_new_primary.assert_called_once_with(STORAGE_NODE_ID)
+
+    def test_an_unfinished_promote_is_409_with_the_reason(self, client, storage_node, storage_node_ops):
+        from simplyblock_core.exceptions import PromoteIncompleteError
+        storage_node_ops.make_sec_new_primary.side_effect = PromoteIncompleteError(
+            "the promote of node x did not finish: devices of the old host still removed: old-1",
+            still_removed=["old-1"])
+
+        response = client.post(f'{BASE}/{STORAGE_NODE_ID}/promote')
+
+        assert response.status_code == 409
+        assert "old-1" in response.json()["detail"]
