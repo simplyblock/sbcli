@@ -5266,6 +5266,35 @@ REMOVABLE_STATUSES = (
 #: so phase 1 has something to stop. Everything else is either already
 #: stopped by an earlier step (the departing statuses) or not answering
 #: (OFFLINE, UNREACHABLE), where a shutdown could only fail.
+def _release_host_huge_pages(node: StorageNode) -> None:
+    """Have the agent of a node that is leaving give back the huge pages
+    simplyblock set on its host, once no other storage node is left there.
+
+    The pages and the records of them are per host, shared by every storage
+    node on it whatever its cluster, so they go with the last one. Best
+    effort: an agent that does not answer, one that predates the call, or
+    pages still in use leave the host as it was, which the next deployment on
+    it handles as before."""
+    host = node._k8s_node_label()
+    others = [
+        n.get_id() for n in DBController().get_storage_nodes()
+        if n.get_id() != node.get_id() and n.status != StorageNode.STATUS_REMOVED
+        and (n.mgmt_ip == node.mgmt_ip or n._k8s_node_label() == host)
+    ]
+    if others:
+        logger.info(f"Huge pages stay on {host}: storage node(s) {', '.join(others)} still run there")
+        return
+    try:
+        released, error = node.client(timeout=20).release_hugepages()
+    except SNodeClientException as e:
+        logger.warning(f"Huge pages on {host} were not released: {e.message}")
+        return
+    if not released:
+        logger.warning(f"Huge pages on {host} were not released: {error}")
+        return
+    logger.info(f"Huge pages on {host} released")
+
+
 def force_delete_storage_node(node_id) -> bool:
     """Delete a storage node as part of bringing its cluster down, killing its
     SPDK first whatever its status, and report whether SPDK was confirmed
@@ -5291,6 +5320,8 @@ def force_delete_storage_node(node_id) -> bool:
     if not stopped:
         logger.error(f"SPDK on node {node_id} could not be confirmed stopped; "
                      f"deleting the node's records anyway")
+    else:
+        _release_host_huge_pages(snode)
     delete_storage_node(node_id, force=True)
     return stopped
 
@@ -8701,6 +8732,7 @@ def _finalize_node_removal(removed_node: StorageNode):
                     ret = snode_api.delete_dev_gpt_partitions(dev.pcie_address)
                     logger.debug(ret)
                     pci_address.append(dev.pcie_address)
+            _release_host_huge_pages(removed_node)
     except Exception as e:
         logger.exception(e)
 
