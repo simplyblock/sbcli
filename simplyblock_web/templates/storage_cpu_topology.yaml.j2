@@ -55,9 +55,10 @@ spec:
               # under /etc/kubernetes/kubelet. One started with --config-dir alone
               # names a directory of drop-in files instead: RKE2 starts its kubelet
               # that way and writes its own drop-in there again at every start, so
-              # the settings of this Job go into a drop-in of their own. The kubeadm
-              # default stands for a kubelet that names neither, and for one
-              # embedded in another process.
+              # the settings of this Job go into a drop-in of their own. k3s does
+              # the same, but runs the kubelet inside its own process, so the
+              # directory is read from where k3s keeps it. The kubeadm default
+              # stands for a kubelet that names neither.
               KUBELET_CFG_ON_HOST="/var/lib/kubelet/config.yaml"
               CFG_FROM_KUBELET=""
               CFG_DIR_FROM_KUBELET=""
@@ -77,6 +78,44 @@ spec:
                 CFG_DIR_FROM_KUBELET="$(tr '\0' '\n' < "/proc/$KUBELET_PID/cmdline" \
                   | awk 'prev == "--config-dir" { print; exit } /^--config-dir=/ { sub(/^--config-dir=/, ""); print; exit } { prev = $0 }' \
                   | tr -d '"')"
+              fi
+              # No process is named kubelet on a k3s node, and no command line
+              # names the drop-in directory: it is agent/etc/kubelet.conf.d under
+              # the data directory of k3s, which --data-dir moves. k3s hides its
+              # flags from its command line, so the data directory is read from
+              # where its binary runs, <data dir>/data/<hash>/bin, before the
+              # flag and the default.
+              K3S_DATA_DIR=""
+              if [ -z "$KUBELET_PID" ]; then
+                for comm in /proc/[0-9]*/comm; do
+                  case "$(cat "$comm" 2>/dev/null)" in
+                    k3s|k3s-server|k3s-agent)
+                      K3S_PROC="$(dirname "$comm")"
+                      K3S_DATA_DIR="$(readlink "$K3S_PROC/exe" 2>/dev/null | sed -n 's|/data/[^/]*/bin/[^/]*$||p')"
+                      if [ -z "$K3S_DATA_DIR" ]; then
+                        K3S_DATA_DIR="$(tr '\0' '\n' < "$K3S_PROC/cmdline" \
+                          | awk 'prev == "--data-dir" || prev == "-d" { print; exit } /^--data-dir=/ { sub(/^--data-dir=/, ""); print; exit } { prev = $0 }' \
+                          | tr -d '"')"
+                      fi
+                      if [ -z "$K3S_DATA_DIR" ]; then
+                        K3S_DATA_DIR="/var/lib/rancher/k3s"
+                      fi
+                      break
+                      ;;
+                  esac
+                done
+              fi
+              if [ -n "$K3S_DATA_DIR" ]; then
+                if [ ! -d "/host$K3S_DATA_DIR/agent/etc/kubelet.conf.d" ]; then
+                  # An older k3s, whose kubelet takes its settings only as
+                  # kubelet-arg of the k3s configuration. That is the
+                  # administrator's file, and this Job does not edit it.
+                  echo "[ERROR] k3s runs the kubelet of this node and keeps no drop-in directory at $K3S_DATA_DIR/agent/etc/kubelet.conf.d"
+                  echo "        Set cpu-manager-policy=static, topology-manager-policy=single-numa-node, topology-manager-scope=pod"
+                  echo "        and reserved-cpus={{ RESERVED_SYSTEM_CPUS }} as kubelet-arg of k3s, and deploy without the kubelet configuration."
+                  exit 1
+                fi
+                CFG_DIR_FROM_KUBELET="$K3S_DATA_DIR/agent/etc/kubelet.conf.d"
               fi
               # The kubelet reads the drop-ins after the file of --config, in the
               # order of their names, and the last one to state a setting decides it.

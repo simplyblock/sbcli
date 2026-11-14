@@ -15,6 +15,11 @@ Regression: 2026-11-13, RKE2 1.36 on Rocky 9. The kubelet there is started with
 ``--config-dir=/var/lib/rancher/rke2/agent/etc/kubelet.conf.d`` and no
 ``--config``, under ``rke2-agent.service``, and the Job stopped the same way.
 
+k3s keeps the same kind of directory but runs the kubelet inside its own process
+(k3s 1.34: no process named ``kubelet``, drop-ins under
+``/var/lib/rancher/k3s/agent/etc/kubelet.conf.d``), so the Job has no command line
+to read the directory from.
+
 The script runs for real here, against a fake host under a temporary directory:
 ``/host``, ``/proc`` and ``/var/simplyblock`` are pointed into it, and
 ``nsenter``, ``systemctl``, ``apk`` and ``sleep`` are stand-ins. The kubelet is a
@@ -41,6 +46,7 @@ SNAP_UNIT = "snap.kubelet-eks.daemon.service"
 RKE2_CONFIG_DIR = "/var/lib/rancher/rke2/agent/etc/kubelet.conf.d"
 RKE2_DEFAULTS = RKE2_CONFIG_DIR + "/00-rke2-defaults.conf"
 RKE2_DROPIN = RKE2_CONFIG_DIR + "/99-simplyblock-cpu-topology.conf"
+K3S_CONFIG_DIR = "/var/lib/rancher/k3s/agent/etc/kubelet.conf.d"
 
 _FAKES = {
     # Run what follows `--` on this machine instead of in the host's namespaces.
@@ -267,6 +273,76 @@ class TestCpuTopologyJob(unittest.TestCase):
         self.assertNotEqual(done.returncode, 0)
         self.assertEqual(os.listdir(host.path(RKE2_CONFIG_DIR)), ["00-rke2-defaults.conf"])
         self.assertEqual(_restarts(calls), ["restart rke2-agent.service"] * 2)
+        self.assertFalse(os.path.exists(host.marker))
+
+    def _k3s_host(self, k3s_args=("agent",), unit="k3s-agent.service", config_dir=K3S_CONFIG_DIR,
+                  exe=None, **kw):
+        """A k3s node: the kubelet is inside the k3s process."""
+        host = _Host(self._tmp.name, unit, kubelet_args=None, **kw)
+        os.makedirs(os.path.join(host.root, "proc/900"))
+        host._proc("900", "k3s-agent" if "agent" in k3s_args else "k3s-server",
+                   ["/usr/local/bin/k3s"] + list(k3s_args))
+        if exe:
+            os.symlink(exe, os.path.join(host.root, "proc/900/exe"))
+        if config_dir:
+            os.makedirs(host.path(config_dir))
+            host.write(config_dir + "/00-k3s-defaults.conf", "kind: KubeletConfiguration\ncgroupDriver: systemd\n")
+        return host
+
+    def test_configures_the_kubelet_inside_k3s_with_a_drop_in(self):
+        host = self._k3s_host()
+
+        done, calls = host.run()
+
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        config = yaml.safe_load(host.read(K3S_CONFIG_DIR + "/99-simplyblock-cpu-topology.conf"))
+        self.assertEqual(config["cpuManagerPolicy"], "static")
+        self.assertEqual(config["topologyManagerPolicy"], "single-numa-node")
+        self.assertEqual(config["reservedSystemCPUs"], "0,8")
+        self.assertEqual(_restarts(calls), ["restart k3s-agent.service"])
+        self.assertFalse(os.path.exists(host.path("/var/lib/kubelet/cpu_manager_state")))
+        self.assertFalse(os.path.exists(host.path(KUBEADM_CONFIG)))
+        self.assertEqual(os.listdir(host.path("/etc/systemd/system")), [])
+        self.assertTrue(os.path.exists(host.marker))
+
+    def test_follows_the_data_directory_a_k3s_server_was_started_with(self):
+        moved = "/data/k3s/agent/etc/kubelet.conf.d"
+        host = self._k3s_host(k3s_args=("server", "--data-dir", "/data/k3s"), unit="k3s.service",
+                              config_dir=moved)
+
+        done, calls = host.run()
+
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertTrue(os.path.exists(host.path(moved + "/99-simplyblock-cpu-topology.conf")))
+        self.assertFalse(os.path.exists(host.path(K3S_CONFIG_DIR)))
+        self.assertEqual(_restarts(calls), ["restart k3s.service"])
+
+    def test_follows_the_data_directory_k3s_runs_from_when_its_flags_are_hidden(self):
+        """k3s rewrites its command line to `k3s agent`, without its flags. The
+        binary it runs is under the data directory, which is what the Job reads."""
+        moved = "/data/k3s/agent/etc/kubelet.conf.d"
+        host = self._k3s_host(config_dir=moved, exe="/data/k3s/data/342d21a06834/bin/k3s-agent")
+
+        done, calls = host.run()
+
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertTrue(os.path.exists(host.path(moved + "/99-simplyblock-cpu-topology.conf")))
+        self.assertEqual(_restarts(calls), ["restart k3s-agent.service"])
+
+    def test_a_k3s_without_a_drop_in_directory_is_refused_and_left_alone(self):
+        """An older k3s takes kubelet settings only as kubelet-arg of its own
+        configuration. The Job says so and changes nothing, instead of writing
+        a kubeadm file that k3s never reads and marking the node configured."""
+        host = self._k3s_host(config_dir=None)
+
+        done, calls = host.run()
+
+        self.assertNotEqual(done.returncode, 0)
+        self.assertIn("keeps no drop-in directory", done.stdout)
+        self.assertEqual(_restarts(calls), [])
+        self.assertFalse(os.path.exists(host.path(KUBEADM_CONFIG)))
+        self.assertTrue(os.path.exists(host.path("/var/lib/kubelet/cpu_manager_state")),
+                        "the CPU manager state was removed though nothing was configured")
         self.assertFalse(os.path.exists(host.marker))
 
     def test_a_kubelet_that_does_not_come_back_gets_its_configuration_back(self):
