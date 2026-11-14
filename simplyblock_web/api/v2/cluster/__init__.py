@@ -162,9 +162,9 @@ def add(request: Request, parameters: ClusterParams, response_format: util.Creat
     try:
         params = parameters.model_dump(exclude_none=True)
         if parameters.backup_config is not None:
-            params["backup_config"] = parameters.backup_config.model_dump(exclude_none=True)
+            params["backup_config"] = parameters.backup_config.model_dump(mode="json", exclude_none=True)
         if parameters.kms_settings is not None:
-            params["kms_settings"] = parameters.kms_settings.model_dump(exclude_none=True)
+            params["kms_settings"] = parameters.kms_settings.model_dump(mode="json", exclude_none=True)
         with util.sync_http_errors():
             cluster_id_or_false = cluster_ops.add_cluster(**params)
     except ValueError as e:
