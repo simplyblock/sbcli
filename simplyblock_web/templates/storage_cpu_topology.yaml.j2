@@ -52,10 +52,16 @@ spec:
 
               # Where the kubelet reads its configuration. A kubelet started with
               # --config names the file on its command line: the EKS images keep it
-              # under /etc/kubernetes/kubelet. The kubeadm default stands for a
-              # kubelet that names none, and for one embedded in another process.
+              # under /etc/kubernetes/kubelet. One started with --config-dir alone
+              # names a directory of drop-in files instead: RKE2 starts its kubelet
+              # that way and writes its own drop-in there again at every start, so
+              # the settings of this Job go into a drop-in of their own. k3s does
+              # the same, but runs the kubelet inside its own process, so the
+              # directory is read from where k3s keeps it. The kubeadm default
+              # stands for a kubelet that names neither.
               KUBELET_CFG_ON_HOST="/var/lib/kubelet/config.yaml"
               CFG_FROM_KUBELET=""
+              CFG_DIR_FROM_KUBELET=""
               # Found by its name in /proc rather than with pgrep: the pgrep of this
               # image is the one of BusyBox, whose -x does not match the kubelet.
               KUBELET_PID=""
@@ -69,9 +75,57 @@ spec:
                 CFG_FROM_KUBELET="$(tr '\0' '\n' < "/proc/$KUBELET_PID/cmdline" \
                   | awk 'prev == "--config" { print; exit } /^--config=/ { sub(/^--config=/, ""); print; exit } { prev = $0 }' \
                   | tr -d '"')"
+                CFG_DIR_FROM_KUBELET="$(tr '\0' '\n' < "/proc/$KUBELET_PID/cmdline" \
+                  | awk 'prev == "--config-dir" { print; exit } /^--config-dir=/ { sub(/^--config-dir=/, ""); print; exit } { prev = $0 }' \
+                  | tr -d '"')"
               fi
+              # No process is named kubelet on a k3s node, and no command line
+              # names the drop-in directory: it is agent/etc/kubelet.conf.d under
+              # the data directory of k3s, which --data-dir moves. k3s hides its
+              # flags from its command line, so the data directory is read from
+              # where its binary runs, <data dir>/data/<hash>/bin, before the
+              # flag and the default.
+              K3S_DATA_DIR=""
+              if [ -z "$KUBELET_PID" ]; then
+                for comm in /proc/[0-9]*/comm; do
+                  case "$(cat "$comm" 2>/dev/null)" in
+                    k3s|k3s-server|k3s-agent)
+                      K3S_PROC="$(dirname "$comm")"
+                      K3S_DATA_DIR="$(readlink "$K3S_PROC/exe" 2>/dev/null | sed -n 's|/data/[^/]*/bin/[^/]*$||p')"
+                      if [ -z "$K3S_DATA_DIR" ]; then
+                        K3S_DATA_DIR="$(tr '\0' '\n' < "$K3S_PROC/cmdline" \
+                          | awk 'prev == "--data-dir" || prev == "-d" { print; exit } /^--data-dir=/ { sub(/^--data-dir=/, ""); print; exit } { prev = $0 }' \
+                          | tr -d '"')"
+                      fi
+                      if [ -z "$K3S_DATA_DIR" ]; then
+                        K3S_DATA_DIR="/var/lib/rancher/k3s"
+                      fi
+                      break
+                      ;;
+                  esac
+                done
+              fi
+              if [ -n "$K3S_DATA_DIR" ]; then
+                if [ ! -d "/host$K3S_DATA_DIR/agent/etc/kubelet.conf.d" ]; then
+                  # An older k3s, whose kubelet takes its settings only as
+                  # kubelet-arg of the k3s configuration. That is the
+                  # administrator's file, and this Job does not edit it.
+                  echo "[ERROR] k3s runs the kubelet of this node and keeps no drop-in directory at $K3S_DATA_DIR/agent/etc/kubelet.conf.d"
+                  echo "        Set cpu-manager-policy=static, topology-manager-policy=single-numa-node, topology-manager-scope=pod"
+                  echo "        and reserved-cpus={{ RESERVED_SYSTEM_CPUS }} as kubelet-arg of k3s, and deploy without the kubelet configuration."
+                  exit 1
+                fi
+                CFG_DIR_FROM_KUBELET="$K3S_DATA_DIR/agent/etc/kubelet.conf.d"
+              fi
+              # The kubelet reads the drop-ins after the file of --config, in the
+              # order of their names, and the last one to state a setting decides it.
+              DROPIN_NAME="99-simplyblock-cpu-topology.conf"
+              KUBELET_DROPIN=""
               if [ -n "$CFG_FROM_KUBELET" ]; then
                 KUBELET_CFG_ON_HOST="$CFG_FROM_KUBELET"
+              elif [ -n "$CFG_DIR_FROM_KUBELET" ]; then
+                KUBELET_CFG_ON_HOST="$CFG_DIR_FROM_KUBELET/$DROPIN_NAME"
+                KUBELET_DROPIN="/host$KUBELET_CFG_ON_HOST"
               fi
               KUBELET_CFG="/host$KUBELET_CFG_ON_HOST"
               BACKUP="${KUBELET_CFG}.pre-simplyblock.bak"
@@ -80,6 +134,26 @@ spec:
               DROPIN="$SYSTEMD_UNIT_DIR/20-simplyblock-cpu-manager.conf"
 
               apk add --no-cache sed grep coreutils util-linux jq
+
+              if [ -n "$KUBELET_DROPIN" ]; then
+                if [ ! -d "/host$CFG_DIR_FROM_KUBELET" ]; then
+                  echo "[ERROR] the kubelet names --config-dir=$CFG_DIR_FROM_KUBELET, which is not a directory on the host"
+                  exit 1
+                fi
+                echo "[INFO] The kubelet reads drop-ins from $CFG_DIR_FROM_KUBELET: writing $DROPIN_NAME"
+                # Written whole each time, so there is nothing to back up: taking
+                # the settings back is removing the file.
+                {
+                  echo "apiVersion: kubelet.config.k8s.io/v1beta1"
+                  echo "kind: KubeletConfiguration"
+                  echo "cpuManagerPolicy: static"
+                  echo "cpuManagerReconcilePeriod: 5s"
+                  echo "topologyManagerPolicy: single-numa-node"
+                  echo "topologyManagerScope: pod"
+                  echo "reservedSystemCPUs: \"{{ RESERVED_SYSTEM_CPUS }}\""
+                } > "$KUBELET_DROPIN"
+                chmod 600 "$KUBELET_DROPIN"
+              else
 
               echo "[INFO] Ensuring kubelet config exists at $KUBELET_CFG"
               if [ ! -f "$KUBELET_CFG" ]; then
@@ -133,13 +207,15 @@ spec:
                 set_key "reservedSystemCPUs" {{ RESERVED_SYSTEM_CPUS }}
               fi
 
+              fi
+
               echo "[INFO] kubelet config updated:"
               grep -E "(cpuManagerPolicy|cpuManagerReconcilePeriod|topologyManagerPolicy|topologyManagerScope|reservedSystemCPUs)" "$KUBELET_CFG" || true
 
               # A kubelet that names no --config has to be pointed at the file.
               # Many kubeadm setups already do via systemd: ExecStart=... --config=/var/lib/kubelet/config.yaml
               # If not present, add a systemd drop-in to force it.
-              if [ -z "$CFG_FROM_KUBELET" ]; then
+              if [ -z "$CFG_FROM_KUBELET" ] && [ -z "$KUBELET_DROPIN" ]; then
                 mkdir -p "$SYSTEMD_UNIT_DIR"
                 if ! grep -R --quiet -- "--config=/var/lib/kubelet/config.yaml" /host/etc/systemd/system /host/lib/systemd/system /host/usr/lib/systemd/system 2>/dev/null; then
                   echo "[WARN] Did not detect kubelet --config flag; adding drop-in $DROPIN"
@@ -158,8 +234,13 @@ spec:
               '; then
                 # A kubelet that does not run takes the node out of the cluster, so
                 # the configuration it ran with is put back before the Job fails.
-                echo "[ERROR] The kubelet did not come back with the new configuration. Restoring $KUBELET_CFG_ON_HOST."
-                cat "$BACKUP" > "$KUBELET_CFG"
+                if [ -n "$KUBELET_DROPIN" ]; then
+                  echo "[ERROR] The kubelet did not come back with the new configuration. Removing $KUBELET_CFG_ON_HOST."
+                  rm -f "$KUBELET_DROPIN"
+                else
+                  echo "[ERROR] The kubelet did not come back with the new configuration. Restoring $KUBELET_CFG_ON_HOST."
+                  cat "$BACKUP" > "$KUBELET_CFG"
+                fi
                 rm -rf $CPU_MNG
                 nsenter --target 1 --mount --uts --ipc --net --pid -- /bin/sh -c '
                   {{ restart_kubelet() | trim | indent(18) }}
