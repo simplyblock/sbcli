@@ -4,6 +4,7 @@ import pytest
 
 from simplyblock_core import utils as core_utils
 from simplyblock_core.exceptions import (
+    SubsystemMoveInProgressError,
     SyncReplicationSiteError,
     SyncReplicationUnsupportedError,
     SyncSiteConflictError,
@@ -259,6 +260,19 @@ class TestConnectVolume:
         assert response.status_code == 200
         assert response.json() == details
         lvol_controller.connect_lvol.assert_called_once_with(VOLUME_ID, host_nqn=None)
+
+    def test_a_subsystem_mid_move_is_409_not_404(self, client, volume, lvol_controller):
+        """The volume exists and the host is allowed, but its subsystem is held
+        by a consistency-group move. A host that connected now would hold a
+        path the move never suspends; the CSI node retries a 409 and reads a
+        404 as a deleted volume."""
+        lvol_controller.connect_lvol.side_effect = SubsystemMoveInProgressError(
+            'volume v is in subsystem nqn.src, which a consistency-group subsystem move holds')
+
+        response = client.get(f'{BASE}/{VOLUME_ID}/connect')
+
+        assert response.status_code == 409
+        assert 'subsystem move holds' in response.json()['detail']
 
     def test_a_volume_gone_underneath_returns_404(self, client, volume, lvol_controller):
         lvol_controller.connect_lvol.return_value = (None, 'Failed to find volume')
