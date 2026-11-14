@@ -1445,7 +1445,8 @@ def cluster_growth_ratios(db_controller, cluster_id):
     """Growth of the data devices relative to their placement weight, as
     ``(uniform, min_ratio, max_ratio)``. Journal, new, and failed devices are
     ignored. A ratio above 1 means the device grew after it was placed (see
-    device_controller.resize_device)."""
+    device_controller.grow_cluster_devices, which grows all of them by the
+    same factor)."""
     ratios = []
     for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
         if node.is_secondary_node:
@@ -1471,8 +1472,8 @@ def scaled_placement_size(db_controller, cluster_id, size):
     a common factor f, their weights still stand for their original sizes, so
     a new device is weighted as size / f; weighting it by its full size would
     give it f times its share of the data. Returns 0 (weight = size) when the
-    cluster has not grown, or has grown unevenly (then the next
-    grow-devices run sets every weight to its size anyway)."""
+    cluster has not grown. Growth is uniform by construction; should the
+    ratios ever disagree, the device keeps its full size as weight."""
     uniform, lo, hi = cluster_growth_ratios(db_controller, cluster_id)
     factor = (lo + hi) / 2
     if not uniform or factor <= 1.0 + GROWTH_UNIFORM_TOLERANCE or not size:
@@ -1970,6 +1971,8 @@ def _create_jm_stack_on_device(rpc_client, nvme, snode: StorageNode, after_resta
         'alceml_name': alceml_name,
         'nvme_bdev': nvme.nvme_bdev,
         "serial_number": nvme.serial_number,
+        'aio_block_size': nvme.aio_block_size,
+        'lblk_io_engine': nvme.lblk_io_engine,
         "device_data_dict": nvme.to_dict(),
         'jm_bdev': jm_bdev,
         'testing_bdev': test_name,
@@ -9080,6 +9083,14 @@ def _reconcile_discovered_devices(snode, nvme_devs):
                     db_dev.bdev_type = "aio"
                     db_dev.device_path = found_dev.device_path
                     db_dev.by_id_path = found_dev.by_id_path
+                    # Restore a block size a control-plane service that
+                    # predates the field dropped from the record (found_dev
+                    # got it from the node's lblk_devices entry).
+                    if found_dev.aio_block_size and not db_dev.aio_block_size:
+                        db_dev.aio_block_size = found_dev.aio_block_size
+                    # The I/O engine found_dev was created with (the recorded
+                    # one, or uring for a device-mapper node).
+                    db_dev.lblk_io_engine = found_dev.lblk_io_engine
                 else:
                     db_dev.nvme_controller = found_dev.nvme_controller
                     db_dev.pcie_address = found_dev.pcie_address

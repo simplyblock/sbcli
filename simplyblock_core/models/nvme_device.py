@@ -77,9 +77,17 @@ class NVMeDevice(BaseModel):
     # distrib placement weight of the device is derived from it, and distrib
     # requires a weight never to change once set (a change re-places 50% or
     # more of the data). ``size`` follows an online growth of an lblk device
-    # (device_controller.resize_device); this field keeps the weight frozen.
-    # 0 means the device was never resized, so ``size`` is still the weight.
+    # (device_controller.grow_cluster_devices); this field keeps the weight
+    # frozen. 0 means the device was never grown, so ``size`` is still the
+    # weight.
     placement_size: int = 0
+    # Size in bytes of the device's block device (the LUN) when the cluster
+    # last rescanned it (device_controller.grow_cluster_devices); 0 = never
+    # rescanned. alceml always uses the whole block device, but all devices
+    # grow by the same factor only, so ``size`` may stay below this value; the
+    # rest is unused and left out of the capacity. A value below ``size`` means
+    # the block device shrank, which raises an alert.
+    backend_size: int = 0
     # NVMe per-block metadata size in bytes, as reported by the bound SPDK bdev.
     # >=8 means alceml can run in cv_md_method (no read/write amplification).
     # 0 means alceml must use cv_fallback_method (extra md page per 2 MiB extent).
@@ -105,6 +113,22 @@ class NVMeDevice(BaseModel):
     # Stable /dev/disk/by-id/... symlink when the device has one; preferred
     # as the AIO bdev filename so udev renames cannot bite mid-flight.
     by_id_path: str = ""
+    # Block size in bytes the AIO base bdev of an lblk device was created
+    # with, and must be re-created with on every restart: alceml's on-disk
+    # layout depends on the base bdev block size, so data written at one
+    # size cannot be read at another. 0 means the bdev was created without a
+    # block size (SPDK used the device's logical block size): every device
+    # created before this field existed, which keeps being created that way.
+    # Also kept in the node's ``lblk_devices`` entries (see
+    # utils.recorded_aio_block_size).
+    aio_block_size: int = 0
+    # I/O engine of the base bdev of an lblk device: "aio" (bdev_aio) or
+    # "uring" (bdev_uring, for device-mapper nodes such as multipath maps,
+    # which refuse the RWF_NOWAIT submits of bdev_aio). Only the
+    # create/delete/rescan RPCs differ; the bdev name and bdev_type "aio"
+    # are the same. Does not change the on-disk format. Also kept in the
+    # node's ``lblk_devices`` entries (see utils.recorded_lblk_io_engine).
+    lblk_io_engine: str = "aio"
     # The latest disk-health assessment an external assessor (the Kubernetes
     # operator) recorded through PUT .../devices/{id}/health-assessment,
     # stored verbatim: {"reporter", "reported_at", "valid_seconds",
@@ -117,6 +141,16 @@ class NVMeDevice(BaseModel):
         """Bytes the cluster-map weight of this device is derived from: the
         size it had when it was placed, unchanged by later growth."""
         return self.placement_size if self.placement_size > 0 else self.size
+
+    def unused_size(self) -> int:
+        """Bytes of the block device beyond ``size``: grown on the storage
+        array, but not usable because the other data devices of the cluster
+        grew by a smaller factor."""
+        return max(0, self.backend_size - self.size) if self.size > 0 else 0
+
+    def is_shrunk(self) -> bool:
+        """The block device was last seen smaller than the device."""
+        return 0 < self.backend_size < self.size
 
     def __change_dev_connection_to(self, connecting_from_node):
         # Targeted single-record write. The previous implementation scanned

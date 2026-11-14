@@ -1503,7 +1503,9 @@ class RPCClient:
         """Create an SPDK AIO bdev over a Linux block device (lblk cluster
         mode). ``filename`` is the device path — prefer the stable
         /dev/disk/by-id symlink. ``block_size`` 0 lets SPDK use the device's
-        logical block size."""
+        logical block size. Callers go through utils.create_aio_bdev, which
+        passes the block size a device was formatted with
+        (NVMeDevice.aio_block_size)."""
         kwargs = {"name": name, "filename": filename}
         if block_size:
             kwargs["block_size"] = block_size
@@ -1515,6 +1517,23 @@ class RPCClient:
     def bdev_aio_rescan(self, name):
         """Re-read the backing device's size (device grow pickup)."""
         return self._request("bdev_aio_rescan", name=name)
+
+    def bdev_uring_create(self, name, filename, block_size=0):
+        """Create an SPDK io_uring bdev over a Linux block device (lblk
+        cluster mode, device-mapper nodes: see constants.LBLK_IO_ENGINE_URING).
+        Same arguments as bdev_aio_create; callers go through
+        utils.create_aio_bdev with io_engine="uring"."""
+        kwargs = {"name": name, "filename": filename}
+        if block_size:
+            kwargs["block_size"] = block_size
+        return self._request("bdev_uring_create", **kwargs)
+
+    def bdev_uring_delete(self, name):
+        return self._request("bdev_uring_delete", name=name)
+
+    def bdev_uring_rescan(self, name):
+        """Re-read the backing device's size (device grow pickup)."""
+        return self._request("bdev_uring_rescan", name=name)
 
     def alceml_bdev_backend_resize_begin(self, name, request_timeout=None):
         """Put an alceml bdev into its resize state: new I/O is held, pending

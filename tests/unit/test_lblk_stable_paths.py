@@ -184,7 +184,7 @@ class TestTheAioBdevIsOpenedOnThePath(unittest.TestCase):
         devices = utils.addAioDevices(rpc, self._snode(), resolved)
 
         rpc.bdev_aio_create.assert_called_once_with(
-            utils.aio_bdev_name_for_serial("S-DATA"), DATA_BY_ID_ALT)
+            utils.aio_bdev_name_for_serial("S-DATA"), DATA_BY_ID_ALT, block_size=4096)
         self.assertEqual(devices[0].by_id_path, DATA_BY_ID_ALT)
 
 
