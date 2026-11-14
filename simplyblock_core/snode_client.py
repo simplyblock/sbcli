@@ -213,6 +213,11 @@ class SNodeClient:
         return self._request("GET", "spdk_process_cleanup",
                              {"rpc_port": rpc_port, "cluster_id": cluster_id})
 
+    def release_hugepages(self):
+        """Give back the huge pages simplyblock set on the agent's host, for a
+        host whose last storage node has left."""
+        return self._request("POST", "release_hugepages")
+
     def leave_swarm(self):
         return True
         # return self._request("GET", "leave_swarm")

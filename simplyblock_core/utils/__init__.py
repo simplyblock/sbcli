@@ -1,3 +1,4 @@
+import contextlib
 import glob
 import hashlib
 import json
@@ -3188,9 +3189,93 @@ def _save_user_hugepages_baseline(node, baseline):
         logger.warning(f"Node {node}: could not save hugepage baseline to {baseline_file}: {e}")
 
 
+def _nr_hugepages_path(node, page_size_kb=2048):
+    return f"/sys/devices/system/node/node{node}/hugepages/hugepages-{page_size_kb}kB/nr_hugepages"
+
+
+def _read_nr_hugepages(node, page_size_kb=2048) -> int:
+    with open(_nr_hugepages_path(node, page_size_kb), "r") as f:
+        return int(f.read().strip())
+
+
+def _write_nr_hugepages(node, hugepages, page_size_kb=2048) -> None:
+    cmd = f"echo {int(hugepages)} | sudo tee {_nr_hugepages_path(node, page_size_kb)}"
+    subprocess.run(cmd, shell=True, check=True)
+
+
+class HugePagesNotReleasedError(Exception):
+    """The huge pages simplyblock set on this host could not all be given back."""
+
+
+def release_hugepages() -> dict[int, int]:
+    """Give back the huge pages simplyblock added on this host and remove its
+    records of them: the inverse of set_hugepages_if_needed, for a host whose
+    last storage node has left.
+
+    Nothing else ever did either: the pages stayed allocated and the records
+    stayed in /var/run/simplyblock until the next reboot. The baseline in them
+    is captured once and only grows, because a count below simplyblock's last
+    total is read as a reset, not as the host lowering its own reservation. A
+    host that reserved pages when the first deployment came and none later
+    kept the old baseline under every deployment after it (2026-11-13: 5922
+    pages recorded on hosts that had reserved none for four days, so a
+    deployment needing 3584 asked for 9728, on 19.7 GiB of RAM). Removing the
+    records with the last storage node makes each deployment capture the
+    baseline again, as a reboot does.
+
+    Per NUMA node with a record of an allocation, the count goes back to the
+    recorded baseline, plus whatever was added on top of simplyblock's total
+    since, which is the host's by the rule set_hugepages_if_needed applies. It
+    is never raised. The records of a NUMA node are removed only once its
+    count is down: pages still in use stay, and so do the records that say
+    whose they are.
+
+    Returns the count now set per NUMA node released. Raises
+    HugePagesNotReleasedError naming the NUMA nodes that kept pages or records.
+    """
+    recorded = set()
+    for name in os.listdir(_HUGEPAGES_BASELINE_DIR) if os.path.isdir(_HUGEPAGES_BASELINE_DIR) else []:
+        match = re.fullmatch(r"hugepages_(?:sb|baseline)_node(\d+)", name)
+        if match:
+            recorded.add(int(match.group(1)))
+
+    released: dict[int, int] = {}
+    kept: list[str] = []
+    for node in sorted(recorded):
+        baseline_file = os.path.join(_HUGEPAGES_BASELINE_DIR, f"hugepages_baseline_node{node}")
+        sb_file = os.path.join(_HUGEPAGES_BASELINE_DIR, f"hugepages_sb_node{node}")
+        prev_sb = _get_sb_hugepages_allocation(node)
+        try:
+            current = _read_nr_hugepages(node)
+            if prev_sb is None:
+                # A baseline alone: captured, and nothing ever allocated on it.
+                target = current
+            else:
+                with open(baseline_file) as f:
+                    baseline = max(int(f.read().strip()), 0)
+                target = min(baseline + max(current - prev_sb, 0), current)
+            if current != target:
+                _write_nr_hugepages(node, target)
+                current = _read_nr_hugepages(node)
+            if current > target:
+                kept.append(f"NUMA {node}: {current - target} huge page(s) still in use")
+                continue
+            for record in (sb_file, baseline_file):
+                # A record that is not there is a record already removed.
+                with contextlib.suppress(FileNotFoundError):
+                    os.remove(record)
+            released[node] = current
+            logger.info(f"Node {node}: huge pages released, {current} left to the host")
+        except (OSError, ValueError, subprocess.CalledProcessError) as e:
+            kept.append(f"NUMA {node}: {e}")
+    if kept:
+        raise HugePagesNotReleasedError("; ".join(kept))
+    return released
+
+
 def set_hugepages_if_needed(node, hugepages_needed, page_size_kb=2048):
     """Set hugepages for a specific NUMA node, adjusting up or down based on previous allocation."""
-    hugepage_path = f"/sys/devices/system/node/node{node}/hugepages/hugepages-{page_size_kb}kB/nr_hugepages"
+    hugepage_path = _nr_hugepages_path(node, page_size_kb)
 
     try:
         with open(hugepage_path, "r") as f:
@@ -3237,9 +3322,22 @@ def set_hugepages_if_needed(node, hugepages_needed, page_size_kb=2048):
         logger.debug(f"Node {node}: setting to {required} (user={current_user} + simplyblock={hugepages_needed})")
 
         if current_hugepages != required:
-            cmd = f"echo {required} | sudo tee /sys/devices/system/node/node{node}/hugepages/hugepages-2048kB/nr_hugepages"
-            subprocess.run(cmd, shell=True, check=True)
+            _write_nr_hugepages(node, required)
             logger.debug(f"Node {node}: hugepages updated to {required}.")
+            # The kernel allocates what it can and reports no error. A short
+            # pool leaves the storage pod Pending on huge pages or on memory,
+            # with nothing saying why, so the two numbers that explain it are
+            # logged here.
+            allocated = _read_nr_hugepages(node, page_size_kb)
+            if allocated < required:
+                cause = "The host has too little free or unfragmented memory on this NUMA node."
+                if current_user > 0:
+                    cause = (f"If the host reserved fewer than {current_user} itself, the record in "
+                             f"{_HUGEPAGES_BASELINE_DIR}/hugepages_baseline_node{node} is left over from an "
+                             f"earlier deployment: write the host's own count there and apply again.")
+                logger.error(
+                    f"Node {node}: asked for {required} huge pages ({current_user} recorded as the host's own "
+                    f"+ {hugepages_needed} for simplyblock) and the kernel allocated {allocated}. {cause}")
         else:
             logger.debug(f"Node {node}: already has {current_hugepages} hugepages == required {required}, no change needed.")
 
