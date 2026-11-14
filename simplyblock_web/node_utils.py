@@ -203,7 +203,11 @@ PERSISTENT_LINK_DIRS = ("by-partuuid", "by-id")
 # which is the same kind of ordering the kernel name already is. A SCSI device's
 # NAA designator arrives as a wwn- link, so the SCSI case needs no rule of its
 # own.
-_SELF_REPORTED_PREFIXES = ("wwn-", "nvme-eui.", "nvme-uuid.")
+# The md-uuid link carries the UUID of a software-RAID array's superblock and the
+# dm-uuid-mpath link the WWID of the LUN a multipath map joins the paths of.
+# Beside each sits a link built from the name an administrator gave the array
+# or the map, which is renamed the way a label is.
+_SELF_REPORTED_PREFIXES = ("wwn-", "nvme-eui.", "nvme-uuid.", "md-uuid-", "dm-uuid-mpath-")
 
 
 def _persistent_link_rank(link: str) -> int:
@@ -264,12 +268,59 @@ def read_persistent_links(dev_root: str = DEV_ROOT) -> dict[str, list[str]]:
 
 
 def _partition_holders(disk_name: str, part_name: str) -> list[str]:
-    """Holders of a single partition (/sys/block/<disk>/<part>/holders)."""
+    """Holders of a single partition (/sys/block/<disk>/<part>/holders).
+
+    A partition kpartx mapped out of a multipath map is a device-mapper node of
+    its own, which sysfs puts at /sys/block/<part> rather than under its map."""
     import os
+    path = (f"/sys/block/{part_name}/holders" if part_name.startswith("dm-")
+            else f"/sys/block/{disk_name}/{part_name}/holders")
     try:
-        return sorted(set(os.listdir(f"/sys/block/{disk_name}/{part_name}/holders")))
+        return sorted(set(os.listdir(path)))
     except OSError:
         return []
+
+
+def _members(kname: str) -> list[str]:
+    """Kernel names of the devices an array or a map is built on
+    (/sys/block/<dev>/slaves): the holders relation read the other way."""
+    import os
+    try:
+        return sorted(os.listdir(f"/sys/block/{kname}/slaves"))
+    except OSError:
+        return []
+
+
+# The lsblk TYPE of a multipath map, and the prefix of every md array's.
+_MULTIPATH_TYPE = "mpath"
+_RAID_TYPE_PREFIX = "raid"
+
+
+def is_storage_unit_type(dtype: str) -> bool:
+    """Whether an lsblk TYPE names a device an lblk node is built on as a whole:
+    a disk, a software-RAID array, or a multipath map.
+
+    An array and a map are each the device their administrator built, in place
+    of the disks underneath, which stay held by them. Every other stacked type
+    (lvm, crypt) is a slice of something or somebody's data behind a key, and is
+    refused."""
+    dtype = dtype or ""
+    return dtype == "disk" or dtype == _MULTIPATH_TYPE or dtype.startswith(_RAID_TYPE_PREFIX)
+
+
+def _unit_identity(kname: str, dtype: str) -> str:
+    """The identity an array or a map reports about itself, where lsblk reports
+    no SERIAL: the UUID of an md superblock, or the WWID of the LUN behind a
+    multipath map, read off the dm uuid that multipathd writes as
+    ``mpath-<wwid>``. Empty for a plain disk, and for a unit whose sysfs says
+    nothing."""
+    if dtype.startswith(_RAID_TYPE_PREFIX):
+        return _read_sysfs(f"/sys/block/{kname}/md/uuid")
+    if dtype == _MULTIPATH_TYPE:
+        uuid = _read_sysfs(f"/sys/block/{kname}/dm/uuid")
+        prefix = _MULTIPATH_TYPE + "-"
+        return uuid[len(prefix):] if uuid.startswith(prefix) else ""
+    return ""
 
 
 def _root_disk_names() -> list[str]:
@@ -297,27 +348,36 @@ def _subtree_mounted(dev: dict) -> bool:
 
 
 def get_block_devices_info() -> list[dict]:
-    """Inventory of block devices (whole disks AND their partitions) for the
-    lblk cluster mode.
+    """Inventory of the block devices an lblk node can be built on (whole
+    disks, software-RAID arrays, multipath maps) AND their partitions.
 
-    One dict per lsblk TYPE=disk entry plus one per TYPE=part child, carrying
-    everything the control plane needs for eligibility filtering, identity
-    (serial-first) and AIO bdev creation. Sizes are bytes (lsblk -b).
+    One dict per unit plus one per TYPE=part child, carrying everything the
+    control plane needs for eligibility filtering, identity (serial-first) and
+    AIO bdev creation. Sizes are bytes (lsblk -b).
 
-    Disk identity: SERIAL, falling back to WWN; devices with neither get a
-    synthetic-stable id derived from hostname|by-id-or-name|size so identity
-    survives reboots.
+    A unit is named by its kernel name (``name``), which is what /dev and
+    /sys/block call it: ``md0`` for an array, ``dm-0`` for a multipath map
+    whose mapper name (``mpatha``) is carried as ``dm_name``. An array or a map
+    appears under every disk it is built on in the lsblk tree and is
+    inventoried once; the disks underneath are inventoried as held by it.
+
+    Disk identity: SERIAL, falling back to WWN; an array falls back to the UUID
+    of its md superblock and a map to the WWID of its LUN; devices with none
+    of these get a synthetic-stable id derived from hostname|by-id-or-name|size
+    so identity survives reboots.
 
     Partition identity: partitions have no lsblk SERIAL of their own, so the
-    serial is derived from the parent disk's serial plus the PARTUUID
-    ("<parent-serial>-part-<partuuid>") — stable across disk renames and
+    serial is derived from the parent unit's serial plus the PARTUUID
+    ("<parent-serial>-part-<partuuid>") -- stable across unit renames and
     unique per partition. Partitions without a PARTUUID get a synthetic id.
+    A partition kpartx mapped out of a multipath map is a device-mapper node of
+    its own and is named by its kernel name (``dm-2``), like the map.
     """
     import hashlib
 
     logger.debug("function:get_block_devices_info start")
     out, err, rc = shell_utils.run_command(
-        "lsblk -J -b -o NAME,TYPE,SIZE,SERIAL,WWN,MOUNTPOINT,MODEL,ROTA,RO,VENDOR,PKNAME,PARTUUID")
+        "lsblk -J -b -o NAME,KNAME,TYPE,SIZE,SERIAL,WWN,MOUNTPOINT,MODEL,ROTA,RO,VENDOR,PKNAME,PARTUUID")
     if rc != 0:
         logger.error("Error running lsblk: %s", err)
         return []
@@ -332,48 +392,72 @@ def get_block_devices_info() -> list[dict]:
     # Read once for the whole host: every device's links sit in the same two
     # directories, so a reading per device would walk them again for each disk.
     persistent = read_persistent_links()
-    devices: list[dict] = []
-    for dev in data.get("blockdevices", []):
-        if dev.get("type") != "disk":
-            continue
-        name = dev.get("name", "")
+
+    def _kname(dev: dict) -> str:
+        # KNAME is the kernel name; NAME is the mapper name for a device-mapper
+        # node and the same thing for everything else. Older lsblk builds
+        # without KNAME report the mapper name only, which /sys/block does not
+        # know, and the device is then skipped by the sysfs reads below.
+        return (dev.get("kname") or dev.get("name") or "").strip()
+
+    def _unit_entry(dev: dict, parent: dict | None) -> dict:
+        name = _kname(dev)
+        dtype = (dev.get("type") or "").strip()
         children = dev.get("children") or []
+        partitions = [c for c in children if c.get("type") == "part"]
         by_id_paths = persistent.get(name, [])
         by_id_path = by_id_paths[0] if by_id_paths else ""
         serial = (dev.get("serial") or "").strip()
         wwn = (dev.get("wwn") or "").strip()
         if not serial:
             serial = wwn
+        if not serial:
+            serial = _unit_identity(name, dtype)
         synthetic = False
         if not serial:
             seed = f"{hostname}|{by_id_path or name}|{dev.get('size') or 0}"
             serial = "SYN-" + hashlib.sha1(seed.encode()).hexdigest()[:16]
             synthetic = True
         numa_node = int(_read_sysfs(f"/sys/block/{name}/device/numa_node") or -1)
-        devices.append({
+        # A partition kpartx maps out of a multipath map holds the map in
+        # sysfs, the way a volume group holds a disk. It is the map's own and
+        # is reported as its partition, not as something using it.
+        own = {_kname(c) for c in partitions}
+        holders = [h for h in _disk_holders(name) if h not in own]
+        entry = {
             "name": name,
             "device_path": f"/dev/{name}",
-            "type": dev.get("type"),
+            "type": dtype,
             "size": int(dev.get("size") or 0),
             "serial": serial,
             "serial_synthetic": synthetic,
             "wwn": wwn,
-            "model": (dev.get("model") or "").strip(),
-            "vendor": (dev.get("vendor") or "").strip(),
-            "rota": bool(dev.get("rota")),
+            "model": (dev.get("model") or (parent or {}).get("model") or "").strip(),
+            "vendor": (dev.get("vendor") or (parent or {}).get("vendor") or "").strip(),
+            "rota": bool(dev.get("rota") if dev.get("rota") is not None
+                         else (parent or {}).get("rota")),
             "ro": bool(dev.get("ro")),
-            "has_partitions": any(c.get("type") == "part" for c in children),
+            "has_partitions": bool(partitions),
             "mounted_in_subtree": _subtree_mounted(dev),
-            "holders": _disk_holders(name),
+            "holders": holders,
             "is_root_disk": name in root_disks,
             "by_id_path": by_id_path,
             "by_id_paths": by_id_paths,
             "numa_node": numa_node,
-        })
-        for child in children:
+        }
+        if dtype != "disk":
+            entry["members"] = _members(name)
+            if name.startswith("dm-"):
+                entry["dm_name"] = (dev.get("name") or "").strip()
+        return entry
+
+    def _partition_entries(unit: dict, parent_entry: dict) -> list[dict]:
+        serial = parent_entry["serial"]
+        out_parts = []
+        for child in unit.get("children") or []:
             if child.get("type") != "part":
                 continue
-            part_name = child.get("name", "")
+            part_name = _kname(child)
             partuuid = (child.get("partuuid") or "").strip()
             part_paths = persistent.get(part_name, [])
             part_synthetic = False
@@ -383,29 +467,51 @@ def get_block_devices_info() -> list[dict]:
                 seed = f"{hostname}|{serial}|{part_name}|{child.get('size') or 0}"
                 part_serial = "SYN-" + hashlib.sha1(seed.encode()).hexdigest()[:16]
                 part_synthetic = True
-            devices.append({
+            out_parts.append({
                 "name": part_name,
                 "device_path": f"/dev/{part_name}",
                 "type": "part",
                 "size": int(child.get("size") or 0),
                 "serial": part_serial,
-                "serial_synthetic": part_synthetic or synthetic,
+                "serial_synthetic": part_synthetic or parent_entry["serial_synthetic"],
                 "partuuid": partuuid,
-                "parent_name": name,
+                "parent_name": parent_entry["name"],
                 "parent_serial": serial,
-                "wwn": wwn,
-                "model": (dev.get("model") or "").strip(),
-                "vendor": (dev.get("vendor") or "").strip(),
-                "rota": bool(dev.get("rota")),
-                "ro": bool(child.get("ro") or dev.get("ro")),
+                "wwn": parent_entry["wwn"],
+                "model": parent_entry["model"],
+                "vendor": parent_entry["vendor"],
+                "rota": parent_entry["rota"],
+                "ro": bool(child.get("ro") or unit.get("ro")),
                 "has_partitions": False,
                 "mounted_in_subtree": _subtree_mounted(child),
-                "holders": _partition_holders(name, part_name),
+                "holders": _partition_holders(parent_entry["name"], part_name),
                 "is_root_disk": part_name in root_disks,
                 "by_id_path": part_paths[0] if part_paths else "",
                 "by_id_paths": part_paths,
-                "numa_node": numa_node,
+                "numa_node": parent_entry["numa_node"],
             })
+        return out_parts
+
+    devices: list[dict] = []
+    seen: set = set()
+
+    def _walk(dev: dict, parent: dict | None) -> None:
+        dtype = (dev.get("type") or "").strip()
+        name = _kname(dev)
+        if is_storage_unit_type(dtype) and name and name not in seen:
+            seen.add(name)
+            entry = _unit_entry(dev, parent)
+            devices.append(entry)
+            devices.extend(_partition_entries(dev, entry))
+        # An array or a map is a child of every disk it is built on, and a
+        # stacked unit may itself carry another (an array over multipath maps).
+        for child in dev.get("children") or []:
+            if is_storage_unit_type((child.get("type") or "").strip()):
+                _walk(child, dev)
+
+    for dev in data.get("blockdevices", []):
+        if dev.get("type") == "disk":
+            _walk(dev, None)
     logger.debug("function:get_block_devices_info end")
     return devices
 
@@ -671,8 +777,16 @@ def partition_disk_for_journal(disk_name: str, jm_bytes: int) -> tuple[dict, dic
 
     inventory = {d["name"]: d for d in get_block_devices_info()}
     disk = inventory.get(disk_name)
-    if disk is None or disk.get("type") != "disk":
+    if disk is None or not is_storage_unit_type(disk.get("type", "")):
         raise ValueError(f"disk {disk_name} not found")
+    if disk.get("type") == _MULTIPATH_TYPE:
+        # The kernel reads no partition table off a device-mapper node: the
+        # partitions of a map are mapped by kpartx, from the host's udev rules,
+        # which this container cannot run. A map is used whole.
+        raise ValueError(
+            f"{disk_name} is a multipath map, which cannot be partitioned for the journal "
+            f"here; give the node a second unit to carve the journal from, or dedicate one "
+            f"with --lblk-journal-device")
     if disk.get("mounted_in_subtree"):
         raise ValueError(f"disk {disk_name} is mounted (busy)")
     if disk.get("holders"):

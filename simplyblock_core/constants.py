@@ -138,9 +138,12 @@ AIO_HUNG_IO_STALL_POLLS = 3
 # Consecutive polls a configured block device may be absent from the host's
 # lsblk before it is treated as hot-removed (REMOVAL semantics).
 AIO_DEVICE_ABSENT_POLLS = 2
-# Kernel block devices never eligible for lblk data placement.
-LBLK_EXCLUDED_NAME_PREFIXES = ("ram", "loop", "sr", "fd", "zram", "nbd",
-                               "md", "dm-", "drbd")
+# Kernel block devices never eligible for lblk data placement. A software-RAID
+# array (md*) and a multipath map (dm-*) are not here: each is the device its
+# administrator built, in place of the disks it is built on, and the inventory
+# admits them by their lsblk type (raid*, mpath) rather than by name. Every other
+# device-mapper node (an LVM volume, dm-crypt) is refused by that type check.
+LBLK_EXCLUDED_NAME_PREFIXES = ("ram", "loop", "sr", "fd", "zram", "nbd", "drbd")
 # Minimum storage units (whole SSDs or partitions) per lblk node: one journal
 # home plus at least one data device.
 LBLK_MIN_DEVICES_PER_NODE = 2

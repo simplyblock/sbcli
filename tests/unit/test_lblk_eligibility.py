@@ -68,7 +68,7 @@ class TestEligibility(unittest.TestCase):
 
     def test_non_disk_non_part_type_rejected(self):
         reasons = self._reasons([_blk("dax0.0", dtype="lvm")])
-        self.assertIn("not a disk or partition", reasons["dax0.0"])
+        self.assertIn("not a disk, partition, RAID array, or multipath map", reasons["dax0.0"])
 
     def test_idle_partition_is_eligible_when_requested(self):
         devs = [_blk("sdb1", dtype="part")]
@@ -94,7 +94,9 @@ class TestEligibility(unittest.TestCase):
         self.assertIn("itself selected", str(ctx.exception))
 
     def test_special_prefixes_rejected(self):
-        for name in ("ram0", "loop3", "sr0", "zram1", "nbd0", "md127", "dm-0", "drbd0", "fd0"):
+        # md127 and dm-0 are not here: an array and a multipath map are units,
+        # and the other device-mapper nodes are refused by their lsblk type.
+        for name in ("ram0", "loop3", "sr0", "zram1", "nbd0", "drbd0", "fd0"):
             reasons = self._reasons([_blk(name, serial=f"S-{name}")])
             self.assertIn("special", reasons[name], name)
 
