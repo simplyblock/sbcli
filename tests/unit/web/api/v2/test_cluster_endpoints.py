@@ -133,6 +133,28 @@ class TestCreateCluster:
         # derivation live instead of frozen into the record.
         assert 'bucket_name' not in cluster_ops.add_cluster.call_args.kwargs['backup_config']
 
+    def test_backup_config_credentials_reach_add_cluster_unmasked(self, client, db, cluster, cluster_ops):
+        """model_dump(mode="json") masks SecretStr to "**********" -- a real
+        regression here, since add_cluster persists whatever it is handed.
+        The wrap-early-unwrap-late convention means this layer must still see
+        the actual secret, wrapped, not pydantic's own masked literal."""
+        cluster_ops.add_cluster.return_value = CLUSTER_ID
+        body = {
+            'name': 'cluster-1', 'distr_ndcs': 1, 'distr_npcs': 2, **SIZING,
+            'backup_config': {
+                'bucket_name': 'chosen',
+                'access_key_id': 'minioadmin',
+                'secret_access_key': 'topsecret',
+            },
+        }
+
+        response = client.post('/api/v2/clusters/', json=body)
+
+        assert response.status_code == 201
+        credentials = cluster_ops.add_cluster.call_args.kwargs['backup_config']['credentials']
+        assert credentials['access_key_id'].get_secret_value() == 'minioadmin'
+        assert credentials['secret_access_key'].get_secret_value() == 'topsecret'
+
     def test_a_named_backup_bucket_is_passed_through(self, client, db, cluster, cluster_ops):
         cluster_ops.add_cluster.return_value = CLUSTER_ID
         body = {
