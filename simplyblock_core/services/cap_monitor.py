@@ -2,14 +2,23 @@
 import time
 from datetime import UTC, datetime
 
-from simplyblock_core import cluster_ops, constants, db_controller, utils
+from simplyblock_core import (
+    capacity_guard,
+    cluster_ops,
+    constants,
+    db_controller,
+    utils,
+)
 from simplyblock_core.controllers import (
     cluster_events,
+    device_controller,
     fdb_backup_controller,
     mgmt_events,
 )
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
+from simplyblock_core.models.nvme_device import NVMeDevice
+from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.prom_client import PromClient
 
 logger = utils.get_logger(__name__)
@@ -60,6 +69,70 @@ def check_api_metrics(cluster):
             mgmt_events.api_latency_warning(cluster.get_id(), avg_api_req_duration)
 
 
+def _stripe_width(cl):
+    return int(getattr(cl, "distr_ndcs", 0) or 0) + int(getattr(cl, "distr_npcs", 0) or 0)
+
+
+def _devices_full(cl):
+    """Why *cl* must go read_only although its average is below cap_crit, or "".
+
+    A new stripe needs ndcs + npcs distinct devices with room (the distrib
+    never puts two chunks of one stripe on one device). When fewer devices
+    than that are below cap_crit, the next writes that need a new location
+    fail. They fail whatever the cluster average is: bed bf24 (2026-11-14,
+    5 x 1 device, 1+2) had three devices full and two at about 70% at an 88%
+    average, below the 90% threshold, and the clients got EIO. Devices without
+    a capacity reading are left out, and so is a cluster that has fewer
+    counted devices than a stripe needs: no reading is not a full device.
+    """
+    width = _stripe_width(cl)
+    if not cl.cap_crit or width < 1:
+        return ""
+    try:
+        devices = capacity_guard.device_utilizations(db, cl.get_id())
+    except Exception as e:                                # noqa: BLE001
+        logger.warning(f"Device capacity of cluster {cl.get_id()} unreadable: {e}")
+        return ""
+    if len(devices) < width:
+        return ""
+    room = [d for d in devices if d[2] < cl.cap_crit]
+    if len(room) >= width:
+        return ""
+    full = sorted(f"{dev.get_id()}={util}%" for _n, dev, util in devices if util >= cl.cap_crit)
+    return (f"only {len(room)} device(s) below {cl.cap_crit}% where a stripe needs {width} "
+            f"(full: {', '.join(full)})")
+
+
+def _stop_allocating_on_full_devices(cl):
+    """Mark an online device at or above cap_crit cannot_allocate.
+
+    The distrib then places new data on the other devices, while the device
+    still has room for the writes it already holds data for. Before this, a
+    device was marked only when it was full already (error_write_cannot_allocate
+    from the data plane), and the writes in flight that needed space on it
+    failed. Only while enough other devices have room for a whole stripe
+    (_devices_full decides otherwise). device_monitor brings the device back
+    online once it is below cap_crit again.
+    """
+    try:
+        devices = capacity_guard.device_utilizations(db, cl.get_id())
+    except Exception as e:                                # noqa: BLE001
+        logger.warning(f"Device capacity of cluster {cl.get_id()} unreadable: {e}")
+        return
+    for node, dev, util in devices:
+        if util < cl.cap_crit or dev.status != NVMeDevice.STATUS_ONLINE:
+            continue
+        if node.status != StorageNode.STATUS_ONLINE:
+            continue
+        logger.warning(f"Device {dev.get_id()} on node {node.get_id()} is at {util}% capacity, "
+                       f"at or above the cluster's critical threshold of {cl.cap_crit}%: "
+                       f"no new allocations on it")
+        try:
+            device_controller.device_set_state(dev.get_id(), NVMeDevice.STATUS_CANNOT_ALLOCATE)
+        except Exception as e:                            # noqa: BLE001
+            logger.error(f"Could not set device {dev.get_id()} cannot_allocate: {e}")
+
+
 def main():
     logger.info("Starting capacity monitoring service...")
     while True:
@@ -81,9 +154,11 @@ def main():
             size_util = records[0].size_util
             size_prov = records[0].size_prov_util
             logger.debug(f"cluster abs util: {size_util}, prov util: {size_prov}")
+            devices_full = _devices_full(cl)
             if cl.cap_crit:
-                if cl.cap_crit <= size_util:
+                if cl.cap_crit <= size_util or devices_full:
                     logger.warning(f"Cluster absolute cap critical, util: {size_util}% of cluster util: {cl.cap_crit}, "
+                                   f"{devices_full + ', ' if devices_full else ''}"
                                    f"putting the cluster in read_only mode")
                     if cl.id in last_event:
                         diff = datetime.now(UTC) - datetime.fromtimestamp(last_event[cl.id]["date"]/1000, UTC)
@@ -100,6 +175,8 @@ def main():
                 else:
                     if cl.status == Cluster.STATUS_READONLY:
                         cluster_ops.cluster_set_active(cl.get_id())
+                    elif cl.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED]:
+                        _stop_allocating_on_full_devices(cl)
 
             if cl.cap_warn:
                 if cl.cap_warn < size_util < cl.cap_crit:
