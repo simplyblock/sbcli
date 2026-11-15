@@ -3,7 +3,13 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
-from simplyblock_core import constants, db_controller, migration_turn, utils
+from simplyblock_core import (
+    capacity_guard,
+    constants,
+    db_controller,
+    migration_turn,
+    utils,
+)
 from simplyblock_core.controllers import (
     lvol_controller,
     replication_delta,
@@ -834,20 +840,20 @@ def _cadence_capacity_hold(cluster_id):
     another one only adds to that, so the cadence holds and retention can
     reclaim what already replicated. A missing capacity reading never holds:
     the guard must not stop replication on a cluster it cannot measure.
+
+    The utilization is the fullest DEVICE's when that is above the cluster
+    average (capacity_guard): a write fails on a full device, whatever the
+    average (bf24 2026-11-14: three devices full at 88% cluster average).
     """
     try:
         cluster = db.get_cluster_by_id(cluster_id)
-        records = db.get_cluster_capacity(cluster, 1)
     except Exception:                                     # noqa: BLE001
         return ""
-    if not records:
-        return ""
-    util = getattr(records[0], "size_util", None)
+    util, why = capacity_guard.effective_utilization(db, cluster)
     warn = getattr(cluster, "cap_warn", 0) or 0
     if util is None or not warn or util < warn:
         return ""
-    return (f"cluster {cluster_id} is at {util}% capacity, at or above its "
-            f"warning threshold of {warn}%")
+    return f"{why}, at or above its warning threshold of {warn}%"
 
 
 def _exempt_from_capacity_hold(repl_lvols, cluster_id):

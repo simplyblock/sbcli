@@ -997,10 +997,9 @@ def process_snap_replicate_start(task, snapshot):
     if remote_lv_node is None:
         # Waiting, not failing: the target's leadership is not this transfer's
         # fault, and counting it let a leaderless window kill the task.
-        _suspend_for_retry(task, f"target leadership not established "
-                                 f"({lead_why}), retrying",
-                           backoff=True, count=_switches_exhausted(task))
+        _wait_for_target_leader(task, remote_lv, lead_why)
         return
+    _target_leader_found(task)
     # Who may receive. The transfer goes through a hub, and SPDK demuxes hub IO
     # by map id in the HUB's own lvstore (vbdev_hublvol_submit_request): the
     # primary receives through its own transfer hub, an acting SECONDARY
@@ -1432,6 +1431,62 @@ def _stable_target_leader(remote_lv):
     with _SETTLED_LEADER_LOCK:
         _SETTLED_LEADER[key] = (second[0].get_id(), time.time())
     return second[0], ""
+
+
+def _target_member_states(remote_lv):
+    """"<id8> <status>" of every member of the target lvstore, role order."""
+    states = []
+    for node_id in _source_members(remote_lv):
+        try:
+            states.append(f"{node_id[:8]} {db.get_storage_node_by_id(node_id).status}")
+        except KeyError:
+            states.append(f"{node_id[:8]} unknown")
+    return ", ".join(states)
+
+
+def _wait_for_target_leader(task, remote_lv, lead_why):
+    """Suspend a transfer whose target lvstore has no settled leader, and say
+    for how long and why.
+
+    Replication never makes a leader itself. A target lvstore has no client
+    IO, so no member promotes itself when its primary goes down; the node
+    monitor's proven takeover gives it a leader, during the down member's
+    restart too while that member's SPDK is down (bf24 2026-11-14, LVS_22:
+    the transfer waited ~110 s for the crashed primary to come back). The
+    wait is polled every REPL_RETRY_BACKOFF_BASE_SEC (step 0, whatever the
+    task's earlier retries), costs no retry, and raises a REPLICATION_STALLED
+    event once it lasts REPL_TARGET_LEADERLESS_ALERT_SEC, then at most every
+    REPL_MERGE_ALERT_EVERY_SEC."""
+    params = task.function_params
+    now = time.time()
+    since = params.get("target_leaderless_since") or now
+    params["target_leaderless_since"] = since
+    waited = int(now - since)
+    members = _target_member_states(remote_lv)
+    msg = (f"target leadership not established ({lead_why}) for {waited}s "
+           f"[{members}], retrying")
+    alerted = params.get("target_leaderless_alerted_at") or 0
+    if (waited >= constants.REPL_TARGET_LEADERLESS_ALERT_SEC
+            and now - alerted >= constants.REPL_MERGE_ALERT_EVERY_SEC):
+        params["target_leaderless_alerted_at"] = now
+        try:
+            src = db.get_snapshot_by_id(params["snapshot_id"]).lvol
+            lvol_events.replication_target_leaderless(
+                src, remote_lv.lvs_name, waited, f"{lead_why}; members: {members}")
+        except Exception as e:                            # noqa: BLE001
+            logger.error("Replication task %s: could not log the leaderless-target "
+                         "event: %s", task.uuid, e)
+    _suspend_for_retry(task, msg, backoff=True, count=_switches_exhausted(task),
+                       backoff_step=0)
+
+
+def _target_leader_found(task):
+    """End a leaderless-target wait: log how long it lasted."""
+    since = task.function_params.pop("target_leaderless_since", None)
+    task.function_params.pop("target_leaderless_alerted_at", None)
+    if since:
+        logger.info("Replication task %s: target leadership settled after %ds without "
+                    "a leader", task.uuid, int(time.time() - since))
 
 
 def _attached_hub_ctrl(task, hub_node):

@@ -35,6 +35,8 @@ def _node(node_id, lvstore="LVS_1", jm_vuid=7):
     rpc.jc_get_jm_status.return_value = {"jm1": True, "remote_jm2": True}
     rpc.bdev_lvol_update_lvstore.return_value = True
     rpc.bdev_lvol_set_leader.return_value = True
+    # what the leadership proof (_member_proven_non_leader) reads
+    rpc.get_lvstore.return_value = {"lvs leadership": False}
     return types.SimpleNamespace(
         get_id=lambda: node_id, status=StorageNode.STATUS_ONLINE,
         lvstore=lvstore, jm_vuid=jm_vuid, cluster_id="c1",
