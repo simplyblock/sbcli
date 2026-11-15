@@ -33,11 +33,11 @@ class _Node:
 
 @pytest.fixture(autouse=True)
 def env(monkeypatch):
-    def is_node_leader(node, lvs):
+    def leadership_reported(node, lvs):
         if not node.rpc_ok:
             raise RuntimeError("rpc timeout")
         return node.leader
-    monkeypatch.setattr(lvol_controller, "is_node_leader", is_node_leader)
+    monkeypatch.setattr(sno, "_lvs_leadership_reported", leadership_reported)
     monkeypatch.setattr(sno.time, "sleep", lambda s: None)
     monkeypatch.setattr(sno.constants, "LEADERSHIP_SAFETY_WINDOW_SEC", 10)
 
@@ -99,3 +99,36 @@ def test_the_force_branch_no_longer_signals_and_requires_proof():
 def test_the_leaderless_grant_requires_proof_before_set_leader():
     src = inspect.getsource(sno._recover_leaderless_lvs)
     assert src.index("_leadership_proven_free(") < src.index("bdev_lvol_set_leader(")
+
+
+def test_an_unreachable_member_is_not_proven_by_its_rpc_alone(monkeypatch):
+    # lvol_controller.is_node_leader swallows the connection error and says
+    # "not leader"; the proof used it, so an unreachable member with a
+    # running SPDK was "proven" without the node agent ever being asked.
+    from simplyblock_core.rpc_client import RPCConnectionError
+    monkeypatch.undo()
+    monkeypatch.setattr(sno.time, "sleep", lambda s: None)
+
+    class _Rpc:
+        def get_lvstore(self, name):
+            raise RPCConnectionError("Could not reach remote")
+
+    node = _Node("A", spdk_up=True)
+    node.rpc_client = lambda **kw: _Rpc()
+    assert lvol_controller.is_node_leader(node, "LVS_10") is False
+    ok, why = sno._member_proven_non_leader(node, "LVS_10")
+    assert not ok and "still running" in why
+    node.spdk_up = False
+    assert sno._member_proven_non_leader(node, "LVS_10")[0]
+
+
+def test_a_member_without_the_lvstore_is_proven(monkeypatch):
+    monkeypatch.undo()
+
+    class _Rpc:
+        def get_lvstore(self, name):
+            return None
+
+    node = _Node("A", agent_ok=False)
+    node.rpc_client = lambda **kw: _Rpc()
+    assert sno._member_proven_non_leader(node, "LVS_10")[0]
