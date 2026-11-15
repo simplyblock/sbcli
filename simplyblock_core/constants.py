@@ -759,6 +759,12 @@ REPL_MERGE_RETRY_MIN_SEC = 5.0
 REPL_MERGE_RETRY_MAX_SEC = 120.0
 REPL_MERGE_FAIL_ALERT = 3
 REPL_MERGE_ALERT_EVERY_SEC = 600.0
+# A transfer waiting for its TARGET lvstore to have a leader raises a
+# REPLICATION_STALLED event once it has waited this long, then at most every
+# REPL_MERGE_ALERT_EVERY_SEC. The node monitor gives a leaderless target a
+# leader within about a minute of its primary going down (crashed or shut
+# down); a wait beyond this means no member could be proven safe to lead.
+REPL_TARGET_LEADERLESS_ALERT_SEC = 180
 # Pass interval of the snapshot replication runner while any transfer or
 # merge is in flight; TASK_EXEC_INTERVAL_SEC when idle. Not sub-second: each
 # pass reads the task table (see test_transfer_completion_latency).
