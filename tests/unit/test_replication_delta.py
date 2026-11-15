@@ -169,12 +169,17 @@ class TestOverlapWithMerge(unittest.TestCase):
     def _decide(self, pred, sec_status=None):
         task = SimpleNamespace(function_params={}, write_to_db=MagicMock(), uuid="t")
         remote_lv = SimpleNamespace(get_id=lambda: "landing")
+        # sec_status "offline" = the secondary cannot be reached: members are
+        # judged by whether they answer, not by DB status (replica_chain)
         node = SimpleNamespace(secondary_node_id="sec" if sec_status else "",
-                               get_id=lambda: "tgt")
+                               tertiary_node_id="", get_id=lambda: "tgt")
         db = MagicMock()
-        db.get_storage_node_by_id.return_value = SimpleNamespace(status=sec_status)
+        db.get_storage_node_by_id.return_value = SimpleNamespace(
+            status=sec_status, get_id=lambda: "sec")
         prechain = MagicMock()
         with patch.object(snapshot_replication, "_finishing_predecessor", return_value=pred), \
+                patch.object(snapshot_replication.replica_chain, "reachable",
+                             return_value=sec_status != "offline"), \
                 patch.object(snapshot_replication, "_prechain_landing_volume", prechain), \
                 patch.object(snapshot_replication, "db", db):
             res = snapshot_replication._partial_transfer_decision(
@@ -187,7 +192,7 @@ class TestOverlapWithMerge(unittest.TestCase):
         self.assertEqual(res, (True, 0x88))
         self.assertEqual(params["chain_deferred_to"], "snap")
 
-    def test_an_offline_secondary_makes_it_full_but_still_deferred(self):
+    def test_an_unreachable_secondary_makes_it_full_but_still_deferred(self):
         (res, params) = self._decide(_snap(before=CLEAN, blobid=0x88), sec_status="offline")
         self.assertEqual(res, (False, 0))
         self.assertEqual(params["chain_deferred_to"], "snap")
