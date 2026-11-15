@@ -248,7 +248,7 @@ def test_tertiary_is_pre_chained_too(monkeypatch):
     assert sr._prechain_landing_volume(
         task, cur, False, _LandingLV(), leader) is True
     ter = sr.db.get_storage_node_by_id("N_TGT_TER")
-    assert ter.add_clone_calls == [("LVS/REP_SNAP_2", "LVS/T_SNAP_1")]
+    assert ter.add_clone_calls == [("LVS/REP_SNAP_2", "LVS/T_SNAP_1")]  # type: ignore[attr-defined]
     assert task.function_params["prechained_node_ids"] == ["N_TGT", "N_TGT_SEC", "N_TGT_TER"]
 
 
