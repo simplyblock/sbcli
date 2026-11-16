@@ -359,28 +359,39 @@ class TestApplyClusterHugepages(unittest.TestCase):
         self.assertIsNone(result)
 
 
-class TestHugepageMemoryFactor(unittest.TestCase):
-    """The huge-page figure is the computed pool + EXTRA_HUGE_PAGE_MEMORY total,
-    with no safety multiplier. The old 2.0x factor reserved ~twice what SPDK
-    needs -- on a two-instances-per-socket host that was the difference between
-    fitting a node and starving it."""
+class TestHugepageMemoryBudget(unittest.TestCase):
+    """The huge-page figure is the explicit sum of SPDK's consumers -- iobuf
+    pools, bdev_io pool, distrib data buffers, md journal, NVMe/TCP qpairs,
+    blobstore masks, threads -- times HP_OVERHEAD_FACTOR, sized for the node's
+    saturation point (2026-11-16). No 2x multiplier, no flat 3 GiB reserve."""
 
-    def test_is_the_undoubled_computed_figure(self):
-        small, large, lvol, cpu = 192160, 3945, 45, 12
-        pool_consumption = (small * 8 + large * 128) / 1024
-        expected = int((4 * cpu + 1.1 * pool_consumption + 22 * lvol) * (1024 * 1024)
-                       + constants.EXTRA_HUGE_PAGE_MEMORY)
-        self.assertEqual(
-            utils.calculate_minimum_hp_memory(small, large, lvol, 0, cpu), expected)
+    GiB = 1024 ** 3
 
-    def test_not_doubled(self):
-        """Guard against the 2.0x regression: the result is the pool figure plus
-        one EXTRA_HUGE_PAGE_MEMORY, so it sits between 1x and 2x that constant."""
-        small, large, lvol, cpu = 100000, 1000, 10, 8
-        result = utils.calculate_minimum_hp_memory(small, large, lvol, 0, cpu)
-        self.assertGreater(result, constants.EXTRA_HUGE_PAGE_MEMORY)
-        self.assertLess(result, 2 * constants.EXTRA_HUGE_PAGE_MEMORY,
-                        "result must not carry the old 2x multiplier")
+    def test_is_the_explicit_sum(self):
+        small, large, lvol, cpu = 96128, 775, 30, 16
+        peer = constants.HP_PEER_QPAIRS_PER_CORE * cpu
+        expected = int((small * constants.IOBUF_SMALL_BUFSIZE + large * constants.IOBUF_LARGE_BUFSIZE
+                        + constants.BDEV_IO_POOL_SIZE * constants.BDEV_IO_SIZE_ESTIMATE
+                        + constants.HP_DISTRIB_DATA_BUF_BYTES + constants.HP_MD_JOURNAL_BYTES
+                        + (lvol * (constants.CLIENT_QPAIR_COUNT + 1) + peer) * constants.HP_NVMF_QPAIR_BYTES
+                        + peer * constants.HP_NVME_INITIATOR_QPAIR_BYTES
+                        + constants.HP_BLOBSTORE_BYTES
+                        + constants.HP_THREAD_BYTES_BASE + constants.HP_THREAD_BYTES_PER_CORE * cpu)
+                       * constants.HP_OVERHEAD_FACTOR)
+        self.assertEqual(utils.calculate_minimum_hp_memory(small, large, lvol, 0, cpu), expected)
+
+    def test_run_node_gets_about_6_6_gib(self):
+        """The pnfs 2026-11-13 node (16 cores, max_lvol 30) got 5619 MB and ran
+        out; the budget for it is ~6.6 GiB."""
+        small, large = utils.calculate_pool_count(3, 2 * 5, 16, 16, 30)
+        result = utils.calculate_minimum_hp_memory(small, large, 30, 0, 16)
+        self.assertGreater(result, 6.3 * self.GiB)
+        self.assertLess(result, 7.0 * self.GiB)
+
+    def test_grows_with_subsystems_and_cores(self):
+        base = utils.calculate_minimum_hp_memory(96128, 775, 30, 0, 16)
+        self.assertGreater(utils.calculate_minimum_hp_memory(96128, 775, 250, 0, 16), base)
+        self.assertGreater(utils.calculate_minimum_hp_memory(96128, 775, 30, 0, 32), base)
 
 
 class TestReserveClusterHugepages(unittest.TestCase):
