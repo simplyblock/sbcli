@@ -475,14 +475,21 @@ class TestSupersededRounds:
 
     def test_take_round_records_the_round_and_prunes_after_the_submit(self):
         task = _task(direct_rounds=True, direct_done_snap="R1", direct_round_ids=["R0", "R1"])
-        order = []
+        order: list = []
+
+        def _submit(t, lv):
+            order.append("submit")
+            return None, t
+
+        def _drop(t, lv, f):
+            order.append(("drop", f))
+            return t
+
         with patch.object(final, "_record", side_effect=_record_inline), \
                 patch.object(final, "_take_shrink_snapshot",
                              return_value=("R2", None, task)), \
-                patch.object(final, "_submit_direct_round",
-                             side_effect=lambda t, lv: (order.append("submit"), (None, t))[1]), \
-                patch.object(final, "_drop_superseded_rounds",
-                             side_effect=lambda t, lv, f: (order.append(("drop", f)), t)[1]):
+                patch.object(final, "_submit_direct_round", side_effect=_submit), \
+                patch.object(final, "_drop_superseded_rounds", side_effect=_drop):
             err, task = final._take_round(task, _lvol())
         assert err is None
         assert task.function_params["direct_round_ids"] == ["R0", "R1", "R2"]

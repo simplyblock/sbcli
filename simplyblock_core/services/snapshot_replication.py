@@ -26,6 +26,7 @@ from simplyblock_core.controllers import (
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.pool import Pool
+from simplyblock_core.models.replica_chain_pending import ReplicaChainPending
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCException
@@ -2059,8 +2060,8 @@ def _prechain_landing_volume(task, snapshot, replicate_to_source, remote_lv,
     """Chain the landing volume onto the destination's copy of the PREVIOUS
     snapshot, before the transfer runs, so only the delta has to be sent.
 
-    Returns True when the landing volume (and every online member of its HA
-    pair) is chained, which is the precondition for asking for a PARTIAL
+    Returns True when the landing volume is chained on every member of its
+    lvstore, which is the precondition for asking for a PARTIAL
     transfer. Returns False to mean "send a full transfer", which is always
     correct and is what this pipeline did unconditionally until now.
 
@@ -2087,10 +2088,12 @@ def _prechain_landing_volume(task, snapshot, replicate_to_source, remote_lv,
       * a predecessor copy must resolve cleanly on this node (``ok`` and a
         non-empty ``target_prev_snap`` from :func:`_resolve_chain_target`);
       * the LVS leader must accept the chain;
-      * the secondary must be ONLINE and accept it too. The transfer lands on
-        the leader and the lvstore mirrors it to the secondary; an unchained
-        secondary would read zeros wherever the delta did not write, so a
-        degraded pair gets a full transfer rather than a delta.
+      * every other member (secondary and tertiary) must answer and accept
+        it too, whatever its DB status (replica_chain's reachability rule).
+        The transfer lands on the leader and the lvstore mirrors it; an
+        unchained member would read zeros wherever the delta did not write,
+        so a lvstore with a member that cannot be chained gets a full
+        transfer rather than a delta.
     Anything short of that logs why and falls back to a full transfer.
     """
     target_prev_snap, _prev_snap_for_db, ok = _resolve_chain_target(
@@ -2107,21 +2110,16 @@ def _prechain_landing_volume(task, snapshot, replicate_to_source, remote_lv,
             remote_lv.top_bdev, snapshot.get_id())
         return False
 
-    # A node without a secondary is a single-node cluster's: there is no
-    # member to leave holes on, so chaining the node itself is enough.
-    single = not remote_lv_node.secondary_node_id
-    sec_node = None
-    if not single:
-        try:
-            sec_node = db.get_storage_node_by_id(remote_lv_node.secondary_node_id)
-        except KeyError:
-            sec_node = None
-    if not single and (sec_node is None or sec_node.status != StorageNode.STATUS_ONLINE):
-        logger.info(
-            "Landing volume %s stays a full-transfer target: the secondary of "
-            "%s is not online, and a delta would leave holes on it",
-            remote_lv.top_bdev, remote_lv_node.get_id())
-        return False
+    # Every other member of the destination lvstore -- secondary AND tertiary,
+    # whatever its DB status -- must be chained as well: the transfer lands on
+    # the leader and the lvstore mirrors it, and an unchained member reads
+    # zeros wherever the delta did not write. A member is judged by whether it
+    # answers (replica_chain), not by its DB status: one that is offline in the
+    # DB but answering is chained like any other, one that cannot be reached
+    # (or does not hold the landing volume) gets a full transfer instead. A
+    # node without replicas is a single-node cluster's: chaining the node
+    # itself is enough.
+    replicas = replica_chain.lvstore_replicas(remote_lv_node, db=db)
 
     prechained = list(task.function_params.get("prechained_node_ids") or [])
 
@@ -2148,13 +2146,30 @@ def _prechain_landing_volume(task, snapshot, replicate_to_source, remote_lv,
         prechained.append(node.get_id())
         return True
 
+    def _chain_on_replica(node, role):
+        if node.get_id() in prechained:
+            return True
+        # Idempotent, and not recorded as owed when skipped: the volume then
+        # gets a full transfer, and the finish chains (or records) it there.
+        outcome, err = replica_chain.add_clone_on(
+            node, role, remote_lv.top_bdev, target_prev_snap['snap_bdev'],
+            owner=remote_lv_node, record=False, db=db)
+        if outcome != replica_chain.DONE:
+            logger.info("Landing volume %s stays a full-transfer target: %s %s "
+                        "could not be chained (%s)", remote_lv.top_bdev, role,
+                        node.get_id(), err or "not reachable, or without the volume")
+            return False
+        prechained.append(node.get_id())
+        return True
+
     primary_ok = _chain_on(remote_lv_node, "primary")
     # Record whatever actually landed even on the failure path: the entry exists
     # on that node now, and the finish step must not add it a second time.
-    if single:
-        secondary_ok = True
-    else:
-        secondary_ok = _chain_on(sec_node, "secondary") if primary_ok else False
+    secondary_ok = primary_ok
+    for role, peer in replicas:
+        if not secondary_ok:
+            break
+        secondary_ok = _chain_on_replica(peer, role)
     if prechained != (task.function_params.get("prechained_node_ids") or []):
         task.function_params["prechained_node_ids"] = prechained
         task.write_to_db()
@@ -2271,19 +2286,16 @@ def _deferred_partial_decision(task, snapshot, pred, remote_lv_node, source_node
     """The transfer mode while *pred*'s copy is still being merged on the
     target: the landing volume stays unchained until the finish (see
     _finishing_predecessor), and a delta is sent on the same terms as on a
-    pre-chained volume -- a clean basis, and both members of the destination
-    pair online. A full transfer is chained there all the same."""
+    pre-chained volume -- a clean basis, and every member of the destination
+    lvstore reachable. A full transfer is chained there all the same."""
     task.function_params["chain_deferred_to"] = pred.get_id()
     logger.info("Transfer of %s runs while %s's copy is merged; its landing volume is "
                 "chained onto that copy after the transfer", snapshot.get_id(), pred.get_id())
-    if remote_lv_node.secondary_node_id:
-        try:
-            sec = db.get_storage_node_by_id(remote_lv_node.secondary_node_id)
-        except KeyError:
-            sec = None
-        if sec is None or sec.status != StorageNode.STATUS_ONLINE:
-            logger.info("Transfer of %s stays FULL: the secondary of %s is not online",
-                        snapshot.get_id(), remote_lv_node.get_id())
+    for role, peer in replica_chain.lvstore_replicas(remote_lv_node, db=db):
+        # reachability, not DB status (replica_chain), as in the pre-chain
+        if not replica_chain.reachable(peer, role):
+            logger.info("Transfer of %s stays FULL: %s %s of %s cannot be reached",
+                        snapshot.get_id(), role, peer.get_id(), remote_lv_node.get_id())
             return False, 0
     ok, why = replication_delta.delta_basis(pred, snapshot, source_node_id)
     if ok and pred.blobid:
@@ -2684,15 +2696,20 @@ def process_snap_replicate_finish(task, snapshot):
             continue
         if target_prev_snap and peer.get_id() not in _prechained:
             if _secondary_lacks_bdev(peer, target_prev_snap['snap_bdev']):
-                logger.warning("%s %s does not hold %s; the chain is not repeated there",
+                logger.warning("%s %s does not hold %s; the chain is owed there",
                                role, peer.get_id(), target_prev_snap['snap_bdev'])
+                replica_chain.record_pending(
+                    peer, role, ReplicaChainPending.OP_ADD_CLONE, remote_lv.top_bdev,
+                    target_prev_snap['snap_bdev'],
+                    reason=ReplicaChainPending.REASON_ABSENT, owner=remote_snode, db=db)
             else:
                 logger.info(f"Chaining replicated lvol: {remote_lv.top_bdev} to snap: "
                             f"{target_prev_snap['snap_bdev']} on {role}")
                 with xfer_timing.phase("chain_add_clone", snap=snapshot.get_id(),
                                        lvol=snapshot.lvol.get_id(), node=role):
                     outcome, err = replica_chain.add_clone_on(
-                        peer, role, remote_lv.top_bdev, target_prev_snap['snap_bdev'])
+                        peer, role, remote_lv.top_bdev, target_prev_snap['snap_bdev'],
+                        owner=remote_snode, db=db)
                 if outcome == replica_chain.FAILED:
                     logger.error("Failed to chain replicated snapshot on %s: %s", role, err)
                     return False
@@ -2704,7 +2721,8 @@ def process_snap_replicate_finish(task, snapshot):
 
         with xfer_timing.phase("chain_convert", snap=snapshot.get_id(),
                                lvol=snapshot.lvol.get_id(), node=role):
-            outcome, err = replica_chain.convert_on(peer, role, remote_lv.top_bdev)
+            outcome, err = replica_chain.convert_on(peer, role, remote_lv.top_bdev,
+                                                    owner=remote_snode, db=db)
         if outcome == replica_chain.FAILED:
             logger.error("Failed to convert to snapshot on %s: %s", role, err)
             return False

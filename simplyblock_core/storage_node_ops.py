@@ -12454,6 +12454,21 @@ def _recover_leaderless_lvs(cluster_id, all_nodes, lvs_name, preferred_taker, ow
                          "refusing to grant leadership", taker.get_id(),
                          lvs_name, e)
             return None
+        # The reload re-reads the blobstore's super block and masks, not the
+        # snapshot tree the taker keeps in memory: a link or convert it missed
+        # while it could not be reached is replayed before it leads
+        # (replica_chain; bf23 2026-11-12, LVS_16). Trusted -- nobody leads
+        # to confirm the records against. Best effort: the grant goes on.
+        try:
+            from simplyblock_core.controllers import replica_chain
+            owed = replica_chain.replay_pending(taker, db=db, lvs_name=lvs_name, trusted=True)
+            if owed["skipped"] or owed["failed"]:
+                logger.error("%s takes %s with %d snapshot-tree change(s) still owed "
+                             "(%d failed): its tree may be stale", taker.get_id(),
+                             lvs_name, owed["skipped"] + owed["failed"], owed["failed"])
+        except Exception as e:  # noqa: BLE001
+            logger.error("Replay of owed snapshot-tree changes on %s for %s failed: %s",
+                         taker.get_id(), lvs_name, e)
         if pre_handoff_restart_of and _leadership_moving_tasks_active(
                 cluster_id, member_ids, lvs_name, pre_handoff_restart_of=pre_handoff_restart_of):
             # Last look, right before the grant: the proof and the reload took

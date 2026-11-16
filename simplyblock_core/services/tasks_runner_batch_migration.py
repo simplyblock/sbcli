@@ -917,7 +917,9 @@ def _handle_intermediate_barrier(group, member_migrations, src_node, tgt_node, s
                 continue
             tgt_bdev_composite = f"{tgt_node.lvstore}/{_lvol_tgt_bdev_name(lvol.lvol_bdev)}"
             try:
-                _err = replica_chain.add_clone_on_replicas(tgt_node, tgt_bdev_composite, snap_composite, db=db)
+                # never retried: a failed member is recorded as owed and replayed
+                _err = replica_chain.add_clone_on_replicas(tgt_node, tgt_bdev_composite, snap_composite,
+                                                           db=db, record_failed=True)
             except Exception as e:  # noqa: BLE001 -- non-fatal past the cutover
                 _err = str(e)
             if _err:

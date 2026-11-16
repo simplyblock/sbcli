@@ -114,7 +114,7 @@ def test_an_unreachable_member_is_not_proven_by_its_rpc_alone(monkeypatch):
             raise RPCConnectionError("Could not reach remote")
 
     node = _Node("A", spdk_up=True)
-    node.rpc_client = lambda **kw: _Rpc()
+    node.rpc_client = lambda **kw: _Rpc()  # type: ignore[attr-defined]
     assert lvol_controller.is_node_leader(node, "LVS_10") is False
     ok, why = sno._member_proven_non_leader(node, "LVS_10")
     assert not ok and "still running" in why
@@ -130,5 +130,5 @@ def test_a_member_without_the_lvstore_is_proven(monkeypatch):
             return None
 
     node = _Node("A", agent_ok=False)
-    node.rpc_client = lambda **kw: _Rpc()
+    node.rpc_client = lambda **kw: _Rpc()  # type: ignore[attr-defined]
     assert sno._member_proven_non_leader(node, "LVS_10")[0]

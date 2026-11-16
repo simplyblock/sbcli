@@ -490,8 +490,11 @@ def run_cutover(src_node, tgt_node, lvol, tgt_lvol_composite, tgt_map_id,
         with xfer_timing.phase("final_peer_add_clone", lvol=lvol.get_id(),
                                peer=peer.get_id()):
             try:
+                # non-fatal and never retried: a failure is recorded as owed
+                # like a skip, and replayed (replica_chain.replay_pending)
                 outcome, err = replica_chain.add_clone_on(
-                    peer, "peer", tgt_lvol_composite, tgt_snap_composite)
+                    peer, "peer", tgt_lvol_composite, tgt_snap_composite,
+                    owner=tgt_node, record_failed=True, db=db)
             except Exception as e:  # noqa: BLE001 -- non-fatal past the cutover
                 outcome, err = replica_chain.FAILED, str(e)
         if outcome == replica_chain.FAILED:
