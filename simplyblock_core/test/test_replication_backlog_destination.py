@@ -65,30 +65,9 @@ def test_backlog_skips_snapshots_whose_volume_has_no_destination():
     assert skip_at < enqueue_at
 
 
-def test_undeliverable_forward_task_is_ended_not_retried(monkeypatch):
-    """A task for a destination-less volume must be completed, so it cannot
-    starve the runner or block deletes behind its snapshot."""
-    task = _Task()
-    snap = _snap("S1", _lvol("REP_LV", repl_node=""))
-
-    # A blank id must never reach the node lookup.
-    def _boom(_id):
-        raise AssertionError("looked up a storage node with a blank id")
-
-    monkeypatch.setattr(sr.db, "get_storage_node_by_id", _boom)
-    monkeypatch.setattr(sr, "_select_source_node",
-                        lambda s, exclude=(): (SimpleNamespace(get_id=lambda: "N_SRC"), "primary"))
-    # The chain-completeness gate has its own suite
-    # (test_replication_chain_completeness); this test is about the
-    # destination guard behind it.
-    monkeypatch.setattr(sr, "_unreplicated_local_ancestor",
-                        lambda snode, snapshot, to_source: ("ok", None, ""))
-
-    sr.process_snap_replicate_start(task, snap)
-
-    assert task.status == JobSchedule.STATUS_DONE, "the task must end, not retry"
-    assert "no replication destination" in task.function_result
-    assert task.retry == 0, "ending a doomed task must not consume the retry budget"
+# The task-side defence (a task that exists anyway ends instead of retrying) is
+# tests/integration/test_replication_backlog_destination.py: it reads the
+# volume's stored record, which needs the real database.
 
 
 def test_volume_with_a_destination_is_still_processed(monkeypatch):

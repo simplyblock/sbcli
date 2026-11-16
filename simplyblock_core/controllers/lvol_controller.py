@@ -5050,24 +5050,51 @@ def _place_on_peer_preferring(db_controller, lvol, peer):
 def place_on_peer_destination(lvol):
     """Place *lvol* on its peer destination, when it replicates there but has
     no node yet (replication_start deferred the placement). Returns the volume
-    with its node set, or None when it is not such a volume.
+    as stored, with its node set, or None when it does not replicate to a
+    peer destination.
+
+    *lvol* may be stale: a replication task holds the copy embedded in its
+    snapshot's record, taken before any placement. So the stored record
+    decides, and a volume another task already placed is returned as stored,
+    without asking the peer again (bed run 20261113-2112-ebs-splitdr placed
+    each member twice). Two tasks asking at once both get the node stored
+    first: the peer may answer each differently, and a volume whose node
+    changes mid-chain lands its copies apart.
 
     Raises:
         PeerUnreachableError: the peer still does not answer.
         PeerError: the peer answers but cannot place the volume.
     """
-    if lvol.replication_node_id or not lvol.do_replicate:
-        return None
     db_controller = DBController()
+    try:
+        lvol = db_controller.get_lvol_by_id(lvol.get_id())
+    except KeyError:
+        return None
+    if lvol.replication_node_id:
+        return lvol
+    if not lvol.do_replicate:
+        return None
     peer = _destination_peer(db_controller, lvol, _policy_target_cluster(db_controller, lvol))
     if peer is None:
         return None
     node_id = _place_on_peer_preferring(db_controller, lvol, peer)
-    fresh = db_controller.get_lvol_by_id(lvol.get_id())
-    fresh.replication_node_id = node_id
-    fresh.write_to_db()
-    logger.info("LVol %s placed on node %s of its peer destination", lvol.get_id(), node_id)
-    return fresh
+
+    def _store_unless_placed(fresh):
+        if fresh.replication_node_id:
+            return False
+        fresh.replication_node_id = node_id
+        return True
+
+    stored = db_controller.atomic_update(lvol, _store_unless_placed)
+    if stored is None:
+        return None
+    if stored.replication_node_id == node_id:
+        logger.info("LVol %s placed on node %s of its peer destination", lvol.get_id(), node_id)
+    else:
+        logger.info("LVol %s was placed on node %s of its peer destination meanwhile; "
+                    "keeping it (the peer answered %s)", lvol.get_id(),
+                    stored.replication_node_id, node_id)
+    return stored
 
 
 def replication_start(lvol_id, replication_cluster_id=None, mode=None, interval_min=None,
