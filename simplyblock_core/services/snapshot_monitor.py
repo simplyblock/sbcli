@@ -7,6 +7,7 @@ from simplyblock_core import (
     constants,
     db_controller,
     migration_turn,
+    replication_spare,
     utils,
 )
 from simplyblock_core.controllers import (
@@ -976,6 +977,19 @@ def take_due_internal_snapshots(cluster_id, now_ts):
             logger.error(f"Internal snapshot scheduling failed for {lvol.get_id()}: {e}")
 
 
+_last_spare_sweep: dict = {}
+
+
+def sweep_spare_landing_volumes(cluster_id, now_ts):
+    """Run replication_spare.sweep for *cluster_id* at most every
+    SWEEP_INTERVAL_SEC: deletes spare landing volumes whose volume no longer
+    replicates. Returns the number deleted."""
+    if now_ts - _last_spare_sweep.get(cluster_id, 0) < replication_spare.SWEEP_INTERVAL_SEC:
+        return 0
+    _last_spare_sweep[cluster_id] = now_ts
+    return replication_spare.sweep(cluster_id, now_ts)
+
+
 def main():
     logger.info("Starting LVol monitor...")
     while True:
@@ -996,6 +1010,11 @@ def main():
                 take_due_internal_snapshots(cluster.get_id(), int(time.time()))
             except Exception as e:
                 logger.error(f"Internal snapshot scheduling failed for cluster {cluster.get_id()}: {e}")
+
+            try:
+                sweep_spare_landing_volumes(cluster.get_id(), int(time.time()))
+            except Exception as e:
+                logger.error(f"Spare landing volume sweep failed for cluster {cluster.get_id()}: {e}")
 
             try:
                 snapshot_controller.reap_snapshot_intents(cluster.get_id())

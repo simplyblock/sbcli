@@ -3155,6 +3155,15 @@ def _delete_held_sources(lvol):
                          lvol.cloned_from_snap)
 
 
+def _discard_replication_spare(lvol_id):
+    """Delete the spare landing volume (replication_spare) of *lvol_id*. Best effort."""
+    try:
+        from simplyblock_core import replication_spare
+        replication_spare.discard(lvol_id)
+    except Exception as e:                              # noqa: BLE001
+        logger.warning("Could not discard the spare landing volume of %s: %s", lvol_id, e)
+
+
 def delete_lvol(lvol: LVol, *, force_delete: bool = False, lock: bool = True) -> None:
     db_controller = DBController()
     ops_gate.assert_object_ops_allowed("volume delete", pool_uuid=lvol.pool_uuid)
@@ -3192,6 +3201,11 @@ def delete_lvol(lvol: LVol, *, force_delete: bool = False, lock: bool = True) ->
         _cancel_replication_cutover(lvol.get_id(), db_controller.get_job_tasks(cluster_id))
     except Exception as e:                              # noqa: BLE001
         logger.warning("Could not cancel the cutover task of %s: %s", lvol.get_id(), e)
+
+    # A replicating volume's spare landing volume on the destination goes
+    # with it (only replicating volumes have one; others skip the look-up).
+    if lvol.do_replicate or lvol.replication_policy_id or lvol.replication_node_id:
+        _discard_replication_spare(lvol.get_id())
 
     # Consistency-group detach on delete (design §8.2): close the member's
     # epoch so future generations exclude it, but PRESERVE its snapshots in
@@ -5451,6 +5465,10 @@ def replication_stop(lvol_id, delete=False, from_policy=False):
     logger.info("Setting LVol do_replicate: False")
     lvol.do_replicate = False
     lvol.write_to_db()
+    # The spare landing volume kept ready on the destination serves no
+    # transfer any more. After the write above: a spare create still racing
+    # with this stop sees do_replicate False and deletes its own spare.
+    _discard_replication_spare(lvol_id)
 
     snode = db_controller.get_storage_node_by_id(lvol.node_id)
     tasks = db_controller.get_job_tasks(snode.cluster_id)
