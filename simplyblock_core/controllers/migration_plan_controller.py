@@ -227,17 +227,18 @@ def build_plan(cluster_id, target_cluster_id, pool_id=None, lvol_ids=None,
 
     cluster = db.get_cluster_by_id(cluster_id)
     # Every volume's initial-copy snapshot pins the blocks overwritten while it
-    # is outstanding -- up to the volume's whole used size. A source already
-    # past its warning threshold has no room for that (the EKS bed of
-    # 2026-10-22 filled, went read_only, and its clients got EIO).
+    # is outstanding -- up to the volume's whole used size. Capacity thresholds
+    # are informational: a source past its warning threshold gets a warning on
+    # the plan, never a refusal (bed bf25, 2026-11-16: a refused plan left the
+    # volumes behind; the migration is how a full cluster gets relieved).
     capacity = _source_capacity(db, cluster_id)
     if capacity:
         util, warn, total, used = capacity
         if warn and util >= warn:
-            raise MigrationPlanError(
+            plan.warnings.append(
                 f"source cluster {cluster_id} is at {util}% capacity, at or above "
-                f"its warning threshold of {warn}%: snapshots taken for the "
-                f"migration would fill it")
+                f"its warning threshold of {warn}%: the snapshots taken for the "
+                f"migration need room until it cuts over")
         pin = sum(_used_bytes(db, lv) for lv in selected)
         if total and total - used < pin:
             plan.warnings.append(
