@@ -125,11 +125,6 @@ on:
         required: true
         default: "RandomMultiClientMultiFailoverTest"
 
-      MAX_RUN_HOURS:
-        description: "Hours the stress loop may run before it stops itself, at the top of an iteration, through its normal end-of-run path. The collection steps then run inside the job's remaining timeout. 0 means run until failure and accept being cancelled mid-outage."
-        required: false
-        default: "108"
-
       # =========================
       # Security inputs
       # =========================
@@ -162,13 +157,13 @@ jobs:
   bootstrap-and-stress:
     name: Pre-clean -> Bootstrap -> Stress
     runs-on: [self-hosted]
-    # 5 days. The stress loop stops itself at MAX_RUN_HOURS (108h) and the
-    # Graylog export that follows is capped at 480 minutes, so the job keeps
-    # ~4h of headroom over both. Reaching THIS limit means the planned stop did
-    # not happen: the job is then cancelled mid-outage, which is what cost
-    # 43419924336 its end-of-run validation and left stress.py running on the
-    # runner for five hours afterwards.
-    timeout-minutes: 7200
+    # 5.5 days: the 5-day run budget, plus room for the loop to stop cleanly
+    # and for the Graylog export that follows it, which is capped at 480
+    # minutes. The budget is the operating limit; this is only the outer bound.
+    # Reaching THIS limit means the planned stop did not happen: the job is
+    # then cancelled mid-outage, which is what cost 43419924336 its end-of-run
+    # validation and left stress.py running for five hours afterwards.
+    timeout-minutes: 7920
 
     env:
       # Cluster/lab env
@@ -1145,25 +1140,22 @@ jobs:
       - name: Run stress (foreground; until failure or the run budget)
         shell: bash
         working-directory: sbcli/e2e
-        env:
-          MAX_RUN_HOURS: ${{ inputs.MAX_RUN_HOURS || '108' }}
         run: |
           set -uxo pipefail
 
+          # Five days, fixed. Not a dispatch input: the job timeout above is
+          # sized around this number, so the two only make sense together, and
+          # k8s-native-stress is already at GitHub's limit of 25 inputs.
+          #
           # An absolute deadline, not a duration: a --resume run inherits the
           # original one instead of restarting the clock, and the log says up
           # front when the run was always going to end. utils/run_budget.py
           # reads it, and the outage loops check it at the top of an iteration.
-          hours="${MAX_RUN_HOURS:-108}"
-          hard_sec=0
-          if [[ "${hours}" =~ ^[0-9]+$ ]] && [ "${hours}" -gt 0 ]; then
-            STRESS_DEADLINE_EPOCH=$(( $(date +%s) + hours * 3600 ))
-            export STRESS_DEADLINE_EPOCH
-            hard_sec=$(( hours * 3600 + 3600 ))
-            echo "Run budget: ${hours}h, stopping at $(date -u -d "@${STRESS_DEADLINE_EPOCH}" '+%F %T UTC')"
-          else
-            echo "Run budget: unlimited (MAX_RUN_HOURS=${hours}) -- this run can be cancelled mid-outage"
-          fi
+          hours=120
+          hard_sec=$(( hours * 3600 + 3600 ))
+          STRESS_DEADLINE_EPOCH=$(( $(date +%s) + hours * 3600 ))
+          export STRESS_DEADLINE_EPOCH
+          echo "Run budget: ${hours}h, stopping at $(date -u -d "@${STRESS_DEADLINE_EPOCH}" '+%F %T UTC')"
 
           # touch this file to end a run early without killing it.
           STRESS_STOP_FILE="${PWD}/.stress_stop"
@@ -1176,12 +1168,8 @@ jobs:
           # the end-of-run validation, but every step below still gets the
           # whole remaining job timeout, which a cancel does not give them.
           run_stress() {
-            if [ "${hard_sec}" -gt 0 ]; then
-              timeout --signal=TERM --kill-after=300 "${hard_sec}" \
-                env PYTHONUNBUFFERED=1 ./stress.py "$@"
-            else
+            timeout --signal=TERM --kill-after=300 "${hard_sec}" \
               env PYTHONUNBUFFERED=1 ./stress.py "$@"
-            fi
           }
 
           run_stress \
