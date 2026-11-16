@@ -49,6 +49,7 @@ from stress_test.rapid_fio_lifecycle import RapidFioLifecycle
 from utils.common_utils import sleep_n_sec
 from utils.fio_defaults import FIO_MAX_LATENCY
 from utils.k8s_utils import K8sUtils
+from utils.run_budget import budget_note, stop_reason
 from utils.ssh_utils import RunnerK8sLog
 
 
@@ -6172,9 +6173,21 @@ class K8sNativeRapidFailoverNoGapTest(RapidFioLifecycle,
         # and record the base runtime. Idempotent, and placed after any resume
         # adoption so a resumed run sees the objects it actually has.
         self.rapid_fio_init(self.FIO_RUNTIME)
+        self.logger.info(budget_note())
 
         try:
             while True:
+                stop = stop_reason()
+                if stop:
+                    # Top of an iteration: the previous outage recovered and
+                    # its FIO was checked, so nothing is half-done. Breaking
+                    # takes the test_failed=False path through `finally`,
+                    # which cleans the k8s resources up and hands the
+                    # workflow's collection steps the whole remaining job
+                    # timeout. Being cancelled at the deadline instead leaves
+                    # the PVCs, the Jobs and a live harness behind.
+                    self.logger.info(f"{stop} — stopping after {iteration - 1} iterations")
+                    break
                 self.checkpoint(iteration)
                 self.logger.info(f"=== Iteration {iteration} ===")
 
