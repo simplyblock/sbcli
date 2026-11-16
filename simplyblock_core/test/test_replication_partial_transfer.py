@@ -41,29 +41,58 @@ def _mk_snap(uuid, created_at, lvol_uuid, node_id, target="", source="",
     return s
 
 
+def _conn_refused():
+    from requests.exceptions import ConnectionError as ReqConnectionError
+
+    from simplyblock_core.rpc_client import RPCConnectionError
+    try:
+        raise RPCConnectionError("refused") from ReqConnectionError()
+    except RPCConnectionError as e:
+        return e
+
+
 class _FakeRPC:
     def __init__(self, owner, add_clone_ok=True):
         self._owner = owner
         self._add_clone_ok = add_clone_ok
 
+    def _reach(self):
+        if not self._owner.reachable:
+            raise _conn_refused()
+
+    def bdev_get(self, name):
+        self._reach()
+        lvol = {"is_snapshot": False}
+        for clone, parent in self._owner.add_clone_calls:
+            if clone == name:
+                lvol["base_snapshot"] = parent.split("/")[-1]
+        return {"name": name, "driver_specific": {"lvol": lvol}}
+
+    def get_version(self):
+        self._reach()
+        return {"version": "x"}
+
     def bdev_lvol_add_clone(self, clone_bdev, snap_bdev):
+        self._reach()
         self._owner.add_clone_calls.append((clone_bdev, snap_bdev))
         return self._add_clone_ok
 
 
 class _Node:
     def __init__(self, uuid, secondary_node_id=None, add_clone_ok=True,
-                 status=StorageNode.STATUS_ONLINE):
+                 status=StorageNode.STATUS_ONLINE, tertiary_node_id=None, reachable=True):
         self._uuid = uuid
         self.secondary_node_id = secondary_node_id
+        self.tertiary_node_id = tertiary_node_id
         self.status = status
+        self.reachable = reachable
         self.add_clone_calls = []
         self._add_clone_ok = add_clone_ok
 
     def get_id(self):
         return self._uuid
 
-    def rpc_client(self):
+    def rpc_client(self, **_kwargs):
         return _FakeRPC(self, self._add_clone_ok)
 
 
@@ -115,7 +144,8 @@ class _LandingLV:
 # --------------------------------------------------------------------------
 
 def _eligible_setup(monkeypatch, primary_ok=True, secondary_ok=True,
-                    secondary_online=True):
+                    secondary_online=True, secondary_reachable=True, tertiary=False,
+                    tertiary_reachable=True):
     """A snapshot with a replicated predecessor whose remote copy sits on the
     receiving leader -- the case a delta is legitimate in."""
     cur = _mk_snap("SNAP_2", 200, "LV1", "N_SRC")
@@ -125,11 +155,16 @@ def _eligible_setup(monkeypatch, primary_ok=True, secondary_ok=True,
 
     sec = _Node("N_TGT_SEC", add_clone_ok=secondary_ok,
                 status=(StorageNode.STATUS_ONLINE if secondary_online
-                        else StorageNode.STATUS_OFFLINE))
+                        else StorageNode.STATUS_OFFLINE),
+                reachable=secondary_reachable)
     leader = _Node("N_TGT", secondary_node_id="N_TGT_SEC",
-                   add_clone_ok=primary_ok)
-    monkeypatch.setattr(sr, "db", _FakeDB([cur, prev, remote_copy],
-                                          {"N_TGT": leader, "N_TGT_SEC": sec}))
+                   add_clone_ok=primary_ok,
+                   tertiary_node_id="N_TGT_TER" if tertiary else None)
+    nodes = {"N_TGT": leader, "N_TGT_SEC": sec}
+    if tertiary:
+        nodes["N_TGT_TER"] = _Node("N_TGT_TER", reachable=tertiary_reachable,
+                                   status=StorageNode.STATUS_DOWN)
+    monkeypatch.setattr(sr, "db", _FakeDB([cur, prev, remote_copy], nodes))
     return cur, leader, sec
 
 
@@ -180,18 +215,63 @@ def test_unreplicated_predecessor_falls_back(monkeypatch):
     assert leader.add_clone_calls == []
 
 
-def test_offline_secondary_forces_a_full_transfer(monkeypatch):
+def test_unreachable_secondary_forces_a_full_transfer(monkeypatch):
     """The transfer lands on the leader and the lvstore mirrors it to the
-    secondary. A secondary that is not there to be chained would read zeros
-    wherever the delta did not write, so a degraded pair gets a full copy."""
-    cur, leader, sec = _eligible_setup(monkeypatch, secondary_online=False)
+    secondary. A secondary that cannot be chained would read zeros wherever
+    the delta did not write, so it gets a full copy."""
+    cur, leader, sec = _eligible_setup(monkeypatch, secondary_reachable=False)
     task = _Task()
 
     assert sr._prechain_landing_volume(
         task, cur, False, _LandingLV(), leader) is False
-    # nothing was chained at all -- we bail before touching either node
-    assert leader.add_clone_calls == []
     assert sec.add_clone_calls == []
+    # what did land is remembered, so the finish does not add it twice
+    assert task.function_params["prechained_node_ids"] == ["N_TGT"]
+
+
+def test_secondary_offline_in_the_db_but_answering_is_chained(monkeypatch):
+    """Reachability, not DB status (replica_chain): a secondary the DB
+    calls offline whose SPDK answers is chained, and the delta goes ahead."""
+    cur, leader, sec = _eligible_setup(monkeypatch, secondary_online=False)
+    task = _Task()
+
+    assert sr._prechain_landing_volume(
+        task, cur, False, _LandingLV(), leader) is True
+    assert sec.add_clone_calls == [("LVS/REP_SNAP_2", "LVS/T_SNAP_1")]
+
+
+def test_tertiary_is_pre_chained_too(monkeypatch):
+    """The tertiary is a member the delta would leave holes on as well."""
+    cur, leader, sec = _eligible_setup(monkeypatch, tertiary=True)
+    task = _Task()
+
+    assert sr._prechain_landing_volume(
+        task, cur, False, _LandingLV(), leader) is True
+    ter = sr.db.get_storage_node_by_id("N_TGT_TER")
+    assert ter.add_clone_calls == [("LVS/REP_SNAP_2", "LVS/T_SNAP_1")]  # type: ignore[attr-defined]
+    assert task.function_params["prechained_node_ids"] == ["N_TGT", "N_TGT_SEC", "N_TGT_TER"]
+
+
+def test_unreachable_tertiary_forces_a_full_transfer(monkeypatch):
+    cur, leader, sec = _eligible_setup(monkeypatch, tertiary=True, tertiary_reachable=False)
+    task = _Task()
+
+    assert sr._prechain_landing_volume(
+        task, cur, False, _LandingLV(), leader) is False
+    assert task.function_params["prechained_node_ids"] == ["N_TGT", "N_TGT_SEC"]
+
+
+def test_deferred_delta_judges_members_by_reachability(monkeypatch):
+    """The deferred-chain delta (predecessor still merging) follows the same
+    rule: an offline-in-DB but answering secondary allows it, an unreachable
+    one forces a full transfer."""
+    cur, leader, sec = _eligible_setup(monkeypatch, secondary_online=False)
+    pred = sr.db.get_snapshot_by_id("SNAP_1")
+    pred.blobid = 0x51
+    monkeypatch.setattr(sr.replication_delta, "delta_basis", lambda *a: (True, ""))
+    assert sr._deferred_partial_decision(_Task(), cur, pred, leader, "N_SRC") == (True, 0x51)
+    sec.reachable = False
+    assert sr._deferred_partial_decision(_Task(), cur, pred, leader, "N_SRC") == (False, 0)
 
 
 def test_failed_primary_chain_forces_a_full_transfer(monkeypatch):

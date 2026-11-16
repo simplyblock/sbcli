@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-ARG UBI_VERSION=10.2
+ARG UBI_VERSION=10.3
 ARG FDB_VERSION=7.3.69
 ARG UV_VERSION=0.13.6
 # Toolchain of the two-node HA event collector (tools/event-collector). The Go
@@ -11,7 +11,7 @@ ARG UV_VERSION=0.13.6
 # does for dnf packages. go.mod's `go 1.24` line is an unrelated minimum
 # language-version requirement, not a toolchain pin, so any newer toolchain
 # here keeps building it fine.
-ARG GO_VERSION=1.27.3
+ARG GO_VERSION=1.27.4
 
 # The application interpreter, free-threaded ("t" suffix). Managed by uv rather
 # than dnf: UBI carries no free-threaded build, and tying the runtime to the
@@ -194,6 +194,11 @@ COPY . .
 # uv creates the environment without pip, setuptools or wheel, so there is
 # nothing to uninstall afterwards; the interpreter's own pip is removed above.
 RUN uv sync --locked --no-default-groups --python "${PYTHON_VERSION}t"
+
+# PyKMIP ships its demo scripts inside the package, including a private key
+# (kmip/demos/certs/server.key) that the image scan's secret scanner flags.
+# Nothing imports kmip.demos.
+RUN rm -rf /opt/venv/lib/python*/site-packages/kmip/demos
 
 
 # The two-node HA event collector (tools/event-collector, docs/design/two-node-

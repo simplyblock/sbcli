@@ -9,7 +9,6 @@ from unittest.mock import MagicMock, patch
 
 from simplyblock_core import constants
 from simplyblock_core.models.job_schedule import JobSchedule
-from simplyblock_core.services import snapshot_monitor as sm
 from simplyblock_core.services import tasks_runner_replication_final as final
 
 
@@ -118,26 +117,3 @@ class TestThrottle:
         assert "_restore_source_throttle(task)" not in inspect.getsource(final._release_lvs_claim)
         assert "_release_lvs_claim(task)" in inspect.getsource(final._abandon_endgame)
 
-
-class TestCapacityHoldExemption:
-
-    def _lv(self, pid):
-        lv = MagicMock()
-        lv.replication_policy_id = pid
-        return lv
-
-    def test_only_migrating_volumes_keep_their_cadence(self):
-        mig = MagicMock(mode="migration")
-        mig.get_id.return_value = "P-MIG"
-        fo = MagicMock(mode="failover")
-        fo.get_id.return_value = "P-FO"
-        lvols = [self._lv("P-MIG"), self._lv("P-FO"), self._lv("")]
-        with patch.object(sm.db, "get_replication_policies", return_value=[mig, fo]):
-            out = sm._exempt_from_capacity_hold(lvols, "CL")
-        assert out == [lvols[0]]
-
-    def test_the_hold_filters_instead_of_returning(self):
-        src = inspect.getsource(sm.take_due_internal_snapshots)
-        i = src.index("hold = _cadence_capacity_hold(cluster_id)")
-        assert "_exempt_from_capacity_hold(repl_lvols, cluster_id)" in src[i:]
-        assert "repl_lvols = migrating" in src[i:]

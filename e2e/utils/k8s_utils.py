@@ -1886,7 +1886,7 @@ class K8sUtils:
 
         saved: list[str] = []
         label = node_ip.replace(".", "_")
-        hash_suffix = hashlib.md5(
+        hash_suffix = hashlib.sha256(
             f"coredump-{node_name}-{time.time()}".encode()
         ).hexdigest()[:8]
         pod_name = f"coredump-collector-{hash_suffix}"

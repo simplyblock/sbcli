@@ -50,3 +50,22 @@ ignore:
     package:
       name: python
       type: binary
+
+  # Regression in hashlib's FIPS enforcement: usedforsecurity's FIPS check is
+  # inverted in 3.14.10, so hashlib.md5() silently succeeds under FIPS mode
+  # even when called with usedforsecurity=True (python/cpython#161383). Fixed
+  # by PR #161385, merged to the 3.14 branch but not yet in a release -- the
+  # next scheduled 3.14.x is 2027-04-06 per PEP 745, so `only-fixed` does not
+  # filter it out.
+  # The control plane never calls hashlib.md5() -- every hash call here uses
+  # sha1/sha256 (subsystem_access.py, rpc_client.py, storage_node.py,
+  # node_utils.py, utils/__init__.py), none of which this regression touches.
+  # That absence is enforced, not just observed: pyproject.toml's
+  # [tool.ruff.lint.flake8-tidy-imports.banned-api] bans hashlib.md5 project-
+  # wide, so ruff fails first if a new call reintroduces this path. The two
+  # are meant to be read together -- this entry says why today's code is
+  # safe, that rule is what keeps it that way.
+  - vulnerability: CVE-2026-119170
+    package:
+      name: python
+      type: binary

@@ -638,7 +638,13 @@ REPL_CUTOVER_DIRECT_ROUND_SUBMITS = 3
 # lowest byte backlog improved on the previous window's by
 # REPL_CATCHUP_PROGRESS_FRACTION is a window without progress. The first
 # window is a baseline.
-REPL_CATCHUP_WINDOW_SEC = 300
+# 120 s (was 300): the throttle now engages after ~6 min instead of >= 15.
+# Bed bf20 (2026-11-10, heavy fio): three volumes that started late shared the
+# replication bandwidth and sat 13-23 min at 90-280 s lag before reaching the
+# endgame, which then cut each over in ~3 min; round 1 took 36 min instead of
+# ~18 (bf21). A delta round under that load takes ~75-150 s, so a window still
+# normally sees the lag's low point; a window without one is a single strike.
+REPL_CATCHUP_WINDOW_SEC = 120
 REPL_CATCHUP_PROGRESS_FRACTION = 0.1
 # After this many windows in a row without progress the source volume's
 # writes are capped: first at REPL_CATCHUP_THROTTLE_FACTOR of its measured
@@ -765,6 +771,12 @@ REPL_MERGE_RETRY_MIN_SEC = 5.0
 REPL_MERGE_RETRY_MAX_SEC = 120.0
 REPL_MERGE_FAIL_ALERT = 3
 REPL_MERGE_ALERT_EVERY_SEC = 600.0
+# A transfer waiting for its TARGET lvstore to have a leader raises a
+# REPLICATION_STALLED event once it has waited this long, then at most every
+# REPL_MERGE_ALERT_EVERY_SEC. The node monitor gives a leaderless target a
+# leader within about a minute of its primary going down (crashed or shut
+# down); a wait beyond this means no member could be proven safe to lead.
+REPL_TARGET_LEADERLESS_ALERT_SEC = 180
 # Pass interval of the snapshot replication runner while any transfer or
 # merge is in flight; TASK_EXEC_INTERVAL_SEC when idle. Not sub-second: each
 # pass reads the task table (see test_transfer_completion_latency).
@@ -1078,6 +1090,7 @@ GRAFANA_EVENT_ALERTS_PLUGIN_URL = (
 # prometheus.yml.j2 scrapes /cluster/metrics from.
 MONITORING_CONTROL_PLANE_ADDR = "http://HAProxy"
 MONITORING_GRAFANA_SERVICE = "monitoring_grafana"
+MONITORING_PROMETHEUS_SERVICE = "monitoring_prometheus"
 
 GRAFANA_K8S_ENDPOINT = "http://simplyblock-grafana:3000"
 GRAYLOG_K8S_ENDPOINT = "http://simplyblock-graylog:9000"

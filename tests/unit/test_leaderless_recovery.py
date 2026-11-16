@@ -35,6 +35,8 @@ def _node(node_id, lvstore="LVS_1", jm_vuid=7):
     rpc.jc_get_jm_status.return_value = {"jm1": True, "remote_jm2": True}
     rpc.bdev_lvol_update_lvstore.return_value = True
     rpc.bdev_lvol_set_leader.return_value = True
+    # what the leadership proof (_member_proven_non_leader) reads
+    rpc.get_lvstore.return_value = {"lvs leadership": False}
     return types.SimpleNamespace(
         get_id=lambda: node_id, status=StorageNode.STATUS_ONLINE,
         lvstore=lvstore, jm_vuid=jm_vuid, cluster_id="c1",
@@ -138,6 +140,31 @@ class TestRecoverLeaderlessLvs(unittest.TestCase):
         self.assertEqual(order, ["update", "grant"])
         self.taker._rpc.bdev_lvol_set_leader.assert_called_once_with(
             "LVS_1", leader=True)
+
+    def test_owed_tree_changes_are_replayed_after_the_reload_before_the_grant(self):
+        """The reload does not refresh the in-memory snapshot tree: a link
+        or convert the taker missed is replayed before it leads (bf23
+        LVS_16), trusted -- nobody leads to confirm it."""
+        order = []
+        self.taker._rpc.bdev_lvol_update_lvstore.side_effect = (
+            lambda lvs: order.append("update") or True)
+        self.taker._rpc.bdev_lvol_set_leader.side_effect = (
+            lambda lvs, leader=False, bs_nonleadership=False: order.append("grant") or True)
+
+        def replay(node, db=None, lvs_name=None, trusted=False):
+            order.append(("replay", node.get_id(), lvs_name, trusted))
+            return {"done": 1, "skipped": 0, "failed": 0}
+
+        with patch("simplyblock_core.controllers.replica_chain.replay_pending",
+                   side_effect=replay):
+            self._run()
+        self.assertEqual(order, ["update", ("replay", "primary-1", "LVS_1", True), "grant"])
+
+    def test_a_failed_replay_does_not_block_the_grant(self):
+        with patch("simplyblock_core.controllers.replica_chain.replay_pending",
+                   side_effect=RuntimeError("db down")):
+            self._run()
+        self.taker._rpc.bdev_lvol_set_leader.assert_called_once()
 
     def test_reload_failure_means_no_grant(self):
         self.taker._rpc.bdev_lvol_update_lvstore.side_effect = (

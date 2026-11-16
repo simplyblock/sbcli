@@ -16,7 +16,7 @@ from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.kms import LocalKMS, backup_dek_path, backup_kek_name
 from simplyblock_core.models.backup import Backup
 from simplyblock_core.models.backup_config import BackupConfig
-from simplyblock_core.models.cluster import Cluster, HashicorpVaultSettings
+from simplyblock_core.models.cluster import Cluster
 
 # Every id a manifest carries is a UUID, so the objects these tests build are
 # given real ones rather than readable stand-ins.
@@ -60,10 +60,21 @@ def _descriptor(**overrides):
 
 def _vault_cluster(db):
     cluster = _cluster(db)
-    cluster.hashicorp_vault_settings = HashicorpVaultSettings()
-    cluster.hashicorp_vault_settings.base_url = "https://vault.example.com"
-    cluster.hashicorp_vault_settings.transit_mount = "sb/transit"
-    cluster.hashicorp_vault_settings.kv_mount = "sb/kv"
+    cluster.set_kms_settings({
+        "provider": "vault",
+        "base_url": "https://vault.example.com",
+        "transit_mount": "sb/transit",
+        "kv_mount": "sb/kv",
+    })
+    return cluster
+
+
+def _kmip_cluster(db):
+    cluster = _cluster(db)
+    cluster.set_kms_settings({
+        "provider": "kmip",
+        "server_url": "kmip.example.com:5696",
+    })
     return cluster
 
 
@@ -110,6 +121,14 @@ class TestKeyDescriptor:
 
         assert descriptor.kek_name == backup_kek_name(BACKUP_ID)
 
+    def test_kmip_settings_are_recorded(self, db):
+        descriptor = backup_controller._build_key_descriptor(
+            _kmip_cluster(db), _backup(db))
+
+        assert isinstance(descriptor, backup_manifest.KMIPKeyDescriptor)
+        assert descriptor.server_url == "kmip.example.com:5696"
+        assert descriptor.kek_name == backup_kek_name(BACKUP_ID)
+
     def test_the_local_backend_has_no_key_encryption_key_to_name(self, db):
         """LocalKMS stores its DEKs as they are; its KEK operations are no-ops.
 
@@ -149,7 +168,7 @@ class TestKeyDescriptor:
 
     def test_a_stored_descriptor_reads_back_as_the_backend_that_wrote_it(self, db):
         """What the tag is for: the reader gets the fields its backend defines."""
-        for cluster in (_cluster(db), _vault_cluster(db)):
+        for cluster in (_cluster(db), _vault_cluster(db), _kmip_cluster(db)):
             written = backup_controller._build_key_descriptor(cluster, _backup(db))
 
             read = backup_manifest.parse_key_descriptor(
@@ -217,6 +236,19 @@ class TestManifestEncryption:
             backup_controller.build_manifest(backup).model_dump(mode="json"))
 
         assert isinstance(parsed.encryption, backup_manifest.HCPKeyDescriptor)
+        assert parsed.encryption.kek_name == backup_kek_name(BACKUP_ID)
+
+    def test_a_kmip_backup_survives_a_manifest_round_trip(self, db):
+        cluster = _kmip_cluster(db)
+        backup = _backup(db)
+        backup.encryption = backup_controller._build_key_descriptor(
+            cluster, backup).model_dump(mode="json", exclude_none=True)
+        backup.write_to_db(db.kv_store)
+
+        parsed = backup_manifest.BackupManifest.model_validate(
+            backup_controller.build_manifest(backup).model_dump(mode="json"))
+
+        assert isinstance(parsed.encryption, backup_manifest.KMIPKeyDescriptor)
         assert parsed.encryption.kek_name == backup_kek_name(BACKUP_ID)
 
 

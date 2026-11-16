@@ -95,8 +95,10 @@ def test_run_cutover_freezes_on_the_source_leader_into_the_target_leader(monkeyp
     assert peer_hub.bdev_name == "lvs_tgt/transferhub_T2"
     assert sec.rpc_client().final_step_gateways == [peer_hub.get_remote_bdev_name()]
     assert src.rpc_client().final_step_gateways == []
-    # add_clone on the other ONLINE target members only.
-    assert [e[1] for e in events if e[0] == "add_clone"] == ["T3"]
+    # add_clone on every other target member that answers, whatever its DB
+    # status: the offline-in-DB primary T1 still answers here, so it is told
+    # too (replica_chain; an unreachable member is skipped).
+    assert [e[1] for e in events if e[0] == "add_clone"] == ["T1", "T3"]
     assert _ana(events)[-2:] == [("T2", "optimized"), ("T3", "non_optimized")]
 
 

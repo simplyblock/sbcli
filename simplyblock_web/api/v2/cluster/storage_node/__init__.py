@@ -10,6 +10,7 @@ from sse_starlette import EventSourceResponse
 from simplyblock_core import storage_node_ops
 from simplyblock_core.controllers import node_drain_steps, tasks_controller
 from simplyblock_core.db_controller import DBController
+from simplyblock_core.exceptions import PromoteIncompleteError
 from simplyblock_core.models.storage_node import StorageNode as StorageNodeModel
 from simplyblock_core.storage_network import NetworkAttachment
 
@@ -340,9 +341,15 @@ def restart(cluster: Cluster, storage_node: StorageNode, parameters: _RestartPar
     return Response(status_code=202)  # FIXME: Provide URL for checking task status
 
 
-@instance_api.post('/promote', name='clusters:storage-nodes:start', status_code=204, responses={204: {"content": None}})
+@instance_api.post('/promote', name='clusters:storage-nodes:promote', status_code=204, responses={
+    204: {"content": None},
+    409: {"description": "The promote did not finish: a device is still new or still removed; call again"},
+})
 def promote(cluster: Cluster, storage_node: StorageNode) -> Response:
-    storage_node_ops.make_sec_new_primary(storage_node.uuid)
+    try:
+        storage_node_ops.make_sec_new_primary(storage_node.uuid)
+    except PromoteIncompleteError as e:
+        raise HTTPException(409, str(e))
     return Response(status_code=204)
 
 

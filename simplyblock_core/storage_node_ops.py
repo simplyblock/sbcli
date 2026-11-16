@@ -67,6 +67,7 @@ from simplyblock_core.db_controller import DBController
 from simplyblock_core.distr_controller import DistribHomeSiteError
 from simplyblock_core.exceptions import (
     PreconditionError,
+    PromoteIncompleteError,
     SyncReplicationUnsupportedError,
     reject_on_sync_replication,
 )
@@ -9123,30 +9124,34 @@ def _reconcile_discovered_devices(snode, nvme_devs):
     return new_devices
 
 
-def _rebind_nvme_devices_to_spdk(snode, snode_api, spdk_pcie_list):
-    """Bind the node's known NVMe devices back to SPDK where they are not.
+def record_host(snode, node_address, node_info):
+    """Point the node's record at the host whose agent answers at ``node_address``.
 
-    SPDK drives a device only while it is bound to uio_pci_generic or
-    vfio-pci, and that binding does not survive a reboot of the host: the
-    devices come back on the kernel nvme driver. The devices to bind are the
-    ones the node was configured with (ssd_pcie), or the ones it is known to
-    own when it was configured with all of them.
+    The same identity the add gives a node: ``api_endpoint`` is the agent's
+    stable name, ``mgmt_ip`` the worker's address, ``hostname`` the worker's
+    name with the RPC port suffix and ``k8s_node_name`` the worker's name. An
+    agent off the host network (attached networks, pod network) cannot see the
+    worker's interfaces and reports the worker's address itself (``host_ip``);
+    on the host network its own address is the worker's.
 
-    Returns whether any bind was attempted, so the caller knows to re-read the
-    node's device lists.
+    A relocation (StorageNodeOps Migrate) restarts the node with another
+    host's address. Until 2026-11-12 the restart stored whatever that address
+    resolved to, which on the pod network is the agent pod: the monitor then
+    pinged a pod that the next DaemonSet roll replaced and declared a healthy
+    node unreachable (Talos lab, three seconds after a Migrate succeeded), and
+    the monitor's host grouping, keyed by ``mgmt_ip``, counted the node as a
+    host of its own. The hostname lost its port suffix the same way.
     """
-    if snode.ssd_pcie:
-        wanted = list(snode.ssd_pcie)
+    snode.api_endpoint = node_address
+    if snode.on_pod_network:
+        ip_iface = utils.get_mgmt_ip(node_info, [], snode.networks, snode.pod_network)
+        if not ip_iface:
+            raise ValueError(f"the agent at {node_address} reports no host address")
+        snode.mgmt_ip = ip_iface[0]
     else:
-        wanted = [dev.pcie_address for dev in snode.nvme_devices if dev.pcie_address]
-    missing = [addr for addr in dict.fromkeys(wanted) if addr not in (spdk_pcie_list or [])]
-    for addr in missing:
-        logger.info(f"Binding NVMe device {addr} to SPDK, it is not bound (host rebooted?)")
-        try:
-            snode_api.bind_device_to_spdk(addr)
-        except Exception as e:
-            logger.warning(f"Failed to bind NVMe device {addr} to SPDK: {e}")
-    return bool(missing)
+        snode.mgmt_ip = utils.resolve_address(node_address)
+    snode.hostname = f"{node_info['hostname']}_{snode.rpc_port}"
+    snode.k8s_node_name = node_info['hostname']
 
 
 def _restart_storage_node_impl(
@@ -9253,8 +9258,11 @@ def _restart_storage_node_impl(
         # captured before mgmt_ip/hostname are overwritten below.
         _old_rpc_client = snode.rpc_client()
         old_rpc_host, old_rpc_port = _old_rpc_client.host, _old_rpc_client.port
-        snode.api_endpoint = node_address
-        snode.mgmt_ip = utils.resolve_address(node_address)
+        try:
+            record_host(snode, node_address, node_info)
+        except ValueError as e:
+            logger.error(f"Cannot restart {node_id} on {node_address}: {e}")
+            return False
         if not snode.on_pod_network:
             data_nics = []
             for nic in snode.data_nics:
@@ -9268,8 +9276,6 @@ def _restart_storage_node_impl(
                         'status': device['status'],
                         'net_type': device['net_type']}))
             snode.data_nics = data_nics
-        snode.hostname = node_info['hostname']
-        snode.k8s_node_name = node_info['hostname']
         evict_cached_session(old_rpc_host, old_rpc_port)
 
         if snode.num_partitions_per_dev == 0 and reattach_volume:
@@ -9712,11 +9718,6 @@ def _restart_storage_node_impl(
             logger.error("No eligible block devices were found!")
             return False
     else:
-        # After a host reboot the node's NVMe devices are back on the kernel
-        # nvme driver, so spdk_pcie_list (devices bound to uio/vfio) is empty
-        # and the restart would find no devices at all.
-        if _rebind_nvme_devices_to_spdk(snode, snode_api, node_info['spdk_pcie_list']):
-            node_info, _ = snode_api.info()
         if not snode.ssd_pcie:
             ssds = node_info['spdk_pcie_list']
         else:
@@ -11035,6 +11036,18 @@ def shutdown_storage_node(node_id, force=False, keep_auto_restart=False,
     except Exception as ana_e:
         logger.error("ANA failover during shutdown of %s failed: %s", node_id, ana_e)
 
+    # Record the node loss in the cluster status now. The node was already
+    # OFFLINE when the monitor next looked at it, so its offline path
+    # (set_node_offline, which refreshes the status) never runs, and the
+    # cluster read ACTIVE with reduced redundancy until the monitor's next
+    # main-loop tick (7 minutes on 2026-10-19). Best effort: the shutdown
+    # itself has completed.
+    from simplyblock_core.services.storage_node_monitor import apply_node_loss_status
+    try:
+        apply_node_loss_status(snode.cluster_id)
+    except Exception:
+        logger.exception("Cluster status update after shutdown of %s failed", node_id)
+
     logger.info("Done")
     return True
 
@@ -11796,16 +11809,25 @@ def _rebind_own_devices_to_spdk(snode, snode_api, node_info):
     setup.sh, so every restart after a shutdown failed with "No NVMe devices
     was found!" (bf7 2026-10-30: e0ad4fa0 and 5055ad5c, shut down by the
     suspend drain, stayed offline for hours).
+
+    A device is bound unless SPDK already holds it, not only when the kernel
+    nvme driver does: after a host reboot a device can be left on no driver at
+    all, and skipping it failed every restart the same way (dev-ocp
+    2026-11-05: master-2's four drives, unbound after its MachineConfig
+    reboot). A device the node has given up, removed or failed and migrated,
+    is not taken back: an operator may have handed it to the kernel on purpose.
     """
-    kernel_bound = set((node_info or {}).get("nvme_pcie_list") or [])
+    spdk_bound = set((node_info or {}).get("spdk_pcie_list") or [])
     own = list(snode.ssd_pcie or [])
+    given_up = (NVMeDevice.STATUS_REMOVED, NVMeDevice.STATUS_FAILED_AND_MIGRATED)
     for dev in snode.nvme_devices:
-        if dev.bdev_type != "aio" and dev.pcie_address and dev.pcie_address not in own:
+        if (dev.bdev_type != "aio" and dev.pcie_address and dev.pcie_address not in own
+                and getattr(dev, "status", None) not in given_up):
             own.append(dev.pcie_address)
     for pci in own:
-        if pci not in kernel_bound:
+        if pci in spdk_bound:
             continue
-        logger.info("Binding %s back to SPDK on %s (left on the kernel driver by a shutdown)",
+        logger.info("Binding %s back to SPDK on %s (not on the SPDK driver after a shutdown or reboot)",
                     pci, snode.get_id())
         try:
             snode_api.bind_device_to_spdk(pci)
@@ -12079,7 +12101,46 @@ def sync_promote_task_owns_move(task) -> bool:
             and not tasks_controller._task_lease_is_stale(task))
 
 
-def _leadership_moving_tasks_active(cluster_id, node_ids, lvs_name=None):
+def restart_before_lvstore_handoff(node_id, lvs_name):
+    """``(True, why)`` while the restart of ``node_id`` cannot be in the
+    leadership handoff of ``lvs_name`` yet: the node is OFFLINE or IN_RESTART,
+    has no restart phase recorded for the lvstore, and its node agent confirms
+    that its SPDK process is NOT running. ``(False, why)`` otherwise, and on
+    any doubt (agent unreachable, record unreadable).
+
+    The restart flow's handoff (leader probe, quiesce of the acting leader,
+    fenced demote, grant on the restarted node) talks to the restarted node's
+    SPDK; with that SPDK down it has not begun, and it cannot begin before
+    the node is started again. Until then the restart task does not own the
+    lvstore's leadership, and an lvstore without client IO (a replication
+    TARGET: nothing promotes a secondary) stays leaderless for the whole
+    restart unless the proven takeover may run (bf24 2026-11-14, LVS_22:
+    target primary crashed 21:08:15, no member led until the restarted node
+    took the lvstore back, the transfer sat suspended the whole time). A
+    leader seated before the handoff is what the handoff already handles: an
+    acting leader it quiesces and demotes, as after an IO-driven promotion."""
+    db = DBController()
+    try:
+        node = db.get_storage_node_by_id(node_id)
+    except KeyError:
+        return False, f"{node_id[:8]} unknown"
+    if node.status not in (StorageNode.STATUS_OFFLINE, StorageNode.STATUS_RESTARTING):
+        return False, f"{node_id[:8]} is {node.status}"
+    phase = (node.restart_phases or {}).get(lvs_name, "")
+    if phase:
+        return False, f"restart of {node_id[:8]} is in phase {phase} for {lvs_name}"
+    try:
+        up = node.client(timeout=5, retry=1).spdk_process_is_up(node.rpc_port, node.cluster_id)
+        is_up = up[0] if isinstance(up, (list, tuple)) else bool(up)
+    except Exception as e:                                  # noqa: BLE001
+        return False, f"node agent of {node_id[:8]} cannot confirm SPDK is down ({e})"
+    if is_up:
+        return False, f"SPDK of {node_id[:8]} is running (its restart is under way)"
+    return True, f"SPDK of {node_id[:8]} is down; its restart has not reached {lvs_name}"
+
+
+def _leadership_moving_tasks_active(cluster_id, node_ids, lvs_name=None,
+                                    pre_handoff_restart_of=None):
     """True when a port-allow or restart task is active on any LVS member, or
     a sync promote task owns the move of the LVS (sync_promote_task_owns_move;
     matched by its node or by ``lvs_name`` in its ``lvs_names``).
@@ -12091,7 +12152,13 @@ def _leadership_moving_tasks_active(cluster_id, node_ids, lvs_name=None):
     vs port-allow demotes on the acting leader, flapping LVS_1 leadership
     for minutes; 2026-07-30 LVS_9: a recovery grant seated the secondary as
     writer moments before the primary's restart handoff. When the task
-    state cannot be read, err on NOT granting."""
+    state cannot be read, err on NOT granting.
+
+    ``pre_handoff_restart_of`` (the node monitor's takeover for a crashed
+    member): the restart task of THAT node does not count while
+    restart_before_lvstore_handoff holds for ``lvs_name`` -- its SPDK is
+    confirmed down, so its handoff has not begun. Every other task, and that
+    one as soon as its SPDK runs or it records a phase, still blocks."""
     try:
         db = DBController()
         for task in db.get_job_tasks(cluster_id):
@@ -12106,6 +12173,16 @@ def _leadership_moving_tasks_active(cluster_id, node_ids, lvs_name=None):
                 continue
             if task.node_id in node_ids and \
                     task.status != JobSchedule.STATUS_DONE and not task.canceled:
+                if (pre_handoff_restart_of and lvs_name
+                        and task.function_name == JobSchedule.FN_NODE_RESTART
+                        and task.node_id == pre_handoff_restart_of):
+                    ok, why = restart_before_lvstore_handoff(task.node_id, lvs_name)
+                    if ok:
+                        logger.info("LVS %s: restart task %s does not own the leadership "
+                                    "yet (%s)", lvs_name, task.uuid, why)
+                        continue
+                    logger.info("LVS %s: restart task %s owns the leadership (%s)",
+                                lvs_name, task.uuid, why)
                 return True
     except Exception as e:
         logger.warning("Cannot verify port-allow/restart task state for "
@@ -12192,14 +12269,25 @@ def _sync_grant_guard(cluster_id, lvs_name, owner_id, taker_id, *, timeout=0):
         yield permitted and not on_lost
 
 
+def _lvs_leadership_reported(node, lvs_name):
+    """Whether *node*'s own SPDK reports leadership of *lvs_name*; False when
+    it answers that it has no such lvstore. RAISES when it cannot be asked.
+
+    Not lvol_controller.is_node_leader: that one never raises (an unreachable
+    node reads as "not leader"), which is right for routing but turned every
+    unreachable member into a "proven" non-leader here -- the node-agent
+    check below never ran for a member whose RPC was down."""
+    lvs = node.rpc_client(timeout=5, retry=1).get_lvstore(lvs_name)
+    return bool(lvs and lvs.get("lvs leadership"))
+
+
 def _member_proven_non_leader(node, lvs_name):
     """``(True, why)`` when *node* demonstrably does not lead *lvs_name*: its
     own RPC answers non-leader, or its SPDK process is confirmed gone by its
     node agent. A member that cannot be asked either way is a POSSIBLE
     leader: ``(False, why)``."""
-    from simplyblock_core.controllers.lvol_controller import is_node_leader
     try:
-        if is_node_leader(node, lvs_name):
+        if _lvs_leadership_reported(node, lvs_name):
             return False, f"{node.get_id()[:8]} reports leadership"
         return True, f"{node.get_id()[:8]} reports non-leader"
     except Exception as e:                                  # noqa: BLE001
@@ -12241,7 +12329,8 @@ def _leadership_proven_free(all_nodes, lvs_name, taker):
     return True
 
 
-def _recover_leaderless_lvs(cluster_id, all_nodes, lvs_name, preferred_taker, owner_id=None):
+def _recover_leaderless_lvs(cluster_id, all_nodes, lvs_name, preferred_taker, owner_id=None,
+                            pre_handoff_restart_of=None):
     """Recovery for a leaderless-but-healthy LVS.
 
     Leadership placement is otherwise the restart/creation/activation flows'
@@ -12271,6 +12360,11 @@ def _recover_leaderless_lvs(cluster_id, all_nodes, lvs_name, preferred_taker, ow
     taker's LOCAL copies of this LVS's journal, and the step-1 hublvol repair
     is skipped for a taker that is not the owner (it would wire the taker's
     OWN LVS hublvol: _check_sec_node_hublvol reads ``taker.hublvol``).
+
+    ``pre_handoff_restart_of`` (node monitor takeover for a crashed member,
+    see restart_before_lvstore_handoff): that member's restart task does not
+    block the grant while its SPDK is confirmed down; checked again right
+    before set_leader, which then gets a single attempt.
 
     Returns the confirmed leader node or None (callers fail fast; the
     no-leader negative cache bounds re-entry)."""
@@ -12325,10 +12419,15 @@ def _recover_leaderless_lvs(cluster_id, all_nodes, lvs_name, preferred_taker, ow
     # 2- reload-then-grant, guarded. The explicit bdev_lvol_update_lvstore
     # replays the same blob-md reload the IO-driven promotion does, so the
     # subsequent set_leader cannot serve stale metadata.
-    if _leadership_moving_tasks_active(cluster_id, member_ids, lvs_name):
+    if _leadership_moving_tasks_active(cluster_id, member_ids, lvs_name,
+                                       pre_handoff_restart_of=pre_handoff_restart_of):
         logger.warning("leaderless recovery for %s: port-allow/restart/promote "
                        "task active on an LVS member — leaving leadership "
                        "movement to it", lvs_name)
+        return None
+    if pre_handoff_restart_of and taker.get_id() == pre_handoff_restart_of:
+        logger.warning("leaderless recovery for %s: the taker %s is the member "
+                       "being restarted — no grant", lvs_name, taker.get_id()[:8])
         return None
     if lvs_owner is not None:
         quorum_ok = _taker_jm_quorum_ok(taker, lvs_owner.jm_vuid, sync=True)
@@ -12357,8 +12456,35 @@ def _recover_leaderless_lvs(cluster_id, all_nodes, lvs_name, preferred_taker, ow
                          "refusing to grant leadership", taker.get_id(),
                          lvs_name, e)
             return None
+        # The reload re-reads the blobstore's super block and masks, not the
+        # snapshot tree the taker keeps in memory: a link or convert it missed
+        # while it could not be reached is replayed before it leads
+        # (replica_chain; bf23 2026-11-12, LVS_16). Trusted -- nobody leads
+        # to confirm the records against. Best effort: the grant goes on.
         try:
-            taker.rpc_client(timeout=5, retry=2).bdev_lvol_set_leader(
+            from simplyblock_core.controllers import replica_chain
+            owed = replica_chain.replay_pending(taker, db=db, lvs_name=lvs_name, trusted=True)
+            if owed["skipped"] or owed["failed"]:
+                logger.error("%s takes %s with %d snapshot-tree change(s) still owed "
+                             "(%d failed): its tree may be stale", taker.get_id(),
+                             lvs_name, owed["skipped"] + owed["failed"], owed["failed"])
+        except Exception as e:  # noqa: BLE001
+            logger.error("Replay of owed snapshot-tree changes on %s for %s failed: %s",
+                         taker.get_id(), lvs_name, e)
+        if pre_handoff_restart_of and _leadership_moving_tasks_active(
+                cluster_id, member_ids, lvs_name, pre_handoff_restart_of=pre_handoff_restart_of):
+            # Last look, right before the grant: the proof and the reload took
+            # >= LEADERSHIP_SAFETY_WINDOW_SEC, and the crashed member's restart
+            # may have started its SPDK meanwhile. The reload changed nothing
+            # (it never flips leadership), so stopping here is clean.
+            logger.warning("leaderless recovery for %s: the restart of %s began "
+                           "meanwhile — leaving the leadership to it", lvs_name,
+                           pre_handoff_restart_of[:8])
+            return None
+        try:
+            # One attempt only when racing a restart: a grant that lands late
+            # must not reach the taker after the restart's handoff began.
+            taker.rpc_client(timeout=5, retry=1 if pre_handoff_restart_of else 2).bdev_lvol_set_leader(
                 lvs_name, leader=True)
         except Exception as e:
             logger.error("take-leadership RPC on %s for %s failed: %s",
@@ -12526,7 +12652,8 @@ def _resync_solo_lvs_after_restart(snode, cluster=None):
         logger.warning("Solo-LVS resync after restart of %s failed: %s", snode.get_id(), e)
 
 
-def find_leader_with_failover(all_nodes, lvs_name, *, recover: bool = True):
+def find_leader_with_failover(all_nodes, lvs_name, *, recover: bool = True,
+                              pre_handoff_restart_of=None):
     """Detect the current leader and failover if needed — with a no-leader
     fail-fast gate.
 
@@ -12547,6 +12674,10 @@ def find_leader_with_failover(all_nodes, lvs_name, *, recover: bool = True):
     (None, []) and nothing is granted, forced or signalled. Such an answer is
     not a full pass, so it is not recorded as a no-leader verdict; a verdict
     another lookup recorded is still honoured.
+
+    ``pre_handoff_restart_of`` is for the node monitor's takeover only: the
+    restart task of that (crashed) member does not block a grant while its
+    SPDK is confirmed down (restart_before_lvstore_handoff).
     """
     from simplyblock_core.utils.ttl_cache import NO_LEADER_TTL_SEC, no_leader_cache
 
@@ -12567,7 +12698,8 @@ def find_leader_with_failover(all_nodes, lvs_name, *, recover: bool = True):
 
     leader, _ = _find_leader_with_failover_impl(
         candidates.nodes, lvs_name, grants_allowed=candidates.grants_allowed and recover,
-        owner_id=candidates.owner_id, taker_id=candidates.taker_id)
+        owner_id=candidates.owner_id, taker_id=candidates.taker_id,
+        pre_handoff_restart_of=pre_handoff_restart_of)
     if leader is None:
         if recover:
             no_leader_cache.put(cache_key, True)
@@ -12577,7 +12709,8 @@ def find_leader_with_failover(all_nodes, lvs_name, *, recover: bool = True):
 
 
 def _find_leader_with_failover_impl(all_nodes, lvs_name, *, grants_allowed=True,
-                                    owner_id=None, taker_id=None):
+                                    owner_id=None, taker_id=None,
+                                    pre_handoff_restart_of=None):
     """Single full leader-detection/recovery pass.
 
     ``all_nodes`` are the candidates (_lvs_leader_candidates). Without
@@ -12734,7 +12867,8 @@ def _find_leader_with_failover_impl(all_nodes, lvs_name, *, grants_allowed=True,
                 and _is_node_rpc_responsive(taker, lvs_name)):
             taker = leader
         recovered = _recover_leaderless_lvs(cluster_id, all_nodes, lvs_name, taker,
-                                            owner_id=owner_id)
+                                            owner_id=owner_id,
+                                            pre_handoff_restart_of=pre_handoff_restart_of)
         if recovered is not None:
             leader_cache.put(cache_key, recovered.get_id())
             return recovered, [n for n in all_nodes
@@ -12792,7 +12926,8 @@ def _find_leader_with_failover_impl(all_nodes, lvs_name, *, grants_allowed=True,
     except Exception:
         pass
     recovered = _recover_leaderless_lvs(cluster_id, all_nodes, lvs_name, failover_target,
-                                        owner_id=owner_id)
+                                        owner_id=owner_id,
+                                        pre_handoff_restart_of=pre_handoff_restart_of)
     if recovered is None:
         return None, []
     failover_target = recovered
@@ -20035,6 +20170,27 @@ def get_cluster_map(node_id):
 
 
 def make_sec_new_primary(node_id):
+    """Finish a node's relocation onto another host: activate the devices
+    the restart found there (``new``) and retire the ones it did not
+    (``removed``), whose data the retirement migrates off them, then re-point
+    the node's own addresses and its volumes.
+
+    The devices are the point of no return, and the record, re-read after the
+    calls, is the verdict: a device still new or still removed is one the
+    promote did not finish, whatever the calls answered. It raises
+    PromoteIncompleteError then, naming them, instead of returning True over
+    a node whose old devices stay in the cluster map as live. (Talos lab
+    2026-11-12: a relocated node's three origin devices had been set back
+    online by the self-repair, device_set_failed refused each with "must be
+    in removed status" and logged it, the promote returned True, the
+    operator's Migrate reported Succeeded, and the volume on the node was
+    corrupt.) The caller calls again once what blocked it is gone; the
+    promote is idempotent.
+
+    The re-point is done either way: the node is on the new host whether or
+    not its devices are settled, and a volume that names the old host is
+    wrong on every retry.
+    """
     db_controller = DBController()
     try:
         snode = db_controller.get_storage_node_by_id(node_id)
@@ -20042,14 +20198,17 @@ def make_sec_new_primary(node_id):
         logger.exception("snode not found")
         return False
 
+    refused = []
     for dev in snode.nvme_devices:
         if dev.status == NVMeDevice.STATUS_NEW:
-            device_controller.add_device(dev.get_id(), add_migration_task=False)
+            if not device_controller.add_device(dev.get_id(), add_migration_task=False):
+                refused.append(f"add_device({dev.get_id()})")
 
     time.sleep(5)
     for dev in snode.nvme_devices:
         if dev.status == NVMeDevice.STATUS_REMOVED:
-            device_controller.device_set_failed(dev.get_id())
+            if not device_controller.device_set_failed(dev.get_id()):
+                refused.append(f"device_set_failed({dev.get_id()})")
 
     snode = db_controller.get_storage_node_by_id(node_id)
     snode.primary_ip = snode.mgmt_ip
@@ -20058,6 +20217,21 @@ def make_sec_new_primary(node_id):
     for lvol in db_controller.get_lvols_by_node_id(node_id):
         lvol.hostname = snode.hostname
         lvol.write_to_db()
+
+    still_new = [d.get_id() for d in snode.nvme_devices if d.status == NVMeDevice.STATUS_NEW]
+    still_removed = [d.get_id() for d in snode.nvme_devices if d.status == NVMeDevice.STATUS_REMOVED]
+    if still_new or still_removed:
+        parts = []
+        if still_new:
+            parts.append(f"devices of the new host still new, not activated: {', '.join(still_new)}")
+        if still_removed:
+            parts.append("devices of the old host still removed, their data not migrated off them: "
+                         + ", ".join(still_removed))
+        if refused:
+            parts.append("refused: " + ", ".join(refused))
+        raise PromoteIncompleteError(
+            f"the promote of node {node_id} on {snode.hostname} did not finish: " + "; ".join(parts),
+            still_new=still_new, still_removed=still_removed)
 
     return True
 
