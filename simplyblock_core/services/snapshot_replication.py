@@ -362,25 +362,15 @@ def _group_id_for_lvol(lvol):
     """The consistency group *lvol* belongs to, or "".
 
     A member carries its group (group_id). Only a volume recorded before that
-    field existed is resolved through its policy, and only through a policy
-    that owns its group (consistency_group): a standalone group attaches to an
-    ordinary policy, several of them can share one, and that policy names no
-    single group (bed run 20261113-2112-ebs-splitdr: every replication task
-    logged "Multiple values present" and the members counted as in no group).
+    field existed is resolved through its policy, to the group the policy owns
+    if any: several standalone groups can follow one policy (bed run
+    20261113-2112-ebs-splitdr: every replication task logged "Multiple values
+    present" and the members counted as in no group).
     """
     gid = getattr(lvol, "group_id", "")
     if gid:
         return gid
-    policy_id = getattr(lvol, "replication_policy_id", "")
-    if not policy_id:
-        return ""
-    try:
-        policy = db.get_replication_policy_by_id(policy_id)
-    except KeyError:
-        return ""
-    if not getattr(policy, "consistency_group", False):
-        return ""
-    group = db.get_consistency_group_for_policy(policy.get_id())
+    group = db.get_consistency_group_for_policy(getattr(lvol, "replication_policy_id", ""))
     return group.get_id() if group else ""
 
 

@@ -2289,10 +2289,21 @@ class DBController(metaclass=Singleton):
         return self.query_one(ConsistencyGroup, 'cluster_id+group_name', cluster_id, name)
 
     def get_consistency_group_for_policy(self, policy_id: str) -> ConsistencyGroup | None:
+        """The group a consistency-group policy owns (create_group_for_policy),
+        or None.
+
+        Only that group. A standalone group attached to a policy
+        (attach_group_policy) carries the policy's id too, any policy takes
+        them, and several can share one: after a fail-over on a split control
+        plane, every group of the site follows its policy toward the peer.
+        They are told apart by name: a standalone group always has one (a
+        labeled volume joins it by name), the group a policy owns never does.
+        """
         wanted = policy_id.split('/')[-1] if policy_id else ""
         if not wanted:
             return None
-        return self.query_one(ConsistencyGroup, 'policy_id', wanted)
+        owned = [g for g in self.query(ConsistencyGroup, 'policy_id', wanted) if not g.group_name]
+        return single_or_none(owned)
 
     def get_lvols_by_replication_policy(self, policy_id: str) -> list[LVol]:
         wanted = policy_id.split('/')[-1] if policy_id else ""

@@ -84,3 +84,26 @@ def test_a_policy_that_owns_its_group_still_answers_for_an_unstamped_volume(db, 
     vol = placement._with(db, vol, replication_policy_id=policy.get_id())
 
     assert resolve(vol) == group.get_id()
+
+
+# ------------------------------------------------------------------ the policy's own group
+
+def test_an_ordinary_policy_owns_no_group_however_many_attach(db):
+    """Standalone groups attached to an ordinary policy are not its group: the
+    lookup answers None instead of raising "Multiple values present"."""
+    groups, _, policy = _two_groups_on_one_policy(db)
+
+    assert len(groups) == 2
+    assert db.get_consistency_group_for_policy(policy.get_id()) is None
+
+
+def test_a_policy_that_owns_its_group_answers_it_beside_an_attached_one(db):
+    """attach_group_policy accepts any policy, a consistency-group one too: the
+    group it owns is still the one the policy path means."""
+    cluster, node, policy, _ = placement._site_a(db, members=0)
+    policy.consistency_group = True
+    policy.write_to_db(db.kv_store)
+    owned = cgc.create_group_for_policy(policy)
+    _group(db, cluster, node, "gitea", policy.get_id())
+
+    assert db.get_consistency_group_for_policy(policy.get_id()).get_id() == owned.get_id()
