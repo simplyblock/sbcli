@@ -2201,6 +2201,128 @@ jobs:
 
       # ── Run tests ───────────────────────────────────────────────────────────
 
+
+      # Which lanes want the S3 prerequisites. Computed once into an env var
+      # rather than repeated as a condition on each step: the group keyword and
+      # the dropdown are two ways of asking for the same lane, and a condition
+      # that drifts between steps half-configures the cluster.
+      - name: Decide whether this run needs the S3 prerequisites
+        shell: bash
+        run: |
+          set -uo pipefail
+          sec='${{ github.event.inputs.cluster_security }}'
+          name=$(echo '${{ github.event.inputs.testname }}' | tr '[:upper:]' '[:lower:]')
+          want=0
+          [ "$sec" = "s3" ] && want=1
+          case "$name" in *s3*|*objectstore*) want=1;; esac
+          echo "S3_WANTED=$want" >> "$GITHUB_ENV"
+          echo "cluster_security=$sec testname=$name -> S3_WANTED=$want"
+
+      # ── cluster_security: s3 ───────────────────────────────────────────────
+      #
+      # Prerequisites only. The StorageClass, the credentials Secret and the
+      # ObjectStore are each created by the test that asserts on them -- see
+      # e2e_tests/objectstore/.
+      #
+      # Unlike `backup`, none of this can go in the ClusterDeploymentConfig:
+      # backup has to be configured BEFORE the CDC is approved, because
+      # patching StorageCluster.spec.backup afterwards never reaches the
+      # control plane. Every step here is post-Online by construction -- the
+      # MDS DaemonSet does not schedule until the cluster is serving.
+      - name: Enable the S3 prerequisites (pNFS + gateway IAM)
+        if: ${{ env.S3_WANTED == '1' }}
+        timeout-minutes: 20
+        shell: bash
+        run: |
+          set -uxo pipefail
+          NS=simplyblock
+
+          echo "=== pNFS on the driver ==="
+          # Every S3 bucket is a pNFS volume: S3Bucket.spec.storageClassName
+          # "must select the pnfs fstype, or the bucket never leaves Pending".
+          # Idempotent -- a cluster already running pNFS is left alone.
+          if ! kubectl get simplyblockdriver simplyblock -n $NS -o jsonpath='{.spec.pnfs}' 2>/dev/null | grep -q .; then
+            kubectl patch simplyblockdriver simplyblock -n $NS --type=merge -p '{"spec":{"pnfs":{"mds":{}}}}'
+          fi
+          kubectl get simplyblockdriver simplyblock -n $NS -o jsonpath='{.spec.pnfs}'; echo
+
+          echo "=== a node that can host the MDS guest ==="
+          # The MDS DaemonSet's own nodeSelector. With no node carrying it
+          # there is no metadata server, and every bucket sits in Pending until
+          # its case times out -- eighteen times over, saying nothing.
+          KVM=""
+          for i in $(seq 1 60); do
+            KVM=$(kubectl get nodes -l storage.simplyblock.io/kvm-capable=true -o jsonpath='{range .items[*]}{.metadata.name} {end}' 2>/dev/null || true)
+            [ -n "${KVM// /}" ] && break
+            echo "no kvm-capable node yet ($i/60)"
+            sleep 10
+          done
+          if [ -z "${KVM// /}" ]; then
+            echo "::error title=no kvm-capable node::No node carries storage.simplyblock.io/kvm-capable=true, so no pNFS metadata server can run and no S3 bucket can leave Pending."
+            kubectl get nodes --show-labels | head -20
+            exit 1
+          fi
+          echo "kvm-capable: $KVM"
+
+          echo "=== the gateway's IAM AppRole ==="
+          # versitygw's IAM is OpenBao's KV-v2 behind AppRole auth
+          # (gateway/README.md), one entry per access key. setup-kms.sh above
+          # enabled simplyblock/kv for the control plane's own KMS; the gateway
+          # reads from a separate mount.
+          #
+          # Every command tolerates existing state: this lane reruns against a
+          # reused cluster, and `bao secrets enable` on an existing path is an
+          # error rather than a no-op.
+          BAO_NS=vault
+          BAO_POD=openbao-0
+          if ! kubectl get pod $BAO_POD -n $BAO_NS >/dev/null 2>&1; then
+            echo "::warning title=no OpenBao::OpenBao is not deployed, so the gateway serves its root account alone. TC-S3-006 reports itself not applicable rather than failing."
+          else
+            # The openbao-unsealer Deployment created earlier keeps this true;
+            # the wait is for the case where this step runs before it has acted.
+            for i in $(seq 1 30); do
+              SEALED=$(kubectl exec -n $BAO_NS $BAO_POD -- sh -c 'bao status -format=json 2>/dev/null || true' | grep -o '"sealed":[^,]*' | head -1 || true)
+              echo "openbao: ${SEALED:-unknown} ($i/30)"
+              case "$SEALED" in *false*) break;; esac
+              sleep 10
+            done
+
+            # Written line by line rather than as a heredoc: see the module
+            # docstring. The third rule is the one that matters -- list on
+            # secret/metadata/s3 ITSELF, not only below it. versitygw's
+            # list-users reads that path directly, and a policy granting only
+            # s3/* answers it with permission denied. gateway/README.md
+            # records this exact trap.
+            : > /tmp/s3-policy.hcl
+            echo 'path "secret/data/s3/*"     { capabilities = ["create","read","update","delete","list"] }' >> /tmp/s3-policy.hcl
+            echo 'path "secret/metadata/s3/*" { capabilities = ["read","list","delete"] }' >> /tmp/s3-policy.hcl
+            echo 'path "secret/metadata/s3"   { capabilities = ["read","list"] }' >> /tmp/s3-policy.hcl
+            cat /tmp/s3-policy.hcl
+
+            kubectl cp /tmp/s3-policy.hcl $BAO_NS/$BAO_POD:/tmp/s3-policy.hcl || true
+            kubectl exec -n $BAO_NS $BAO_POD -- sh -c 'bao secrets enable -path=secret -version=2 kv' 2>&1 | tail -1 || true
+            kubectl exec -n $BAO_NS $BAO_POD -- sh -c 'bao auth enable approle' 2>&1 | tail -1 || true
+            kubectl exec -n $BAO_NS $BAO_POD -- sh -c 'bao policy write simplyblock-s3-policy /tmp/s3-policy.hcl' 2>&1 | tail -1 || true
+            kubectl exec -n $BAO_NS $BAO_POD -- sh -c 'bao write auth/approle/role/simplyblock-s3 token_policies=simplyblock-s3-policy token_ttl=1h token_max_ttl=24h' 2>&1 | tail -1 || true
+
+            ROLE_ID=$(kubectl exec -n $BAO_NS $BAO_POD -- sh -c 'bao read -field=role_id auth/approle/role/simplyblock-s3/role-id 2>/dev/null' || true)
+            SECRET_ID=$(kubectl exec -n $BAO_NS $BAO_POD -- sh -c 'bao write -f -field=secret_id auth/approle/role/simplyblock-s3/secret-id 2>/dev/null' || true)
+            if [ -n "${ROLE_ID:-}" ] && [ -n "${SECRET_ID:-}" ]; then
+              # set +x around these two deliberately. A role_id and a secret_id
+              # together ARE the gateway's IAM credential, and this workflow's
+              # trace is readable by anyone who can see the run.
+              set +x
+              kubectl create secret generic simplyblock-s3-iam -n $NS --from-literal=VGW_IAM_VAULT_ENDPOINT_URL=https://openbao-0.openbao-internal.vault.svc:8200 --from-literal=VGW_IAM_VAULT_SECRET_STORAGE_PATH=s3 --from-literal=VGW_IAM_VAULT_MOUNT_PATH=secret --from-literal=VGW_IAM_VAULT_ROLE_ID="$ROLE_ID" --from-literal=VGW_IAM_VAULT_ROLE_SECRET="$SECRET_ID" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+              set -x
+              echo "Secret/simplyblock-s3-iam written (values not echoed)"
+            else
+              echo "::warning title=no AppRole credential::could not read the AppRole role_id/secret_id, so the gateway falls back to its root account only"
+            fi
+          fi
+
+          echo "=== S3 prerequisites ready ==="
+          kubectl get crd 2>/dev/null | grep -E 'objectstores|s3buckets' || echo "::warning title=no ObjectStore CRDs::this operator build predates the ObjectStore work; every case in the s3 group refuses at its own gate"
+
       - name: Set RUN_DIR_FILE
         run: echo "RUN_DIR_FILE=/tmp/sb_k8s_run_dir_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}.txt" >> "$GITHUB_ENV"
 

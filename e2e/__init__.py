@@ -116,6 +116,30 @@ from e2e_tests.migration.test_migration_topology import (
 )
 from e2e_tests.multi_lvol_run_fio import TestManyLvolSameNode
 from e2e_tests.multi_node_crash_fio_clone import TestMultiFioSnapshotDowntime
+from e2e_tests.objectstore.test_objectstore_gateway import (
+    S3BucketDeliveredWithoutRestartK8s,
+    S3GatewayNodeSelectorK8s,
+    S3GatewayPodKilledK8s,
+    S3GatewayRescheduledK8s,
+    S3GatewayScaleOutK8s,
+    S3GatewayTLSK8s,
+    S3TwoObjectStoresSameNameK8s,
+)
+from e2e_tests.objectstore.test_objectstore_lifecycle import (
+    S3BucketCapacityExhaustionK8s,
+    S3BucketCapacityPatchK8s,
+    S3BucketLifecycleK8s,
+    S3BucketNameBoundaryK8s,
+    S3ObjectStoreDeletedWithBucketsK8s,
+    S3ObjectStoreReplicasZeroK8s,
+)
+from e2e_tests.objectstore.test_objectstore_resilience import (
+    S3BucketProvisioningLatencyK8s,
+    S3MissingEnvFromSecretK8s,
+    S3OpenBaoSealedK8s,
+    S3OperatorRestartK8s,
+    S3RBACFullCycleK8s,
+)
 from e2e_tests.pnfs.test_pnfs_rwx import (
     PnfsByteRangeLockK8s,
     PnfsClaimCeilingK8s,
@@ -473,6 +497,16 @@ from stress_test.mass_create_delete_stress import (
 from stress_test.mgmt_node_network_outage import (
     MgmtNodeNetworkOutageTest,
     MgmtNodeRebootTest,
+)
+from stress_test.objectstore_stress import (
+    S3BucketChurnUnderLoadK8s,
+    S3CsiNodePluginRestartK8s,
+    S3GatewayLargeReplicaCountK8s,
+    S3GatewayNodeDrainedK8s,
+    S3LoadAcrossOutagesK8s,
+    S3ManyBucketsK8s,
+    S3MdsMoveDuringProvisioningK8s,
+    S3MdsMoveUnderLoadK8s,
 )
 from stress_test.pnfs_stress import (
     PnfsRwxFailoverK8s,
@@ -838,6 +872,35 @@ ALL_TESTS = [
     # cost run 41604777129.
     TestLvolOutageLoadTest,
     TestParallelLvolSnapshotCloneAPI,
+    # ObjectStore / S3Bucket. Listed here as well as in their own group for
+    # the reason the comment above gives: a class only reachable by group
+    # reports "not found" when somebody names it directly.
+    S3BucketLifecycleK8s,
+    S3ObjectStoreDeletedWithBucketsK8s,
+    S3BucketCapacityExhaustionK8s,
+    S3BucketCapacityPatchK8s,
+    S3BucketNameBoundaryK8s,
+    S3ObjectStoreReplicasZeroK8s,
+    S3GatewayScaleOutK8s,
+    S3GatewayTLSK8s,
+    S3BucketDeliveredWithoutRestartK8s,
+    S3GatewayRescheduledK8s,
+    S3GatewayNodeSelectorK8s,
+    S3TwoObjectStoresSameNameK8s,
+    S3GatewayPodKilledK8s,
+    S3OpenBaoSealedK8s,
+    S3BucketProvisioningLatencyK8s,
+    S3OperatorRestartK8s,
+    S3RBACFullCycleK8s,
+    S3MissingEnvFromSecretK8s,
+    S3MdsMoveUnderLoadK8s,
+    S3LoadAcrossOutagesK8s,
+    S3CsiNodePluginRestartK8s,
+    S3GatewayNodeDrainedK8s,
+    S3ManyBucketsK8s,
+    S3MdsMoveDuringProvisioningK8s,
+    S3GatewayLargeReplicaCountK8s,
+    S3BucketChurnUnderLoadK8s,
     PnfsSharedWriteVerifyK8s,
     PnfsLayoutProofK8s,
     PnfsCrossClientReadK8s,
@@ -1056,6 +1119,17 @@ def get_stress_tests():
         PnfsRwxFailoverK8s,
         PnfsRwxRapidNoGapK8s,
         PnfsRwxResilientK8s,
+        # The S3 chaos lane, here for the same reason the three above are:
+        # stress.py resolves --testname against get_stress_tests() +
+        # get_backup_stress_tests() and nothing else.
+        S3MdsMoveUnderLoadK8s,
+        S3LoadAcrossOutagesK8s,
+        S3CsiNodePluginRestartK8s,
+        S3GatewayNodeDrainedK8s,
+        S3ManyBucketsK8s,
+        S3MdsMoveDuringProvisioningK8s,
+        S3GatewayLargeReplicaCountK8s,
+        S3BucketChurnUnderLoadK8s,
         ProductLimits_Docker,
         ProductLimits_K8s,
         ProductLimits_70TiB_Docker,
@@ -1576,6 +1650,69 @@ def get_pnfs_stress_tests():
         PnfsRwxFailoverK8s,          # A-01  baseline outage loop
         PnfsRwxRapidNoGapK8s,        # A-02  outages during a migration
         PnfsRwxResilientK8s,         # A-03  long soak, snapshot/clone churn
+    ]
+
+
+def get_objectstore_tests():
+    """ObjectStore / S3Bucket -- what dev's own suite leaves uncovered.
+
+    Ordered as a gate. TC-S3-001 proves a bucket can be provisioned through
+    the CRD and that its volume is released again; until it passes, every
+    case below is measuring something other than the feature. The TLS case
+    is second because a gateway that is not serving a real certificate makes
+    every data assertion after it meaningless.
+
+    Each class ends in K8s: the CRDs exist only on the k8s path, so the
+    platform filter drops the group on a Docker cluster rather than failing
+    it obscurely.
+    """
+    return [
+        # The gate.
+        S3BucketLifecycleK8s,              # TC-S3-001  CRD lifecycle + release
+        S3GatewayTLSK8s,                   # TC-S3-007/8/9  obj E-01..E-03
+        # Delivery: the invariant the whole design rests on.
+        S3BucketDeliveredWithoutRestartK8s,  # TC-S3-011/012  bucket E-01/E-03
+        S3GatewayScaleOutK8s,              # TC-S3-005  obj U-18 live, bucket E-02
+        S3GatewayRescheduledK8s,           # TC-S3-013  bucket E-04
+        S3GatewayNodeSelectorK8s,          # TC-S3-018  heterogeneous pool
+        # Validation and boundaries.
+        S3BucketCapacityPatchK8s,          # TC-S3-004  grow/shrink/immutable
+        S3BucketNameBoundaryK8s,           # TC-S3-023  U-17/U-18 live
+        S3ObjectStoreReplicasZeroK8s,      # TC-S3-019  the excluded boundary
+        S3BucketCapacityExhaustionK8s,     # TC-S3-003  full bucket, live neighbour
+        # Failure paths that need a real kubelet or a real GC.
+        S3MissingEnvFromSecretK8s,         # TC-S3-010  obj I-07
+        S3OperatorRestartK8s,              # TC-S3-015/016  bucket E-08 + mid-delete
+        S3RBACFullCycleK8s,                # TC-S3-017  bucket I-11
+        S3TwoObjectStoresSameNameK8s,      # TC-S3-020  U-17/U-19 live
+        S3GatewayPodKilledK8s,             # TC-S3-021/022  obj M-01 + OQ 2
+        S3OpenBaoSealedK8s,                # TC-S3-006  the deploy-script note
+        # The measurement, last: it is the slowest and it fails nothing.
+        S3BucketProvisioningLatencyK8s,    # TC-S3-014  bucket E-05/6/7, OQ 4
+        # Deliberately last of all: it deletes an ObjectStore out from under
+        # live buckets, which leaves the namespace in whichever state the
+        # product chooses.
+        S3ObjectStoreDeletedWithBucketsK8s,  # TC-S3-002  obj I-04 live half
+    ]
+
+
+def get_objectstore_stress_tests():
+    """S3 under a cluster that breaks -- the axis the feature has none of.
+
+    Ordered cheapest first so a bring-up problem surfaces in the shortest
+    case rather than three hours into the scale one. TC-S3-101 is first among
+    the long ones because the MDS singleton is in every bucket's data path
+    and is the likeliest finding.
+    """
+    return [
+        S3MdsMoveUnderLoadK8s,             # TC-S3-101  bucket-prov §7, widened
+        S3CsiNodePluginRestartK8s,         # TC-S3-103  Open Question 6
+        S3GatewayNodeDrainedK8s,           # TC-S3-104  required anti-affinity
+        S3MdsMoveDuringProvisioningK8s,    # TC-S3-106  bucket-prov §7, exact
+        S3GatewayLargeReplicaCountK8s,     # TC-S3-107  replica-count axis
+        S3BucketChurnUnderLoadK8s,         # TC-S3-108  leak detection
+        S3LoadAcrossOutagesK8s,            # TC-S3-102  the full outage matrix
+        S3ManyBucketsK8s,                  # TC-S3-105  Open Question 4 at scale
     ]
 
 

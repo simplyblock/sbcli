@@ -30,6 +30,7 @@ from __init__ import (
     get_migration_load_tests,
     get_migration_stress_tests,
     get_migration_tests,
+    get_objectstore_tests,
     get_parity_tests,
     get_pnfs_tests,
     get_replication_load_tests,
@@ -228,6 +229,13 @@ def main():
         # plain NFS. Runs on the existing k8s-native-e2e lane with
         # testname=pnfs; no new workflow.
         "pnfs": get_pnfs_tests,
+        # ObjectStore / S3Bucket. k8s only and gated the same way pnfs is:
+        # every bucket is a pNFS volume, so a cluster with no metadata
+        # server cannot serve one and the group refuses rather than timing
+        # out eighteen times. Runs on the existing k8s-native-e2e lane with
+        # testname=s3; no new workflow.
+        "s3": get_objectstore_tests,
+        "objectstore": get_objectstore_tests,
         "parity": get_parity_tests,
         "e2e-all": get_e2e_all_tests,
     }
