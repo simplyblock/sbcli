@@ -747,7 +747,7 @@ def calculate_bdev_io_pool_size(spdk_cpu_mask):
     than half of it.
     """
     try:
-        cores = bin(int(str(spdk_cpu_mask), 16)).count("1") if spdk_cpu_mask else 0
+        cores = int(str(spdk_cpu_mask), 16).bit_count() if spdk_cpu_mask else 0
     except ValueError:
         cores = 0
     return _bdev_io_pool_size_for_cores(cores)

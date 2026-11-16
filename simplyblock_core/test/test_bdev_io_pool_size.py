@@ -13,7 +13,7 @@ class TestBdevIoPoolSize(unittest.TestCase):
 
     def test_thread_caches_take_at_most_half(self):
         for mask in ("0xff", "0xffffffff", "0x" + "f" * 64):
-            cores = bin(int(mask, 16)).count("1")
+            cores = int(mask, 16).bit_count()
             threads = constants.BDEV_IO_POOL_THREADS_PER_CORE * cores + 8
             size = utils.calculate_bdev_io_pool_size(mask)
             self.assertGreaterEqual(size, 2 * constants.BDEV_IO_CACHE_SIZE * (threads + 1))
