@@ -4,24 +4,23 @@ from simplyblock_core import constants, utils
 
 
 class TestBdevIoPoolSize(unittest.TestCase):
+    """The bdev_io pool is sized for a node's saturation point: the SPDK
+    default of 65535, never cut (a smaller pool caps write IOPS)."""
 
-    def test_small_node_gets_floor(self):
-        # bed bf20: mask 0x66 (4 reactor cores), peak 6861 in use
-        self.assertEqual(utils.calculate_bdev_io_pool_size("0x66"), constants.BDEV_IO_POOL_SIZE_MIN)
+    def test_keeps_the_saturation_size(self):
+        for mask in ("0x66", "0xff", "0xffff", "0xffffffff"):
+            self.assertEqual(utils.calculate_bdev_io_pool_size(mask), constants.BDEV_IO_POOL_SIZE)
 
-    def test_covers_thread_caches(self):
-        for mask in ("0xff", "0xffff", "0xffffffff"):
+    def test_thread_caches_take_at_most_half(self):
+        for mask in ("0xff", "0xffffffff", "0x" + "f" * 64):
             cores = bin(int(mask, 16)).count("1")
             threads = constants.BDEV_IO_POOL_THREADS_PER_CORE * cores + 8
             size = utils.calculate_bdev_io_pool_size(mask)
-            self.assertGreaterEqual(size, constants.BDEV_IO_CACHE_SIZE * (threads + 1))
+            self.assertGreaterEqual(size, 2 * constants.BDEV_IO_CACHE_SIZE * (threads + 1))
 
-    def test_capped_at_spdk_default(self):
-        self.assertEqual(utils.calculate_bdev_io_pool_size("0x" + "f" * 32), constants.BDEV_IO_POOL_SIZE_MAX)
-
-    def test_unknown_mask_keeps_spdk_default(self):
+    def test_unknown_mask_keeps_the_saturation_size(self):
         for mask in (None, "", "garbage"):
-            self.assertEqual(utils.calculate_bdev_io_pool_size(mask), constants.BDEV_IO_POOL_SIZE_MAX)
+            self.assertEqual(utils.calculate_bdev_io_pool_size(mask), constants.BDEV_IO_POOL_SIZE)
 
 
 if __name__ == "__main__":

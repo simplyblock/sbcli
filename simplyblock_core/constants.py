@@ -433,21 +433,61 @@ IOBUF_SMALL_POOL_EXTRA_BYTES = 300 * 1024 * 1024
 # The NVMe-oF poll-group cache (buf_cache_size) is kept: it is used.
 BDEV_IOBUF_SMALL_CACHE_SIZE = 16
 BDEV_IOBUF_LARGE_CACHE_SIZE = 2
-# bdev_io pool (bdev_set_options bdev_io_pool_size). The SPDK default of 65535
-# bdev_ios at ~53 KiB each (bdev_io + module contexts) pins ~3.3 GiB of
-# hugepages per node. Measured on bed bf20 (2026-11-10, 10 nodes, heavy IO +
-# migration, RPC bdev_get_io_pool_stats every 2 s): p99 2973 in use, max 6861,
-# startup burst ~16640, zero NOMEM. Every SPDK thread takes BDEV_IO_CACHE_SIZE
-# into its cache when it starts and SPDK aborts if the pool runs dry, so the
-# size also scales with the thread count (bf20: 4 reactor cores -> 13 threads).
-BDEV_IO_CACHE_SIZE = 256
-BDEV_IO_POOL_SIZE_MIN = 24576
-BDEV_IO_POOL_SIZE_MAX = 65535
-BDEV_IO_POOL_THREADS_PER_CORE = 4
-BDEV_IO_POOL_HEADROOM = 16384
 ACCEL_SMALL_CACHE_SIZE = 32
 ACCEL_LARGE_CACHE_SIZE = 2
-EXTRA_HUGE_PAGE_MEMORY = 3221225472
+
+# Hugepage budget (calculate_pool_count, calculate_bdev_io_pool_size,
+# calculate_minimum_hp_memory). Every pool is sized for the saturation point
+# of a 200 Gbit node -- 2M 4K-read / 1M 4K-write IOPS at 7-8 ms latency
+# (Little's law: concurrency = IOPS x latency) -- so that no pool and no heap
+# allocation limits IOPS below saturation; above it, more IO only adds latency.
+# The figure is an explicit sum of the consumers, not pools + a flat reserve:
+# the old 4*cpu + 1.1*pools + 22 MiB*max_lvol + 3 GiB had no term for the
+# bdev_io pool, the NVMe/TCP qpairs, distrib's parity buffers or the blobstore
+# masks, and when max_lvol was 30 instead of 60 the 22 MiB term no longer
+# covered them (pnfs_rwx_rapid_nogap_k8s 2026-11-13: lvol registration and
+# failover "Cannot update lvolstore ... rc = -12", qpair allocation failures).
+#
+# Small iobuf pool: data in flight at saturation -- 200 Gbit x 8 ms = 200 MB
+# (24.4k buffers) of 128K IO, or 16k 4K reads plus ~13k peer reads -- with
+# headroom; plus blobstore merge/CoW pieces, the replication reserve
+# (IOBUF_SMALL_POOL_EXTRA_BYTES) and the buffers parked in per-thread caches.
+IOBUF_SMALL_DATA_COUNT = 40960          # 320 MiB
+IOBUF_SMALL_MERGE_COW_COUNT = 4608      # 36 MiB
+NVMF_BUF_CACHE_SIZE = 512               # NVMe-oF transport buf_cache_size, per poll group
+# bdev_io pool (bdev_set_options bdev_io_pool_size). At 8 ms a 4K-write
+# saturation holds ~16k top-level bdev_ios (lvol + raid0 per IO) plus, while
+# distrib processes them, ~5 children per write and ~2 per peer IO arriving
+# at alceml: 36k-118k depending on where the queueing happens. The SPDK
+# default of 65535 is kept (not cut): a smaller pool would cap write IOPS at
+# saturation. bf20 (2026-11-10, heavy IO + migration) peaked at 6861 in use.
+# Every SPDK thread takes BDEV_IO_CACHE_SIZE into its cache at start and SPDK
+# aborts if the pool runs dry, so the pool also covers the caches.
+BDEV_IO_CACHE_SIZE = 64
+BDEV_IO_POOL_SIZE = 65535
+BDEV_IO_POOL_THREADS_PER_CORE = 4
+# Bytes per bdev_io: sizeof(spdk_bdev_io) + the largest module context
+# (bdev_get_io_pool_stats bdev_io_size, ~53 KiB with distrib's t_task inline).
+# Kept at this upper value even once distrib's task leaves the bdev_io.
+BDEV_IO_SIZE_ESTIMATE = 53 * 1024
+# distrib parity/recovery buffers in flight at saturation (node-wide).
+HP_DISTRIB_DATA_BUF_BYTES = 512 * 1024 * 1024
+# Blobstore md journal: 64 MiB per lvstore, up to 3 lvstores (primary,
+# secondary, tertiary) per node.
+HP_MD_JOURNAL_BYTES = 3 * 64 * 1024 * 1024
+# NVMe/TCP target qpair: max_queue_depth (128) x in_capsule_data_size (8 KiB)
+# plus 2 x 128 + 1 PDUs of ~1.1 KiB. Initiator qpair: request buffer + send PDUs.
+HP_NVMF_QPAIR_BYTES = 128 * 8192 + 257 * 1152
+HP_NVME_INITIATOR_QPAIR_BYTES = 360 * 1024
+# qpairs to/from other storage nodes (remote devices, JM, hublvol), per core.
+HP_PEER_QPAIRS_PER_CORE = 16
+# Blobstore: used-clusters bit array and a load/failover mask of the same size
+# per lvstore copy (40 MiB each at 1.25 PiB provisioned, 4 MiB clusters),
+# 3 copies, plus the 16 MiB dump page buffer and the md-page arrays.
+HP_BLOBSTORE_BYTES = 272 * 1024 * 1024
+HP_THREAD_BYTES_BASE = 16 * 1024 * 1024     # SPDK message mempool etc.
+HP_THREAD_BYTES_PER_CORE = 4 * 1024 * 1024  # thread rings, per-thread channels
+HP_OVERHEAD_FACTOR = 1.15                   # DPDK heap headers and fragmentation
 EXTRA_SYS_MEMORY = 0.10
 
 INSTANCE_STORAGE_DATA = {
