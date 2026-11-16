@@ -2838,24 +2838,6 @@ def set_cluster_status(cl_id, status) -> None:
     cluster_events.cluster_status_change(updated, updated.status, captured['old'])
 
 
-def cluster_set_read_only(cl_id) -> None:
-    cluster = db_controller.get_cluster_by_id(cl_id)
-
-    if cluster.status == Cluster.STATUS_READONLY:
-        return
-
-    set_cluster_status(cl_id, Cluster.STATUS_READONLY)
-    st = db_controller.get_storage_nodes_by_cluster_id(cl_id)
-    for node in st:
-        if node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
-            continue
-        for dev in node.nvme_devices:
-            if dev.status == NVMeDevice.STATUS_ONLINE:
-                # dev_stat = db_controller.get_device_stats(dev, 1)
-                # if dev_stat and dev_stat[0].size_util >= cluster.cap_crit:
-                device_controller.device_set_state(dev.get_id(), NVMeDevice.STATUS_CANNOT_ALLOCATE)
-
-
 def cluster_set_active(cl_id) -> None:
     cluster = db_controller.get_cluster_by_id(cl_id)
 
