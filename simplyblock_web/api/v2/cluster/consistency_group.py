@@ -470,7 +470,8 @@ def replication_failover(cluster: Cluster, group: ConsistencyGroupResource,
 @instance_api.post('/replication/demote', name='clusters:consistency-groups:replication:demote',
                    status_code=204, responses={204: {"content": None}, 202: {"content": None}})
 def replication_demote(cluster: Cluster, group: ConsistencyGroupResource,
-                       site: util.SiteParameter = None) -> Response:
+                       site: util.SiteParameter = None,
+                       superseded: util.SupersededParameter = False) -> Response:
     """Demote the whole group: fence every member and confirm each one's last
     write replicated (design-csi-addons-replication.md §14.4). Re-drivable, not
     queued: 204 once every member is demoted, 202 (with per-member detail) while
@@ -478,13 +479,18 @@ def replication_demote(cluster: Cluster, group: ConsistencyGroupResource,
 
     On a sync-replication cluster: fence every member on ``site`` (required),
     one gate for all - 204, 409 when the gate fails.
+
+    ``superseded=true`` is the fence order for a group failed over elsewhere
+    (control-plane split): every member is fenced and its replication stopped,
+    with no demote cut. The caller decides it, never this control plane.
     """
     if cluster.sync_replication:
+        util.refuse_superseded_on_sync(superseded)
         site = util.require_site(site)
         with util.sync_http_errors():
             sync_replication_controller.sync_demote_group(group.get_id(), site)
         return Response(status_code=204)
-    result = consistency_group_controller.demote_group(group)
+    result = consistency_group_controller.demote_group(group, superseded=superseded)
     if result.get("error"):
         logger.error("group demote failed for %s: %s", group.get_id(), result["error"])
         raise HTTPException(500, 'group demote failed')

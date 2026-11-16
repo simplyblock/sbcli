@@ -872,9 +872,15 @@ def _peer_group_is_being_served(members):
     return False
 
 
-def demote_group(group):
+def demote_group(group, superseded=False):
     """Demote the whole consistency group as ONE crash-consistent unit
     (design-csi-addons-replication.md §14.4).
+
+    ``superseded``: the caller says this group was failed over elsewhere (the
+    control-plane split's fence order, decided by the layer above). Every
+    member of THIS group is demoted as superseded: fenced, its replication
+    stopped, no group cut. No peer group is resolved: the order names this
+    site's group, and the failover record is on the other site.
 
     The demote generation is a SINGLE ``bdev_lvol_snapshot_group`` -- one atomic
     cut across every member, carrying one ``group_seq`` -- NOT a per-member
@@ -907,6 +913,11 @@ def demote_group(group):
             members.append(db.get_lvol_by_id(m["lvol_id"]))
         except KeyError:
             continue
+
+    if superseded:
+        return aggregate_group_demote(
+            [(m.get_id(), lvol_controller.demote_lvol(m.get_id(), superseded=True))
+             for m in members])
 
     # Relocate fail-back: the demote is issued against THIS (origin) group via its
     # origin-pinned handle (cg:<origin>:<id>), but after a fail-over the current

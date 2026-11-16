@@ -120,6 +120,10 @@ class LandingRequest(BaseModel):
     #: Only create: report a volume already wearing the name as ``exists`` and
     #: leave it alone (pre-staging a cutover's next round).
     create_only: bool = False
+    #: The source volume the snapshot is of. The target refuses a landing for a
+    #: volume it failed over (it holds the failover record); empty skips that
+    #: check, as from a source that predates the field.
+    source_lvol_id: str = ""
 
 
 class LandingResponse(BaseModel):

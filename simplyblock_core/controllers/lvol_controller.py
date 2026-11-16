@@ -4752,8 +4752,14 @@ def _reset_demote_state(new_lvol):
     new_lvol.replication_demote_snapshot_id = ""
 
 
-def demote_lvol(lvol_id):
+def demote_lvol(lvol_id, superseded=False):
     """Fence the source and confirm the last write replicated (P0-3).
+
+    ``superseded``: the caller says this volume was failed over elsewhere (the
+    fence order of the control-plane split; the layer above decides it, never
+    this control plane). The volume is fenced, its replication stopped, and it
+    is demoted at once with no demote cut: its data is stale, and the record
+    of the failover is on the other site. See :func:`_demote_superseded`.
 
     The lossless half of a planned swap (design-csi-addons-replication.md
     §5.2): after this returns {"demoted": True}, the peer's planned promote
@@ -4776,6 +4782,9 @@ def demote_lvol(lvol_id):
     except KeyError as e:
         logger.error(e)
         return False, str(e)
+
+    if superseded:
+        return _demote_superseded(db_controller, lvol)
 
     if lvol.replication_demote_state == LVol.REPLICATION_DEMOTE_DONE:
         return {"demoted": True}
@@ -4872,6 +4881,44 @@ def demote_lvol(lvol_id):
 
     lvol.replication_demote_state = LVol.REPLICATION_DEMOTE_DONE
     lvol.write_to_db(db_controller.kv_store)
+    return {"demoted": True}
+
+
+def _demote_superseded(db_controller, lvol):
+    """Demote a volume the caller says was failed over elsewhere: fence it,
+    stop its replication, and mark it demoted, with no demote cut.
+
+    The control-plane split's fence order (Michael, 2026-11-16): the returning
+    old source does not detect its own supersession; the layer above orders it.
+    Centrally, demote_lvol takes the same branch when it finds the failover
+    record itself; in split mode that record is on the new primary's site.
+
+    Overrides a normal demote already started (Ramen's DemoteVolume can arrive
+    first): its demote cut waits on a transfer the new primary refuses, so its
+    task is cancelled with the volume's other transfers. Idempotent: a volume
+    already demoted with nothing replicating is left alone.
+    """
+    if (lvol.replication_demote_state == LVol.REPLICATION_DEMOTE_DONE
+            and not lvol.do_replicate):
+        return {"demoted": True}
+
+    source_node = db_controller.get_storage_node_by_id(lvol.node_id)
+    replication_final_step.fence_source_paths(
+        source_node, source_node.lvstore, lvol.nqn, lvol.ns_id)
+
+    def _demoted(fresh):
+        # Cleared before the tasks are cancelled: the cadence reads
+        # do_replicate, so no new transfer is queued behind the cancel.
+        fresh.do_replicate = False
+        fresh.replication_demote_state = LVol.REPLICATION_DEMOTE_DONE
+        return True
+
+    db_controller.atomic_update(lvol, _demoted)
+    tasks = db_controller.get_job_tasks(source_node.cluster_id)
+    _cancel_snapshot_replication_tasks(db_controller, lvol.get_id(), tasks)
+    _cancel_replication_cutover(lvol.get_id(), tasks)
+    logger.info("Volume %s demoted as superseded (failed over elsewhere): fenced, "
+                "replication stopped, no demote cut", lvol.get_id())
     return {"demoted": True}
 
 
@@ -5566,8 +5613,13 @@ def replication_stop(lvol_id, delete=False, from_policy=False):
 
     snode = db_controller.get_storage_node_by_id(lvol.node_id)
     tasks = db_controller.get_job_tasks(snode.cluster_id)
+    _cancel_snapshot_replication_tasks(db_controller, lvol.uuid, tasks)
+    _cancel_replication_cutover(lvol_id, tasks)
+    return True
 
 
+def _cancel_snapshot_replication_tasks(db_controller, lvol_uuid, tasks):
+    """Cancel every transfer of the volume's snapshots that has not finished."""
     for task in tasks:
         if task.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION and task.status != JobSchedule.STATUS_DONE:
             # A task whose snapshot is gone replicates nothing and belongs to
@@ -5579,11 +5631,8 @@ def replication_stop(lvol_id, delete=False, from_policy=False):
                 logger.warning("replication task %s names snapshot %s, which no longer exists; skipped",
                                task.uuid, task.function_params.get("snapshot_id"))
                 continue
-            if snap.lvol.uuid == lvol.uuid:
+            if snap.lvol.uuid == lvol_uuid:
                 tasks_controller.cancel_task(task.uuid)
-
-    _cancel_replication_cutover(lvol_id, tasks)
-    return True
 
 
 def _cancel_replication_cutover(lvol_id, tasks):

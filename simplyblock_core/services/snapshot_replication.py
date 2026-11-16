@@ -698,7 +698,7 @@ def _prestage_next_landing(snapshot, remote_lv):
                 landing_name=rep_name, size=snapshot.size, ha_type=snapshot.lvol.ha_type,
                 max_namespace_per_subsys=snapshot.lvol.max_namespace_per_subsys or 0,
                 node_hint=remote_lv.node_id, pool_hints=[remote_lv.pool_uuid],
-                create_only=True))
+                create_only=True, source_lvol_id=lvol_id))
         if landing.state != "ready":
             return None                                   # already staged
         lv_id = landing.lvol_id
@@ -898,7 +898,7 @@ def process_snap_replicate_start(task, snapshot):
                 max_namespace_per_subsys=snapshot.lvol.max_namespace_per_subsys or 0,
                 data_uuid=snapshot.data_uuid or "", node_hint=node_hint or "",
                 pool_hints=_pool_hints(dest_lvol, snode.cluster_id, destination_cluster_id),
-                counterpart_hint=counterpart_hint))
+                counterpart_hint=counterpart_hint, source_lvol_id=snapshot.lvol.get_id()))
         except PeerNotFoundError as e:
             msg = f"Replication destination is gone ({e}), stopping task"
             logger.error(msg)

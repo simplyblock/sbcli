@@ -495,7 +495,7 @@ class TestCutover:
 
         assert response.status_code == 202
         assert response.json() == {'demoted': False}
-        lvol_controller.demote_lvol.assert_called_once_with(VOLUME_ID)
+        lvol_controller.demote_lvol.assert_called_once_with(VOLUME_ID, superseded=False)
 
     def test_demote_done_is_204(self, client, db, volume, lvol_controller):
         lvol_controller.demote_lvol.return_value = {'demoted': True}
@@ -515,6 +515,26 @@ class TestCutover:
         # (CodeQL: information exposure through an exception).
         assert response.json()['detail'] == 'demote failed'
         assert 'no space' not in response.json()['detail']
+
+    def test_a_superseded_demote_is_passed_on(self, client, db, volume, lvol_controller):
+        """The fence order from the layer above: this volume was failed over
+        elsewhere, so the demote fences it and takes no demote cut."""
+        lvol_controller.demote_lvol.return_value = {'demoted': True}
+
+        response = client.post(REPLICATION_URL + 'demote?superseded=true')
+
+        assert response.status_code == 204
+        lvol_controller.demote_lvol.assert_called_once_with(VOLUME_ID, superseded=True)
+
+    def test_a_superseded_demote_on_a_sync_cluster_is_400(self, client, db, cluster, volume,
+                                                          lvol_controller):
+        """Sync replication has no failover record on another site to defer to."""
+        cluster.sync_replication = True
+
+        response = client.post(REPLICATION_URL + 'demote?superseded=true&site=a')
+
+        assert response.status_code == 400
+        lvol_controller.demote_lvol.assert_not_called()
 
     def test_failback(self, client, db, volume, lvol_controller):
         lvol_controller.replication_failback.return_value = True

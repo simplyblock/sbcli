@@ -13,7 +13,7 @@ from uuid import UUID, uuid5
 from simplyblock_core import constants, xfer_timing
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.exceptions import PreconditionError
-from simplyblock_core.models.lvol_model import LVol
+from simplyblock_core.models.lvol_model import LVol, LVolReplication
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
@@ -207,6 +207,11 @@ class LandingVolumeError(PreconditionError):
     or creating it failed."""
 
 
+class SupersededSourceError(PreconditionError):
+    """The landing is for a volume this cluster failed over: its source is
+    superseded, and its data must not land here."""
+
+
 def prepare_landing(cluster_id: str, request: LandingRequest) -> LandingResponse:
     """Make the landing volume of a replicated snapshot ready on *cluster_id*.
 
@@ -221,12 +226,14 @@ def prepare_landing(cluster_id: str, request: LandingRequest) -> LandingResponse
             hint is unknown or on another cluster.
         LandingVolumeError: no member or pool can take the volume, or the
             create failed.
+        SupersededSourceError: this cluster failed the source volume over.
     """
     # Imported here for the same reason as in discard_landing.
     from simplyblock_core.controllers import lvol_controller
 
     db = DBController()
     db.get_cluster_by_id(cluster_id)
+    _refuse_superseded_source(db, cluster_id, request.source_lvol_id)
     pools = db.get_pools(cluster_id)
     existing = _named_landing(db, pools, request.landing_name)
     if request.create_only and existing is not None:
@@ -284,6 +291,40 @@ def prepare_landing(cluster_id: str, request: LandingRequest) -> LandingResponse
         # created but not readable back yet: the id is what matters
         return LandingResponse(state="ready", lvol_id=lvol_id, lvs_name=node.lvstore,
                                node_id=node.get_id(), pool_id=pool_uuid)
+
+
+def _refuse_superseded_source(db, cluster_id, source_lvol_id):
+    """Refuse a landing for a volume *cluster_id* failed over.
+
+    After a failover with the source cut off, the returning source can ship
+    before it is fenced: its old transfers resume, or Ramen's DemoteVolume
+    starts a normal demote cut. Its data is stale; landed here it would be one
+    more generation of its group, which a later failover could pick. The fence
+    itself is ordered from the layer above (control-plane split, M3); this
+    check only guards this cluster's own records, and decides nothing about
+    the source.
+
+    Keyed by the failover relationship, whose source is the volume of the
+    other cluster. Only the newest relationship of that volume counts, as in
+    lvol_controller._replication_for_lvol.
+
+    Raises:
+        SupersededSourceError: the volume's newest relationship is a failover
+            onto *cluster_id*.
+    """
+    if not source_lvol_id:
+        return
+    for rep in reversed(db.get_lvol_replication_objects()):
+        source = rep.source_lvol.get_id() if rep.source_lvol else ""
+        target = rep.target_lvol.get_id() if rep.target_lvol else ""
+        if source_lvol_id not in (source, target):
+            continue
+        if (source == source_lvol_id and rep.state == LVolReplication.STATE_FAILED_OVER
+                and rep.target_cluster_id == cluster_id):
+            raise SupersededSourceError(
+                f"Volume {source_lvol_id} was failed over to {target} on cluster "
+                f"{cluster_id}; its source is superseded and nothing of it lands here")
+        return
 
 
 def _ready(landing, adopted=False):
