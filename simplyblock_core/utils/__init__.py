@@ -702,15 +702,20 @@ def calculate_pool_count(alceml_count, number_of_distribs, cpu_count, poller_cou
     '''
     poller_number = poller_count if poller_count else cpu_count
 
-    # Small buffers are sized off the max number of subsystems (max_lvol /
-    # --max-subsys) on the node: a fixed base plus 16 small bufs per
-    # NS-add poll group (128) per subsystem.
-    # Plus IOBUF_SMALL_POOL_EXTRA_BYTES of 8 KiB buffers for replication: its
-    # transfers and landing merges take their buffers from the small pool as
-    # chains of 8 KiB (preallocated, immune to heap fragmentation; a request
-    # waits for a buffer instead of failing with -ENOMEM).
-    small_pool_count = (100000 + max_lvol * 16 * 128
-                        + constants.IOBUF_SMALL_POOL_EXTRA_BYTES // constants.IOBUF_SMALL_BUFSIZE)
+    # Small buffers are sized for the data in flight at the node's saturation
+    # point (see the hugepage budget in constants), not off max_lvol: a fixed
+    # data reserve, blobstore merge/CoW pieces, and IOBUF_SMALL_POOL_EXTRA_BYTES
+    # of 8 KiB buffers for replication (its transfers and landing merges take
+    # chains of 8 KiB from the small pool). Plus the buffers that sit in
+    # per-thread caches and are not available to other threads: the NVMe-oF
+    # poll-group cache (one poll group per core) and the bdev/accel caches
+    # (threads estimated as BDEV_IO_POOL_THREADS_PER_CORE per core + 8).
+    threads = constants.BDEV_IO_POOL_THREADS_PER_CORE * max(cpu_count, 1) + 8
+    small_pool_count = (constants.IOBUF_SMALL_DATA_COUNT
+                        + constants.IOBUF_SMALL_MERGE_COW_COUNT
+                        + constants.IOBUF_SMALL_POOL_EXTRA_BYTES // constants.IOBUF_SMALL_BUFSIZE
+                        + constants.NVMF_BUF_CACHE_SIZE * (max(cpu_count, 1) + 1)
+                        + (constants.BDEV_IOBUF_SMALL_CACHE_SIZE + constants.ACCEL_SMALL_CACHE_SIZE) * threads)
     # Large buffers are not used in the data path: the NVMe-oF transport's
     # io_unit_size is 8 KiB (small buffers only), no exported bdev supports
     # zcopy, and every bdev caller supplies aligned buffers, so the bdev layer
@@ -737,31 +742,43 @@ def calculate_bdev_io_pool_size(spdk_cpu_mask):
 
     Room for every thread's bdev_io cache (threads estimated as
     BDEV_IO_POOL_THREADS_PER_CORE per core plus a few app threads) plus
-    BDEV_IO_POOL_HEADROOM in flight, never below BDEV_IO_POOL_SIZE_MIN nor
-    above the SPDK default (BDEV_IO_POOL_SIZE_MAX).
+    BDEV_IO_POOL_SIZE (the SPDK default, sized for saturation -- see
+    constants), raised only if the thread caches would otherwise take more
+    than half of it.
     """
     try:
         cores = bin(int(str(spdk_cpu_mask), 16)).count("1") if spdk_cpu_mask else 0
     except ValueError:
         cores = 0
-    if cores <= 0:
-        return constants.BDEV_IO_POOL_SIZE_MAX
-    threads = constants.BDEV_IO_POOL_THREADS_PER_CORE * cores + 8
-    size = constants.BDEV_IO_CACHE_SIZE * (threads + 1) + constants.BDEV_IO_POOL_HEADROOM
-    return int(min(max(size, constants.BDEV_IO_POOL_SIZE_MIN), constants.BDEV_IO_POOL_SIZE_MAX))
+    return _bdev_io_pool_size_for_cores(cores)
+
+
+def _bdev_io_pool_size_for_cores(cores):
+    threads = constants.BDEV_IO_POOL_THREADS_PER_CORE * max(int(cores or 0), 1) + 8
+    return int(max(constants.BDEV_IO_POOL_SIZE, 2 * constants.BDEV_IO_CACHE_SIZE * (threads + 1)))
 
 
 def calculate_minimum_hp_memory(small_pool_count, large_pool_count, lvol_count, max_prov, cpu_count):
-    pool_consumption = (small_pool_count * 8 + large_pool_count * 128) / 1024
-    memory_consumption = (4 * cpu_count + 1.1 * pool_consumption + 22 * lvol_count) * (
-            1024 * 1024) + constants.EXTRA_HUGE_PAGE_MEMORY
-    # The computed pool + EXTRA_HUGE_PAGE_MEMORY figure is the reservation; it
-    # is not doubled. The historical 2.0x safety factor reserved ~twice the
-    # memory SPDK actually needs -- on a two-instances-per-socket host that was
-    # the difference between fitting a node and starving it -- so it is gone.
-    # If a workload is ever shown to need headroom, reintroduce it as a small,
-    # measured factor (peak_used / computed), not a blanket 2x.
-    return int(memory_consumption)
+    """Hugepage memory SPDK needs on a node: the explicit sum of its consumers
+    (see the hugepage budget in constants), times HP_OVERHEAD_FACTOR.
+
+    lvol_count is the node's max subsystems (each with CLIENT_QPAIR_COUNT IO
+    qpairs + 1 admin qpair from its host); cpu_count its SPDK cores. max_prov
+    is not used here (callers apply it as a floor).
+    """
+    cpu_count = max(int(cpu_count or 0), 1)
+    lvol_count = max(int(lvol_count or 0), 0)
+    pools = (small_pool_count * constants.IOBUF_SMALL_BUFSIZE
+             + large_pool_count * constants.IOBUF_LARGE_BUFSIZE)
+    bdev_io = _bdev_io_pool_size_for_cores(cpu_count) * constants.BDEV_IO_SIZE_ESTIMATE
+    peer_qpairs = constants.HP_PEER_QPAIRS_PER_CORE * cpu_count
+    qpairs_in = lvol_count * (constants.CLIENT_QPAIR_COUNT + 1) + peer_qpairs
+    qpairs = (qpairs_in * constants.HP_NVMF_QPAIR_BYTES
+              + peer_qpairs * constants.HP_NVME_INITIATOR_QPAIR_BYTES)
+    threads = constants.HP_THREAD_BYTES_BASE + constants.HP_THREAD_BYTES_PER_CORE * cpu_count
+    total = (pools + bdev_io + constants.HP_DISTRIB_DATA_BUF_BYTES + constants.HP_MD_JOURNAL_BYTES
+             + qpairs + constants.HP_BLOBSTORE_BYTES + threads)
+    return int(total * constants.HP_OVERHEAD_FACTOR)
 
 
 def calculate_minimum_sys_memory(ssd_list):

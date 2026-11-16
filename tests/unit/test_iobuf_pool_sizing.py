@@ -25,11 +25,27 @@ def test_large_pool_still_covers_the_per_thread_caches():
     assert large >= per_thread * 2000
 
 
-def test_small_pool_gains_300_mib():
-    small, _ = utils.calculate_pool_count(alceml_count=8, number_of_distribs=12, cpu_count=8,
-                                          poller_count=8, max_lvol=200)
-    base = 100000 + 200 * 16 * 128
-    assert small - base == 300 * 1024 * 1024 // (8 * 1024)
+def test_small_pool_is_sized_for_saturation_not_max_lvol():
+    small, _ = utils.calculate_pool_count(alceml_count=8, number_of_distribs=12, cpu_count=16,
+                                          poller_count=16, max_lvol=30)
+    small2, _ = utils.calculate_pool_count(alceml_count=8, number_of_distribs=12, cpu_count=16,
+                                           poller_count=16, max_lvol=250)
+    assert small == small2
+    threads = constants.BDEV_IO_POOL_THREADS_PER_CORE * 16 + 8
+    expected = (constants.IOBUF_SMALL_DATA_COUNT + constants.IOBUF_SMALL_MERGE_COW_COUNT
+                + 300 * 1024 * 1024 // (8 * 1024)        # replication reserve
+                + constants.NVMF_BUF_CACHE_SIZE * 17
+                + (constants.BDEV_IOBUF_SMALL_CACHE_SIZE + constants.ACCEL_SMALL_CACHE_SIZE) * threads)
+    assert small == expected
+    assert 90000 < small < 100000  # ~96k on a 16-core node (2026-11-16 sizing)
+
+
+def test_small_pool_grows_with_cores_for_the_thread_caches():
+    s8, _ = utils.calculate_pool_count(alceml_count=4, number_of_distribs=4, cpu_count=8,
+                                       poller_count=8, max_lvol=30)
+    s32, _ = utils.calculate_pool_count(alceml_count=4, number_of_distribs=4, cpu_count=32,
+                                        poller_count=32, max_lvol=30)
+    assert s32 > s8
 
 
 def _client():
