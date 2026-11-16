@@ -33,6 +33,7 @@ from utils.manage_portal_util import (
     detect_fe_be_tags,
     resolve_environment_id_from_ip,
 )
+from utils.run_budget import budget_note, stop_reason
 from utils.sbcli_utils import SbcliUtils
 from utils.ssh_utils import SshUtils
 
@@ -131,7 +132,20 @@ def main():
 
     errors = {}
     passed_cases = []
+    logger.info(budget_note())
     for i, test in enumerate(test_class_run):
+        # Between tests, never inside one. A suite given several classes would
+        # otherwise start a fresh multi-hour class with minutes of budget left
+        # and be cancelled inside it, which is the state this budget exists to
+        # avoid. The first class always runs: a run that executed nothing
+        # reads as a harness fault, and a stale deadline is the likelier
+        # cause of one.
+        stop = stop_reason()
+        if stop and i:
+            logger.info("%s — skipping the remaining %d test(s): %s",
+                        stop, len(test_class_run) - i,
+                        ", ".join(c.__name__ for c in test_class_run[i:]))
+            break
         logger.info(f"Running Test {test}")
         test_obj = test(fio_debug=args.fio_debug,
                         ndcs=args.ndcs,

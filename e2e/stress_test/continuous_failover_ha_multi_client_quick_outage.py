@@ -19,6 +19,7 @@ from stress_test.lvol_ha_stress_fio import TestLvolHACluster
 from stress_test.rapid_fio_lifecycle import RapidFioLifecycle
 from utils import ssh_utils
 from utils.common_utils import sleep_n_sec
+from utils.run_budget import budget_note, stop_reason
 
 
 def _rand_id(n=15, first_alpha=True):
@@ -2146,7 +2147,20 @@ class RandomRapidFailoverNoGapV2WithMigration(RandomRapidFailoverNoGap):
             iteration = resumed_at
             self.adopt_existing_objects()
             self.resume_reattach_clients()
+        self.logger.info(f"[V2] {budget_note()}")
         while True:
+            stop = stop_reason()
+            if stop:
+                # Top of an iteration, so nothing is half-done: the previous
+                # outage recovered and its FIO was checked. Breaking here
+                # returns through run() normally, which is what gets the
+                # end-of-run validation and leaves the workflow's collection
+                # steps the whole job timeout to work in. Being cancelled at
+                # the job deadline instead gets none of that.
+                self.logger.info(
+                    f"[V2] {stop} — stopping after {self._iter} outages"
+                )
+                break
             self.checkpoint(iteration)
             if self.dump_validation_errors:
                 raise RuntimeError(

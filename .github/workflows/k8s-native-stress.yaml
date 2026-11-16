@@ -101,6 +101,11 @@ on:
         required: false
         default: ''
 
+      max_run_hours:
+        description: "Hours the stress loop may run before it stops itself, at the top of an iteration, through its normal end-of-run path. The collection steps then run inside the job's remaining timeout. 0 means run until failure and accept being cancelled mid-outage."
+        required: false
+        default: '108'
+
       resume:
         description: 'Continue the previous run on this cluster instead of wiping its objects. Requires use_existing_cluster=true, since recreating the setup destroys exactly what resume would adopt.'
         required: false
@@ -145,7 +150,13 @@ env:
 jobs:
   stress-test:
     runs-on: ${{ github.event.inputs.cluster_environment == 'aws-openshift' && 'vm-runner-43' || 'self-hosted' }}
-    timeout-minutes: 4320
+    # 5 days. The stress loop stops itself at max_run_hours (108h) and the
+    # Graylog export that follows is capped at 480 minutes, so the job keeps
+    # ~4h of headroom over both. Reaching THIS limit means the planned stop did
+    # not happen: the job is then cancelled mid-outage, which on the docker
+    # twin (43419924336) cost the run its end-of-run validation and left
+    # stress.py driving outages for five hours after the job had gone.
+    timeout-minutes: 7200
     concurrency:
       group: ${{ github.workflow }}-${{ github.event.inputs.cluster_environment || 'local' }}
       cancel-in-progress: false
@@ -2227,14 +2238,57 @@ jobs:
           if [ -n "${TEST_CASE:-}" ]; then
             CASE_ARG="--case ${TEST_CASE}"
           fi
+
+          # An absolute deadline, not a duration: a resume run inherits the
+          # original one instead of restarting the clock, and the log says up
+          # front when the run was always going to end. utils/run_budget.py
+          # reads it, and the outage loops check it at the top of an iteration,
+          # so the stop lands between outages and the steps below get the whole
+          # remaining job timeout rather than a cancel.
+          HOURS="${MAX_RUN_HOURS:-108}"
+          HARD_SEC=0
+          if [[ "${HOURS}" =~ ^[0-9]+$ ]] && [ "${HOURS}" -gt 0 ]; then
+            STRESS_DEADLINE_EPOCH=$(( $(date +%s) + HOURS * 3600 ))
+            export STRESS_DEADLINE_EPOCH
+            HARD_SEC=$(( HOURS * 3600 + 3600 ))
+            echo "Run budget: ${HOURS}h, stopping at $(date -u -d "@${STRESS_DEADLINE_EPOCH}" '+%F %T UTC')"
+          else
+            echo "Run budget: unlimited (max_run_hours=${HOURS}) -- this run can be cancelled mid-outage"
+          fi
+
+          # touch this file to end a run early without killing it.
+          STRESS_STOP_FILE="${PWD}/.stress_stop"
+          export STRESS_STOP_FILE
+          rm -f "${STRESS_STOP_FILE}"
           if [ -n "${RESUME:-}" ]; then
             echo "RESUME=1: adopting the objects left by the previous run on this cluster"
           fi
 
-          PYTHONUNBUFFERED=1 ./stress.py $TESTNAME \
+          # Backstop, one hour past the deadline. It only fires when the loop
+          # never reached the top of an iteration -- a wedged kubectl call, or
+          # a test class that does not check the budget yet.
+          run_stress() {
+            if [ "${HARD_SEC}" -gt 0 ]; then
+              timeout --signal=TERM --kill-after=300 "${HARD_SEC}" \
+                env PYTHONUNBUFFERED=1 ./stress.py "$@"
+            else
+              env PYTHONUNBUFFERED=1 ./stress.py "$@"
+            fi
+          }
+
+          set +e
+          run_stress $TESTNAME \
             --ndcs $NDCS --npcs $NPCS --bs $BS --chunk_bs $CHUNK_BS \
             --run_k8s True --tls_enabled true $PRESERVE_ARG $CASE_ARG 2>&1 | tee output.log
+          rc=${PIPESTATUS[0]}
+
+          if [ "${rc}" -eq 124 ] || [ "${rc}" -eq 137 ]; then
+            echo "PLANNED STOP: hard budget of ${HARD_SEC}s reached; stress.py was signalled instead of stopping itself. Not a product failure, but the end-of-run validation did not run -- find out why the loop never saw the deadline." | tee -a output.log
+            rc=0
+          fi
+          exit "${rc}"
         env:
+          MAX_RUN_HOURS: ${{ github.event.inputs.max_run_hours || '108' }}
           NDCS: ${{ env.NDCS }}
           NPCS: ${{ env.NPCS }}
           BS: ${{ env.BS }}
@@ -2251,6 +2305,47 @@ jobs:
           # Read by stress.py directly. Empty means a normal run.
           RESUME: ${{ github.event.inputs.resume == 'true' && '1' || '' }}
           TEST_CASE: ${{ github.event.inputs.test_case }}
+
+      - name: Stop any stress.py this job left running
+        if: always()
+        timeout-minutes: 5
+        continue-on-error: true
+        shell: bash
+        run: |
+          set +e
+          # Cancelling a step does not stop what it started. After the 72h
+          # cancel of the docker twin 43419924336 the harness drove outages for
+          # five more hours, while the runner -- idle, no Runner.Worker -- was
+          # free to accept the next job, whose first step wipes the cluster.
+          # Only processes whose cwd is inside this workspace are ours.
+          workspace="$(cd "${GITHUB_WORKSPACE}" && pwd -P 2>/dev/null)" || exit 0
+          victims=""
+          for pid in $(pgrep -f 'stress[.]py' 2>/dev/null); do
+            [ "${pid}" = "$$" ] && continue
+            cwd="$(readlink -f /proc/${pid}/cwd 2>/dev/null)"
+            case "${cwd}" in
+              "${workspace}"|"${workspace}"/*) victims="${victims} ${pid}" ;;
+            esac
+          done
+          if [ -z "${victims}" ]; then
+            echo "No stress.py left running under ${workspace}"
+            exit 0
+          fi
+          echo "Orphaned harness processes under ${workspace}:"
+          ps -o pid,lstart,etime,args -p "$(echo ${victims} | tr ' ' ',')"
+          kill -TERM ${victims} 2>/dev/null
+          for _ in $(seq 1 30); do
+            still=""
+            for pid in ${victims}; do
+              kill -0 "${pid}" 2>/dev/null && still="${still} ${pid}"
+            done
+            [ -z "${still}" ] && break
+            sleep 1
+          done
+          for pid in ${victims}; do
+            kill -0 "${pid}" 2>/dev/null && kill -KILL "${pid}" 2>/dev/null
+          done
+          echo "Stopped:${victims}"
 
       # ── Post-test: timing, logs, notifications ──────────────────────────────
 
@@ -2365,9 +2460,21 @@ jobs:
             log_tail="$(tail -n 50 "${out_log}" | sed 's/\x1b\[[0-9;]*m//g' || true)"
           fi
 
+          # A run that spent its whole budget without failing is a result in
+          # its own right, and must not read as a SUCCESS with nothing in it.
+          planned_stop=""
+          if [[ -f "${out_log}" ]]; then
+            planned_stop="$(grep -ohE 'PLANNED STOP: .+' "${out_log}" 2>/dev/null \
+              | tail -n 1 | sed 's/\\x1b\\[[0-9;]*m//g' || true)"
+          fi
+
           conclusion="SUCCESS"
-          if [[ "${{ job.status }}" != "success" ]]; then
+          if [[ "${{ job.status }}" == "cancelled" ]]; then
+            conclusion="CANCELLED (job timeout or manual cancel)"
+          elif [[ "${{ job.status }}" != "success" ]]; then
             conclusion="FAILED"
+          elif [[ -n "${planned_stop}" ]]; then
+            conclusion="STOPPED (ran its full budget without failing)"
           fi
 
           {
@@ -2375,6 +2482,10 @@ jobs:
             echo ""
             echo "**Result:** ${conclusion}"
             echo ""
+            if [[ -n "${planned_stop}" ]]; then
+              echo "> ${planned_stop}"
+              echo ""
+            fi
             echo "### Run Info"
             echo "- **Test class:** \`${TESTNAME}\`"
             echo "- **Cluster ID:** \`${CLUSTER_ID}\`"
@@ -2484,8 +2595,12 @@ jobs:
           branch   = os.environ.get("GITHUB_REF_NAME", "?")
           wf_name  = os.environ.get("SLACK_WF_NAME",   "Run")
           ok       = os.environ.get("JOB_STATUS",      "") == "success"
-          icon    = ":white_check_mark:" if ok else ":x:"
-          status  = "SUCCESS" if ok else "FAILURE"
+          # A run that spent its whole budget without failing is a result, not
+          # a plain SUCCESS: "passed 1/1" after five days says nothing about
+          # what it actually did.
+          stopped = bool(re.search(r'PLANNED STOP: .+', content)) if os.path.isfile(out_log) else False
+          icon    = (":stopwatch:" if stopped else ":white_check_mark:") if ok else ":x:"
+          status  = ("STOPPED (full run budget, no failure)" if stopped else "SUCCESS") if ok else "FAILURE"
           mention = "" if ok else " <!channel>"
           lines = [
               f"{icon} *SimplyBlock {wf_name}*{mention}",
