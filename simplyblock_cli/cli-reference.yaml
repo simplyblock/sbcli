@@ -884,10 +884,10 @@ commands:
             type: int
             default: 89
           - name: "--cap-crit"
-            help: "The capacity critical level in percent. Default: `99`."
+            help: "The capacity critical level in percent. Default: `98`."
             dest: cap_crit
             type: int
-            default: 99
+            default: 98
           - name: "--prov-cap-warn"
             help: "The capacity warning level in percent. Default: `250`."
             dest: prov_cap_warn
@@ -1209,10 +1209,10 @@ commands:
             type: int
             default: 89
           - name: "--cap-crit"
-            help: "The capacity critical level in percent. Default: `99`."
+            help: "The capacity critical level in percent. Default: `98`."
             dest: cap_crit
             type: int
-            default: 99
+            default: 98
           - name: "--prov-cap-warn"
             help: "The capacity warning level in percent. Default: `250`."
             dest: prov_cap_warn

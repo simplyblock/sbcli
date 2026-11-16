@@ -57,7 +57,6 @@ def _run(backlog):
     db.get_cluster_by_id.return_value = SimpleNamespace(sync_replication=False)
     with patch.object(sm, "db", db), \
             patch.object(sm.migration_turn, "waiting_lvol_ids", return_value=set()), \
-            patch.object(sm, "_cadence_capacity_hold", return_value=None), \
             patch.object(sm, "_due_for_internal_snapshot", return_value=True), \
             patch.object(sm, "_outstanding_internal_snapshot", return_value=None), \
             patch.object(sm, "_deletion_backlog", return_value=backlog), \
