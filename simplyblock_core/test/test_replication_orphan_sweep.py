@@ -295,8 +295,11 @@ def test_the_sweep_is_throttled_per_cluster(harness, monkeypatch):
     use, deleted = harness
     db = use(_FakeDB([], []))
     calls = []
-    monkeypatch.setattr(rsr, "sweep_orphaned",
-                        lambda db, cluster_id, now=None: calls.append(cluster_id) or [])
+
+    def _sweep(db, cluster_id, now=None):
+        calls.append(cluster_id)
+        return []
+    monkeypatch.setattr(rsr, "sweep_orphaned", _sweep)
     rsr.reap_retired(db, B)
     rsr.reap_retired(db, B)
     rsr.reap_retired(db, A)
