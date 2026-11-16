@@ -2956,7 +2956,11 @@ def check_node(snode):
             set_node_offline(snode)
             return False
     except Exception as e:
-        logger.debug(e)
+        # The agent could not say whether SPDK runs (it could not ask the
+        # Kubernetes API, or the request failed). The node keeps its status:
+        # only an answer of "not running" sets it offline.
+        logger.warning("Check: spdk process %s:5000 ... unknown (%s); node status unchanged",
+                       snode.mgmt_ip, e)
         return False
 
     # 4- check node rpc interface
