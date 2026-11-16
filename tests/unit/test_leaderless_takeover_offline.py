@@ -11,12 +11,10 @@ itself still never grants: a landing create with the primary down only routes
 to an EXISTING leader (recover=False).
 """
 import unittest
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from simplyblock_core import storage_node_ops
 from simplyblock_core.controllers import lvol_controller
-from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.services import storage_node_monitor as mon
 
@@ -78,20 +76,23 @@ class TestLeaderlessTakeover(unittest.TestCase):
         mon._take_over_leaderless_lvstores(self.a)
         self.assertEqual(self.find.call_count, 2)
 
-    def test_not_while_the_restart_flow_runs(self):
+    def test_not_once_the_restart_handoff_can_have_begun(self):
+        # the restart owns the leadership once the node's SPDK runs again
         with patch.object(mon.tasks_controller, "get_active_node_restart_task",
-                          return_value="T1"):
-            self.db.get_task_by_id.return_value = SimpleNamespace(
-                status=JobSchedule.STATUS_RUNNING)
+                          return_value="T1"),                 patch.object(storage_node_ops, "restart_before_lvstore_handoff",
+                             return_value=(False, "SPDK of A is running")):
             mon._take_over_leaderless_lvstores(self.a)
         self.find.assert_not_called()
 
-    def test_a_queued_restart_does_not_block(self):
+    def test_during_the_restart_while_its_spdk_is_down(self):
+        # bf24 2026-11-14: crashed target primary, restart task already active
         with patch.object(mon.tasks_controller, "get_active_node_restart_task",
-                          return_value="T1"):
-            self.db.get_task_by_id.return_value = SimpleNamespace(status=JobSchedule.STATUS_NEW)
+                          return_value="T1"),                 patch.object(storage_node_ops, "restart_before_lvstore_handoff",
+                             return_value=(True, "SPDK of A is down")):
             mon._take_over_leaderless_lvstores(self.a)
         self.assertEqual(self.find.call_count, 2)
+        for c in self.find.call_args_list:
+            self.assertEqual(c.kwargs, {"pre_handoff_restart_of": "A"})
 
     def test_not_on_sync_replication_clusters(self):
         self.sync.return_value = "site-a"

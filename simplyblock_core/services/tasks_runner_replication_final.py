@@ -1339,18 +1339,88 @@ def _take_round(task, lvol):
     if not params.get("direct_rounds"):
         _, err, task = _take_shrink_snapshot(task, lvol)
         return err, task
-    _, err, task = _take_shrink_snapshot(task, lvol, direct=True)
+    new_snap, err, task = _take_shrink_snapshot(task, lvol, direct=True)
     if err:
         return err, task
     # direct_rounds_used outlives the endgame's params: whatever ends this
     # attempt, its round snapshots must not be left unreplicated
-    task = _record(task, direct_submits=0, direct_xfer_node="", direct_rounds_used=True)
+    ids = list(task.function_params.get("direct_round_ids") or [])
+    if new_snap and new_snap not in ids:
+        ids.append(new_snap)
+    task = _record(task, direct_submits=0, direct_xfer_node="", direct_rounds_used=True,
+                   direct_round_ids=ids)
     err, task = _submit_direct_round(task, lvol)
     if err:
         # the snapshot exists; the next pass sends it (_direct_round_done)
         logger.warning("cutover for lvol %s: round %s not sent yet: %s", lvol.get_id(),
                        task.function_params.get("shrink_round"), err)
+    task = _drop_superseded_rounds(task, lvol, new_snap)
     return None, task
+
+
+def _drop_superseded_rounds(task, lvol, in_flight=None):
+    """Delete this endgame's direct-round snapshots that nothing needs any
+    more; returns the task.
+
+    A direct round arrives in the cutover clone and the next round is a delta
+    against it, so only two round snapshots are of use: the last one that
+    arrived (the next round's base, and the final step's if this is the last
+    round) and the one in flight. Every older one only pins what was written
+    since it was taken, on the source. Held until the cutover, they filled
+    bed bf24 (2026-11-14): endgames that did not converge took 10-13 rounds
+    each, 30 s apart, five volumes in parallel. Under random overwrites every
+    round touches nearly every cluster, so each held round pinned about the
+    whole 10 GiB volume. The source cluster went from 36% to 88% in 15 minutes
+    (17 -> 63 snapshots), three devices filled up and client writes failed
+    with EIO.
+
+    Deleting one merges it into its successor, which has arrived already and
+    is not transferring (the round in flight is the successor's successor).
+    The copy in flight reads only its own clusters, so the merge does not
+    change what it sends. A delete that is refused now is tried again after
+    the next round. Whatever is left over goes with the rest after the
+    cutover (_delete_direct_rounds), or replicates the ordinary way if the
+    endgame gives up (_requeue_direct_rounds).
+    """
+    params = task.function_params or {}
+    ids = list(params.get("direct_round_ids") or [])
+    keep = {params.get("direct_done_snap"), params.get("shrink_snap_id"), in_flight}
+    superseded = [i for i in ids if i and i not in keep]
+    if not superseded:
+        return task
+    base = _clone_base_source(lvol, params)
+    if base is not None:
+        keep.add(base.get_id())
+        superseded = [i for i in superseded if i not in keep]
+        if not superseded:
+            return task
+    from simplyblock_core.controllers import snapshot_controller
+    dropped = []
+    for snap_id in superseded:
+        try:
+            snap = db.get_snapshot_by_id(snap_id)
+        except KeyError:
+            dropped.append(snap_id)                       # gone already
+            continue
+        if snap.status == SnapShot.STATUS_IN_DELETION:
+            dropped.append(snap_id)
+            continue
+        try:
+            ok = snapshot_controller.delete(snap_id)
+        except Exception as e:                            # noqa: BLE001
+            ok = False
+            logger.warning("cutover for lvol %s: superseded round snapshot %s not deleted: %s",
+                           lvol.get_id(), snap_id, e)
+        if ok:
+            dropped.append(snap_id)
+    if not dropped:
+        return task
+    logger.info("cutover for lvol %s: deleted %d superseded round snapshot(s) (%s); "
+                "keeping %s", lvol.get_id(), len(dropped), ", ".join(dropped),
+                ", ".join(sorted(k for k in keep if k)))
+    xfer_timing.stamp("direct_rounds_dropped", lvol=lvol.get_id(), n=len(dropped),
+                      round=params.get("shrink_round"))
+    return _record(task, direct_round_ids=[i for i in ids if i not in dropped])
 
 
 def _submit_direct_round(task, lvol):
@@ -1829,7 +1899,7 @@ def _final_delta_estimate(params):
 _ENDGAME_ROUND_PARAMS = ("shrink_snap_id", "shrink_round", "shrink_round_times",
                          "shrink_started_at", "shrink_round_done_at",
                          "direct_rounds", "direct_xfer_node", "direct_submits",
-                         "direct_done_snap")
+                         "direct_done_snap", "direct_round_ids")
 
 
 def _abandon_endgame(task, lvol, reason) -> NoReturn:

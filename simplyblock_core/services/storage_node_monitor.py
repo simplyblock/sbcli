@@ -1738,6 +1738,10 @@ def _ana_failover_once(node) -> bool:
 #: lvstore key -> monotonic time of the last takeover attempt (rate limit).
 _leaderless_takeover_tried: dict[tuple, float] = {}
 LEADERLESS_TAKEOVER_INTERVAL_SEC = 30
+#: lvstore key -> monotonic time the restart-time precheck last ran (it asks
+#: the node agent; the monitor cycles every few seconds).
+_leaderless_precheck_tried: dict[tuple, float] = {}
+LEADERLESS_PRECHECK_INTERVAL_SEC = 10
 
 
 def _member_lvstores(snode):
@@ -1775,9 +1779,22 @@ def _take_over_leaderless_lvstores(snode):
     makes a node leader only after every other member is proven non-leader or
     SPDK-dead, twice, LEADERSHIP_SAFETY_WINDOW_SEC apart. Replication itself
     still never grants leadership; this is the node-offline handling of the
-    control plane. Not done:
-      * while a restart task of the node is RUNNING (the restart flow owns the
-        lvstore's leadership and port blocks during its phases);
+    control plane.
+
+    A CRASHED member is restarted automatically, so it is OFFLINE only for
+    seconds and its restart task exists from then on -- and an active restart
+    task blocked every grant (_leadership_moving_tasks_active). bf24
+    2026-11-14 (also bf21, bf23): the target primary of LVS_22 crashed, its
+    restart started 12 s later, and the lvstore had no leader until the
+    restarted node took it back ~110 s after the crash; replication into it
+    sat suspended all along. The restart owns the leadership only once its
+    handoff can run, i.e. once the node's SPDK runs again: until then
+    (restart_before_lvstore_handoff: SPDK confirmed down by the node agent,
+    no restart phase for the lvstore) the takeover runs during the restart
+    too, and the restart's handoff later treats the new leader as the acting
+    leader it quiesces and demotes. Not done:
+      * for an lvstore whose restart handoff can have begun (the node's SPDK
+        runs, cannot be confirmed down, or a phase is recorded);
       * on sync-replication clusters (sites; the passive triplet must stay
         leaderless) and on two-node arbitrated clusters (the arbiter owns
         leadership there);
@@ -1788,9 +1805,8 @@ def _take_over_leaderless_lvstores(snode):
     if storage_node_ops._cluster_two_node_arbitrated(snode.cluster_id, db=db):
         return
     try:
-        task_id = tasks_controller.get_active_node_restart_task(snode.cluster_id, snode.get_id())
-        if task_id and db.get_task_by_id(task_id).status == JobSchedule.STATUS_RUNNING:
-            return
+        restarting = bool(tasks_controller.get_active_node_restart_task(
+            snode.cluster_id, snode.get_id()))
     except Exception as e:                                  # noqa: BLE001
         logger.debug("Restart-task lookup for %s failed: %s", snode.get_id(), e)
         return
@@ -1801,19 +1817,30 @@ def _take_over_leaderless_lvstores(snode):
         now = time.monotonic()
         if now - _leaderless_takeover_tried.get(key, -1e9) < LEADERLESS_TAKEOVER_INTERVAL_SEC:
             continue
+        kwargs = {}
+        if restarting:
+            if now - _leaderless_precheck_tried.get(key, -1e9) < LEADERLESS_PRECHECK_INTERVAL_SEC:
+                continue
+            _leaderless_precheck_tried[key] = now
+            ok, why = storage_node_ops.restart_before_lvstore_handoff(snode.get_id(), lvs_name)
+            if not ok:
+                logger.debug("No leader takeover for %s: %s", lvs_name, why)
+                continue
+            kwargs["pre_handoff_restart_of"] = snode.get_id()
         _leaderless_takeover_tried[key] = now
         try:
-            leader, _ = storage_node_ops.find_leader_with_failover(members, lvs_name)
+            leader, _ = storage_node_ops.find_leader_with_failover(members, lvs_name, **kwargs)
         except Exception as e:                              # noqa: BLE001
-            logger.error("Leader takeover for %s (member %s offline) failed: %s",
-                         lvs_name, snode.get_id(), e)
+            logger.error("Leader takeover for %s (member %s %s) failed: %s",
+                         lvs_name, snode.get_id(), snode.status, e)
             continue
         if leader is None:
-            logger.warning("%s has no leader while member %s is offline; no member "
-                           "could be proven safe to lead yet", lvs_name, snode.get_id())
+            logger.warning("%s has no leader while member %s is %s; no member "
+                           "could be proven safe to lead yet", lvs_name, snode.get_id(),
+                           snode.status)
         else:
-            logger.info("%s is led by %s while member %s is offline",
-                        lvs_name, leader.get_id(), snode.get_id())
+            logger.info("%s is led by %s while member %s is %s",
+                        lvs_name, leader.get_id(), snode.get_id(), snode.status)
 
 
 def _ana_failover_rearm(node_id) -> None:
@@ -2769,6 +2796,19 @@ def check_node(snode):
             logger.error("ANA failover for node %s in removal failed: %s", snode.get_id(), e)
         logger.info(f"Node status is: {snode.status}, skipping")
         return False
+
+    # A crashed node is restarted automatically: it is OFFLINE for seconds and
+    # IN_RESTART after that, and the restart task makes this monitor skip the
+    # node altogether (both below). Its lvstores without client IO still need
+    # a leader while its SPDK is down; _take_over_leaderless_lvstores runs
+    # only for those whose restart handoff cannot have begun.
+    if snode.status in (StorageNode.STATUS_OFFLINE, StorageNode.STATUS_RESTARTING):
+        try:
+            if tasks_controller.get_active_node_restart_task(snode.cluster_id, snode.get_id()):
+                _take_over_leaderless_lvstores(snode)
+        except Exception as e:                              # noqa: BLE001
+            logger.error("Leaderless takeover for restarting node %s failed: %s",
+                         snode.get_id(), e)
 
     if snode.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_UNREACHABLE,
                             StorageNode.STATUS_SCHEDULABLE, StorageNode.STATUS_DOWN,

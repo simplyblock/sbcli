@@ -2,6 +2,8 @@
 on read/write the same way backup_config is (see Cluster.get_backup_config),
 plus the legacy-shape migration for records written before this field existed.
 """
+import json
+
 import pytest
 from pydantic import TypeAdapter, ValidationError
 
@@ -33,6 +35,21 @@ class TestKMSSettingsUnion:
     def test_vault_without_base_url_is_refused(self):
         with pytest.raises(ValidationError):
             TypeAdapter(KMSSettings).validate_python({"provider": "vault"})
+
+    def test_base_url_serializes_to_str_without_json_mode(self):
+        """base_url is an AnyUrl, not JSON-native. The field owns its own
+        conversion to str (like BackupLocation._serialize_endpoint), so
+        plain model_dump() is already storage-safe and callers never need
+        mode="json" -- which would mask a SecretStr sibling to "**********"
+        the moment this union grows one (e.g. KMS credentials)."""
+        settings = TypeAdapter(KMSSettings).validate_python({
+            "provider": "vault", "base_url": "https://vault.example.com:8200",
+        })
+
+        dumped = settings.model_dump(exclude_none=True)
+
+        assert dumped["base_url"] == "https://vault.example.com:8200/"
+        json.dumps(dumped)
 
     def test_extra_fields_are_refused(self):
         """Catches a typo (or a stale field from a provider that was removed)
