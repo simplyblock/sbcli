@@ -104,3 +104,40 @@ def test_socket_ramdisk_is_small():
             for v in (d.get("spec", {}).get("template", {}).get("spec", d.get("spec", {})).get("volumes") or [])]
     socket_dir = next(v for v in vols if v["name"] == "socket-dir")
     assert socket_dir["emptyDir"]["sizeLimit"] == "16Mi"
+
+
+def test_nvme_capacity_reads_subsystem_level_namespaces():
+    # newer nvme-cli lists the namespace under the subsystem, not the controller
+    listing = {"Devices": [{"Subsystems": [
+        {"Namespaces": [{"PhysicalSize": 2 * TiB}],
+         "Controllers": [{"Address": "0000:00:01.0"}]},
+        {"Namespaces": [{"PhysicalSize": 3 * TiB}],
+         "Controllers": [{"Address": "0000:00:02.0", "Namespaces": []}]},
+    ]}]}
+    with patch.object(utils, "get_nvme_list_verbose", return_value=json.dumps(listing)):
+        assert utils.get_total_capacity_of_nvme_devices(["0000:00:01.0", "0000:00:02.0"]) == 5 * TiB
+
+
+def test_nvme_capacity_counts_each_device_once():
+    # a dual-port device shows the same address under two subsystems' controllers
+    ns = [{"PhysicalSize": TiB}]
+    listing = {"Devices": [{"Subsystems": [
+        {"Controllers": [{"Address": "0000:00:01.0", "Namespaces": ns}]},
+        {"Controllers": [{"Address": "0000:00:01.0", "Namespaces": ns}]},
+    ]}]}
+    with patch.object(utils, "get_nvme_list_verbose", return_value=json.dumps(listing)):
+        assert utils.get_total_capacity_of_nvme_devices(["0000:00:01.0"]) == TiB
+
+
+def test_nvme_capacity_is_0_when_nvme_cli_fails():
+    with patch.object(utils, "get_nvme_list_verbose", return_value="nvme: command not found"):
+        assert utils.get_total_capacity_of_nvme_devices(["0000:00:01.0"]) == 0
+
+
+def test_capacity_from_node_info_only_counts_the_nodes_devices():
+    devices = [{"address": "0000:00:01.0", "size": 4 * TiB},
+               {"address": "0000:00:02.0", "size": 4 * TiB},
+               {"address": "0000:00:09.0", "size": 4 * TiB}]  # boot disk / not ours
+    assert utils.nvme_capacity_from_node_info(devices, ["0000:00:01.0", "0000:00:02.0"]) == 8 * TiB
+    assert utils.nvme_capacity_from_node_info(None, ["0000:00:01.0"]) == 0
+    assert utils.nvme_capacity_from_node_info(devices, []) == 0

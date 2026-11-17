@@ -2525,18 +2525,42 @@ def node_config_min_sys_memory(node) -> int:
 
 
 def get_total_capacity_of_nvme_devices(pci_lst):
-    json_string = get_nvme_list_verbose()
-    data = json.loads(json_string)
+    """Raw capacity of the kernel-visible NVMe devices among pci_lst, from
+    `nvme list -v`: summed over all of them, each PCI address once. The
+    namespace is listed under the controller or, in newer nvme-cli, under the
+    subsystem. Devices already bound to SPDK are not visible (0)."""
+    try:
+        data = json.loads(get_nvme_list_verbose())
+    except (ValueError, TypeError):
+        logger.warning("Cannot read the NVMe device list; capacity unknown")
+        return 0
+    wanted = set(pci_lst or [])
+    seen: set = set()
     total_capacity = 0
-    for device_entry in data.get('Devices', []):
-        for subsystem in device_entry.get('Subsystems', []):
-            for controller in subsystem.get('Controllers', []):
+    for device_entry in data.get('Devices', []) or []:
+        for subsystem in device_entry.get('Subsystems', []) or []:
+            for controller in subsystem.get('Controllers', []) or []:
                 address = controller.get("Address")
-                if len(controller.get("Namespaces") or []) > 0 and address in pci_lst:
-                    # sum over all devices (it used to keep only the last one)
-                    total_capacity += int(controller.get("Namespaces")[0].get("PhysicalSize") or 0)
+                if address not in wanted or address in seen:
+                    continue
+                namespaces = controller.get("Namespaces") or subsystem.get("Namespaces") or []
+                if namespaces:
+                    seen.add(address)
+                    total_capacity += int(namespaces[0].get("PhysicalSize") or 0)
 
     return int(total_capacity)
+
+
+def nvme_capacity_from_node_info(nvme_devices, pci_lst) -> int:
+    """Raw capacity of the devices among pci_lst in a node agent's info
+    `nvme_devices` (address, size), each address once."""
+    wanted = set(pci_lst or [])
+    sizes = {}
+    for dev in nvme_devices or []:
+        address = dev.get("address") if isinstance(dev, dict) else None
+        if address in wanted:
+            sizes[address] = max(int(dev.get("size") or 0), 0)
+    return sum(sizes.values())
 
 
 def vcpu_requirement_met(total_cores, vcpu_count):
