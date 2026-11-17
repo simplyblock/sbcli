@@ -4274,11 +4274,27 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
             logger.error("Cannot get memory info from the instance.. Exiting")
             return False
 
-        # Calculate minimum sys memory
+        # Calculate minimum sys memory: also the SPDK container's hard memory
+        # limit, so it must reflect the node's real capacity. The configured
+        # figure comes from `sn configure` (nvme-cli then, which misses devices
+        # already bound to SPDK); the agent's device list is fresh. Take the
+        # larger. lblk entries carry exact sizes.
         if spdk_sys_mem:
             minimum_sys_memory = int(utils.parse_size(spdk_sys_mem))
         else:
-            minimum_sys_memory = node_config.get("sys_memory")
+            minimum_sys_memory = int(node_config.get("sys_memory") or 0)
+            if node_config.get("lblk_devices"):
+                minimum_sys_memory = max(minimum_sys_memory, utils.node_config_min_sys_memory(node_config))
+            else:
+                ssd_pcis = node_config.get("ssd_pcis") or []
+                capacity = utils.nvme_capacity_from_node_info(node_info.get("nvme_devices"), ssd_pcis)
+                if ssd_pcis and capacity <= 0 and minimum_sys_memory <= constants.SYS_MEMORY_BASE_BYTES:
+                    logger.error(
+                        "Cannot determine the capacity of the NVMe devices %s on %s (not visible to the "
+                        "kernel, or nvme-cli failed); the SPDK memory limit would be too low. Make the "
+                        "devices visible (unbind them from SPDK) or pass spdk_sys_mem.", ssd_pcis, node_addr)
+                    return False
+                minimum_sys_memory = max(minimum_sys_memory, utils.sys_memory_for_capacity(capacity))
         max_lvol = node_config.get("max_lvol")
         # Clamp rather than fail: a config file generated before the cap was
         # enforced (or hand-edited) can carry a larger value, and refusing the
@@ -9471,7 +9487,11 @@ def _restart_storage_node_impl(
     # if not satisfied:
     #    logger.error(
     #        f"Not enough memory for the provided max_lvo: {snode.max_lvol}, max_snap: {snode.max_snap}, max_prov: {utils.humanbytes(snode.max_prov)}.. Exiting")
-    minimum_sys_memory = snode.minimum_sys_memory or 0
+    # The SPDK container's memory limit: recomputed from the node's devices
+    # (the stored figure may come from an older formula), else the stored one.
+    raw_capacity = sum(max(int(d.size or 0), 0) for d in (snode.nvme_devices or []))
+    minimum_sys_memory = (utils.sys_memory_for_capacity(raw_capacity) if raw_capacity
+                          else snode.minimum_sys_memory or 0)
     snode.spdk_mem = minimum_hp_memory
 
     spdk_debug = snode.spdk_debug

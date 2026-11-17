@@ -305,7 +305,7 @@ class TestNodeConfigHelpers(unittest.TestCase):
 
     def test_min_sys_memory_lblk_uses_capacity_factor(self):
         node = {"lblk_devices": [{"size": 50 << 30}, {"size": 50 << 30}]}
-        expected = 2147483648 + int((100 << 30) * utils.SYS_MEMORY_STORAGE_FACTOR)
+        expected = utils.sys_memory_for_capacity(100 << 30)
         self.assertEqual(utils.node_config_min_sys_memory(node), expected)
         # ~2.2 GiB total — NOT 2 GiB + full capacity (the bug the first AWS
         # lblk deploy hit: 102 GiB demanded on 32 GiB hosts).

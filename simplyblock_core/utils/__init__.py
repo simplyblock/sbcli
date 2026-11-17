@@ -760,12 +760,26 @@ def _bdev_io_pool_size_for_cores(cores):
 
 
 def calculate_minimum_hp_memory(small_pool_count, large_pool_count, lvol_count, max_prov, cpu_count):
+    """Hugepage memory SPDK needs on a node: its own budget
+    (_hp_memory_for_node), but at least that of the reference node
+    (HP_REFERENCE_CORES / HP_REFERENCE_SUBSYSTEMS), so all usual node sizes
+    get one figure. max_prov is not used here (callers apply it as a floor).
+    """
+    ref_small, ref_large = calculate_pool_count(0, 0, constants.HP_REFERENCE_CORES,
+                                                constants.HP_REFERENCE_CORES,
+                                                constants.HP_REFERENCE_SUBSYSTEMS)
+    return max(_hp_memory_for_node(small_pool_count, large_pool_count, lvol_count, cpu_count),
+               _hp_memory_for_node(ref_small, ref_large, constants.HP_REFERENCE_SUBSYSTEMS,
+                                   constants.HP_REFERENCE_CORES))
+
+
+def _hp_memory_for_node(small_pool_count, large_pool_count, lvol_count, cpu_count):
     """Hugepage memory SPDK needs on a node: the explicit sum of its consumers
-    (see the hugepage budget in constants), times HP_OVERHEAD_FACTOR.
+    (see the hugepage budget in constants), times HP_OVERHEAD_FACTOR, plus
+    HP_RESERVE_BYTES.
 
     lvol_count is the node's max subsystems (each with CLIENT_QPAIR_COUNT IO
-    qpairs + 1 admin qpair from its host); cpu_count its SPDK cores. max_prov
-    is not used here (callers apply it as a floor).
+    qpairs + 1 admin qpair from its host); cpu_count its SPDK cores.
     """
     cpu_count = max(int(cpu_count or 0), 1)
     lvol_count = max(int(lvol_count or 0), 0)
@@ -779,11 +793,20 @@ def calculate_minimum_hp_memory(small_pool_count, large_pool_count, lvol_count, 
     threads = constants.HP_THREAD_BYTES_BASE + constants.HP_THREAD_BYTES_PER_CORE * cpu_count
     total = (pools + bdev_io + constants.HP_DISTRIB_DATA_BUF_BYTES + constants.HP_MD_JOURNAL_BYTES
              + qpairs + constants.HP_BLOBSTORE_BYTES + threads)
-    return int(total * constants.HP_OVERHEAD_FACTOR)
+    return int(total * constants.HP_OVERHEAD_FACTOR) + constants.HP_RESERVE_BYTES
+
+
+def sys_memory_for_capacity(raw_capacity_bytes) -> int:
+    """System (non-hugepage) memory of the SPDK container for a node with this
+    much raw device capacity: SYS_MEMORY_BASE_BYTES + SYS_MEMORY_PER_TIB_BYTES
+    per TiB. Also the container's hard memory limit."""
+    capacity = max(int(raw_capacity_bytes or 0), 0)
+    return int(constants.SYS_MEMORY_BASE_BYTES
+               + capacity * constants.SYS_MEMORY_PER_TIB_BYTES // (1024 ** 4))
 
 
 def calculate_minimum_sys_memory(ssd_list):
-    minimum_sys_memory = 2147483648 + get_total_capacity_of_nvme_devices(ssd_list)
+    minimum_sys_memory = sys_memory_for_capacity(get_total_capacity_of_nvme_devices(ssd_list))
 
     logger.debug(f"Minimum system memory is {humanbytes(minimum_sys_memory)}")
     return int(minimum_sys_memory)
@@ -2489,37 +2512,56 @@ def lblk_device_serials(lblk_devices) -> set[str]:
 # "RAM 4GB min. Plus 0.2% of the storage." The nvme path nominally adds the
 # FULL device capacity but in practice always measures 0 — capacity is read
 # via `nvme list` AFTER the devices were unbound from the kernel driver. The
-# lblk path knows the real sizes, so it applies the documented 0.2% factor
-# (2026-08-05 AWS run: summing full capacity demanded 102 GiB sys memory for
-# 2x50G EBS volumes on 32 GiB hosts and failed every `sn configure --lblk`).
-SYS_MEMORY_STORAGE_FACTOR = 0.002
-
-
 def node_config_min_sys_memory(node) -> int:
-    """Minimum system memory for a node-config entry: 2 GiB + 0.2% of total
-    device capacity. lblk entries carry their sizes; nvme goes through
-    nvme-cli."""
+    """Minimum system memory for a node-config entry: sys_memory_for_capacity
+    of its total device capacity. lblk entries carry their sizes; nvme goes
+    through nvme-cli."""
     lblk = node.get("lblk_devices") or []
     if lblk:
         capacity = sum(int(e.get("size") or 0) for e in lblk)
-        total = 2147483648 + int(capacity * SYS_MEMORY_STORAGE_FACTOR)
+        total = sys_memory_for_capacity(capacity)
         logger.debug(f"Minimum system memory is {humanbytes(total)}")
         return int(total)
     return calculate_minimum_sys_memory(node.get("ssd_pcis") or [])
 
 
 def get_total_capacity_of_nvme_devices(pci_lst):
-    json_string = get_nvme_list_verbose()
-    data = json.loads(json_string)
+    """Raw capacity of the kernel-visible NVMe devices among pci_lst, from
+    `nvme list -v`: summed over all of them, each PCI address once. The
+    namespace is listed under the controller or, in newer nvme-cli, under the
+    subsystem. Devices already bound to SPDK are not visible (0)."""
+    try:
+        data = json.loads(get_nvme_list_verbose())
+    except (ValueError, TypeError):
+        logger.warning("Cannot read the NVMe device list; capacity unknown")
+        return 0
+    wanted = set(pci_lst or [])
+    seen: set = set()
     total_capacity = 0
-    for device_entry in data.get('Devices', []):
-        for subsystem in device_entry.get('Subsystems', []):
-            for controller in subsystem.get('Controllers', []):
+    for device_entry in data.get('Devices', []) or []:
+        for subsystem in device_entry.get('Subsystems', []) or []:
+            for controller in subsystem.get('Controllers', []) or []:
                 address = controller.get("Address")
-                if len(controller.get("Namespaces")) > 0 and address in pci_lst:
-                    total_capacity = controller.get("Namespaces")[0].get("PhysicalSize")
+                if address not in wanted or address in seen:
+                    continue
+                namespaces = controller.get("Namespaces") or subsystem.get("Namespaces") or []
+                if namespaces:
+                    seen.add(address)
+                    total_capacity += int(namespaces[0].get("PhysicalSize") or 0)
 
     return int(total_capacity)
+
+
+def nvme_capacity_from_node_info(nvme_devices, pci_lst) -> int:
+    """Raw capacity of the devices among pci_lst in a node agent's info
+    `nvme_devices` (address, size), each address once."""
+    wanted = set(pci_lst or [])
+    sizes = {}
+    for dev in nvme_devices or []:
+        address = dev.get("address") if isinstance(dev, dict) else None
+        if address in wanted:
+            sizes[address] = max(int(dev.get("size") or 0), 0)
+    return sum(sizes.values())
 
 
 def vcpu_requirement_met(total_cores, vcpu_count):

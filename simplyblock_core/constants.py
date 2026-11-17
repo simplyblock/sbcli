@@ -467,9 +467,11 @@ BDEV_IO_CACHE_SIZE = 64
 BDEV_IO_POOL_SIZE = 65535
 BDEV_IO_POOL_THREADS_PER_CORE = 4
 # Bytes per bdev_io: sizeof(spdk_bdev_io) + the largest module context
-# (bdev_get_io_pool_stats bdev_io_size, ~53 KiB with distrib's t_task inline).
-# Kept at this upper value even once distrib's task leaves the bdev_io.
-BDEV_IO_SIZE_ESTIMATE = 53 * 1024
+# (bdev_get_io_pool_stats bdev_io_size). 1792 B measured on ultra main since
+# #241 (7f08f4c2) moved distrib's t_task out of the bdev_io (53280 B before),
+# rounded up to 2 KiB. Needs an ultra image with #241; release branches whose
+# ultra lacks it keep 53 KiB.
+BDEV_IO_SIZE_ESTIMATE = 2 * 1024
 # distrib parity/recovery buffers in flight at saturation (node-wide).
 HP_DISTRIB_DATA_BUF_BYTES = 512 * 1024 * 1024
 # Blobstore md journal: 64 MiB per lvstore, up to 3 lvstores (primary,
@@ -488,6 +490,24 @@ HP_BLOBSTORE_BYTES = 272 * 1024 * 1024
 HP_THREAD_BYTES_BASE = 16 * 1024 * 1024     # SPDK message mempool etc.
 HP_THREAD_BYTES_PER_CORE = 4 * 1024 * 1024  # thread rings, per-thread channels
 HP_OVERHEAD_FACTOR = 1.15                   # DPDK heap headers and fragmentation
+# Unassigned hugepage reserve, added after HP_OVERHEAD_FACTOR. When the bdev_io
+# estimate dropped from 53 KiB to 2 KiB (ultra #241), the budget was lowered by
+# only 2 GiB, not by the full amount freed: the rest (~1.67 GiB) stays as a reserve.
+HP_RESERVE_BYTES = (int(BDEV_IO_POOL_SIZE * (53 * 1024 - BDEV_IO_SIZE_ESTIMATE) * HP_OVERHEAD_FACTOR)
+                    - 2 * 1024 ** 3)
+# One hugepage figure for all usual node sizes: every node gets at least the
+# budget of this reference node (6.5 GiB); only larger nodes get more. Smaller
+# nodes would save under 2.3 GiB, which isn't worth a per-size figure.
+HP_REFERENCE_CORES = 32
+HP_REFERENCE_SUBSYSTEMS = 250
+# System (non-hugepage) memory of the SPDK container, also its hard memory
+# limit (k8s request = limit, docker mem_limit): a base for the process
+# (binary, DPDK, threads, RPC) plus the metadata that grows with capacity --
+# distrib placement maps (544-1504 B per 4 MiB page, 3 copies) and alceml
+# (~170 B per 2 MiB page): ~0.6 GiB per TiB with compact page maps, 1.3 GiB
+# with bitmap page maps. The limit takes the upper value.
+SYS_MEMORY_BASE_BYTES = 2 * 1024 ** 3
+SYS_MEMORY_PER_TIB_BYTES = int(1.3 * 1024 ** 3)
 EXTRA_SYS_MEMORY = 0.10
 
 INSTANCE_STORAGE_DATA = {
