@@ -1536,3 +1536,8 @@ LEADERSHIP_SAFETY_WINDOW_SEC = 10
 # whose process died: snapshot_controller.reap_snapshot_intents rolls it back.
 # Far above any create (lock waits included).
 SNAPSHOT_INTENT_REAP_SEC = 600
+
+# How long the post-cutover --delete-source waits for every host connected to
+# the source to show a controller on the target (ns_host_guard); the CSI
+# reconnect loop connects new paths within seconds.
+REPL_NS_HOST_RECONNECT_WAIT_SEC = 120
