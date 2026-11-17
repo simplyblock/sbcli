@@ -473,11 +473,11 @@ KNOWN_FAILING = {
                                               "takeover waits on the frozen primary's data devices "
                                               "(fix: ultra #219 with F24, F25 and F26)"),
                                               "F23"),
-    "F6b-restart-precheck-fenced-peer": ("the restart's jc_compression precheck on a fenced peer "
+    "F6b-restart-precheck-fenced-peer": (("the restart's jc_compression precheck on a fenced peer "
                                          "whose JC is in error mode answers -6 until jc_unfence; "
                                          "the arbiter unfences only after the restarting node is "
                                          "healthy, so the restart the partition recovery hands "
-                                         "over aborts (review of #1559)",
+                                         "over aborts (review of #1559)"),
                                          "code -6"),
     "F21-takeover-reader-frozen-peer-jm": (("F21: the survivor's takeover reader picks the frozen "
                                            "peer's JM and waits for the 8 s NVMe IO timeout "
