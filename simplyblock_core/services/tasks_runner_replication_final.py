@@ -26,6 +26,7 @@ from datetime import datetime
 from typing import Any, NoReturn
 
 from simplyblock_core import constants, db_controller, utils, xfer_timing
+from simplyblock_core.controllers import ns_host_guard
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol, LVolReplication
 from simplyblock_core.models.snapshot import SnapShot
@@ -353,6 +354,21 @@ def _delete_source_if_requested(task):
     try:
         from simplyblock_core.controllers import lvol_controller
         src_lvol = db.get_lvol_by_id(src_lvol_id)
+        # A host still connected only to the source would lose its block
+        # device with it; its CSI connects the target within seconds.
+        deadline = time.time() + constants.REPL_NS_HOST_RECONNECT_WAIT_SEC
+        while True:
+            blocked = ns_host_guard.removal_blocked(
+                getattr(src_lvol, "nqn", ""), ns_host_guard.volume_node_ids(src_lvol),
+                _target_node_ids(task.function_params),
+                f"deleting migrated-away source {src_lvol_id}")
+            if not blocked or time.time() >= deadline:
+                break
+            time.sleep(5)
+        if blocked:
+            logger.error(f"{blocked}; the source volume is kept and must be "
+                         f"deleted once the host runs on the target")
+            return
         logger.info(f"Cutover committed with --delete-source: deleting "
                     f"source volume {src_lvol_id}")
         lvol_controller.delete_lvol(src_lvol)
@@ -858,6 +874,17 @@ def task_runner(task: JobSchedule, tasks):
         # what the source volume's delta is taken against.
         task = _rebase_on_last_round(task)
         params = task.function_params
+
+    # Every host on the source must also be connected to the target before
+    # the freeze: the flip leaves the source paths inaccessible, and a host
+    # without a target controller would have no usable path (its CSI connects
+    # the target within seconds of the clone's export).
+    blocked = ns_host_guard.removal_blocked(
+        lvol.nqn, ns_host_guard.volume_node_ids(lvol), _target_node_ids(params),
+        f"cutover freeze of {lvol_id}")
+    if blocked:
+        _record(task, last_error=blocked)
+        raise TaskDefer(blocked)
 
     # Marks the freeze as running: a plan cancel or a policy detach leaves a
     # freezing cutover alone (tasks_controller.cutover_is_freezing). Written
@@ -2045,8 +2072,34 @@ def _abandon_prepared_cutover(task):
     return task
 
 
-def _delete_cutover_clone(clone_id):
-    """Start deleting the clone; True once it is gone, False while it is not."""
+def _target_node_ids(params):
+    """The nodes exporting the prepared cutover clone, if there is one."""
+    clone_id = (params or {}).get("tgt_lvol_id")
+    if not clone_id:
+        return []
+    try:
+        return ns_host_guard.volume_node_ids(db.get_lvol_by_id(clone_id))
+    except KeyError:
+        return []
+
+
+def _source_node_ids(lvol_id):
+    try:
+        return ns_host_guard.volume_node_ids(db.get_lvol_by_id(lvol_id))
+    except KeyError:
+        return []
+
+
+class CloneRemovalBlocked(Exception):
+    """A host reaches the volume only through the clone's namespace."""
+
+
+def _delete_cutover_clone(clone_id, src_lvol_id=None):
+    """Start deleting the clone; True once it is gone, False while it is not.
+
+    Raises CloneRemovalBlocked while a host is connected to the clone's
+    namespace and to none of the source's (ns_host_guard): deleting it would
+    take that host's block device away for good (bed bf26 2026-11-17)."""
     from simplyblock_core.controllers import lvol_controller
     try:
         clone = db.get_lvol_by_id(clone_id)
@@ -2055,6 +2108,12 @@ def _delete_cutover_clone(clone_id):
     if clone.status == LVol.STATUS_DELETED:
         return True
     if clone.status != LVol.STATUS_IN_DELETION:
+        blocked = ns_host_guard.removal_blocked(
+            clone.nqn, ns_host_guard.volume_node_ids(clone),
+            _source_node_ids(src_lvol_id) if src_lvol_id else [],
+            f"discarding cutover clone {clone_id}")
+        if blocked:
+            raise CloneRemovalBlocked(blocked)
         lvol_controller.delete_lvol(clone)
     return False
 
@@ -2077,7 +2136,13 @@ def _discard_failed_cutover(task):
             raise TaskDefer("waiting for SPDK to end the failed final step "
                             "before discarding its clone")
         try:
-            gone = _delete_cutover_clone(clone_id)
+            gone = _delete_cutover_clone(clone_id, params.get("lvol_id"))
+        except CloneRemovalBlocked as e:
+            # Not counted against the discard deadline: the host is the one
+            # that has to come back, and the source keeps serving meanwhile.
+            logger.warning(str(e))
+            _record(task, last_error=str(e))
+            raise TaskDefer(str(e))
         except Exception as e:                          # noqa: BLE001
             gone = False
             task = _record(task, last_error=(
@@ -2235,9 +2300,14 @@ def _cleanup_unfinished_cutover(task):
     if not clone_id:
         return
     try:
-        _delete_cutover_clone(clone_id)
+        _delete_cutover_clone(clone_id, params.get("lvol_id"))
         logger.info("cutover task %s ended without a cutover; deleting its "
                     "clone %s", task.uuid, clone_id)
+    except CloneRemovalBlocked as e:
+        # Left exported rather than taking a host's device away; the clone is
+        # an orphan from here on and is reported loudly.
+        logger.error("cutover task %s ended without a cutover; its clone %s is "
+                     "kept: %s", task.uuid, clone_id, e)
     except Exception as e:                              # noqa: BLE001
         logger.error("cutover task %s ended without a cutover and its clone %s "
                      "could not be deleted: %s", task.uuid, clone_id, e)
