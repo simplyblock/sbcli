@@ -4898,17 +4898,12 @@ def _demote_superseded(db_controller, lvol):
     task is cancelled with the volume's other transfers. Idempotent: a volume
     already demoted with nothing replicating is left alone.
     """
+    source_node = db_controller.get_storage_node_by_id(lvol.node_id)
     if (lvol.replication_demote_state == LVol.REPLICATION_DEMOTE_DONE
             and not lvol.do_replicate):
+        # A repeated order finishes a withdrawal a member missed.
+        _withdraw_namespace(lvol, source_node)
         return {"demoted": True}
-
-    # The paths stay up. The order arrives when the site reconnects, while its
-    # copy of the application may still run: a guest whose disk goes dark hangs
-    # on shutdown, the site is never cleaned up, and Ramen never makes it
-    # secondary (bed run 20261117-0616). What it writes stays on this site and
-    # ships nowhere. Ramen's own DemoteVolume comes once the workload is
-    # unmounted, and a later relocate's cutover fences as it always does.
-    source_node = db_controller.get_storage_node_by_id(lvol.node_id)
 
     def _demoted(fresh):
         # Cleared before the tasks are cancelled: the cadence reads
@@ -4921,9 +4916,54 @@ def _demote_superseded(db_controller, lvol):
     tasks = db_controller.get_job_tasks(source_node.cluster_id)
     _cancel_snapshot_replication_tasks(db_controller, lvol.get_id(), tasks)
     _cancel_replication_cutover(lvol.get_id(), tasks)
+    _withdraw_namespace(lvol, source_node)
     logger.info("Volume %s demoted as superseded (failed over elsewhere): "
-                "replication stopped, no demote cut, paths left up", lvol.get_id())
+                "replication stopped, no demote cut, namespace withdrawn", lvol.get_id())
     return {"demoted": True}
+
+
+def _withdraw_namespace(lvol, primary_node):
+    """Remove *lvol*'s namespace from its subsystem on every member that may
+    still serve it: the superseded source's I/O cut.
+
+    The cut has to fail the I/O, not queue it. The order arrives when the site
+    reconnects, while its copy of the application may still run. An ANA cut
+    (every path inaccessible) leaves the client's multipath with live
+    controllers, so it queues the guest's I/O indefinitely: the guest hangs on
+    shutdown, the site is never cleaned up, and Ramen never makes it secondary
+    (bed run 20261117-0616). With the namespace gone from every controller the
+    client has no path left and fails the I/O, so the guest gets an error and
+    can stop.
+
+    The subsystem itself stays: it may carry other volumes' namespaces, and
+    the volume's delete removes it as usual. Peers first, the primary last,
+    as in the ANA fence. A member that is offline is skipped; one that cannot
+    be reached is logged and left for a repeated order. A node restart before
+    the cleanup adds the namespace back (the restart recreates it from the
+    record), which leaves the volume as a replication-only fence.
+    """
+    members = replication_final_step._lvs_members(primary_node)
+    for member in members[1:] + members[:1]:
+        if member.status not in replication_final_step._FENCEABLE:
+            continue
+        try:
+            rpc_client = member.rpc_client()
+            subsystem = rpc_client.subsystem_get(lvol.nqn)
+            for ns in (subsystem or {}).get("namespaces", []):
+                if ns.get("uuid") != lvol.get_ns_uuid():
+                    continue
+                rpc_client.nvmf_subsystem_remove_ns(lvol.nqn, ns["nsid"])
+                confirmed, _ = _confirm_namespace_removed(rpc_client, lvol.nqn, ns["nsid"])
+                if confirmed:
+                    logger.info("Superseded %s: namespace %s withdrawn on %s",
+                                lvol.get_id(), ns["nsid"], member.get_id()[:8])
+                else:
+                    logger.error("Superseded %s: namespace %s still listed on %s after "
+                                 "the remove; a repeated order retries it",
+                                 lvol.get_id(), ns["nsid"], member.get_id()[:8])
+        except (RPCException, OSError) as e:
+            logger.error("Superseded %s: namespace not withdrawn on %s (%s); a repeated "
+                         "order retries it", lvol.get_id(), member.get_id()[:8], e)
 
 
 def is_lvol_removal_deferred_for_pending_failover(db_controller, lvol):

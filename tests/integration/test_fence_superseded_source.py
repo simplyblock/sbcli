@@ -7,11 +7,12 @@ superseded: the layer above (the DR hub, a person, any other component that
 detects the failover) orders it, through the operator, as a demote with
 ``superseded=True``. That demote stops each member's replication and takes no
 demote cut: B's data is stale, and shipping it would land as one more
-generation of B's group on A. It leaves the paths up: the order arrives while
-B's copy of the application may still run, and a guest whose disk goes dark
-hangs on shutdown, so B is never cleaned up and Ramen never makes it secondary
-(bed run 20261117-0616). Ramen's own DemoteVolume, which comes only once the
-workload is unmounted, cuts the paths.
+generation of B's group on A. It cuts the I/O by withdrawing the namespace on
+every member, not with an ANA cut: the order arrives while B's copy of the
+application may still run, and on all-inaccessible paths the client queues the
+guest's I/O indefinitely, so the guest hangs on shutdown, B is never cleaned up
+and Ramen never makes it secondary (bed run 20261117-0616). With the namespace
+gone the client fails the I/O, and the guest can stop.
 
 The order and Ramen's own DemoteVolume can reach B in either order, and B's old
 replication tasks can resume before either. So the new primary also guards its
@@ -29,6 +30,7 @@ from simplyblock_core.controllers import consistency_group_controller as cgc
 from simplyblock_core.controllers import lvol_controller
 from simplyblock_core.models.lvol_model import LVol, LVolReplication
 from simplyblock_core.models.replication import ConsistencyGroup
+from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.peer import service
 from simplyblock_core.peer.protocol import LandingRequest
 from simplyblock_core.services import replication_final_step
@@ -85,15 +87,15 @@ def _group(db, cluster, vols):
 
 # ------------------------------------------------------------------ one volume
 
-def test_a_superseded_demote_stops_replication_and_leaves_the_paths_up(
-        db, fences, no_snapshots):
+def test_a_superseded_demote_stops_replication_without_an_ana_cut(
+        db, fences, no_snapshots, spdk):
     cluster, (vol,) = _replicating(db)
     task, _ = deferred._task(db, cluster, vol)
 
     assert lvol_controller.demote_lvol(vol.get_id(), superseded=True) == {"demoted": True}
 
     stored = db.get_lvol_by_id(vol.get_id())
-    assert fences == [], "the paths stay up: the old site's workload may still run"
+    assert fences == [], "no ANA cut: inaccessible paths queue the old site's I/O"
     assert no_snapshots == [], "no demote cut: the data is stale"
     assert stored.replication_demote_state == LVol.REPLICATION_DEMOTE_DONE
     assert stored.do_replicate is False, "nothing ships toward the new primary"
@@ -171,6 +173,144 @@ def test_a_superseded_order_for_an_empty_group_is_done(db, fences):
 
     assert cgc.demote_group(group, superseded=True)["demoted"] is True
     assert fences == []
+
+
+# ------------------------------------------------------------------ the namespace withdrawal
+
+class _Member:
+    """One member's SPDK, as far as the withdrawal touches it: its subsystems
+    and their namespaces."""
+
+    def __init__(self, node_id, removed, reachable=True):
+        self.node_id = node_id
+        self.removed = removed
+        self.reachable = reachable
+        self.namespaces = {}
+        self.deleted = []
+
+    def subsystem_get(self, nqn):
+        if not self.reachable:
+            raise ConnectionError(f"{self.node_id} unreachable")
+        if nqn not in self.namespaces:
+            return None
+        return {"nqn": nqn, "namespaces": [dict(ns) for ns in self.namespaces[nqn]]}
+
+    def nvmf_subsystem_remove_ns(self, nqn, nsid):
+        self.removed.append((self.node_id, nqn, nsid))
+        self.namespaces[nqn] = [ns for ns in self.namespaces[nqn] if ns["nsid"] != nsid]
+        return True
+
+    def subsystem_delete(self, nqn):
+        self.deleted.append(nqn)
+        return True
+
+
+class _Spdk(dict):
+    def __init__(self):
+        super().__init__()
+        self.removed = []
+
+    def __missing__(self, node_id):
+        self[node_id] = _Member(node_id, self.removed)
+        return self[node_id]
+
+    def serve(self, vol, *node_ids, nsid=1):
+        for node_id in node_ids:
+            self[node_id].namespaces.setdefault(vol.nqn, []).append(
+                {"nsid": nsid, "uuid": vol.get_ns_uuid()})
+
+
+@pytest.fixture(autouse=True)
+def spdk(monkeypatch):
+    """Every node's SPDK, so no test of the order reaches for a real node."""
+    s = _Spdk()
+    monkeypatch.setattr(StorageNode, "rpc_client", lambda node, *a, **kw: s[node.get_id()])
+    return s
+
+
+def _with_secondary(db, vol, status=StorageNode.STATUS_ONLINE):
+    """Give *vol*'s node an HA peer on the same site; returns (primary, secondary)."""
+    primary = db.get_storage_node_by_id(vol.node_id)
+    cluster = db.get_cluster_by_id(primary.cluster_id)
+    secondary = stack._seed_node(db, cluster, "a2", "", status=status)
+    primary.secondary_node_id = secondary.get_id()
+    primary.write_to_db(db.kv_store)
+    return primary, secondary
+
+
+def test_a_superseded_demote_withdraws_the_namespace_from_every_member(
+        db, fences, no_snapshots, spdk):
+    """The cut fails the old site's IO instead of queuing it: a guest still
+    running there gets an error and can shut down."""
+    _, (vol,) = _replicating(db)
+    primary, secondary = _with_secondary(db, vol)
+    spdk.serve(vol, primary.get_id(), secondary.get_id())
+
+    assert lvol_controller.demote_lvol(vol.get_id(), superseded=True) == {"demoted": True}
+
+    assert spdk.removed == [(secondary.get_id(), vol.nqn, 1), (primary.get_id(), vol.nqn, 1)], \
+        "peers first, the primary last"
+    assert fences == [], "no ANA cut: an inaccessible path queues the IO"
+    assert spdk[primary.get_id()].deleted == [] and spdk[secondary.get_id()].deleted == [], \
+        "the subsystem stays: other volumes may share it"
+
+
+def test_the_withdrawal_leaves_other_namespaces_of_a_shared_subsystem(db, fences, spdk):
+    _, (vol,) = _replicating(db)
+    primary = db.get_storage_node_by_id(vol.node_id)
+    spdk.serve(vol, primary.get_id())
+    spdk[primary.get_id()].namespaces[vol.nqn].append({"nsid": 2, "uuid": "another-volume"})
+
+    lvol_controller.demote_lvol(vol.get_id(), superseded=True)
+
+    assert spdk[primary.get_id()].namespaces[vol.nqn] == [{"nsid": 2, "uuid": "another-volume"}]
+
+
+def test_an_unreachable_member_does_not_stop_the_others_and_a_repeat_retries_it(
+        db, fences, spdk):
+    _, (vol,) = _replicating(db)
+    primary, secondary = _with_secondary(db, vol)
+    spdk.serve(vol, primary.get_id(), secondary.get_id())
+    spdk[secondary.get_id()].reachable = False
+
+    assert lvol_controller.demote_lvol(vol.get_id(), superseded=True) == {"demoted": True}
+    assert spdk.removed == [(primary.get_id(), vol.nqn, 1)]
+
+    spdk[secondary.get_id()].reachable = True
+    assert lvol_controller.demote_lvol(vol.get_id(), superseded=True) == {"demoted": True}
+    assert (secondary.get_id(), vol.nqn, 1) in spdk.removed, "the repeated order finishes the cut"
+
+
+def test_an_offline_member_is_skipped(db, fences, spdk):
+    _, (vol,) = _replicating(db)
+    primary, secondary = _with_secondary(db, vol, status=StorageNode.STATUS_OFFLINE)
+    spdk.serve(vol, primary.get_id(), secondary.get_id())
+
+    lvol_controller.demote_lvol(vol.get_id(), superseded=True)
+
+    assert spdk.removed == [(primary.get_id(), vol.nqn, 1)]
+
+
+def test_a_plain_demote_withdraws_no_namespace(db, fences, no_snapshots, spdk):
+    _, (vol,) = _replicating(db)
+    spdk.serve(vol, vol.node_id)
+
+    lvol_controller.demote_lvol(vol.get_id())
+
+    assert spdk.removed == []
+
+
+def test_a_superseded_group_demote_withdraws_every_member(db, fences, no_snapshots, spdk,
+                                                         monkeypatch):
+    cluster, vols = _replicating(db, members=2)
+    group = _group(db, cluster, vols)
+    monkeypatch.setattr(cgc, "create_group_snapshot_for_group", lambda g: (5, None))
+    for nsid, v in enumerate(vols, start=1):
+        spdk.serve(v, v.node_id, nsid=nsid)
+
+    cgc.demote_group(group, superseded=True)
+
+    assert sorted(spdk.removed) == sorted((v.node_id, v.nqn, n) for n, v in enumerate(vols, start=1))
 
 
 # ------------------------------------------------------------------ the new primary
