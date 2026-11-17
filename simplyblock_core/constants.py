@@ -467,9 +467,11 @@ BDEV_IO_CACHE_SIZE = 64
 BDEV_IO_POOL_SIZE = 65535
 BDEV_IO_POOL_THREADS_PER_CORE = 4
 # Bytes per bdev_io: sizeof(spdk_bdev_io) + the largest module context
-# (bdev_get_io_pool_stats bdev_io_size, ~53 KiB with distrib's t_task inline).
-# Kept at this upper value even once distrib's task leaves the bdev_io.
-BDEV_IO_SIZE_ESTIMATE = 53 * 1024
+# (bdev_get_io_pool_stats bdev_io_size). 1792 B measured on ultra main since
+# #241 (7f08f4c2) moved distrib's t_task out of the bdev_io (53280 B before),
+# rounded up to 2 KiB. Needs an ultra image with #241; release branches whose
+# ultra lacks it keep 53 KiB.
+BDEV_IO_SIZE_ESTIMATE = 2 * 1024
 # distrib parity/recovery buffers in flight at saturation (node-wide).
 HP_DISTRIB_DATA_BUF_BYTES = 512 * 1024 * 1024
 # Blobstore md journal: 64 MiB per lvstore, up to 3 lvstores (primary,
@@ -488,6 +490,24 @@ HP_BLOBSTORE_BYTES = 272 * 1024 * 1024
 HP_THREAD_BYTES_BASE = 16 * 1024 * 1024     # SPDK message mempool etc.
 HP_THREAD_BYTES_PER_CORE = 4 * 1024 * 1024  # thread rings, per-thread channels
 HP_OVERHEAD_FACTOR = 1.15                   # DPDK heap headers and fragmentation
+# Unassigned hugepage reserve, added after HP_OVERHEAD_FACTOR. When the bdev_io
+# estimate dropped from 53 KiB to 2 KiB (ultra #241), the budget was lowered by
+# only 2 GiB, not by the full amount freed: the rest (~1.67 GiB) stays as a reserve.
+HP_RESERVE_BYTES = (int(BDEV_IO_POOL_SIZE * (53 * 1024 - BDEV_IO_SIZE_ESTIMATE) * HP_OVERHEAD_FACTOR)
+                    - 2 * 1024 ** 3)
+# One hugepage figure for all usual node sizes: every node gets at least the
+# budget of this reference node (6.5 GiB); only larger nodes get more. Smaller
+# nodes would save under 2.3 GiB, which isn't worth a per-size figure.
+HP_REFERENCE_CORES = 32
+HP_REFERENCE_SUBSYSTEMS = 250
+# System (non-hugepage) memory of the SPDK container, also its hard memory
+# limit (k8s request = limit, docker mem_limit): a base for the process
+# (binary, DPDK, threads, RPC) plus the metadata that grows with capacity --
+# distrib placement maps (544-1504 B per 4 MiB page, 3 copies) and alceml
+# (~170 B per 2 MiB page): ~0.6 GiB per TiB with compact page maps, 1.3 GiB
+# with bitmap page maps. The limit takes the upper value.
+SYS_MEMORY_BASE_BYTES = 2 * 1024 ** 3
+SYS_MEMORY_PER_TIB_BYTES = int(1.3 * 1024 ** 3)
 EXTRA_SYS_MEMORY = 0.10
 
 INSTANCE_STORAGE_DATA = {
@@ -619,6 +639,25 @@ REPL_CUTOVER_MAX_SHRINK_ROUNDS = 12
 # deletion (in deletion, or replicated beyond what retention keeps). Sized to
 # match the endgame's round bound (2026-11-04).
 REPL_MAX_DELETION_BACKLOG = REPL_CUTOVER_MAX_SHRINK_ROUNDS
+# Bounded chains in the replication phase (not the final cutover, whose rounds
+# have their own bound above). Every transfer adds a layer on the target (its
+# landing copy, converted into a snapshot) and retention merges the oldest one
+# away by deleting it (swap-merge into its successor). When that merge falls
+# behind, each further layer pins every page the client rewrites since: bed
+# bf21 2026-11-10 reached blob-chain depth 7 under rewrite load and 93-99 %
+# device use (cannot_allocate, client EIO). So a volume's next transfer and its
+# next cadence snapshot wait while more than this many of its target layers
+# are not merged yet (beyond retention, being deleted, or a landing copy still
+# merging with its base) -- replication slows to the speed of the merge.
+REPL_MAX_UNMERGED_LANDING_LAYERS = 1
+# The same bound on the source side: no cadence snapshot while more than this
+# many of the volume's replication snapshots are unreplicated or replicated
+# but not pruned yet (beyond retention, or being deleted).
+REPL_MAX_PENDING_SOURCE_SNAPSHOTS = 2
+# A hold that sees no progress (the backlog does not shrink) for this long is
+# released once, loudly: a merge that never completes (a prune deferred for
+# good) must not turn into a silent replication stop.
+REPL_MERGE_HOLD_MAX_SEC = 1800
 # Hard limit SPDK puts on bdev_lvol_transfer_final_step: the final step's
 # terminate_timeout is armed when it starts and fails the transfer ("Task
 # transfer terminate timeout ...", transfer_state 'Failed') once it passes.
@@ -1516,3 +1555,8 @@ LEADERSHIP_SAFETY_WINDOW_SEC = 10
 # whose process died: snapshot_controller.reap_snapshot_intents rolls it back.
 # Far above any create (lock waits included).
 SNAPSHOT_INTENT_REAP_SEC = 600
+
+# How long the post-cutover --delete-source waits for every host connected to
+# the source to show a controller on the target (ns_host_guard); the CSI
+# reconnect loop connects new paths within seconds.
+REPL_NS_HOST_RECONNECT_WAIT_SEC = 120

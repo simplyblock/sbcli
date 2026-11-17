@@ -206,6 +206,44 @@ class TestDone:
             done, task = final._direct_round_done(task, _lvol())
         assert done is True and task.function_params["direct_done_snap"] == "S1"
 
+    def _landed(self, before):
+        """A round S1 arriving after *before* arrived; returns the delete mock."""
+        db = self._stat("Done")
+        db.get_snapshot_by_id.side_effect = lambda sid: before if sid == "S0" else _snap("S1")
+        task = _task(direct_rounds=True, direct_xfer_node="SRC", direct_submits=1,
+                     direct_done_snap="S0")
+        with patch.object(final, "db", db), \
+                patch.object(final, "_record", side_effect=_record_inline), \
+                patch.object(snapshot_controller, "delete", return_value=True) as delete:
+            done, task = final._direct_round_done(task, _lvol())
+        assert done is True and task.function_params["direct_done_snap"] == "S1"
+        return delete
+
+    def test_the_round_before_a_landed_round_is_deleted(self):
+        delete = self._landed(_snap("S0"))
+        delete.assert_called_once_with("S0")
+
+    def test_the_clones_base_copy_is_never_deleted_as_a_round(self):
+        delete = self._landed(_snap("S0", name="repl_internal_x"))
+        delete.assert_not_called()
+
+    def test_a_replicated_round_is_left_alone(self):
+        before = _snap("S0")
+        before.target_replicated_snap_uuid = "T0"
+        delete = self._landed(before)
+        delete.assert_not_called()
+
+    def test_a_failed_delete_does_not_fail_the_round(self):
+        db = self._stat("Done")
+        db.get_snapshot_by_id.side_effect = lambda sid: _snap(sid)
+        task = _task(direct_rounds=True, direct_xfer_node="SRC", direct_submits=1,
+                     direct_done_snap="S0")
+        with patch.object(final, "db", db), \
+                patch.object(final, "_record", side_effect=_record_inline), \
+                patch.object(snapshot_controller, "delete", side_effect=RuntimeError("busy")):
+            done, _ = final._direct_round_done(task, _lvol())
+        assert done is True
+
     def test_an_arrived_round_is_not_asked_again(self):
         task = _task(direct_rounds=True, direct_done_snap="S1")
         with patch.object(final, "db") as db:
@@ -282,17 +320,21 @@ class TestTakeRound:
 
 class TestEnds:
 
-    def test_an_attempt_without_a_cutover_requeues_its_round_snapshots(self):
+    def test_an_attempt_without_a_cutover_deletes_its_round_snapshots(self):
+        # bf23: requeued for replication, a failed attempt's rounds stacked up
+        # on the source until the cluster went read-only
         snaps = [_snap("R1"), _snap("R2")]
         for s in snaps:
             s.lvol.node_id = "SRC"
         task = _task(direct_rounds_used=True, cutover_lvs="LVS_1")
         with patch.object(final, "_direct_round_snapshots", return_value=snaps), \
                 patch.object(final, "drop_params", side_effect=_drop_inline), \
+                patch.object(snapshot_controller, "delete", return_value=True) as delete, \
                 patch("simplyblock_core.controllers.tasks_controller."
                       "add_snapshot_replication_task") as add:
             final._release_lvs_claim(task)
-        assert [c.args[2] for c in add.call_args_list] == ["R1", "R2"]
+        assert [c.args[0] for c in delete.call_args_list] == ["R1", "R2"]
+        add.assert_not_called()
         assert "direct_rounds_used" not in task.function_params
 
     def test_nothing_to_requeue_without_direct_rounds(self):
@@ -306,7 +348,7 @@ class TestEnds:
         src = inspect.getsource(final._record_cutover_done)
         assert src.index("_delete_direct_rounds(task)") < src.index("_release_lvs_claim(task)")
 
-    def test_an_unfinished_cutover_requeues(self):
+    def test_an_unfinished_cutover_drops_its_rounds(self):
         assert "_requeue_direct_rounds(task)" in inspect.getsource(
             final._cleanup_unfinished_cutover)
 
