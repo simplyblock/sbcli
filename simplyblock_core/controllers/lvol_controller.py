@@ -3240,6 +3240,7 @@ def delete_lvol(lvol: LVol, *, force_delete: bool = False, lock: bool = True) ->
             logger.exception(f"failed to log delete event for {lvol.get_id()}")
 
         db_controller.release_lvol_ns_slot(lvol)
+        db_controller.delete_lvol_stats(lvol)
 
         # if lvol is clone and snapshot is deleted, then delete snapshot
         if lvol.cloned_from_snap:
