@@ -1033,6 +1033,22 @@ def set_hugepages():
     return utils.get_response(True)
 
 
+@api.post('/release_hugepages', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'boolean'
+    })}}},
+})
+def release_hugepages():
+    """Give back the huge pages simplyblock set on this host and remove its
+    records of them. The control plane calls it once no storage node is left
+    on the host."""
+    try:
+        core_utils.release_hugepages()
+    except core_utils.HugePagesNotReleasedError as e:
+        return utils.get_response(False, str(e))
+    return utils.get_response(True)
+
+
 @api.post('/apply_config', responses={
     200: {'content': {'application/json': {'schema': utils.response_schema({
         'type': 'boolean'
