@@ -374,14 +374,17 @@ def _links_back(counterpart, snap_id):
     return any(_instance_uuid(i) == snap_id for i in (counterpart.instances or []))
 
 
-def _pair_is_live(db, snap):
+def _pair_is_live(db, snap, moved_on=frozenset()):
     """True while *snap* belongs to a replication pair: a counterpart on the
     other cluster still exists and still links back to it. A live pair is
     retention's business (or a fail-over's hold, KI-12), never the sweep's.
     An instance recorded on another cluster counts as a pair as long as it
-    exists: instance-mode replication links only that way."""
+    exists: instance-mode replication links only that way.
+
+    A counterpart in *moved_on* (_moved_on_orphans) does not keep the pair
+    live: both halves are leftovers of a volume that migrated on."""
     for other_id in (snap.source_replicated_snap_uuid, snap.target_replicated_snap_uuid):
-        if not other_id:
+        if not other_id or other_id in moved_on:
             continue
         try:
             other = db.get_snapshot_by_id(other_id)
@@ -391,7 +394,7 @@ def _pair_is_live(db, snap):
             return True
     for inst in snap.instances or []:
         inst_id = _instance_uuid(inst)
-        if not inst_id or inst_id == snap.get_id() or \
+        if not inst_id or inst_id == snap.get_id() or inst_id in moved_on or \
                 _instance_cluster(inst) in ("", snap.cluster_id):
             continue
         try:
@@ -402,16 +405,17 @@ def _pair_is_live(db, snap):
     return False
 
 
-def _orphan_candidates(minis, lvols, now):
+def _orphan_candidates(minis, lvols, now, include_marked=False):
     """Mini records that may be orphaned replication snapshots: online, not
-    yet marked, past the grace age, no volume of their own, no volume reading
-    through them. The full record decides the rest."""
+    yet marked (unless *include_marked*), past the grace age, no volume of
+    their own, no volume reading through them. The full record decides the
+    rest."""
     lvol_ids = {lv.get_id() for lv in lvols}
     bases = _live_bases(minis, lvols)
     grace = constants.REPL_ORPHAN_SNAPSHOT_GRACE_SEC
     out = []
     for m in minis:
-        if m.deleted or m.status != SnapShot.STATUS_ONLINE:
+        if (m.deleted and not include_marked) or m.status != SnapShot.STATUS_ONLINE:
             continue
         if m.snap_type != SnapShot.TYPE_INTERNAL and \
                 not (m.snap_name or "").startswith(_REPLICATION_NAME_PREFIXES):
@@ -424,6 +428,33 @@ def _orphan_candidates(minis, lvols, now):
             continue
         out.append(m)
     return out
+
+
+def _cadence_owner(snap_name):
+    """The volume-id prefix a cadence snapshot is named after
+    (repl_internal_<id[:8]>_<ts>, snapshot_monitor); "" for any other name."""
+    if not (snap_name or "").startswith("repl_internal_"):
+        return ""
+    parts = snap_name[len("repl_internal_"):].split("_")
+    return parts[0] if len(parts) >= 2 and len(parts[0]) == 8 else ""
+
+
+def _moved_on_orphans(candidates, lvols):
+    """Ids of the orphan candidates (of every cluster) whose volume migrated
+    on: a cadence copy named after a volume that is still alive -- a migrated
+    volume keeps its id -- but that is not its own volume and that no volume
+    reads through (both already ruled out by _orphan_candidates).
+
+    A volume that migrates back re-sends the chain under it, so both halves of
+    a pair can be left like that, one per cluster, each linking back to the
+    other: judged one at a time, each kept the other "live" for ever (bed
+    bf26, 2026-11-17: 90 of 131 snapshots after 8 back-and-forth rounds). A
+    pair whose volume is gone altogether (a deleted DR source) has no live
+    namesake and stays retention's business."""
+    live = {lv.get_id()[:8] for lv in lvols
+            if getattr(lv, "status", "") not in (LVol.STATUS_IN_DELETION, LVol.STATUS_DELETED)}
+    return frozenset(m.get_id() for m in candidates
+                     if _cadence_owner(m.snap_name) in live)
 
 
 def sweep_orphaned(db, cluster_id, now=None):
@@ -446,15 +477,23 @@ def sweep_orphaned(db, cluster_id, now=None):
     minis = db.get_mini_snapshots()
     lvols = db.get_mini_lvols()
     orphans = []
-    for mini in _orphan_candidates(minis, lvols, now):
+    candidates = _orphan_candidates(minis, lvols, now)
+    # A half marked on an earlier sweep (of either cluster) still counts.
+    moved_on = _moved_on_orphans(
+        _orphan_candidates(minis, lvols, now, include_marked=True), lvols)
+    for mini in candidates:
         try:
             snap = db.get_snapshot_by_id(mini.get_id())
         except KeyError:
             continue
+        # A landing copy re-sent onward when its volume migrated back lost its
+        # source link and reads as a plain user snapshot; a moved-on cadence
+        # copy (named after a live volume that is not its own) is one anyway.
         if snap.cluster_id != cluster_id or snap.deleted or \
-                snap.status != SnapShot.STATUS_ONLINE or not is_replication_snapshot(snap):
+                snap.status != SnapShot.STATUS_ONLINE or \
+                not (is_replication_snapshot(snap) or snap.get_id() in moved_on):
             continue
-        if _pair_is_live(db, snap):
+        if _pair_is_live(db, snap, moved_on):
             continue
         # Something still sits on it in the data plane (a landing volume
         # being chained onto it, a successor the records missed), or the
@@ -534,7 +573,10 @@ def reap_retired(db, cluster_id):
             snap = db.get_snapshot_by_id(uuid)
         except KeyError:
             continue
-        if snap.cluster_id != cluster_id or not is_replication_snapshot(snap):
+        # A cadence copy re-sent onward reads as a user snapshot (no source
+        # link); sweep_orphaned marked it as a moved-on half.
+        if snap.cluster_id != cluster_id or not (
+                is_replication_snapshot(snap) or _cadence_owner(snap.snap_name)):
             continue
         if not snap.lvol or snap.lvol.get_id() in lvol_ids:
             continue

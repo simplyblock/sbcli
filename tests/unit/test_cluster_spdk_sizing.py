@@ -307,9 +307,10 @@ class TestApplyClusterHugepages(unittest.TestCase):
         snode_api = MagicMock()
         snode_api.persist_node_config.return_value = (True, None)
         # sn configure priced this for the product ceiling and its own
-        # default (larger) core count.
+        # default (larger) core count -- 64 cores, above the reference node,
+        # so the figure can shrink at all.
         node_config = self._node_config(max_lvol=constants.DEFAULT_SUBSYSTEMS_PER_NODE,
-                                        isolated_len=28)
+                                        isolated_len=64)
         configured_hp_memory = node_config["huge_page_memory"]
         node_config["max_lvol"] = 10  # the cluster's real max_subsys, already applied above
 
@@ -377,21 +378,46 @@ class TestHugepageMemoryBudget(unittest.TestCase):
                         + peer * constants.HP_NVME_INITIATOR_QPAIR_BYTES
                         + constants.HP_BLOBSTORE_BYTES
                         + constants.HP_THREAD_BYTES_BASE + constants.HP_THREAD_BYTES_PER_CORE * cpu)
-                       * constants.HP_OVERHEAD_FACTOR)
-        self.assertEqual(utils.calculate_minimum_hp_memory(small, large, lvol, 0, cpu), expected)
+                       * constants.HP_OVERHEAD_FACTOR) + constants.HP_RESERVE_BYTES
+        self.assertEqual(utils._hp_memory_for_node(small, large, lvol, cpu), expected)
 
-    def test_run_node_gets_about_6_6_gib(self):
+    def test_run_node_own_budget_is_about_4_6_gib(self):
         """The pnfs 2026-11-13 node (16 cores, max_lvol 30) got 5619 MB and ran
-        out; the budget for it is ~6.6 GiB."""
+        out with 53 KiB bdev_ios; with distrib's task out of the bdev_io (ultra
+        #241) its own budget is ~4.6 GiB, 2 GiB below the 53 KiB budget."""
         small, large = utils.calculate_pool_count(3, 2 * 5, 16, 16, 30)
-        result = utils.calculate_minimum_hp_memory(small, large, 30, 0, 16)
-        self.assertGreater(result, 6.3 * self.GiB)
-        self.assertLess(result, 7.0 * self.GiB)
+        result = utils._hp_memory_for_node(small, large, 30, 16)
+        self.assertGreater(result, 4.3 * self.GiB)
+        self.assertLess(result, 5.0 * self.GiB)
+
+    def test_usual_nodes_get_the_reference_figure(self):
+        figures = set()
+        for cores, subsys in [(4, 10), (8, 30), (16, 30), (16, 100), (32, 250)]:
+            small, large = utils.calculate_pool_count(3, 10, cores, cores, subsys)
+            figures.add(utils.calculate_minimum_hp_memory(small, large, subsys, 0, cores))
+        self.assertEqual(len(figures), 1)
+        figure = figures.pop()
+        self.assertGreater(figure, 6.3 * self.GiB)
+        self.assertLess(figure, 6.7 * self.GiB)
+
+    def test_larger_nodes_get_more_than_the_reference(self):
+        small, large = utils.calculate_pool_count(3, 10, 32, 32, 250)
+        ref = utils.calculate_minimum_hp_memory(small, large, 250, 0, 32)
+        small, large = utils.calculate_pool_count(3, 10, 64, 64, 500)
+        self.assertGreater(utils.calculate_minimum_hp_memory(small, large, 500, 0, 64), ref)
+
+    def test_bdev_io_shrink_lowers_the_budget_by_exactly_2_gib(self):
+        small, large = utils.calculate_pool_count(3, 2 * 5, 16, 16, 30)
+        result = utils._hp_memory_for_node(small, large, 30, 16)
+        saved = int(constants.BDEV_IO_POOL_SIZE * (53 * 1024 - constants.BDEV_IO_SIZE_ESTIMATE)
+                    * constants.HP_OVERHEAD_FACTOR)
+        self.assertEqual(result + saved - constants.HP_RESERVE_BYTES, result + 2 * self.GiB)
+        self.assertGreater(constants.HP_RESERVE_BYTES, 1.5 * self.GiB)
 
     def test_grows_with_subsystems_and_cores(self):
-        base = utils.calculate_minimum_hp_memory(96128, 775, 30, 0, 16)
-        self.assertGreater(utils.calculate_minimum_hp_memory(96128, 775, 250, 0, 16), base)
-        self.assertGreater(utils.calculate_minimum_hp_memory(96128, 775, 30, 0, 32), base)
+        base = utils._hp_memory_for_node(96128, 775, 30, 16)
+        self.assertGreater(utils._hp_memory_for_node(96128, 775, 250, 16), base)
+        self.assertGreater(utils._hp_memory_for_node(96128, 775, 30, 32), base)
 
 
 class TestReserveClusterHugepages(unittest.TestCase):
@@ -400,8 +426,9 @@ class TestReserveClusterHugepages(unittest.TestCase):
     product-ceiling config. set_hugepages() reads the config, so the config must
     already be recomputed when it runs -- the ordering is the whole fix."""
 
+    # 64 cores by default: above the reference node, so the figure can shrink.
     @staticmethod
-    def _node_config(max_lvol, isolated_len=8, ssd="0000:00:01.0"):
+    def _node_config(max_lvol, isolated_len=64, ssd="0000:00:01.0"):
         small, large = utils.calculate_pool_count(
             4, 2 * 2, isolated_len, isolated_len, max_lvol)
         return {

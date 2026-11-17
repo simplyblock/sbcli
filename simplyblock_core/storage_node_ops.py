@@ -4274,11 +4274,27 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
             logger.error("Cannot get memory info from the instance.. Exiting")
             return False
 
-        # Calculate minimum sys memory
+        # Calculate minimum sys memory: also the SPDK container's hard memory
+        # limit, so it must reflect the node's real capacity. The configured
+        # figure comes from `sn configure` (nvme-cli then, which misses devices
+        # already bound to SPDK); the agent's device list is fresh. Take the
+        # larger. lblk entries carry exact sizes.
         if spdk_sys_mem:
             minimum_sys_memory = int(utils.parse_size(spdk_sys_mem))
         else:
-            minimum_sys_memory = node_config.get("sys_memory")
+            minimum_sys_memory = int(node_config.get("sys_memory") or 0)
+            if node_config.get("lblk_devices"):
+                minimum_sys_memory = max(minimum_sys_memory, utils.node_config_min_sys_memory(node_config))
+            else:
+                ssd_pcis = node_config.get("ssd_pcis") or []
+                capacity = utils.nvme_capacity_from_node_info(node_info.get("nvme_devices"), ssd_pcis)
+                if ssd_pcis and capacity <= 0 and minimum_sys_memory <= constants.SYS_MEMORY_BASE_BYTES:
+                    logger.error(
+                        "Cannot determine the capacity of the NVMe devices %s on %s (not visible to the "
+                        "kernel, or nvme-cli failed); the SPDK memory limit would be too low. Make the "
+                        "devices visible (unbind them from SPDK) or pass spdk_sys_mem.", ssd_pcis, node_addr)
+                    return False
+                minimum_sys_memory = max(minimum_sys_memory, utils.sys_memory_for_capacity(capacity))
         max_lvol = node_config.get("max_lvol")
         # Clamp rather than fail: a config file generated before the cap was
         # enforced (or hand-edited) can carry a larger value, and refusing the
@@ -5267,6 +5283,35 @@ REMOVABLE_STATUSES = (
 #: so phase 1 has something to stop. Everything else is either already
 #: stopped by an earlier step (the departing statuses) or not answering
 #: (OFFLINE, UNREACHABLE), where a shutdown could only fail.
+def _release_host_huge_pages(node: StorageNode) -> None:
+    """Have the agent of a node that is leaving give back the huge pages
+    simplyblock set on its host, once no other storage node is left there.
+
+    The pages and the records of them are per host, shared by every storage
+    node on it whatever its cluster, so they go with the last one. Best
+    effort: an agent that does not answer, one that predates the call, or
+    pages still in use leave the host as it was, which the next deployment on
+    it handles as before."""
+    host = node._k8s_node_label()
+    others = [
+        n.get_id() for n in DBController().get_storage_nodes()
+        if n.get_id() != node.get_id() and n.status != StorageNode.STATUS_REMOVED
+        and (n.mgmt_ip == node.mgmt_ip or n._k8s_node_label() == host)
+    ]
+    if others:
+        logger.info(f"Huge pages stay on {host}: storage node(s) {', '.join(others)} still run there")
+        return
+    try:
+        released, error = node.client(timeout=20).release_hugepages()
+    except SNodeClientException as e:
+        logger.warning(f"Huge pages on {host} were not released: {e.message}")
+        return
+    if not released:
+        logger.warning(f"Huge pages on {host} were not released: {error}")
+        return
+    logger.info(f"Huge pages on {host} released")
+
+
 def force_delete_storage_node(node_id) -> bool:
     """Delete a storage node as part of bringing its cluster down, killing its
     SPDK first whatever its status, and report whether SPDK was confirmed
@@ -5292,6 +5337,8 @@ def force_delete_storage_node(node_id) -> bool:
     if not stopped:
         logger.error(f"SPDK on node {node_id} could not be confirmed stopped; "
                      f"deleting the node's records anyway")
+    else:
+        _release_host_huge_pages(snode)
     delete_storage_node(node_id, force=True)
     return stopped
 
@@ -8702,6 +8749,7 @@ def _finalize_node_removal(removed_node: StorageNode):
                     ret = snode_api.delete_dev_gpt_partitions(dev.pcie_address)
                     logger.debug(ret)
                     pci_address.append(dev.pcie_address)
+            _release_host_huge_pages(removed_node)
     except Exception as e:
         logger.exception(e)
 
@@ -9439,7 +9487,11 @@ def _restart_storage_node_impl(
     # if not satisfied:
     #    logger.error(
     #        f"Not enough memory for the provided max_lvo: {snode.max_lvol}, max_snap: {snode.max_snap}, max_prov: {utils.humanbytes(snode.max_prov)}.. Exiting")
-    minimum_sys_memory = snode.minimum_sys_memory or 0
+    # The SPDK container's memory limit: recomputed from the node's devices
+    # (the stored figure may come from an older formula), else the stored one.
+    raw_capacity = sum(max(int(d.size or 0), 0) for d in (snode.nvme_devices or []))
+    minimum_sys_memory = (utils.sys_memory_for_capacity(raw_capacity) if raw_capacity
+                          else snode.minimum_sys_memory or 0)
     snode.spdk_mem = minimum_hp_memory
 
     spdk_debug = snode.spdk_debug

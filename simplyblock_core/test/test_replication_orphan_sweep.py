@@ -304,3 +304,59 @@ def test_the_sweep_is_throttled_per_cluster(harness, monkeypatch):
     rsr.reap_retired(db, B)
     rsr.reap_retired(db, A)
     assert calls == [B, A]
+
+
+def _moved_on_pair(live_volume_reads=""):
+    """Bed bf26, 2026-11-17: volume b062cac2 migrated A->B->A...; it keeps its
+    id. Its old landing copy on B (a485d9a8) was re-sent to A as a chain
+    ancestor (6c1ff88b) when it migrated back. Both landing volumes are gone;
+    each half links to the other."""
+    live = _lvol("b062cac2-live", cloned_from_snap=live_volume_reads)
+    on_b = _snap("a485d9a8", _lvol("REP_e38b166f"), "repl_internal_b062cac2_1794912311", B,
+                 target="6c1ff88b")
+    on_b.instances = [{"uuid": "6c1ff88b", "cluster_id": A}]
+    on_a = _snap("6c1ff88b", _lvol("REP_baaa72c7"), "repl_internal_b062cac2_1794912311", A,
+                 source="a485d9a8")
+    return _FakeDB([on_a, on_b], [live])
+
+
+def test_bed_bf26_both_halves_of_a_moved_on_pair_are_swept(harness):
+    use, deleted = harness
+    db = use(_moved_on_pair())
+    assert rsr.sweep_orphaned(db, A) == ["6c1ff88b"]
+    getattr(rsr, "_LAST_SWEEP", {}).clear()
+    assert rsr.sweep_orphaned(db, B) == ["a485d9a8"]
+    _drain(db, A)
+    _drain(db, B)
+    assert sorted(deleted) == ["6c1ff88b", "a485d9a8"]
+
+
+def test_a_moved_on_pair_half_the_volume_reads_through_keeps_the_other(harness):
+    """The live volume was cloned from the half on A: that half is its base,
+    and the half on B stays paired with it."""
+    use, deleted = harness
+    db = use(_moved_on_pair(live_volume_reads="6c1ff88b"))
+    assert rsr.sweep_orphaned(db, A) == []
+    getattr(rsr, "_LAST_SWEEP", {}).clear()
+    assert rsr.sweep_orphaned(db, B) == []
+
+
+def test_a_pair_whose_volume_is_gone_altogether_is_kept(harness):
+    """A deleted DR source: no live volume carries the name; the pair is
+    retention's business, not the sweep's."""
+    use, deleted = harness
+    db = _moved_on_pair()
+    db.lvols = {}
+    use(db)
+    assert rsr.sweep_orphaned(db, A) == []
+    getattr(rsr, "_LAST_SWEEP", {}).clear()
+    assert rsr.sweep_orphaned(db, B) == []
+
+
+def test_a_namesake_being_deleted_does_not_count_as_moved_on(harness):
+    use, deleted = harness
+    db = _moved_on_pair()
+    for lv in db.lvols.values():
+        lv.status = "in_deletion"
+    use(db)
+    assert rsr.sweep_orphaned(db, A) == [] and rsr.sweep_orphaned(db, B) == []

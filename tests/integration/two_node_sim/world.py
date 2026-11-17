@@ -172,7 +172,9 @@ class World:
         self.fault_at: float | None = None     # when the first fault hit (timing base)
         self.fences: list = []
         self.ana_changed: dict = {}            # (node, port, group) -> last change
-        self.conditions: set = set()          # environment (not bugs): jm_needs_reconnect
+        # environment (not bugs): jm_needs_reconnect, jm_reconnect_ineffective,
+        # jc_error_while_fenced, reader_read_inflight_on_peer_jm
+        self.conditions: set = set()
         self.jm_reconnected: dict = {}
         # data versions per LVS and node (F10): a write a node acks alone is
         # missing on its peer until the peer's rebuild completes
@@ -468,6 +470,10 @@ class World:
 
         def reconnect_jms(node, peer):
             sim = world.by_ep.get((node.mgmt_ip, node.rpc_port))
+            if "jm_reconnect_ineffective" in world.conditions:
+                # c1/c2: only a node restart brought the remote JMs back
+                world.log("CP: reconnect of the remote JMs of %s had no effect" % node.get_id()[:8])
+                return
             if sim is not None and sim.up and world.net.data_ok(sim, world.peer_of(sim)):
                 world.jm_reconnected[sim.uuid] = True
                 world.log("CP: reconnected remote JMs of %s" % sim.name)

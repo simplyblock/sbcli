@@ -662,7 +662,10 @@ def spdk_process_start(body: SPDKParams):
             "CORES": core_utils.get_total_cpu_cores(body.l_cores),
             'SPDK_MEM': core_utils.convert_size(body.spdk_mem, 'MiB'),
             'MEM_MEGA': (core_utils.convert_size(body.spdk_mem, 'MiB', round_up=True) // 2) * 2 + 512,
-            'MEM2_MEGA': (core_utils.convert_size(body.system_mem, 'MiB', round_up=True) // 2) * 2,
+            # the SPDK container's hard memory limit (request = limit), never
+            # below the base
+            'MEM2_MEGA': (core_utils.convert_size(max(body.system_mem or 0, constants.SYS_MEMORY_BASE_BYTES),
+                                                  'MiB', round_up=True) // 2) * 2,
             'SERVER_IP': network_attachments.server_ip(body.networks, body.pod_network) or body.server_ip,
             'RPC_PORT': body.rpc_port,
             'RPC_USERNAME': body.rpc_username,
@@ -1030,6 +1033,22 @@ def persist_node_config(body: snode_ops.PersistNodeConfigParams):
     })}}},
 })
 def set_hugepages():
+    return utils.get_response(True)
+
+
+@api.post('/release_hugepages', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'boolean'
+    })}}},
+})
+def release_hugepages():
+    """Give back the huge pages simplyblock set on this host and remove its
+    records of them. The control plane calls it once no storage node is left
+    on the host."""
+    try:
+        core_utils.release_hugepages()
+    except core_utils.HugePagesNotReleasedError as e:
+        return utils.get_response(False, str(e))
     return utils.get_response(True)
 
 
