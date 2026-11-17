@@ -1194,7 +1194,8 @@ def process_snap_replicate_start(task, snapshot):
     if not _cutover_owns(snapshot.lvol.get_id(), task.cluster_id):
         with xfer_timing.phase("landing_spare_prestage", snap=snapshot.get_id(),
                                lvol=snapshot.lvol.get_id()):
-            replication_spare.prestage(snapshot, remote_lv, _create_landing_volume)
+            replication_spare.prestage(snapshot, remote_lv, _create_landing_volume,
+                                       task.cluster_id)
 
     # Do not hand the transfer back to the pass loop and forget about it: wait
     # for it here, polling every 100ms, and finish it in this same pass. Before

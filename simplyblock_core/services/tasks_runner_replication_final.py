@@ -280,6 +280,10 @@ def _record_cutover_done(task):
 
     _restore_source_throttle(task)
     _stop_source_replication(task)
+    # After the stop: a transfer of the source still draining checks the
+    # volume after its spare create and deletes the spare itself once the
+    # volume no longer replicates; the one created before is gone here.
+    _discard_cadence_spare(params.get("lvol_id"))
     _delete_direct_rounds(task)
     _prune_endgame_snapshots(task)
     _delete_source_if_requested(task)
@@ -1596,6 +1600,17 @@ def _delete_direct_rounds(task):
     drop_params(task, "direct_rounds_used")
 
 
+def _discard_cadence_spare(lvol_id):
+    """Delete the cadence spare landing volume of *lvol_id* (replication_spare)."""
+    if not lvol_id:
+        return
+    try:
+        from simplyblock_core import replication_spare
+        replication_spare.discard(lvol_id)
+    except Exception as e:                                # noqa: BLE001
+        logger.warning("Could not discard the cadence spare of %s: %s", lvol_id, e)
+
+
 def _discard_spare_landing(task):
     """Delete the landing volume pre-staged for a round that will not run.
 
@@ -1609,13 +1624,7 @@ def _discard_spare_landing(task):
     # The cadence spare of the volume (replication_spare) is idle too once the
     # rounds are over: the volume cuts over or gives up, either way no cadence
     # snapshot of it lands here again.
-    lvol_id = (task.function_params or {}).get("lvol_id")
-    if lvol_id:
-        try:
-            from simplyblock_core import replication_spare
-            replication_spare.discard(lvol_id)
-        except Exception as e:                                # noqa: BLE001
-            logger.warning("Could not discard the cadence spare of %s: %s", lvol_id, e)
+    _discard_cadence_spare((task.function_params or {}).get("lvol_id"))
     try:
         # The caller's copy may predate the rounds _shrink_step just ran.
         name = (db.get_task_by_id(task.uuid).function_params or {}).get(
