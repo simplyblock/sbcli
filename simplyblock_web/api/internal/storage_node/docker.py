@@ -80,6 +80,7 @@ class SPDKParams(BaseModel):
     l_cores: str | None = Field(None)
     spdk_mem: int = Field(core_utils.parse_size('4GiB'))
     total_mem: int | str | None = Field('')
+    system_mem: int | None = Field(None)  # SPDK container memory limit (non-hugepage)
     multi_threading_enabled: bool | None = Field(False)
     timeout: int | None = Field(5 * 60)
     spdk_image: str | None = Field(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
@@ -143,12 +144,16 @@ def spdk_process_start(body: SPDKParams):
     else:
         log_config = LogConfig(type=LogConfig.types.JOURNALD)
 
+    # Hard memory limit of the SPDK container (hugepages are not part of it):
+    # the node's system memory, never below the base.
+    mem_limit = max(int(body.system_mem or 0), constants.SYS_MEMORY_BASE_BYTES)
     container = node_docker.containers.run(
         body.spdk_image,
         f"sudo -E /root/scripts/run_distr_with_ssd.sh {body.l_cores} {spdk_mem_mib} {spdk_debug}",
         name=f"spdk_{body.rpc_port}",
         detach=True,
         privileged=True,
+        mem_limit=mem_limit,
         network_mode="host",
         log_config=log_config,
         volumes=[

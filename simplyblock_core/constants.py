@@ -500,6 +500,14 @@ HP_RESERVE_BYTES = (int(BDEV_IO_POOL_SIZE * (53 * 1024 - BDEV_IO_SIZE_ESTIMATE) 
 # nodes would save under 2.3 GiB, which isn't worth a per-size figure.
 HP_REFERENCE_CORES = 32
 HP_REFERENCE_SUBSYSTEMS = 250
+# System (non-hugepage) memory of the SPDK container, also its hard memory
+# limit (k8s request = limit, docker mem_limit): a base for the process
+# (binary, DPDK, threads, RPC) plus the metadata that grows with capacity --
+# distrib placement maps (544-1504 B per 4 MiB page, 3 copies) and alceml
+# (~170 B per 2 MiB page): ~0.6 GiB per TiB with compact page maps, 1.3 GiB
+# with bitmap page maps. The limit takes the upper value.
+SYS_MEMORY_BASE_BYTES = 2 * 1024 ** 3
+SYS_MEMORY_PER_TIB_BYTES = int(1.3 * 1024 ** 3)
 EXTRA_SYS_MEMORY = 0.10
 
 INSTANCE_STORAGE_DATA = {

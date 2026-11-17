@@ -9439,7 +9439,11 @@ def _restart_storage_node_impl(
     # if not satisfied:
     #    logger.error(
     #        f"Not enough memory for the provided max_lvo: {snode.max_lvol}, max_snap: {snode.max_snap}, max_prov: {utils.humanbytes(snode.max_prov)}.. Exiting")
-    minimum_sys_memory = snode.minimum_sys_memory or 0
+    # The SPDK container's memory limit: recomputed from the node's devices
+    # (the stored figure may come from an older formula), else the stored one.
+    raw_capacity = sum(max(int(d.size or 0), 0) for d in (snode.nvme_devices or []))
+    minimum_sys_memory = (utils.sys_memory_for_capacity(raw_capacity) if raw_capacity
+                          else snode.minimum_sys_memory or 0)
     snode.spdk_mem = minimum_hp_memory
 
     spdk_debug = snode.spdk_debug

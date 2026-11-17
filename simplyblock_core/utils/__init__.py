@@ -795,8 +795,17 @@ def _hp_memory_for_node(small_pool_count, large_pool_count, lvol_count, cpu_coun
     return int(total * constants.HP_OVERHEAD_FACTOR) + constants.HP_RESERVE_BYTES
 
 
+def sys_memory_for_capacity(raw_capacity_bytes) -> int:
+    """System (non-hugepage) memory of the SPDK container for a node with this
+    much raw device capacity: SYS_MEMORY_BASE_BYTES + SYS_MEMORY_PER_TIB_BYTES
+    per TiB. Also the container's hard memory limit."""
+    capacity = max(int(raw_capacity_bytes or 0), 0)
+    return int(constants.SYS_MEMORY_BASE_BYTES
+               + capacity * constants.SYS_MEMORY_PER_TIB_BYTES // (1024 ** 4))
+
+
 def calculate_minimum_sys_memory(ssd_list):
-    minimum_sys_memory = 2147483648 + get_total_capacity_of_nvme_devices(ssd_list)
+    minimum_sys_memory = sys_memory_for_capacity(get_total_capacity_of_nvme_devices(ssd_list))
 
     logger.debug(f"Minimum system memory is {humanbytes(minimum_sys_memory)}")
     return int(minimum_sys_memory)
@@ -2502,20 +2511,14 @@ def lblk_device_serials(lblk_devices) -> set[str]:
 # "RAM 4GB min. Plus 0.2% of the storage." The nvme path nominally adds the
 # FULL device capacity but in practice always measures 0 — capacity is read
 # via `nvme list` AFTER the devices were unbound from the kernel driver. The
-# lblk path knows the real sizes, so it applies the documented 0.2% factor
-# (2026-08-05 AWS run: summing full capacity demanded 102 GiB sys memory for
-# 2x50G EBS volumes on 32 GiB hosts and failed every `sn configure --lblk`).
-SYS_MEMORY_STORAGE_FACTOR = 0.002
-
-
 def node_config_min_sys_memory(node) -> int:
-    """Minimum system memory for a node-config entry: 2 GiB + 0.2% of total
-    device capacity. lblk entries carry their sizes; nvme goes through
-    nvme-cli."""
+    """Minimum system memory for a node-config entry: sys_memory_for_capacity
+    of its total device capacity. lblk entries carry their sizes; nvme goes
+    through nvme-cli."""
     lblk = node.get("lblk_devices") or []
     if lblk:
         capacity = sum(int(e.get("size") or 0) for e in lblk)
-        total = 2147483648 + int(capacity * SYS_MEMORY_STORAGE_FACTOR)
+        total = sys_memory_for_capacity(capacity)
         logger.debug(f"Minimum system memory is {humanbytes(total)}")
         return int(total)
     return calculate_minimum_sys_memory(node.get("ssd_pcis") or [])
@@ -2529,8 +2532,9 @@ def get_total_capacity_of_nvme_devices(pci_lst):
         for subsystem in device_entry.get('Subsystems', []):
             for controller in subsystem.get('Controllers', []):
                 address = controller.get("Address")
-                if len(controller.get("Namespaces")) > 0 and address in pci_lst:
-                    total_capacity = controller.get("Namespaces")[0].get("PhysicalSize")
+                if len(controller.get("Namespaces") or []) > 0 and address in pci_lst:
+                    # sum over all devices (it used to keep only the last one)
+                    total_capacity += int(controller.get("Namespaces")[0].get("PhysicalSize") or 0)
 
     return int(total_capacity)
 
