@@ -759,12 +759,26 @@ def _bdev_io_pool_size_for_cores(cores):
 
 
 def calculate_minimum_hp_memory(small_pool_count, large_pool_count, lvol_count, max_prov, cpu_count):
+    """Hugepage memory SPDK needs on a node: its own budget
+    (_hp_memory_for_node), but at least that of the reference node
+    (HP_REFERENCE_CORES / HP_REFERENCE_SUBSYSTEMS), so all usual node sizes
+    get one figure. max_prov is not used here (callers apply it as a floor).
+    """
+    ref_small, ref_large = calculate_pool_count(0, 0, constants.HP_REFERENCE_CORES,
+                                                constants.HP_REFERENCE_CORES,
+                                                constants.HP_REFERENCE_SUBSYSTEMS)
+    return max(_hp_memory_for_node(small_pool_count, large_pool_count, lvol_count, cpu_count),
+               _hp_memory_for_node(ref_small, ref_large, constants.HP_REFERENCE_SUBSYSTEMS,
+                                   constants.HP_REFERENCE_CORES))
+
+
+def _hp_memory_for_node(small_pool_count, large_pool_count, lvol_count, cpu_count):
     """Hugepage memory SPDK needs on a node: the explicit sum of its consumers
-    (see the hugepage budget in constants), times HP_OVERHEAD_FACTOR.
+    (see the hugepage budget in constants), times HP_OVERHEAD_FACTOR, plus
+    HP_RESERVE_BYTES.
 
     lvol_count is the node's max subsystems (each with CLIENT_QPAIR_COUNT IO
-    qpairs + 1 admin qpair from its host); cpu_count its SPDK cores. max_prov
-    is not used here (callers apply it as a floor).
+    qpairs + 1 admin qpair from its host); cpu_count its SPDK cores.
     """
     cpu_count = max(int(cpu_count or 0), 1)
     lvol_count = max(int(lvol_count or 0), 0)
@@ -778,7 +792,7 @@ def calculate_minimum_hp_memory(small_pool_count, large_pool_count, lvol_count, 
     threads = constants.HP_THREAD_BYTES_BASE + constants.HP_THREAD_BYTES_PER_CORE * cpu_count
     total = (pools + bdev_io + constants.HP_DISTRIB_DATA_BUF_BYTES + constants.HP_MD_JOURNAL_BYTES
              + qpairs + constants.HP_BLOBSTORE_BYTES + threads)
-    return int(total * constants.HP_OVERHEAD_FACTOR)
+    return int(total * constants.HP_OVERHEAD_FACTOR) + constants.HP_RESERVE_BYTES
 
 
 def calculate_minimum_sys_memory(ssd_list):
