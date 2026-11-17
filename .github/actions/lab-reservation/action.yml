@@ -38,6 +38,17 @@ inputs:
     description: Seconds to wait for the reservation to report ready.
     required: false
     default: "900"
+  on-existing:
+    description: >-
+      What to do when this account already holds a live reservation for the
+      cluster being asked for. `release` (the default) gives it back and books
+      a fresh one, because by the time a later run reaches this step the older
+      booking is the previous run's leftover and this run is about to wipe
+      those hosts anyway. `reuse` keeps it, which is right for a lane sharing a
+      booking with an earlier job in the same chain, or when a person is
+      holding the lab deliberately.
+    required: false
+    default: "release"
   disabled:
     description: Emergency bypass. Skips the reservation and warns.
     required: false
@@ -57,8 +68,16 @@ outputs:
 
 runs:
   # JavaScript rather than composite, for the same reason lab-lock is: only a
-  # JS action gets `post`, and `post` is how the reservation is given back when
-  # the job ends however it ends.
+  # JS action gets `post`.
+  #
+  # `post` no longer releases. A run that ends does not hand the lab back,
+  # because the hosts are usually not in a state anyone should take them in --
+  # a failed stress run leaves a cluster at 4 of 6 nodes with its resources
+  # preserved for debugging, and a reservation released at that moment reports
+  # the lab free when what is free is a wreck. The booking is cleared instead
+  # by the NEXT run, immediately before it books and wipes those hosts.
+  #
+  # The post step still runs, to say what is held and how to give it back.
   using: node20
   main: main.js
   post: post.js

@@ -1,0 +1,112 @@
+name: Lab Reservation — Release
+run-name: "Lab reservation release | ${{ inputs.reservation_ids || inputs.cluster || 'list only' }}"
+
+# Give a lab booking back, by hand.
+#
+# This exists because the runs stopped doing it. A run used to release its
+# reservation in its post step; it does not any more, and the reasoning is in
+# .github/actions/lab-reservation/post.js -- a failed stress run leaves a
+# cluster at 4 of 6 nodes with its resources preserved for debugging, and a
+# reservation released at that moment tells the console the machines are free
+# when what is free is a wreck. The booking is held instead, and the NEXT run
+# clears it immediately before it books and wipes those hosts.
+#
+# That is the right default and it leaves one gap: a lab that is genuinely
+# idle, whose last run is long read and finished with, stays marked busy until
+# its `LABRES_DURATION` expires. This is the release for that case, run where
+# the token already is.
+#
+# Default is to list and change nothing. Releasing needs an explicit id or an
+# explicit cluster, because "release everything this key holds" with no
+# argument is how you take the lab out from under a run that is still going.
+
+on:
+  workflow_dispatch:
+    inputs:
+      reservation_ids:
+        description: 'Reservation ids to release, space- or comma-separated. Leave empty to only list what is held.'
+        required: false
+        default: ''
+      cluster:
+        description: 'Release every live reservation this key holds for this cluster. Ignored when reservation_ids is given.'
+        required: false
+        default: ''
+      confirm_idle:
+        description: 'I have checked that no run is using these hosts and that nobody is mid-triage on them.'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: List, and release what was named
+    runs-on: [self-hosted]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: List and release
+        shell: bash
+        env:
+          LABRES_TOKEN: ${{ secrets.LABRES_TOKEN }}
+          IDS: ${{ inputs.reservation_ids }}
+          CLUSTER: ${{ inputs.cluster }}
+          CONFIRM: ${{ inputs.confirm_idle }}
+        run: |
+          set -uo pipefail
+          API=https://labreservation.simplyblock.ai/api/v1
+          if [ -z "${LABRES_TOKEN:-}" ]; then
+            echo "::error::LABRES_TOKEN is not set as a repository secret"
+            exit 1
+          fi
+          auth=(-H "Authorization: Bearer ${LABRES_TOKEN}")
+
+          # The python below is deliberately one line each. A multi-line
+          # `python3 -c '...'` inside a YAML block scalar puts its closing
+          # quote at column 0, which ends the block and breaks the workflow
+          # file -- and a heredoc has the same problem for the same reason.
+          echo "=== live reservations held by this key ==="
+          live=$(curl -sf "${auth[@]}" "${API}/reservations" || echo '[]')
+          echo "${live}" | python3 -c "import json,sys; rows=json.load(sys.stdin); rows=rows if isinstance(rows,list) else rows.get('reservations',[]); print('\n'.join('  %s  %s  state=%s  expires=%s  held_by=%s' % (r.get('id'),r.get('cluster'),r.get('state'),r.get('expires_at'),r.get('held_by','-')) for r in rows) or '  (none)')" || echo "  (could not parse the listing)"
+
+          targets="${IDS//,/ }"
+          if [ -z "${targets// /}" ] && [ -n "${CLUSTER// /}" ]; then
+            targets=$(echo "${live}" | python3 -c "import json,os,sys; rows=json.load(sys.stdin); rows=rows if isinstance(rows,list) else rows.get('reservations',[]); want=os.environ['CLUSTER'].split(); print(' '.join(r['id'] for r in rows if r.get('cluster') in want and r.get('state') in ('active','pending')))" 2>/dev/null || true)
+            echo "cluster ${CLUSTER} -> ${targets:-(nothing held)}"
+          fi
+
+          if [ -z "${targets// /}" ]; then
+            echo "Nothing named to release. Listing only."
+            exit 0
+          fi
+          if [ "${CONFIRM}" != "true" ]; then
+            echo "::error title=not confirmed::Releasing marks the lab free. Tick confirm_idle once you have checked no run is using these hosts and nobody is mid-triage on them. Named: ${targets}"
+            exit 1
+          fi
+
+          rc=0
+          for id in ${targets}; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "${auth[@]}" \
+                   "${API}/reservations/${id}")
+            # 404 is the state we wanted, not a failure: already expired, or
+            # released by something else.
+            case "${code}" in
+              200|202|404) echo "released ${id} (HTTP ${code})";;
+              *) echo "::error::could not release ${id} (HTTP ${code})"; rc=1;;
+            esac
+          done
+
+          {
+            echo "## Lab reservation release"
+            echo ""
+            echo "- **Released:** \`${targets}\`"
+            echo ""
+            echo "The lab now reads as free. Its hosts are in whatever state"
+            echo "the last run left them -- the next run wipes them before it"
+            echo "books, so this is only a problem if somebody takes them by"
+            echo "hand in between."
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "${rc}"

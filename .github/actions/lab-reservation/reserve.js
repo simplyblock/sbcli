@@ -56,12 +56,22 @@ async function describeHolder(cluster) {
 // documented as "yours, live ones only", so anything it returns is a cluster
 // this account is entitled to use right now.
 async function existing(cluster) {
+  const rows = await existingAll(cluster)
+  return rows[0] || null
+}
+
+// Every live reservation this key holds for *cluster*, not just the first.
+// A lane can end up holding more than one for the same cluster -- a run that
+// died between the 202 and the ready-poll leaves one behind, and the next run
+// books another -- and clearing only the first would leave the lab looking
+// busy for a reason nothing names.
+async function existingAll(cluster) {
   const { status, body } = await call('GET', '/reservations')
-  if (status !== 200) return null
+  if (status !== 200) return []
   const rows = Array.isArray(body) ? body : (body.reservations || [])
-  return rows.find((r) =>
+  return rows.filter((r) =>
     (r.state === 'active' || r.state === 'pending') &&
-    (!cluster || r.cluster === cluster)) || null
+    (!cluster || r.cluster === cluster))
 }
 
 
@@ -135,6 +145,6 @@ const saveState = (name, value) =>
   fs.appendFileSync(process.env.GITHUB_STATE, `${name}=${value}\n`)
 
 module.exports = {
-  BASE, input, warn, fail, log, call, existing, reserve, waitReady, release,
-  setOutput, saveState,
+  BASE, input, warn, fail, log, call, existing, existingAll, reserve,
+  waitReady, release, setOutput, saveState,
 }

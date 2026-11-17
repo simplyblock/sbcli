@@ -1,5 +1,17 @@
+// Reserve the lab, clearing our own leftover booking first.
+//
+// The release used to happen in the post step, at the end of the run. It does
+// not any more, and the order is the point: a run that ends does NOT hand the
+// lab back, because the lab is usually not in a state anyone should take it in
+// -- a failed stress run leaves a cluster at 4 of 6 nodes with resources
+// preserved for debugging, and a reservation released at that moment tells the
+// console the machines are free when what is actually free is a wreck. Holding
+// the booking is the honest signal.
+//
+// So the clearing happens here instead, immediately before a new booking, by
+// the run that is about to wipe those hosts anyway. See post.js.
 const {
-  input, warn, fail, log, existing, reserve, waitReady, release,
+  input, warn, fail, log, existing, existingAll, reserve, waitReady, release,
   setOutput, saveState,
 } = require('./reserve.js')
 
@@ -38,11 +50,38 @@ async function main() {
   // is using.
   try {
     for (const one of (clusters.length ? clusters : [null])) {
-      // Already ours? Then use it. Asking again answers 409 and fails a run
-      // that was entitled to the machines all along -- an engineer holding
-      // the lab for the afternoon, or an earlier job in the same chain.
+      // Already ours? Two answers, and which one applies is a policy choice.
+      //
+      // `reuse` is the old behaviour and still the right one for a booking a
+      // person is sitting on -- an engineer holding the lab for the afternoon,
+      // or an earlier job in the same chain. Asking again answers 409 and
+      // fails a run that was entitled to the machines all along.
+      //
+      // `release` is the default now. The previous run's booking is debris by
+      // the time anyone reads it: the run is over, the hosts are in whatever
+      // state it left them, and this job is about to wipe them regardless.
+      // Clearing it here rather than at the end of that run is what keeps the
+      // console honest in between.
       let res = await existing(one)
       let mine = false
+      if (res && input('on-existing') !== 'reuse') {
+        // Loud, and with the holder in it. If this ever evicts a person, the
+        // line that did it has to be findable without reading the action.
+        for (const stale of await existingAll(one)) {
+          log(`clearing our own existing booking ${stale.id} on ` +
+              `${stale.cluster} (state=${stale.state} ` +
+              `expires=${stale.expires_at || '-'}) before booking again -- ` +
+              `this run is about to clean those hosts`)
+          if (!await release(stale.id)) {
+            warn('Lab reservation',
+                 `could not release ${stale.id}; the booking below may answer ` +
+                 `409. Release it by hand with: curl -X DELETE -H ` +
+                 `"Authorization: Bearer $LABRES_TOKEN" ` +
+                 `https://labreservation.simplyblock.ai/api/v1/reservations/${stale.id}`)
+          }
+        }
+        res = null
+      }
       if (res) {
         log(`${res.cluster} is already reserved to this account as ${res.id} ` +
             `(expires ${res.expires_at}); using it rather than booking again`)
