@@ -59,6 +59,22 @@ def test_k8s_memory_limit_and_request_always_set():
         assert res["limits"]["hugepages-2Mi"] == "7168Mi"
 
 
+def _gone_then_running():
+    """containers.get mock: the old spdk/proxy containers are gone (the two
+    probes before the start), afterwards the new ones exist."""
+    from unittest.mock import MagicMock
+
+    from docker.errors import NotFound
+    calls = {"n": 0}
+
+    def get(name):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise NotFound("gone")
+        return MagicMock()
+    return get
+
+
 def test_docker_spdk_container_gets_mem_limit():
     from simplyblock_web.api.internal.storage_node import docker as docker_api
 
@@ -67,12 +83,10 @@ def test_docker_spdk_container_gets_mem_limit():
         ssd_pcie=["0000:00:01.0"], l_cores="0-3", spdk_mem=6 * GiB, system_mem=12 * GiB)
     with patch.object(docker_api, "get_docker_client") as client, \
             patch.object(docker_api.core_utils, "remove_container"), \
+            patch.object(docker_api.utils, "get_response"), \
             patch.object(docker_api, "time"):
-        client.return_value.containers.get.side_effect = __import__("docker").errors.NotFound("gone")
-        try:
-            docker_api.spdk_process_start(body)
-        except Exception:
-            pass  # only the first containers.run call matters here
+        client.return_value.containers.get.side_effect = _gone_then_running()
+        docker_api.spdk_process_start(body)
         spdk_call = client.return_value.containers.run.call_args_list[0]
     assert spdk_call.kwargs["mem_limit"] == 12 * GiB
 
@@ -85,12 +99,10 @@ def test_docker_mem_limit_never_below_base():
         l_cores="0-3", spdk_mem=6 * GiB)
     with patch.object(docker_api, "get_docker_client") as client, \
             patch.object(docker_api.core_utils, "remove_container"), \
+            patch.object(docker_api.utils, "get_response"), \
             patch.object(docker_api, "time"):
-        client.return_value.containers.get.side_effect = __import__("docker").errors.NotFound("gone")
-        try:
-            docker_api.spdk_process_start(body)
-        except Exception:
-            pass
+        client.return_value.containers.get.side_effect = _gone_then_running()
+        docker_api.spdk_process_start(body)
         spdk_call = client.return_value.containers.run.call_args_list[0]
     assert spdk_call.kwargs["mem_limit"] == constants.SYS_MEMORY_BASE_BYTES
 
