@@ -436,7 +436,7 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             subcommand.add_argument('--CLI_PASS', help='The password for CLI SSH connection.', type=SecretStr, dest='CLI_PASS')
         subcommand.add_argument('--cap-warn', help='The capacity warning level in percent. Default: `89`.', type=int, default=89, dest='cap_warn')
-        subcommand.add_argument('--cap-crit', help='The capacity critical level in percent. Default: `99`.', type=int, default=99, dest='cap_crit')
+        subcommand.add_argument('--cap-crit', help='The capacity critical level in percent. Default: `98`.', type=int, default=98, dest='cap_crit')
         subcommand.add_argument('--prov-cap-warn', help='The capacity warning level in percent. Default: `250`.', type=int, default=250, dest='prov_cap_warn')
         subcommand.add_argument('--prov-cap-crit', help='The capacity critical level in percent. Default: `500`.', type=int, default=500, dest='prov_cap_crit')
         subcommand.add_argument('--ifname', help='Management interface name, e.g. eth0.', type=str, dest='ifname')
@@ -488,6 +488,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--hugepages-mem', help='Huge-page memory floor per storage node, e.g. 4G. Cluster-wide; a node adopts it on its next restart.', type=str, default='', dest='hugepages_mem')
         subcommand.add_argument('--vcpu-count', help='Absolute number of vCPUs SPDK gets on each storage node. A node with fewer than this + 1 cores is refused.', type=int, default=0, dest='vcpu_count')
         subcommand.add_argument('--hashicorp-vault-url', help='Hashicorp vault URL for storing encryption keys for this cluster', type=str, dest='hashicorp_vault_url')
+        subcommand.add_argument('--kmip-server-url', help='KMIP server address (host:port) for storing encryption keys for this cluster', type=str, dest='kmip_server_url')
         subcommand.add_argument('--alerting-config-path', help='Path to the YAML alerting configuration file. Takes precedence over --contact-point.', type=str, dest='alerting_config_path')
         subcommand.add_argument('--cluster-vip', help='Cluster Virtual IP, this is the load balancer IP or domain, would be used for the cluster logging ingress.', type=str, dest='cluster_vip')
 
@@ -496,7 +497,7 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             subcommand.add_argument('--page_size', help='The size of a data page in bytes. Default: `2097152`.', type=int, default=2097152, dest='page_size')
         subcommand.add_argument('--cap-warn', help='The capacity warning level in percent. Default: `89`.', type=int, default=89, dest='cap_warn')
-        subcommand.add_argument('--cap-crit', help='The capacity critical level in percent. Default: `99`.', type=int, default=99, dest='cap_crit')
+        subcommand.add_argument('--cap-crit', help='The capacity critical level in percent. Default: `98`.', type=int, default=98, dest='cap_crit')
         subcommand.add_argument('--prov-cap-warn', help='The capacity warning level in percent. Default: `250`.', type=int, default=250, dest='prov_cap_warn')
         subcommand.add_argument('--prov-cap-crit', help='The capacity critical level in percent. Default: `500`.', type=int, default=500, dest='prov_cap_crit')
         subcommand.add_argument('--data-chunks-per-stripe', help='The erasure coding schema parameter k (distributed raid). Default: `1`.', type=int, default=1, dest='distr_ndcs')
@@ -534,6 +535,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--hugepages-mem', help='Huge-page memory floor per storage node, e.g. 4G. Cluster-wide; a node adopts it on its next restart.', type=str, default='', dest='hugepages_mem')
         subcommand.add_argument('--vcpu-count', help='Absolute number of vCPUs SPDK gets on each storage node. A node with fewer than this + 1 cores is refused.', type=int, default=0, dest='vcpu_count')
         subcommand.add_argument('--hashicorp-vault-url', help='Hashicorp vault URL for storing encryption keys for this cluster', type=str, dest='hashicorp_vault_url')
+        subcommand.add_argument('--kmip-server-url', help='KMIP server address (host:port) for storing encryption keys for this cluster', type=str, dest='kmip_server_url')
 
     def init_cluster__op_stop(self, subparser):
         subcommand = self.add_sub_command(subparser, 'op-stop', 'Stops the cluster accepting object lifecycle operations: creation, deletion and modification of volumes, snapshots, clones and pools. Read paths and the cluster\'s own maintenance are unaffected.')

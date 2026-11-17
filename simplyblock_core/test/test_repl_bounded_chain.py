@@ -62,6 +62,7 @@ class _World:
         self.source: list = []
         self.copies: dict = {}
         self.tasks: list = []
+        self.pruned: list = []
 
     def add_pair(self, n, copy_status=ONLINE, src_status=ONLINE, replicated=True, prev=""):
         cid = f"C{n}"
@@ -294,7 +295,6 @@ def _cadence(held):
     db.get_cluster_by_id.return_value = SimpleNamespace(sync_replication=False)
     with patch.object(sm, "db", db), \
             patch.object(sm.migration_turn, "waiting_lvol_ids", return_value=set()), \
-            patch.object(sm, "_cadence_capacity_hold", return_value=None), \
             patch.object(sm, "_due_for_internal_snapshot", return_value=True), \
             patch.object(sm, "_outstanding_internal_snapshot", return_value=None), \
             patch.object(sm, "_deletion_backlog", return_value=0), \
@@ -312,67 +312,6 @@ def test_a_held_volume_takes_no_cadence_snapshot():
 def test_bounds_are_small_constants():
     assert constants.REPL_MAX_UNMERGED_LANDING_LAYERS == 1
     assert constants.REPL_MAX_PENDING_SOURCE_SNAPSHOTS == 2
-
-
-# --- spares of migrated-away volumes -----------------------------------------
-
-def _snapshot(lvol_id="LV1"):
-    snap = MagicMock()
-    snap.lvol.get_id.return_value = lvol_id
-    snap.size = 10 * 2**30
-    return snap
-
-
-def test_no_spare_is_staged_for_a_volume_that_stopped_replicating():
-    create = MagicMock(return_value=("NEW", None))
-    stopped = SimpleNamespace(do_replicate=False, status=LVol.STATUS_ONLINE)
-    with patch.object(rs.db, "get_lvol_by_id", return_value=stopped), \
-            patch.object(rs.db, "get_lvol_by_name", side_effect=KeyError):
-        assert rs.prestage(_snapshot(), MagicMock(pool_uuid="POOL"), create) is None
-    create.assert_not_called()
-    with patch.object(rs.db, "get_lvol_by_id", side_effect=KeyError):
-        assert rs.prestage(_snapshot(), MagicMock(pool_uuid="POOL"), create) is None
-    create.assert_not_called()
-
-
-def test_a_spare_created_while_the_cutover_stopped_the_volume_is_discarded():
-    create = MagicMock(return_value=("NEW", None))
-    states = iter([True, False])
-    with patch.object(rs, "_replicating", side_effect=lambda lid: next(states)), \
-            patch.object(rs.db, "get_lvol_by_name", side_effect=KeyError), \
-            patch.object(rs.db, "get_storage_node_by_id", return_value=MagicMock()), \
-            patch.object(rs, "discard") as discard:
-        assert rs.prestage(_snapshot(), MagicMock(pool_uuid="POOL"), create) is None
-    create.assert_called_once()
-    discard.assert_called_once_with("LV1", "POOL")
-
-
-def test_the_sweep_discards_spares_of_volumes_that_no_longer_replicate():
-    def spare(owner):
-        return SimpleNamespace(lvol_name=rs.spare_name(owner), status=LVol.STATUS_ONLINE,
-                               pool_uuid="POOL", get_id=lambda o=owner: f"SP_{o}")
-    lvols = [spare("LIVE"), spare("GONE"), spare("STOPPED"),
-             SimpleNamespace(lvol_name="vol1", status=LVol.STATUS_ONLINE, pool_uuid="POOL",
-                             get_id=lambda: "V1")]
-    replicating = {"LIVE": True, "GONE": False, "STOPPED": False}
-    with patch.object(rs.db, "get_lvols", return_value=lvols), \
-            patch.object(rs, "_replicating", side_effect=lambda lid: replicating[lid]), \
-            patch.object(rs, "discard", return_value=True) as discard:
-        assert rs.sweep("CL") == 2
-    assert sorted(c.args[0] for c in discard.call_args_list) == ["GONE", "STOPPED"]
-
-
-def test_cutover_done_discards_the_spare_after_stopping_the_cadence():
-    """--delete-source included: the discard runs after the cadence stopped,
-    so a transfer draining after it cannot bring the spare back."""
-    src = inspect.getsource(final._record_cutover_done)
-    assert src.index("_stop_source_replication(task)") < src.index("_discard_source_spare(task)")
-    assert src.index("_discard_source_spare(task)") < src.index("_delete_source_if_requested(task)")
-    task = JobSchedule()
-    task.function_params = {"lvol_id": "LV1", "delete_source": True}
-    with patch.object(rs, "discard") as discard:
-        final._discard_source_spare(task)
-    discard.assert_called_once_with("LV1")
 
 
 def test_a_retired_snapshot_is_never_a_counterpart(monkeypatch):

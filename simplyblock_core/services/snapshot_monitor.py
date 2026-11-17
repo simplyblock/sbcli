@@ -910,47 +910,6 @@ def _cutover_endgame_lvol_ids(cluster_id):
     return ids
 
 
-def _cadence_capacity_hold(cluster_id):
-    """Why no cadence snapshot may be taken on *cluster_id* now, or "".
-
-    A cadence snapshot pins every block overwritten while it is outstanding,
-    and under sustained overwrites faster than replication ships them one
-    outstanding snapshot per volume pins up to the volume's whole used size
-    (twice that raw, with 1+1). Past the cluster's capacity warning threshold
-    another one only adds to that, so the cadence holds and retention can
-    reclaim what already replicated. A missing capacity reading never holds:
-    the guard must not stop replication on a cluster it cannot measure.
-    """
-    try:
-        cluster = db.get_cluster_by_id(cluster_id)
-        records = db.get_cluster_capacity(cluster, 1)
-    except Exception:                                     # noqa: BLE001
-        return ""
-    if not records:
-        return ""
-    util = getattr(records[0], "size_util", None)
-    warn = getattr(cluster, "cap_warn", 0) or 0
-    if util is None or not warn or util < warn:
-        return ""
-    return (f"cluster {cluster_id} is at {util}% capacity, at or above its "
-            f"warning threshold of {warn}%")
-
-
-def _exempt_from_capacity_hold(repl_lvols, cluster_id):
-    """The volumes among *repl_lvols* whose policy is a migration: they keep
-    their cadence through a capacity hold (see take_due_internal_snapshots)."""
-    try:
-        policies = {p.get_id(): p for p in db.get_replication_policies(cluster_id)}
-    except Exception:                                     # noqa: BLE001
-        return []
-    out = []
-    for lv in repl_lvols:
-        pol = policies.get(getattr(lv, "replication_policy_id", "") or "")
-        if pol is not None and getattr(pol, "mode", "") == "migration":
-            out.append(lv)
-    return out
-
-
 def take_due_internal_snapshots(cluster_id, now_ts):
     """Create an internal snapshot for every replicated volume whose interval
     has elapsed. The snapshot's creation auto-enqueues a replication task.
@@ -994,19 +953,6 @@ def take_due_internal_snapshots(cluster_id, now_ts):
             repl_lvols = [lv for lv in repl_lvols if lv.get_id() not in in_endgame]
             if not repl_lvols:
                 return
-    hold = _cadence_capacity_hold(cluster_id)
-    if hold:
-        # A migrating volume is exempt: its snapshots are how it leaves the
-        # cluster, and holding them locked every migration of bed bf12/bf13
-        # (2026-11-04/05): the retention held for a cutover keeps the usage
-        # above the threshold, the hold keeps the cutover from ever catching
-        # up. Fail-over replication is held as before.
-        migrating = _exempt_from_capacity_hold(repl_lvols, cluster_id)
-        logger.warning("Holding internal replication snapshots: %s%s", hold,
-                       f" (except {len(migrating)} migrating volume(s))" if migrating else "")
-        repl_lvols = migrating
-        if not repl_lvols:
-            return
     all_snaps = db.get_mini_snapshots()
     sync = db.get_cluster_by_id(cluster_id).sync_replication
     leaderless: set = set()
@@ -1127,6 +1073,19 @@ def take_due_internal_snapshots(cluster_id, now_ts):
             logger.error(f"Internal snapshot scheduling failed for {lvol.get_id()}: {e}")
 
 
+_last_spare_sweep: dict = {}
+
+
+def sweep_spare_landing_volumes(cluster_id, now_ts):
+    """Run replication_spare.sweep for *cluster_id* at most every
+    SWEEP_INTERVAL_SEC: deletes spare landing volumes whose volume no longer
+    replicates. Returns the number deleted."""
+    if now_ts - _last_spare_sweep.get(cluster_id, 0) < replication_spare.SWEEP_INTERVAL_SEC:
+        return 0
+    _last_spare_sweep[cluster_id] = now_ts
+    return replication_spare.sweep(cluster_id, now_ts)
+
+
 def main():
     logger.info("Starting LVol monitor...")
     while True:
@@ -1149,15 +1108,15 @@ def main():
                 logger.error(f"Internal snapshot scheduling failed for cluster {cluster.get_id()}: {e}")
 
             try:
+                sweep_spare_landing_volumes(cluster.get_id(), int(time.time()))
+            except Exception as e:
+                logger.error(f"Spare landing volume sweep failed for cluster {cluster.get_id()}: {e}")
+
+            try:
                 snapshot_controller.reap_snapshot_intents(cluster.get_id())
             except Exception as e:
                 logger.error(f"Snapshot intent reaping failed for cluster {cluster.get_id()}: {e}")
 
-            try:
-                replication_snapshot_retire.retire_orphan_copies(db, cluster.get_id())
-            except Exception as e:
-                logger.error(f"Orphaned replication snapshot sweep failed for cluster "
-                             f"{cluster.get_id()}: {e}")
 
             try:
                 deletions_in_flight += replication_snapshot_retire.collapse_migrated_chains(

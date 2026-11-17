@@ -177,3 +177,25 @@ def replication_merge_failing(lvol, target_node_id, rc, fails, retry_in, caused_
                  f"retrying in {int(retry_in)}s"),
         node_id=lvol.get_id(),
         event_level=EventObj.LEVEL_ERROR)
+
+
+def replication_target_leaderless(lvol, lvs_name, waited_s, why, caused_by=ec.CAUSED_BY_MONITOR):
+    """The replication of *lvol* has waited *waited_s* for its target lvstore
+    *lvs_name* to have a leader. Error level, like replication_merge_failing,
+    and raised from the replication runner the same way."""
+    from simplyblock_core.models.events import EventObj
+    try:
+        cluster_id = DBController().get_pool_by_id(lvol.pool_uuid).cluster_id
+    except Exception as e:
+        logger.error(f"No cluster could be resolved for lvol {lvol.get_id()}; event not logged: {e}")
+        return
+    ec.log_event_cluster(
+        cluster_id=cluster_id,
+        domain=ec.DOMAIN_CLUSTER,
+        event=ec.EVENT_REPLICATION_STALLED,
+        db_object=lvol,
+        caused_by=caused_by,
+        message=(f"Replication of LVol {lvol.get_id()} is stalled: its target lvstore "
+                 f"{lvs_name} has had no leader for {int(waited_s)}s ({why})"),
+        node_id=lvol.get_id(),
+        event_level=EventObj.LEVEL_ERROR)

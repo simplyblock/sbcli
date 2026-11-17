@@ -383,7 +383,7 @@ class SnapshotCloneScaleRun:
         self.clone_prefix = args.clone_name_prefix or f"CLN_{self.run_id}"
 
         if args.seed is not None:
-            random.seed(args.seed)
+            random.seed(args.seed)  # noqa: TID251 -- reproducible scale-test run, not a test file
         self.state = RunState()
 
     def close(self):

@@ -14,6 +14,7 @@ from simplyblock_core.controllers.backup.manifest import (
     BackupManifest,
     FDBKeyDescriptor,
     HCPKeyDescriptor,
+    KMIPKeyDescriptor,
     ManifestDataPlane,
     ManifestError,
     ManifestSource,
@@ -75,6 +76,15 @@ class TestSchema:
         restored = backup_manifest._parse(original.model_dump_json().encode(), "k")
 
         assert isinstance(restored.encryption, HCPKeyDescriptor)
+        assert restored == original
+
+    def test_round_trip_keeps_a_kmip_descriptor_as_one(self):
+        original = _manifest(encryption=KMIPKeyDescriptor(
+            dek_path="p", kek_name="k", server_url="kmip.example.com:5696"))
+
+        restored = backup_manifest._parse(original.model_dump_json().encode(), "k")
+
+        assert isinstance(restored.encryption, KMIPKeyDescriptor)
         assert restored == original
 
     def test_an_unencrypted_backup_describes_no_key(self):

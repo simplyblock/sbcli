@@ -430,11 +430,20 @@ def test_get_plan_finds_a_plan_stored_under_its_cluster_prefix():
     assert [p.uuid for p in MigrationPlan().read_from_db(kv, id="C1")] == ["P1"]
 
 
-def test_a_plan_on_a_source_past_its_capacity_warning_is_refused(db, monkeypatch):
+def test_a_plan_on_a_source_past_its_capacity_warning_warns_and_is_built(db, monkeypatch):
+    # Capacity thresholds are informational: a warning on the plan, no refusal.
     db.lvols = {"a": _lvol("a", 10 * GIB)}
     monkeypatch.setattr(mpc, "_source_capacity", lambda d, cid: (85, 80, 1000 * GIB, 850 * GIB))
-    with pytest.raises(mpc.MigrationPlanError, match="85%.*80%"):
-        mpc.build_plan("C1", "C2", db=db)
+    plan = mpc.build_plan("C1", "C2", db=db)
+    assert [v["lvol_id"] for v in plan.volumes] == ["a"]
+    assert any("85%" in w and "80%" in w for w in plan.warnings)
+
+
+def test_a_plan_on_a_full_source_is_still_built(db, monkeypatch):
+    db.lvols = {"a": _lvol("a", 10 * GIB)}
+    monkeypatch.setattr(mpc, "_source_capacity", lambda d, cid: (99, 80, 1000 * GIB, 990 * GIB))
+    plan = mpc.build_plan("C1", "C2", db=db)
+    assert [v["lvol_id"] for v in plan.volumes] == ["a"]
 
 
 def test_too_little_free_capacity_for_the_worst_case_pin_warns(db, monkeypatch):
