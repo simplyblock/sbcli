@@ -1064,6 +1064,43 @@ class K8sNativeFailoverTest(TestClusterBase):
         )
         return self.fio_size
 
+    #: Filesystems whose volumes the CSI driver refuses to clone from a data
+    #: source. Mirrors the refusal in csi-driver's CreateVolume; the two have
+    #: to move together, and the day pNFS grows a clone path this set shrinks.
+    NO_DATASOURCE_CLONE_FS = ("pnfs",)
+
+    def _clone_unsupported(self, fs_type, pvc_name, tag):
+        """True when cloning *pvc_name* is a documented product refusal.
+
+        pNFS has no clone-from-datasource path, and the driver says so plainly
+        rather than failing obscurely::
+
+            rpc error: code = Unimplemented desc = a pNFS volume cannot be
+            created from a data source yet: the clone would carry the source's
+            filesystem, and what an export made that way should contain is not
+            settled
+
+        The refusal arrives at *provisioning*, so the PVC is simply never
+        bound and the ``wait_pvc_bound`` that follows burns its whole 300s
+        timeout before the caller gives up and deletes it. Run 43965211786
+        spent 10 of its 58 minutes on two of these, in a lane whose whole
+        point is to keep outages close together.
+
+        Asking for it is not coverage: the answer is a constant. The pNFS
+        clone path has its own case in ``e2e_tests/pnfs`` -- B-10, which
+        asserts the refusal deliberately and once -- so a churn loop asking
+        again every checkpoint is only buying timeouts.
+        """
+        if (fs_type or "").lower() not in self.NO_DATASOURCE_CLONE_FS:
+            return False
+        self.logger.info(
+            "[%s] %s is fs_type=%s; skipping the clone. The CSI driver "
+            "refuses a volume from a data source on this filesystem "
+            "(Unimplemented), so asking costs a 300s bind timeout and proves "
+            "nothing. Snapshots are still taken -- it is only the clone that "
+            "is refused.", tag, pvc_name, fs_type)
+        return True
+
     # ── PVC → lvol mapping helpers ─────────────────────────────────────────
 
     def _snapshot_lvol_ids(self) -> set[str]:
@@ -1640,6 +1677,8 @@ class K8sNativeFailoverTest(TestClusterBase):
             # Create clone PVC — use same StorageClass/fs_type as source PVC
             clone_sc = self.pvc_details.get(pvc_name, {}).get("storage_class", self.STORAGE_CLASS_NAME)
             clone_fs_type = self.pvc_details.get(pvc_name, {}).get("fs_type", "ext4")
+            if self._clone_unsupported(clone_fs_type, pvc_name, "snap_clone"):
+                continue
             sleep_n_sec(10)
             try:
                 self.k8s_utils.create_clone_pvc(
@@ -4347,6 +4386,8 @@ class K8sNativeBasicFailoverTest(K8sNativeFailoverTest):
             # Create clone PVC — use same StorageClass/fs_type as source PVC
             clone_sc = self.pvc_details.get(pvc_name, {}).get("storage_class", self.STORAGE_CLASS_NAME)
             clone_fs_type = self.pvc_details.get(pvc_name, {}).get("fs_type", "ext4")
+            if self._clone_unsupported(clone_fs_type, pvc_name, "snap_clone"):
+                continue
             sleep_n_sec(10)
             try:
                 self.k8s_utils.create_clone_pvc(
@@ -5103,6 +5144,8 @@ class K8sNativeResilientFailoverTest(K8sNativeFailoverTest):
                 "storage_class", self.STORAGE_CLASS_NAME
             )
             clone_fs_type = self.pvc_details.get(pvc_name, {}).get("fs_type", "ext4")
+            if self._clone_unsupported(clone_fs_type, pvc_name, "permanent"):
+                continue
             sleep_n_sec(10)
             try:
                 self.k8s_utils.create_clone_pvc(

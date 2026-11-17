@@ -5274,6 +5274,38 @@ def _compress_and_cleanup_old_dumps(log_dir, current_dump_dir, logger):
             f"({deleted_bytes / (1024**3):.2f} GB)"
         )
 
+# Which pods' logs are collected into the run folder.
+#
+# An allowlist, not a denylist, and deliberately: a namespace sweep on these
+# clusters is ~60 pods and the per-container follow streams are not free. The
+# cost of that choice is that a component missing from this tuple is invisible
+# in the evidence, which is exactly what happened to the pNFS metadata server
+# -- run 43965211786 failed BECAUSE the MDS restarted, and shipped sixty pod
+# directories without a single MDS log in them.
+#
+# One copy. This lived in three places, identical, and a prefix added to one
+# of them would have been silently missed by the other two.
+K8S_LOG_POD_PREFIXES = (
+    "simplyblock-admin-control",
+    "simplyblock-csi-controller",
+    "simplyblock-csi-mds-proxy",      # per-node proxy to the MDS guest
+    "simplyblock-csi-node",
+    "simplyblock-fdb-",
+    "simplyblock-manager",
+    "simplyblock-mgmt-api-job",
+    "simplyblock-monitoring",
+    "simplyblock-operator",
+    "simplyblock-pnfs-mds",           # the MDS guest itself: one per cluster,
+                                      # in the data path of every pNFS volume
+    "simplyblock-prometheus",
+    "simplyblock-storage-node-controller",
+    "simplyblock-storage-node-ds",
+    "simplyblock-tasks",
+    "simplyblock-webappapi",
+    "snode-spdk-pod",
+    "fio-",
+)
+
 
 class RunnerK8sLog:
     """
@@ -5376,26 +5408,9 @@ class RunnerK8sLog:
             print(f"No running pods found for logging ({outage_type}).")
             return
 
-        _LOG_PREFIXES = (
-            "simplyblock-admin-control",
-            "simplyblock-csi-controller",
-            "simplyblock-csi-node",
-            "simplyblock-fdb-",
-            "simplyblock-manager",
-            "simplyblock-mgmt-api-job",
-            "simplyblock-monitoring",
-            "simplyblock-operator",
-            "simplyblock-prometheus",
-            "simplyblock-storage-node-controller",
-            "simplyblock-storage-node-ds",
-            "simplyblock-tasks",
-            "simplyblock-webappapi",
-            "snode-spdk-pod",
-            "fio-",
-        )
         for pod in pods:
             # Filter pods based on prefixes
-            if not pod.startswith(_LOG_PREFIXES):
+            if not pod.startswith(K8S_LOG_POD_PREFIXES):
                 continue
 
             # Get all containers in the pod
@@ -5508,23 +5523,6 @@ class RunnerK8sLog:
         follow-stream mechanism, so even if a tmux session crashed between
         polls those logs are not lost.
         """
-        _LOG_PREFIXES = (
-            "simplyblock-admin-control",
-            "simplyblock-csi-controller",
-            "simplyblock-csi-node",
-            "simplyblock-fdb-",
-            "simplyblock-manager",
-            "simplyblock-mgmt-api-job",
-            "simplyblock-monitoring",
-            "simplyblock-operator",
-            "simplyblock-prometheus",
-            "simplyblock-storage-node-controller",
-            "simplyblock-storage-node-ds",
-            "simplyblock-tasks",
-            "simplyblock-webappapi",
-            "snode-spdk-pod",
-            "fio-",
-        )
 
         pods = self.get_running_pods()
         if not pods:
@@ -5534,7 +5532,7 @@ class RunnerK8sLog:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
         for pod in pods:
-            if not pod.startswith(_LOG_PREFIXES):
+            if not pod.startswith(K8S_LOG_POD_PREFIXES):
                 continue
 
             pod_log_dir = os.path.join(self.log_dir, pod)
@@ -5722,23 +5720,6 @@ class RunnerK8sLog:
              ``kubectl logs --follow`` stream.
         """
 
-        _LOG_PREFIXES = (
-            "simplyblock-admin-control",
-            "simplyblock-csi-controller",
-            "simplyblock-csi-node",
-            "simplyblock-fdb-",
-            "simplyblock-manager",
-            "simplyblock-mgmt-api-job",
-            "simplyblock-monitoring",
-            "simplyblock-operator",
-            "simplyblock-prometheus",
-            "simplyblock-storage-node-controller",
-            "simplyblock-storage-node-ds",
-            "simplyblock-tasks",
-            "simplyblock-webappapi",
-            "snode-spdk-pod",
-            "fio-",
-        )
 
         # Number of consecutive stale checks before restarting a stream.
         # With poll_interval=60s, 2 means the file hasn't grown for ~2 min.
@@ -5748,7 +5729,7 @@ class RunnerK8sLog:
             while not self._monitor_stop_flag.is_set():
                 pods = self.get_running_pods()
                 for pod in pods:
-                    if not pod.startswith(_LOG_PREFIXES):
+                    if not pod.startswith(K8S_LOG_POD_PREFIXES):
                         continue
 
                     cmd = ["kubectl", "get", "pod", pod, "-n", self.namespace,
