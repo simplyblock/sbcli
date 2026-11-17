@@ -23,10 +23,12 @@ class FakeHost(md_release.Host):
     the real one does: stopping an array removes it from its members' holders,
     and erasing the superblock is recorded."""
 
-    def __init__(self, root, *, content=None, busy=(), mounted=(), swaps=()):
-        super().__init__(sysfs=str(root / "sys"), proc=str(root / "proc"), dev="/dev")
+    def __init__(self, root, *, content=None, busy=(), mounted=(), swaps=(), uuids=None):
+        super().__init__(sysfs=str(root / "sys"), proc=str(root / "proc"), dev=str(root / "dev"),
+                         state=str(root / "state"))
         self.content = content or {}
         self.busy = set(busy)
+        self.uuids = uuids if uuids is not None else {"nvme0n1": UUID, "nvme0n2": UUID}
         self.wiped = []
         self.stopped = []
         os.makedirs(root / "proc" / "1", exist_ok=True)
@@ -53,6 +55,13 @@ class FakeHost(md_release.Host):
 
     def wipe_raid_superblock(self, name):
         self.wiped.append(name)
+        self.uuids.pop(name, None)
+
+    def member_uuid(self, name):
+        return self.uuids.get(name, "")
+
+
+UUID = "6f1c2a3b:4d5e6f70:81920a1b:2c3d4e5f"
 
 
 def _disk(root, name):
@@ -169,10 +178,92 @@ def test_the_selection_names_every_namespace_of_a_controller(tmp_path):
 
 
 def test_the_selection_resolves_persistent_names(tmp_path):
-    os.makedirs(tmp_path / "dev")
+    os.makedirs(tmp_path / "dev" / "disk" / "by-id")
     (tmp_path / "dev" / "nvme0n1").write_text("")
-    link = tmp_path / "google-local-nvme-ssd-0"
+    link = tmp_path / "dev" / "disk" / "by-id" / "google-local-nvme-ssd-0"
     link.symlink_to(tmp_path / "dev" / "nvme0n1")
     host = FakeHost(tmp_path)
 
     assert md_release.selected_block_devices(host, pci_addresses=[], blk_paths=[str(link)]) == ["nvme0n1"]
+
+
+def test_the_selection_takes_no_name_the_generation_would_refuse(tmp_path):
+    """The release runs before the generation validates its selectors, so a
+    selector the generation refuses must select nothing here either: a kernel
+    path, a path that does not exist, and a PCI address that is a pattern
+    rather than an address."""
+    os.makedirs(tmp_path / "dev")
+    (tmp_path / "dev" / "nvme0n1").write_text("")
+    for ctrl in ("0000:00:04.0", "0000:00:05.0"):
+        os.makedirs(tmp_path / f"sys/bus/pci/devices/{ctrl}/nvme/nvme0/nvme0n1")
+    host = FakeHost(tmp_path)
+
+    names = md_release.selected_block_devices(
+        host, pci_addresses=["0000:*", "0000:00:0?.0"],
+        blk_paths=[str(tmp_path / "dev" / "nvme0n1"), str(tmp_path / "dev" / "disk" / "by-id" / "missing")])
+
+    assert names == []
+
+
+def test_a_member_added_after_the_check_is_never_wiped(gke_like):
+    """The check said every member is a device this node takes. A member the
+    array gained after that is one nobody checked, and its superblock is not
+    this configure's to erase."""
+
+    class Growing(FakeHost):
+        def probe_content(self, name):
+            if not os.path.exists(self.block("sdz")):
+                os.makedirs(self.block("sdz", "holders", "md0"))
+                os.makedirs(self.block("md0", "slaves", "sdz"))
+            return super().probe_content(name)
+
+    host = Growing(gke_like)
+
+    assert md_release.release_idle_arrays(["nvme0n1", "nvme0n2"], host) == []
+    assert host.stopped == [] and host.wiped == []
+
+
+def test_an_array_udev_reassembles_is_stopped_again(gke_like):
+    """udev assembles incrementally on the change event a stop produces, so the
+    first stop can come back before the wipe; the next attempt is the ordinary
+    answer to that, not a failure."""
+
+    class Reassembling(FakeHost):
+        def stop_array(self, name):
+            if not self.stopped:
+                md_release.Host.stop_array(self, name)
+                self.stopped.append(name)
+                return  # the array is back before the wipe
+            super().stop_array(name)
+
+    host = Reassembling(gke_like)
+
+    assert md_release.release_idle_arrays(["nvme0n1", "nvme0n2"], host) == ["md0"]
+    assert host.stopped == ["md0", "md0"]
+    assert sorted(host.wiped) == ["nvme0n1", "nvme0n2"]
+
+
+def test_a_teardown_interrupted_after_the_stop_is_finished_by_the_next_run(gke_like):
+    """Once the array is stopped nothing holds its members, so a run that died
+    before the wipe leaves superblocks no holder points at, and the next boot
+    assembles the array over whatever the storage node wrote. The next
+    configure finishes the wipe from the record the first one left."""
+
+    class Crashing(FakeHost):
+        def wipe_raid_superblock(self, name):
+            raise KeyboardInterrupt  # the pod was killed
+
+    with pytest.raises(KeyboardInterrupt):
+        md_release.release_idle_arrays(["nvme0n1", "nvme0n2"], Crashing(gke_like))
+    assert os.listdir(gke_like / "sys/class/block/nvme0n1/holders") == []
+
+    host = FakeHost(gke_like, uuids={"nvme0n1": UUID, "nvme0n2": UUID, "nvme1n1": "another"})
+    _disk(gke_like, "nvme1n1")
+    assert md_release.release_idle_arrays(["nvme0n1", "nvme0n2", "nvme1n1"], host) == []
+    assert sorted(host.wiped) == ["nvme0n1", "nvme0n2"], (
+        "the interrupted wipe was not finished, or a superblock of another array was erased")
+
+    # Finished work is not done twice.
+    again = FakeHost(gke_like, uuids={})
+    md_release.release_idle_arrays(["nvme0n1", "nvme0n2"], again)
+    assert again.wiped == []
