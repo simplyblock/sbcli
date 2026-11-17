@@ -2,14 +2,23 @@ import os.path
 from collections.abc import Mapping
 from typing import Any, ClassVar
 
-from pydantic import SecretStr
+from pydantic import SecretStr, TypeAdapter
 
 from simplyblock_core import constants
+from simplyblock_core.kms import KMSSettings
 from simplyblock_core.models.backup_config import BackupConfig
 from simplyblock_core.models.base_model import BaseModel, default_factory
 
+_KMS_SETTINGS_ADAPTER: TypeAdapter[Any] = TypeAdapter(KMSSettings)
+
 
 class HashicorpVaultSettings(BaseModel):
+    """Superseded by ``Cluster.kms_settings`` (a validated ``KMSSettings``
+    union, see ``simplyblock_core.kms``). Kept only so a record written before
+    that change still loads: ``Cluster.get_kms_settings`` falls back to this
+    field until ``kms_settings_migration`` (``release_upgrades/``) rewrites the
+    record on that cluster's next ``cluster upgrade-complete``. Nothing writes
+    to this field any more."""
     base_url: str = ""
     transit_mount: str = "simplyblock/transit"
     kv_mount: str = "simplyblock/kv"
@@ -34,6 +43,17 @@ class Cluster(BaseModel):
     #: an ONLINE target, which get_restart_phase would otherwise judge stale and
     #: clear out from under a live rebuild.
     STATUS_IN_SHRINK = "in_shrink"
+
+    #: ``lost_site_state`` values (sync replication). Written by the
+    #: storage-node monitor: the site is beyond its FTT and what is left of it
+    #: is being shut down (DRAINING), or every node of it is gone and it may
+    #: return (DOWN). Written by a disaster fail-over (a forced promote): its
+    #: site steps are running - a retry redoes them (FENCING) - or they are
+    #: complete (DONE). The one definition - every reader compares against these.
+    LOST_SITE_DRAINING = "draining"
+    LOST_SITE_DOWN = "down"
+    LOST_SITE_FENCING = "fencing"
+    LOST_SITE_DONE = "done"
 
     STATUS_CODE_MAP: ClassVar[dict] = {
         STATUS_ACTIVE: 1,
@@ -82,7 +102,7 @@ class Cluster(BaseModel):
 
     auth_hosts_only: bool = False
     blk_size: int = 0
-    cap_crit: int = 90
+    cap_crit: int = 98
     # ISO-8601 UTC timestamp of when the cluster last entered IN_ACTIVATION.
     # Stamped/cleared by cluster_ops.set_cluster_status and consumed by the
     # storage_node_monitor watchdog to detect and revert a wedged activation
@@ -300,6 +320,45 @@ class Cluster(BaseModel):
     # Deploy-time only — set at cluster create/add, never toggled at runtime;
     # an existing cluster must be redeployed to gain the feature.
     enable_failure_domain: bool = False
+    # LVol geometry: new lvols inherit distr_ndcs/distr_npcs (or the values
+    # passed at create). When False every new lvol is created with
+    # ndcs=npcs=0, i.e. the distrib's own layout. Toggled at runtime with
+    # `cluster set-lvol-geometry`; existing lvols keep their geometry.
+    lvol_geometry_enabled: bool = True
+    # Site-level synchronous replication (two sites, one cluster). Deploy-time
+    # only, like enable_failure_domain: set at cluster create, never toggled.
+    # Every storage node then carries a `site`, and every LVS is replicated to
+    # the other site.
+    sync_replication: bool = False
+    # The site recorded as out ("" = both sites in service) and its state:
+    # LOST_SITE_DRAINING / LOST_SITE_DOWN when the storage-node monitor judged
+    # it beyond its FTT / gone as a whole (no fail-over involved), or how far
+    # the site-level fencing of a disaster fail-over got - LOST_SITE_FENCING
+    # while its steps run (a retry redoes them, they are idempotent),
+    # LOST_SITE_DONE once they completed. One site at a time; only the site
+    # return clears a record, except that a suspension clears the monitor's.
+    lost_site: str = ""
+    lost_site_state: str = ""
+    # The site whose Kubernetes operator leads the cluster's cluster-scoped
+    # lifecycle (activate, expand, cluster-wide restarts) on a stretched
+    # deployment ("" = unset); the other site's operator follows
+    # (design-stretched-sync-replication-ramen §5.1). Set by the create, read
+    # by a follower's adoption, moved by the hub's role swap (§11.1) through
+    # sync_replication_controller.set_leader_site - only to a site the cluster
+    # has and never to the recorded lost site. A record for the operators:
+    # the data plane never reads it.
+    leader_site: str = ""
+    # The site activation running for the recorded site ("" = none): the site
+    # it builds, the ISO time it began - the token its holder checks at every
+    # step and ends with - and the heartbeat its wrapper stamps every ~60s.
+    # Written only by sync_replication_controller.begin_site_activation /
+    # stamp_site_activation / end_site_activation, and by
+    # clear_site_activation, the storage-node monitor's watchdog. While it is
+    # set, the monitor's handling of a stored SUSPENDED waits for it, as it
+    # waits behind IN_ACTIVATION.
+    site_activation_site: str = ""
+    site_activation_since: str = ""
+    site_activation_heartbeat: str = ""
     # Storage-device mode for the whole cluster. "nvme" (default): NVMe PCIe
     # controllers auto-detected and attached through the SPDK nvme bdev.
     # "lblk": arbitrary Linux block devices wrapped in SPDK AIO bdevs (one
@@ -320,6 +379,13 @@ class Cluster(BaseModel):
     # sends force_4k_atomic so the data plane skips its >=4K block-size gate for
     # fallback-mode inline checksum. Frozen at cluster create time.
     atomic_4k: bool = False
+    # Journal blobstore metadata pages so a write torn by a power loss cannot
+    # leave a half-written page behind. Needed when a device is not 4K-write
+    # atomic. The lvstore records it in its super block at creation, so it is
+    # frozen at cluster create time. Both create paths turn it on unless told
+    # otherwise; False here is what a record written before the field existed
+    # reads as, a cluster whose lvstores were created without it.
+    md_journal: bool = False
     snapshot_replication_target_cluster: str = ""
     snapshot_replication_target_pool: str = ""
     snapshot_replication_timeout: int = 60*10
@@ -331,6 +397,12 @@ class Cluster(BaseModel):
     rpc_base_port: int = 8080
     snode_api_port: int = 50001
     container_image_prefix: str = ""
+    # Validated via get_kms_settings()/set_kms_settings() into a KMSSettings
+    # union (simplyblock_core.kms) -- stays an untyped dict on the record for
+    # the same reason backup_config does: BaseModel cannot nest a pydantic
+    # union, so validating on read/write gives the typing without an FDB
+    # migration for every create/update. Empty dict = no external KMS (LocalKMS).
+    kms_settings: dict = default_factory(dict)
     hashicorp_vault_settings: HashicorpVaultSettings | None = None
 
     # Single-node-expansion resumability cursor. Empty dict means no expansion
@@ -433,6 +505,63 @@ class Cluster(BaseModel):
         """
         self._resolve_backup_config(config)
         self.backup_config = dict(config)
+
+    def _resolve_kms_settings(self, config: Mapping[str, Any]):
+        if "provider" not in config and "base_url" in config:
+            # The flat shape HashicorpVaultSettings used before kms_settings
+            # existed, with no discriminator -- legacy cluster records (and
+            # anything still posting the old hashicorp_vault_settings shape)
+            # carry this.
+            config = {"provider": "vault", **config}
+        return _KMS_SETTINGS_ADAPTER.validate_python(config)
+
+    def get_kms_settings(self):
+        """Validate and return this cluster's KMS configuration, or ``None``
+        for the default (``LocalKMS``, keys held in FoundationDB).
+
+        ``kms_settings`` stays an untyped dict on the record for the same
+        reason ``backup_config`` does (see ``get_backup_config``); validating
+        on read gives the typing without an FDB migration for every write.
+        A cluster written before this field existed has no ``kms_settings``
+        but may have the legacy ``hashicorp_vault_settings`` field populated
+        -- read from there until ``kms_settings_migration``
+        (``release_upgrades/``) rewrites the record on this cluster's next
+        ``cluster upgrade-complete``.
+
+        Raises:
+            ValueError: The stored configuration is not valid. ``ValidationError``
+                is a ``ValueError``, so one except clause covers both.
+        """
+        if self.kms_settings:
+            return self._resolve_kms_settings(self.kms_settings)
+        if self.hashicorp_vault_settings is not None:
+            legacy = self.hashicorp_vault_settings
+            # Not legacy.to_dict(): HashicorpVaultSettings is a BaseModel
+            # subclass, so that also carries id/uuid/name/status/... from the
+            # base class, which KMSSettings' extra="forbid" would then reject.
+            return self._resolve_kms_settings({
+                "base_url": legacy.base_url,
+                "transit_mount": legacy.transit_mount,
+                "kv_mount": legacy.kv_mount,
+                "cert_role": legacy.cert_role,
+            })
+        return None
+
+    def set_kms_settings(self, config: Mapping[str, Any] | None) -> None:
+        """Validate a raw KMS configuration and store it on this record.
+
+        The only way to put a KMS configuration on a cluster going forward --
+        nothing writes to the legacy ``hashicorp_vault_settings`` field any
+        more. ``config=None`` clears it back to the default (``LocalKMS``).
+
+        Raises:
+            ValueError: The configuration does not match any known KMS provider.
+        """
+        if not config:
+            self.kms_settings = {}
+            return
+        self._resolve_kms_settings(config)
+        self.kms_settings = dict(config)
 
     def get_backup_path(self, path=""):
         if self.backup_s3_bucket and self.backup_s3_cred:

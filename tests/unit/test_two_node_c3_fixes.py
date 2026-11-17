@@ -373,6 +373,7 @@ def test_defensive_unblock_skips_the_stale_peer_only(monkeypatch):
     class LvsNode:
         lvstore, jm_vuid = "LVS_6", 4
         secondary_node_id, tertiary_node_id = A, ""
+        remote_primary_node_id = remote_secondary_node_id = remote_tertiary_node_id = ""
 
         def get_id(self):
             return B

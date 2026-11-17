@@ -343,7 +343,12 @@ def process_lvol_delete_finish(cluster, lvol, leader_independent=False):
             f"{lvol_bdev_name}. Keeping the record in_deletion for the next pass")
         return
 
-    # Check if any non-leader node needs sync lock
+    # Check if any non-leader node needs sync lock. Every exit below must end
+    # in lvol_del_sync_lock_reset(): the lock blocks snapshot and volume
+    # creation on this node, and the three early returns used to leave it set
+    # with nothing left to clear it (bf8 2026-11-02: replication of two volumes
+    # stalled for over an hour on "Timed out waiting for in-flight LVol sync
+    # deletion to drain" with no sync-delete task pending anywhere).
     for nln in non_leader_nodes:
         if nln.status in [StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN, StorageNode.STATUS_UNREACHABLE]:
             primary_node.lvol_del_sync_lock()
@@ -361,6 +366,7 @@ def process_lvol_delete_finish(cluster, lvol, leader_independent=False):
             logger.warning(
                 f"LVol {lvol.get_id()}: teardown on primary_node "
                 f"{primary_node.get_id()} deferred: {e}")
+            primary_node.lvol_del_sync_lock_reset()
             return
         except RuntimeError as e:
             logger.error(
@@ -370,6 +376,7 @@ def process_lvol_delete_finish(cluster, lvol, leader_independent=False):
             # pass; the record stays either way.
             tasks_controller.add_lvol_sync_del_task(
                 cluster.get_id(), primary_node.get_id(), lvol_bdev_name, lvol.node_id)
+            primary_node.lvol_del_sync_lock_reset()
             return
 
     # Post-condition, not just an acknowledged RPC: confirm the bdev is really
@@ -380,6 +387,7 @@ def process_lvol_delete_finish(cluster, lvol, leader_independent=False):
         logger.error(
             f"LVol {lvol.get_id()}: could not verify {lvol_bdev_name} is gone "
             f"from {primary_node.get_id()[:8]} ({e}); keeping the record in_deletion")
+        primary_node.lvol_del_sync_lock_reset()
         return
     if not primary_confirmed:
         logger.error(
@@ -508,6 +516,10 @@ def _subsys_sweep_due() -> bool:
         return False
     _last_subsys_sweep = now
     return True
+
+
+#: Cluster states in which the sync ANA-drift repair runs (check_node).
+_ANA_REPAIR_CLUSTER_STATES = (Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY)
 
 
 def check_node(cluster, snode, all_lvols, subsys_check=False):
@@ -826,14 +838,39 @@ def check_node(cluster, snode, all_lvols, subsys_check=False):
         if snode.lvstore_status != "ready":
             continue
 
+        from simplyblock_core import storage_node_ops
+        # Sync replication: the site-rule context, read once per volume. No
+        # ANA-drift repair on a cluster that is not serving (a suspended one,
+        # e.g. after a failed re-activation): opening paths is the
+        # activation's Pass 4 there (the precedent of _check_node_lvstore's
+        # auto_fix outside ACTIVE / DEGRADED / READONLY).
+        sync_ctx = (storage_node_ops.sync_ana_context(lvol)
+                    if lvol.ha_type == "ha" and storage_node_ops._sync_site(snode)
+                    and cluster.status in _ANA_REPAIR_CLUSTER_STATES else None)
         passed = True
         try:
             # Verify against the WIRE identity: after a fail-back the record
             # uuid differs from the namespace's advertised uuid, and checking
             # the record uuid here marked healthy volumes unhealthy and drove
             # the self-heal below into re-registering the wrong identity.
-            passed &= health_controller.check_subsystem(
-                lvol.nqn, rpc_client=snode.rpc_client(), ns_uuid=lvol.get_ns_uuid())
+            owner_rpc = snode.rpc_client()
+            owner_ok = health_controller.check_subsystem(
+                lvol.nqn, rpc_client=owner_rpc, ns_uuid=lvol.get_ns_uuid())
+            passed &= owner_ok
+            # Sync replication: the owner's path, too, must carry the ANA
+            # state of the site rule (on a remote-led LVS it is a fenced
+            # non-leader); a drift is repaired like a non-leader's below.
+            drift = (storage_node_ops.lvol_ana_drift(owner_rpc, lvol, snode, ctx=sync_ctx)
+                     if owner_ok and sync_ctx is not None else None)
+            if drift:
+                passed = False
+                logger.error("ANA DRIFT: lvol %s (%s) path on owner %s: %s",
+                             lvol.get_id(), lvol.lvs_name, snode.get_id(), drift)
+                try:
+                    try_repair_lvol_on_non_leader(lvol, snode, 0)
+                except Exception as re:
+                    logger.error(f"Repair attempt for lvol {lvol.get_id()} "
+                                 f"on owner {snode.get_id()} raised: {re}")
         except Exception as e:
             logger.error(f"Failed to check lvol:{lvol.get_id()} on node: {lvol.node_id}")
             logger.error(e)
@@ -844,12 +881,28 @@ def check_node(cluster, snode, all_lvols, subsys_check=False):
                     sec_node = db.get_storage_node_by_id(sec_id)
                 except KeyError:
                     continue
-                if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
+                # Sync replication: an ONLINE node of the site the cluster
+                # records lost holds no instance until its site activation
+                # builds them - an absent path, like an OFFLINE member's, and
+                # nothing to repair on it.
+                if (sec_node and sec_node.status == StorageNode.STATUS_ONLINE
+                        and not storage_node_ops.member_absent_on_recorded_site(cluster, sec_node)):
                     try:
+                        sec_rpc = sec_node.rpc_client()
                         ret = health_controller.check_subsystem(
-                            lvol.nqn, rpc_client=sec_node.rpc_client(),
+                            lvol.nqn, rpc_client=sec_rpc,
                             ns_uuid=lvol.get_ns_uuid())
-                        if not ret:
+                        # Sync replication: present is not enough - the
+                        # volume's ANA group must follow the site rule (a
+                        # group left inaccessible where the site is open is a
+                        # path the host cannot use).
+                        drift = (storage_node_ops.lvol_ana_drift(sec_rpc, lvol, sec_node, ctx=sync_ctx)
+                                 if ret and sync_ctx is not None else None)
+                        if drift:
+                            passed = False
+                            logger.error("ANA DRIFT: lvol %s (%s) path on node %s: %s",
+                                         lvol.get_id(), lvol.lvs_name, sec_id, drift)
+                        elif not ret:
                             passed = False
                             # Explicit, greppable degraded-path signal. Without
                             # it a replica whose subsystem is missing (or,
@@ -864,11 +917,14 @@ def check_node(cluster, snode, all_lvols, subsys_check=False):
                                 "no namespace; volume is running below its "
                                 "configured redundancy",
                                 lvol.get_id(), lvol.lvs_name, sec_id)
+                        if drift or not ret:
                             # Self-heal: a missing registration on an online
                             # non-leader never fixes itself (the create-time
-                            # deferral queue is lossy) — re-register now. The
-                            # next monitor cycle re-checks and restores
-                            # health_check once the repair sticks.
+                            # deferral queue is lossy) — re-register now; on a
+                            # sync node the re-registration also sets the ANA
+                            # group by the site rule. The next monitor cycle
+                            # re-checks and restores health_check once the
+                            # repair sticks.
                             try:
                                 try_repair_lvol_on_non_leader(lvol, sec_node, sec_index)
                             except Exception as re:

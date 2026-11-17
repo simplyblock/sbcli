@@ -123,3 +123,18 @@ def test_only_the_volumes_open_cutover_is_cancelled(monkeypatch):
     ]
     lvol_controller._cancel_replication_cutover("V1", tasks)
     assert cancelled == ["open"]
+
+
+def test_a_committed_cutover_wrapping_up_is_not_cancelled(monkeypatch):
+    # The cutover's own wrap-up stops the source's replication and deletes the
+    # source (--delete-source) while the task is still running; both reach
+    # _cancel_replication_cutover. A committed cutover (end_time recorded) must
+    # finish as done, not canceled (bf7 2026-10-30: reported failed, PV never
+    # pointed at the target).
+    cancelled: list[str] = []
+    monkeypatch.setattr(lvol_controller.tasks_controller, "cancel_task", cancelled.append)
+    committed = _task(JobSchedule.FN_REPLICATION_FINAL, "V1", status=JobSchedule.STATUS_RUNNING,
+                      uuid="committed")
+    committed.function_params["end_time"] = 1793380000
+    lvol_controller._cancel_replication_cutover("V1", [committed])
+    assert cancelled == []

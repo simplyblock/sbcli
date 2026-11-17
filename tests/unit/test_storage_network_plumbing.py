@@ -47,6 +47,7 @@ def test_the_v2_node_add_hands_the_networks_to_the_task():
     from simplyblock_web.api.v2.cluster.storage_node import StorageNodeParams
 
     cluster = MagicMock()
+    cluster.sync_replication = False
     cluster.get_id.return_value = "00000000-0000-0000-0000-0000000000c1"
     parameters = StorageNodeParams(node_address="10.0.0.1:5000", interface_name="eth0", networks=NETWORKS)
 
@@ -62,6 +63,7 @@ def test_the_v2_node_add_without_networks_leaves_the_task_parameters_as_before()
     from simplyblock_web.api.v2.cluster.storage_node import StorageNodeParams
 
     cluster = MagicMock()
+    cluster.sync_replication = False
     cluster.get_id.return_value = "00000000-0000-0000-0000-0000000000c1"
 
     with patch.object(v2.tasks_controller, "add_node_add_task", return_value="00000000-0000-0000-0000-000000000001") as add, \
@@ -224,6 +226,7 @@ def test_the_v2_node_add_keeps_the_device_resource_of_a_network():
     from simplyblock_web.api.v2.cluster.storage_node import StorageNodeParams
 
     cluster = MagicMock()
+    cluster.sync_replication = False
     cluster.get_id.return_value = "00000000-0000-0000-0000-0000000000c1"
     parameters = StorageNodeParams(node_address="10.0.0.1:5000", interface_name="eth0", networks=DEVICE_NETWORKS)
 

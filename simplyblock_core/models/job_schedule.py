@@ -77,6 +77,39 @@ class JobSchedule(BaseModel):
     # migration commit and fail-back (fresh or recovered source).
     FN_REPLICATION_FINAL = "replication_final"
     FN_FDB_BACKUP = "fdb_backup"
+    # Sync replication: move the leadership of one or more LVS to the other
+    # site's triplet and open the promoted volumes there (promote,
+    # tasks_runner_sync_promote). ``node_id`` is the owner of the first LVS;
+    # ``function_params``: ``site`` (the target), ``lvol_ids`` (the volumes to
+    # open there), ``lvs_names`` every LVS the promote may move (a group
+    # promote spans several), ``owners`` ({lvs: owner id}), and the journal
+    # the runner keeps: ``moves`` ({lvs: lvs_active_site before}, written in
+    # the transaction that sets the ``moving:`` markers) and ``transferring``
+    # (the LVS whose leadership hand-off has started). While such a task is
+    # active with a live lease it owns the move: no leaderless recovery grants
+    # for those LVS, and an LVS it left at ``moving:<site>`` is reconciled
+    # only afterwards (storage_node_ops.reconcile_lvs_move). Its runner hands
+    # the leadership off (without a grant: the taker leads from its first IO)
+    # only through storage_node_ops.move_lvs_leadership, and on failure /
+    # cancel records the task DONE BEFORE settling its markers (the previous
+    # site written back before any hand-off, reconcile_lvs_move after one).
+    # One pass, no retry: the caller's next promote call judges again.
+    FN_SYNC_PROMOTE = "sync_promote"
+    # Sync replication: catch up the lagging zone of one LVS after a zone
+    # desync (tasks_runner_sync_resync). ``node_id`` is the owner of the LVS,
+    # ``function_params["lvs_name"]`` the LVS; one active task per LVS
+    # (tasks_controller.add_sync_resync_task). Unbounded (max_retry=-1): a
+    # failed catch-up re-runs with backoff once the lagging zone is back.
+    FN_SYNC_RESYNC = "sync_resync"
+    # Sync replication: fence a lost site as a whole (the site-level fence
+    # route, design-stretched §10.2) - the disaster site steps of a forced
+    # promote, run once for the site and moving no leadership
+    # (tasks_runner_sync_promote, which owns both functions so the steps have
+    # one implementation). ``node_id`` is empty; ``function_params``: ``site``
+    # (the site fenced), ``lvol_ids`` (always empty: no volume is excepted
+    # from the fence) and, once the steps are done, ``fenced`` (True). One
+    # active task per site (tasks_controller.add_sync_site_fence_task).
+    FN_SYNC_SITE_FENCE = "sync_site_fence"
 
     canceled: bool = False
     cluster_id: str = ""

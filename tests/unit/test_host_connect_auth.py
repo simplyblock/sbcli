@@ -7,7 +7,11 @@ from types import SimpleNamespace
 
 from pydantic import SecretStr
 
-from simplyblock_core.utils.nvme import HostConnectAuth
+from simplyblock_core.utils.nvme import (
+    HostConnectAuth,
+    HostNotAllowedError,
+    HostNQNRequiredError,
+)
 
 
 def _pool(dhchap, dhchap_key="", dhchap_ctrlr_key=""):
@@ -121,3 +125,23 @@ class TestHostConnectAuthResolve(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestRefusalTypes(unittest.TestCase):
+    """A caller answering HTTP tells the two refusals apart from each other and
+    from an absent volume: neither means the volume is gone."""
+
+    def _lvol(self):
+        return SimpleNamespace(allowed_hosts=[{"nqn": "nqn.2014-08.io.simplyblock:uuid:w0"}],
+                               pool_uuid="p1", get_id=lambda: "lv1")
+
+    def test_missing_host_nqn_is_a_required_error(self):
+        with self.assertRaises(HostNQNRequiredError) as ctx:
+            HostConnectAuth.resolve(self._lvol(), None, SimpleNamespace())
+        self.assertIsInstance(ctx.exception, ValueError)
+
+    def test_unknown_host_is_a_not_allowed_error(self):
+        with self.assertRaises(HostNotAllowedError) as ctx:
+            HostConnectAuth.resolve(self._lvol(), "nqn.2014-08.io.simplyblock:uuid:w4", SimpleNamespace())
+        self.assertIsInstance(ctx.exception, ValueError)
+        self.assertIn("not found in allowed hosts", str(ctx.exception))

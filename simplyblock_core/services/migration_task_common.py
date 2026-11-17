@@ -6,12 +6,19 @@ drive the same data-plane operation — start a distr migration, then poll
 ``distr_migration_status`` until it settles — and differ only in what they
 migrate and when they are allowed to start.
 """
+import errno
 from datetime import UTC, datetime
 
-from simplyblock_core import db_controller, utils
-from simplyblock_core.controllers import tasks_controller
+from simplyblock_core import db_controller, storage_node_ops, utils
+from simplyblock_core.controllers import (
+    activation_gate,
+    sync_replication_controller,
+    tasks_controller,
+)
+from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.rpc_client import RPCRemoteError
 from simplyblock_core.services.task_runner_base import (
     TaskAbort,
     TaskDefer,
@@ -31,6 +38,19 @@ MIGRATION_WAIT_UNAVAILABLE_KEY = "wait_unavailable_before_retry"
 # A migration may only start once the cluster has been serving for a moment:
 # a node that just came back is still settling its lvstore.
 NODE_SETTLE_SEC = 60
+
+# Members (``node:<id>`` / ``dev:<id>``) whose health check failed when the
+# migration started, recorded with the start (start_migration).
+MIGRATION_UNHEALTHY_KEY = "migration_unhealthy"
+# Set once a migration's errors were retried to confirm them; only then are they
+# taken as final (cluster held DEGRADED by Cluster.migration_ft_impact).
+MIGRATION_ERROR_CONFIRMED_KEY = "migration_error_confirmed"
+# When the start gate first saw failing health checks (defer_while_unhealthy).
+MIGRATION_WAIT_UNHEALTHY_KEY = "wait_unhealthy_since"
+# How long a migration start waits for failing health checks to recover. Bounded:
+# a health check that stays false for an unrelated reason must not hold
+# rebalancing back forever; the error confirmation below still covers that case.
+UNHEALTHY_START_WAIT_SEC = 300
 
 
 def migration_started(task):
@@ -64,6 +84,12 @@ def defer_unless_operable(cluster):
     FAILED_AND_MIGRATED — which only this family sets. Refusing here would
     deadlock the removal against the status it set itself.
     """
+    # A running sync-replication site activation holds every migration. A hold,
+    # not a failure: no retry consumed and no backoff, so the migration resumes
+    # on the first pass after the activation ends.
+    site_activation = activation_gate.site_activation_blocks(cluster)
+    if site_activation:
+        raise TaskDefer(site_activation)
     if not cluster.allows_operation():
         raise TaskDefer(f"cluster is {cluster.status}, deferring until it allows operations")
 
@@ -88,6 +114,116 @@ def require_node(task):
         return db.get_storage_node_by_id(task.node_id)
     except KeyError:
         raise TaskAbort(f"Node not found: {task.node_id}")
+
+
+def place_on_role_node(task, snode):
+    """Make sure that a sync-replication migration task that has not started
+    is on the node that must run it.
+
+    That node is the primary of the LVS's active triplet
+    (tasks_controller.migration_role_node). A promote can change it after
+    the task was queued. When this function returns, ``task`` is on the
+    right node, and the runner continues on ``snode`` (the task's node) in
+    the same way as on a cluster without sync replication.
+
+    - A task on another node is moved to the right node and deferred. The
+      next runner pass checks it against the new node's start conditions.
+    - While the LVS is being moved, the task is deferred and stays where it is.
+    - When the primary is departing, a re-balance or new-device task is
+      skipped (it ends DONE). A failed-device task waits while every member of
+      the active triplet is departing.
+    - A started task stays on its node, and the runner polls it there.
+
+    A sync-replication task holds the LVS name and its owner (``lvs_name``,
+    ``lvs_owner``). A task on a sync-replication node without them is
+    aborted. All other tasks are not changed.
+    """
+    params = task.function_params
+    distr_name = params.get("distr_name")
+    if "lvs_owner" not in params:
+        if storage_node_ops._sync_site(snode):
+            raise TaskAbort(f"{task.function_name} of {distr_name} on {task.node_id} has no lvs_owner: "
+                            f"a sync-replication migration task must name its LVS owner")
+        return
+    if migration_started(task):
+        return
+
+    lvs_name = params["lvs_name"]
+    owner = _lvs_owner(params)
+    try:
+        placement = tasks_controller.migration_role_node(owner, task.function_name)
+    except KeyError as e:
+        raise TaskAbort(str(e))
+
+    if placement.reason == tasks_controller.PLACEMENT_MOVING:
+        raise TaskDefer(f"{lvs_name} (owner {owner.get_id()}) is being moved ({owner.lvs_active_site}); "
+                        f"placing {task.function_name} of {distr_name} once the move settles")
+    if placement.node is None:
+        members = storage_node_ops.lvs_active_triplet(owner).node_ids
+        if task.function_name == JobSchedule.FN_FAILED_DEV_MIG:
+            raise TaskDefer(f"every member of the active triplet of {lvs_name} ({', '.join(members)}) "
+                            f"is departing; waiting")
+        raise TaskAbort(f"skipped: primary {members[0]} of {lvs_name} is departing")
+
+    target_id = placement.node.get_id()
+    if target_id == task.node_id:
+        return
+    if move_unstarted_task(task, target_id):
+        raise TaskDefer(f"moved {task.function_name} of {distr_name} ({lvs_name}) from {task.node_id} "
+                        f"to {target_id}, the primary of its active triplet")
+    raise TaskDefer(f"{task.function_name} of {distr_name} ({lvs_name}) changed on {task.node_id} "
+                    f"while being moved to {target_id}")
+
+
+def _lvs_owner(params):
+    """The owner of the LVS a sync-replication migration task names."""
+    try:
+        return db.get_storage_node_by_id(params["lvs_owner"])
+    except KeyError:
+        raise TaskAbort(f"Owner {params['lvs_owner']} of {params['lvs_name']} not found")
+
+
+def defer_for_sync_resync(task):
+    """Raise :class:`TaskDefer` while a not-yet-started re-balance or
+    new-device migration of a sync-replication LVS must leave the migration
+    slot to the LVS's zone catch-up.
+
+    A distrib has one migration slot, shared in the order failure > resync >
+    re-balance. Only a catch-up that can run now holds the task
+    (sync_replication_controller.resync_holding_rebalance). A started
+    migration already holds the slot and is polled on; a task without
+    ``lvs_owner`` (no sync replication) is not affected. The failed-device
+    runner does not call this: a failed-device migration never waits for a
+    catch-up.
+    """
+    params = task.function_params
+    if "lvs_owner" not in params or migration_started(task):
+        return
+    resync = sync_replication_controller.resync_holding_rebalance(
+        db.get_cluster_by_id(task.cluster_id), _lvs_owner(params),
+        db.get_storage_nodes_by_cluster_id(task.cluster_id))
+    if resync:
+        raise TaskDefer(f"{params.get('distr_name')} ({params['lvs_name']}): "
+                        f"waiting for the zone catch-up {resync} to finish first")
+
+
+def move_unstarted_task(task, node_id):
+    """Move ``task`` to ``node_id`` in one atomic update. The move happens only
+    if the stored task is still open, not started, and on ``task.node_id``.
+    Return True if the task moved."""
+    old_node_id = task.node_id
+    won = {"ok": False}
+
+    def _mutate(fresh):
+        won["ok"] = False
+        if (fresh.status == JobSchedule.STATUS_DONE or fresh.canceled
+                or migration_started(fresh) or fresh.node_id != old_node_id):
+            return False
+        fresh.node_id = node_id
+        won["ok"] = True
+        return True
+
+    return db.atomic_update(task, _mutate) is not None and won["ok"]
 
 
 def nodes_settled(cluster_id, primaries_only=False):
@@ -159,6 +295,63 @@ def cluster_unavailable_state(cluster_id):
     return sorted(unavailable)
 
 
+def cluster_unhealthy_state(cluster_id):
+    """Online nodes and online devices whose health check is failing, as
+    stable ids (``node:<id>`` / ``dev:<id>``).
+
+    Status alone does not show a network partition of the data ports: on
+    2026-11-16 (striped-volume bed, sb-striped-b6r) a 60 s partition left the
+    node ONLINE, and its device went unavailable and back ONLINE 20 s before
+    the partition ended. The rebalance that the device's return started ran
+    into the partition and ended with error 520 on four distribs, every node
+    and device online, so the errors were taken as final and the cluster stayed
+    DEGRADED. The health checks of the node and the device were still failing
+    while it ran. Members that are not ONLINE are cluster_unavailable_state's.
+    """
+    unhealthy = []
+    for node in db.get_storage_nodes_by_cluster_id(cluster_id):
+        if node.status != StorageNode.STATUS_ONLINE:
+            continue
+        if node.health_check is False:
+            unhealthy.append(f"node:{node.get_id()}")
+        for dev in node.nvme_devices:
+            if dev.status == NVMeDevice.STATUS_ONLINE and dev.health_check is False:
+                unhealthy.append(f"dev:{dev.get_id()}")
+    return sorted(unhealthy)
+
+
+def defer_while_unhealthy(task):
+    """Hold a not-yet-started migration while health checks of online nodes or
+    devices fail, for at most UNHEALTHY_START_WAIT_SEC (no retry consumed).
+
+    A failing health check on an ONLINE member is typically a partition or a
+    peer connection still being repaired; a migration started then loses pages
+    to it (see cluster_unhealthy_state).
+    """
+    if migration_started(task):
+        return
+    unhealthy = cluster_unhealthy_state(task.cluster_id)
+    since = task.function_params.get(MIGRATION_WAIT_UNHEALTHY_KEY)
+    if not unhealthy:
+        if since:
+            drop_params(task, MIGRATION_WAIT_UNHEALTHY_KEY)
+        return
+    now = datetime.now(UTC)
+    if not since:
+        checkpoint(task, **{MIGRATION_WAIT_UNHEALTHY_KEY: now.isoformat()})
+        raise TaskDefer(f"health checks failing on {unhealthy}, waiting before starting migration")
+    try:
+        waited = (now - datetime.fromisoformat(since)).total_seconds()
+    except Exception as e:
+        logger.warning("Unparsable %s stamp %r (%s); not waiting", MIGRATION_WAIT_UNHEALTHY_KEY, since, e)
+        return
+    if waited < UNHEALTHY_START_WAIT_SEC:
+        raise TaskDefer(f"health checks failing on {unhealthy} for {int(waited)}s, "
+                        f"waiting before starting migration")
+    logger.warning("Starting migration task %s although health checks still fail on %s "
+                   "after %ds", task.uuid, unhealthy, int(waited))
+
+
 def require_recovery_progress(task, unavailable):
     """Hold a migration back while the cluster is degraded, releasing it only
     when something actually recovers.
@@ -194,9 +387,21 @@ def start_migration(task, start, **params):
     the handler would otherwise lose it and start a second migration. Any
     ``params`` are recorded in the same commit, so a marker can never land
     without the context written alongside it.
+
+    A sync-replication task (``lvs_owner``) whose start is answered EBUSY
+    defers: the distrib's migration slot is held by another migration (a
+    zone catch-up, or a migration of another task), and the task waits for
+    it without consuming a retry. Every other failure, and EBUSY of a task
+    without sync replication, is a failed attempt (``TaskRetry``).
     """
     try:
         started = start()
+    except RPCRemoteError as e:
+        if e.code == errno.EBUSY and "lvs_owner" in task.function_params:
+            raise TaskDefer(f"migration slot of {task.function_params['distr_name']} busy on "
+                            f"{task.node_id}, waiting") from e
+        logger.error(e)
+        started = False
     except Exception as e:
         logger.error(e)
         started = False
@@ -204,7 +409,9 @@ def start_migration(task, start, **params):
         raise TaskRetry("Failed to start device migration task, retry later")
 
     return checkpoint(task, migration={"name": task.function_params["distr_name"]},
-                      migration_started=datetime.now(UTC).isoformat(), **params)
+                      migration_started=datetime.now(UTC).isoformat(),
+                      **{MIGRATION_UNHEALTHY_KEY: cluster_unhealthy_state(task.cluster_id)},
+                      **params)
 
 
 def _ft_impact_key(task):
@@ -281,6 +488,20 @@ def report_migration_status(task, res, allow_all_errors=False, allowed_error_cod
             # network outage ended 3 s before the migration did; its errors and the pages it counted
             # without full fault tolerance were the outage's). The retry runs with everything online.
             raise TaskRetry(f"mig error: {error_code}, a node came back during the migration, retrying")
+        unhealthy_at_start = task.function_params.get(MIGRATION_UNHEALTHY_KEY) or []
+        recovered = set(unhealthy_at_start) - set(cluster_unhealthy_state(task.cluster_id))
+        if recovered:
+            # Health checks that failed at the start passed again during the migration: a partition
+            # (or peer connection repair) ended while it ran, and its errors may be that outage's.
+            raise TaskRetry(f"mig error: {error_code}, health of {sorted(recovered)} recovered "
+                            f"during the migration, retrying")
+        if not task.function_params.get(MIGRATION_ERROR_CONFIRMED_KEY):
+            # Nothing visible changed, but an outage need not change any status (2026-11-16: a
+            # data-port partition left every node and device online). Run the migration once more
+            # before its errors are taken as final and the cluster is held degraded.
+            checkpoint(task, **{MIGRATION_ERROR_CONFIRMED_KEY: error_code})
+            raise TaskRetry(f"mig error: {error_code}, all nodes online, retrying once to "
+                            f"confirm the errors are not transient")
         # Every node and device is online, so a retry would hit the same errors.
         # The migration is done; whether the cluster may be ACTIVE depends on
         # whether the pages it could not place are fault tolerant as they are.
@@ -313,7 +534,9 @@ def report_migration_status(task, res, allow_all_errors=False, allowed_error_cod
 
 
 def no_sibling_migration(task):
-    """Eligibility: one migration at a time per node.
+    """Eligibility: only one migration of a distr runs at a time on a node.
+    For a sync-replication task, only one runs at a time on all nodes
+    together (tasks_controller.mig_scope_node).
 
     Only gates a task that has not started yet — once its own migration is
     running it is itself the sibling everything else waits on.
@@ -321,7 +544,8 @@ def no_sibling_migration(task):
     if migration_started(task):
         return True
     return not tasks_controller.get_active_node_mig_task(
-        task.cluster_id, task.node_id, task.function_params.get("distr_name"))
+        task.cluster_id, tasks_controller.mig_scope_node(task.node_id, task.function_params),
+        task.function_params.get("distr_name"))
 
 
 def allow_all_migration_errors(cluster_id, statuses):

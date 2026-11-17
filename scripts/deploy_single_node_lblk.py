@@ -229,8 +229,8 @@ def install_sbcli(ips):
         "sudo dnf install git python3-pip nvme-cli fio gdisk parted -y",
         "sudo /usr/bin/python3 -m pip install --upgrade pip setuptools wheel",
         "sudo /usr/bin/python3 -m pip install ruamel.yaml",
-        f"sudo pip install git+https://github.com/simplyblock/sbcli@{BRANCH}"
-        " --upgrade --force --ignore-installed requests",
+        (f"sudo pip install git+https://github.com/simplyblock/sbcli@{BRANCH}"
+        " --upgrade --force --ignore-installed requests"),
     ]
     with ThreadPoolExecutor(max_workers=len(ips)) as ex:
         for t in [ex.submit(ssh_exec, ip, cmds, False, True) for ip in ips]:
@@ -273,9 +273,9 @@ def deploy(config_name, keep_metadata_path=None):
 
     ndcs, npcs = cfg["ec"]
     ssh_exec(mgmt_ip, [
-        f"{sbctl_img} cluster create"
+        (f"{sbctl_img} cluster create"
         " --device-mode lblk --is-single-node"
-        f" --data-chunks-per-stripe {ndcs} --parity-chunks-per-stripe {npcs}"
+        f" --data-chunks-per-stripe {ndcs} --parity-chunks-per-stripe {npcs}")
     ], check=True, timeout=2400)
 
     # configure: whole disks (auto-selection) or explicit partitions
@@ -301,8 +301,8 @@ def deploy(config_name, keep_metadata_path=None):
     for attempt in range(5):
         try:
             ssh_exec(mgmt_ip, [
-                f"{sbctl_img} sn add-node {cluster_uuid} {sn_priv_ip}:5000 {IFACE}"
-                " --enable-journal-device"
+                (f"{sbctl_img} sn add-node {cluster_uuid} {sn_priv_ip}:5000 {IFACE}"
+                " --enable-journal-device")
             ], check=True, timeout=1800)
             break
         except RuntimeError:

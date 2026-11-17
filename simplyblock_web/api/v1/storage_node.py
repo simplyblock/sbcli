@@ -6,6 +6,7 @@ from flask import Blueprint, request
 
 from simplyblock_core import db_controller, storage_node_ops
 from simplyblock_core.controllers import tasks_controller
+from simplyblock_core.exceptions import PromoteIncompleteError
 from simplyblock_web import utils
 
 logger = logging.getLogger(__name__)
@@ -297,5 +298,8 @@ def make_primary(uuid):
     except KeyError:
         return utils.get_response_error(f"node not found: {uuid}", 404)
 
-    out = storage_node_ops.make_sec_new_primary(uuid)
+    try:
+        out = storage_node_ops.make_sec_new_primary(uuid)
+    except PromoteIncompleteError as e:
+        return utils.get_response_error(str(e), 409)
     return utils.get_response(out)

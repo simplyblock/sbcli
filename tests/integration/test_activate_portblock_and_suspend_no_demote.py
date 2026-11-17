@@ -18,13 +18,15 @@ Regression tests for two related fixes:
    in-flight IO still completing on the local distrib → writer conflict.
 """
 
+import contextlib
 import unittest
 from unittest.mock import MagicMock, patch
 
+from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.storage_node import StorageNode
-from tests._mocks import route_fences
+from tests._mocks import patch_fences
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -100,6 +102,17 @@ def _node(uuid, status=StorageNode.STATUS_ONLINE, lvstore="LVS_A",
     return n
 
 
+def _two_node_ring():
+    """A two-node HA cluster: each node owns an LVS and is the other's
+    secondary. ``primary-1``/``LVS_A`` is the pair the tests assert on;
+    ``secondary-1`` also owns ``LVS_B`` because an HA node without a secondary
+    of its own is not a state activation accepts — it assigns one."""
+    primary = _node("primary-1", primary_secondary="secondary-1")
+    secondary = _node("secondary-1", lvstore="LVS_B", primary_secondary="primary-1",
+                      mgmt_ip="10.0.0.2", rpc_port=8081)
+    return primary, secondary
+
+
 def _cluster(status=Cluster.STATUS_SUSPENDED, ha_type="ha", ftt=1):
     c = Cluster()
     c.uuid = "cluster-1"
@@ -114,7 +127,6 @@ def _cluster(status=Cluster.STATUS_SUSPENDED, ha_type="ha", ftt=1):
     c.nqn = "nqn.cluster"
     c.is_single_node = False
     c.enable_node_affinity = False
-    c.backup_config = None
     return c
 
 
@@ -136,26 +148,16 @@ class TestActivatePortBlockWrapper(unittest.TestCase):
         firewall_block_exc=None,
         firewall_allow_exc=None,
     ):
-        """Returns a tuple of (patches_started, recorded_calls).
-
-        Caller is responsible for stopping the patches (via the returned
-        contextmanager-like list) — done in the test's tearDown via addCleanup.
+        """Seed ``cluster``, ``primary`` and ``secondary`` into FDB and patch
+        everything above the database. Returns the started patchers and the
+        recorded calls; the caller stops the patchers.
         """
         from simplyblock_core import cluster_ops
 
         _seed_device_mesh([primary, secondary])
-
-        db = MagicMock()
-        db.get_cluster_by_id.return_value = cluster
-        db.get_storage_nodes_by_cluster_id.return_value = [primary, secondary]
-        db.get_storage_node_by_id.side_effect = lambda nid: (
-            primary if nid == primary.get_id() else secondary)
-        db.get_cluster_capacity.return_value = [{"size_total": 1 << 40}]
-        db.get_qos.return_value = []
-
-        def _primary_for(node_id):
-            return [primary] if node_id == secondary.get_id() else []
-        db.get_primary_storage_nodes_by_secondary_node_id.side_effect = _primary_for
+        db = DBController()
+        for record in (cluster, primary, secondary):
+            record.write_to_db(db.kv_store)
 
         # Fences (nvmf_port_block / nvmf_port_unblock on node.rpc_client):
         # record block/allow calls per node.
@@ -184,9 +186,8 @@ class TestActivatePortBlockWrapper(unittest.TestCase):
                 raise recreate_non_leader_exc
             return recreate_non_leader_ret
 
-        # tasks_controller: drop schedule fallback (the wrapper falls back to
-        # add_port_allow_task only when unblock RPC fails — we don't trigger
-        # that in the green-path tests below; still need a no-op shim).
+        # The wrapper falls back to add_port_allow_task only when the unblock
+        # RPC fails; record it rather than queueing a real task.
         scheduled_port_allow = []
 
         def _add_port_allow_task(cluster_id, node_id, port):
@@ -201,8 +202,6 @@ class TestActivatePortBlockWrapper(unittest.TestCase):
             port_events.append(("allow", node.get_id(), port))
 
         patches = [
-            patch.object(cluster_ops, "db_controller", db),
-            patch.object(cluster_ops, "DBController", return_value=db),
             patch.object(cluster_ops.tcp_ports_events, "port_deny", _port_deny),
             patch.object(cluster_ops.tcp_ports_events, "port_allowed", _port_allowed),
             patch.object(cluster_ops.tasks_controller, "add_port_allow_task",
@@ -213,34 +212,18 @@ class TestActivatePortBlockWrapper(unittest.TestCase):
                          _recreate_non_leader),
             patch.object(cluster_ops.storage_node_ops, "get_next_physical_device_order",
                          lambda *a, **kw: 0),
-            patch.object(cluster_ops.storage_node_ops, "get_secondary_nodes",
-                         lambda *a, **kw: [secondary.get_id()]),
-            patch.object(cluster_ops.storage_node_ops, "get_secondary_nodes_2",
-                         lambda *a, **kw: []),
-            patch.object(cluster_ops, "set_cluster_status", lambda *a, **kw: None),
             # Only sleep. Replacing the whole module makes time.time() return a
             # MagicMock, so the activation path's `time.time() >= deadline`
             # comparisons raise TypeError instead of running.
             patch.object(cluster_ops.time, "sleep", MagicMock()),
-            # qos: prevent FDB writes
-            patch.object(cluster_ops.qos_controller, "get_qos_weights_list",
-                         lambda *a, **kw: []),
+            # Storage nodes: the activation reads its nodes back from FDB, so
+            # the node-side calls are patched on the class, not the instances.
+            patch_fences(_fake_set_port),
+            patch.object(StorageNode, "recreate_hublvol", return_value=True),
+            patch.object(StorageNode, "create_secondary_hublvol", return_value=True),
+            patch.object(StorageNode, "connect_to_hublvol", return_value=True),
+            patch.object(StorageNode, "client", MagicMock()),
         ]
-        # Ensure each node's rpc_client and snode.recreate_hublvol / connect /
-        # write_to_db are no-ops (Pass 3 + post-loop work). The model objects
-        # already exist; we patch their methods inline.
-        for n in (primary, secondary):
-            n.write_to_db = MagicMock(return_value=True)
-            n.rpc_client = MagicMock()
-            n.recreate_hublvol = MagicMock(return_value=True)
-            n.create_secondary_hublvol = MagicMock(return_value=True)
-            n.connect_to_hublvol = MagicMock(return_value=True)
-            n.client = MagicMock()
-        route_fences((primary, secondary), _fake_set_port)
-        # Primary's per-LVS port lookup — already populated in _node().
-        # Make is_qos_set on the cluster return False so the QOS branch is skipped.
-        cluster.is_qos_set = lambda: False
-
         for p in patches:
             p.start()
         return patches, fw_calls, recreate_calls, port_events, scheduled_port_allow
@@ -251,20 +234,17 @@ class TestActivatePortBlockWrapper(unittest.TestCase):
             self._patch_cluster_activate_environment(cluster, primary,
                                                      secondary, **kw)
         self.addCleanup(lambda: [p.stop() for p in patches])
-        try:
+        # cluster_activate may raise on the LVSRestartRequiredError path;
+        # the tests below assert on its effects explicitly.
+        with contextlib.suppress(ValueError):
             cluster_ops.cluster_activate("cluster-1", force=True)
-        except ValueError:
-            # cluster_activate may raise on the LVSRestartRequiredError path;
-            # the tests below assert on it explicitly.
-            pass
         return fw_calls, recreate_calls, port_events, scheduled
 
     # ----- tests -----
 
     def test_reactivation_blocks_and_unblocks_leader_port(self):
         cluster = _cluster(status=Cluster.STATUS_SUSPENDED)
-        primary = _node("primary-1", primary_secondary="secondary-1")
-        secondary = _node("secondary-1", mgmt_ip="10.0.0.2", rpc_port=8081)
+        primary, secondary = _two_node_ring()
 
         fw_calls, recreate_calls, port_events, _ = self._run_activate(
             cluster, primary, secondary)
@@ -279,7 +259,8 @@ class TestActivatePortBlockWrapper(unittest.TestCase):
             f"unexpected firewall sequence: {fw_calls}")
         # Recreate on the non-leader ran with activation_mode=True (we deliberately
         # do NOT switch the helper out of activation_mode — only add the firewall).
-        non_leader_runs = [c for c in recreate_calls if c[0] == "non_leader"]
+        non_leader_runs = [c for c in recreate_calls
+                           if c[0] == "non_leader" and c[2] == "primary-1"]
         self.assertEqual(len(non_leader_runs), 1, recreate_calls)
         _, snode_id, primary_id, activation_mode = non_leader_runs[0]
         self.assertEqual(snode_id, "secondary-1")
@@ -293,8 +274,7 @@ class TestActivatePortBlockWrapper(unittest.TestCase):
 
     def test_fresh_activation_does_not_block_leader_port(self):
         cluster = _cluster(status=Cluster.STATUS_UNREADY)
-        primary = _node("primary-1", primary_secondary="secondary-1")
-        secondary = _node("secondary-1", mgmt_ip="10.0.0.2", rpc_port=8081)
+        primary, secondary = _two_node_ring()
 
         fw_calls, recreate_calls, port_events, _ = self._run_activate(
             cluster, primary, secondary)
@@ -314,8 +294,7 @@ class TestActivatePortBlockWrapper(unittest.TestCase):
         not leak a stuck-blocked leader port — the finally clause unblocks."""
         from simplyblock_core import storage_node_ops
         cluster = _cluster(status=Cluster.STATUS_SUSPENDED)
-        primary = _node("primary-1", primary_secondary="secondary-1")
-        secondary = _node("secondary-1", mgmt_ip="10.0.0.2", rpc_port=8081)
+        primary, secondary = _two_node_ring()
 
         err = storage_node_ops.LVSRestartRequiredError(
             "secondary-1", "LVS_A", detail="examine did not produce lvstore")
@@ -333,8 +312,7 @@ class TestActivatePortBlockWrapper(unittest.TestCase):
 
     def test_reactivation_schedules_port_allow_task_on_unblock_failure(self):
         cluster = _cluster(status=Cluster.STATUS_SUSPENDED)
-        primary = _node("primary-1", primary_secondary="secondary-1")
-        secondary = _node("secondary-1", mgmt_ip="10.0.0.2", rpc_port=8081)
+        primary, secondary = _two_node_ring()
 
         fw_calls, _, _, scheduled = self._run_activate(
             cluster, primary, secondary,
@@ -345,7 +323,8 @@ class TestActivatePortBlockWrapper(unittest.TestCase):
             [c for c in fw_calls if c[0] == "primary-1"],
             [("primary-1", 4420, "block"), ("primary-1", 4420, "allow")])
         # Fallback task scheduled.
-        self.assertEqual(scheduled, [("cluster-1", "primary-1", 4420)],
+        self.assertEqual([t for t in scheduled if t[1] == "primary-1"],
+                         [("cluster-1", "primary-1", 4420)],
                          f"add_port_allow_task fallback missing: {scheduled}")
 
 
@@ -373,18 +352,10 @@ class TestSuspendIsDeprecatedNoop(unittest.TestCase):
         from simplyblock_core import storage_node_ops
 
         snode = _node("node-A", lvstore="LVS_A", status=StorageNode.STATUS_ONLINE)
+        snode.write_to_db(DBController().kv_store)
 
-        snode.rpc_client = MagicMock()
         fence = MagicMock()
-        route_fences([snode], fence)
-        with patch.object(storage_node_ops, "set_node_status"), \
-                patch.object(storage_node_ops, "DBController") as _db:
-            # The callee does DBController().get_storage_node_by_id(...), so the
-            # node has to hang off the INSTANCE mock. Stubbing the class mock
-            # left the callee reading a bare MagicMock status, failing its
-            # is-online check and returning early — the assertion below then
-            # passed without the suspend path ever running.
-            _db.return_value.get_storage_node_by_id.return_value = snode
+        with patch.object(storage_node_ops, "set_node_status"), patch_fences(fence):
             self.assertTrue(
                 storage_node_ops.suspend_storage_node(snode.get_id()))
             fence.assert_not_called()
@@ -393,13 +364,10 @@ class TestSuspendIsDeprecatedNoop(unittest.TestCase):
         from simplyblock_core import storage_node_ops
 
         snode = _node("node-A", lvstore="LVS_A", status=StorageNode.STATUS_SUSPENDED)
+        snode.write_to_db(DBController().kv_store)
 
-        snode.rpc_client = MagicMock()
         fence = MagicMock()
-        route_fences([snode], fence)
-        with patch.object(storage_node_ops, "set_node_status"), \
-                patch.object(storage_node_ops, "DBController") as _db:
-            _db.return_value.get_storage_node_by_id.return_value = snode
+        with patch.object(storage_node_ops, "set_node_status"), patch_fences(fence):
             self.assertTrue(
                 storage_node_ops.resume_storage_node(snode.get_id()))
             fence.assert_not_called()

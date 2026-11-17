@@ -106,7 +106,7 @@ def _run_monitor(spawned, ticks, nodes=None):
     with (
         patch.object(snm, "db", db),
         patch.object(snm, "update_cluster_status"),
-        patch.object(snm, "_run_periodic_housekeeping"),
+        patch.object(snm, "_start_housekeeping"),
         patch.object(snm.threading, "Thread", factory),
         patch.object(snm.time, "sleep", side_effect=_stop_after(ticks)),
     ):
@@ -136,7 +136,7 @@ class TestWorkerFailure:
         with (
             patch.object(snm, "db", db),
             patch.object(snm, "update_cluster_status"),
-            patch.object(snm, "_run_periodic_housekeeping"),
+            patch.object(snm, "_start_housekeeping"),
             patch.object(snm.threading, "Thread", factory),
             patch.object(snm.time, "sleep", side_effect=kill_then_tick),
         ):
@@ -192,7 +192,7 @@ class TestRespawnCeiling:
         with (
             patch.object(snm, "db", db),
             patch.object(snm, "update_cluster_status"),
-            patch.object(snm, "_run_periodic_housekeeping"),
+            patch.object(snm, "_start_housekeeping"),
             patch.object(snm.threading, "Thread", factory),
             patch.object(snm.time, "sleep", side_effect=lambda _s: made[-1].__setattr__("alive", False)),
         ):

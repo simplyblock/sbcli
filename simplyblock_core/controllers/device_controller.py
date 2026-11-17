@@ -3,7 +3,13 @@ import threading
 import time
 import uuid
 
-from simplyblock_core import constants, distr_controller, storage_node_ops, utils
+from simplyblock_core import (
+    constants,
+    distr_controller,
+    jm_raid,
+    storage_node_ops,
+    utils,
+)
 from simplyblock_core.controllers import device_events, tasks_controller
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.cluster import Cluster
@@ -11,7 +17,7 @@ from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.nvme_device import JMDevice, NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.prom_client import PromClient
-from simplyblock_core.rpc_client import RPCException, RPCRemoteError
+from simplyblock_core.rpc_client import RPCClient, RPCException, RPCRemoteError
 from simplyblock_core.utils.helpers import single_or_none
 
 # Debounce window for the per-device flap counter: two countable
@@ -376,6 +382,63 @@ def device_set_online(device_id, cause=CAUSE_OTHER, connect_peers=True):
     return ret
 
 
+#: What drive_identity found under a device record's namespace bdev name.
+DRIVE_SAME = "same"
+DRIVE_OTHER = "other"
+DRIVE_ABSENT = "absent"
+
+
+def drive_identity(device_obj, snode, rpc_client=None):
+    """Say whether the bdev SPDK holds under a device record's name is the
+    drive the record describes.
+
+    Returns ``(verdict, serial)``: DRIVE_SAME when the namespace bdev exists and
+    its serial is the record's, DRIVE_OTHER when it exists with another serial,
+    DRIVE_ABSENT when no such bdev exists. ``serial`` is what SPDK reported,
+    or None.
+
+    A record identifies its drive by serial. Its bdev and controller names are
+    derived from the PCI address, and a PCI address names a slot, not a disk:
+    the same addresses recur on every host built alike, and a node relocated
+    onto such a host (StorageNodeOps Migrate) finds controllers of the right
+    NAME holding drives it has never seen. Anything that rebuilds a device
+    stack from the names alone then puts a second alceml on a namespace that
+    another device already owns, and two stacks writing one disk is data
+    corruption (Talos lab 2026-11-12: a relocated node's three origin devices
+    were "repaired" onto the target's drives and a verifying client read back
+    bad blocks).
+
+    A record without a serial (an AIO device) or a bdev that is not an NVMe
+    namespace has nothing to compare and answers DRIVE_SAME.
+    """
+    rpc_client = rpc_client or snode.rpc_client()
+    if device_obj.bdev_type == "aio" or not device_obj.serial_number:
+        return DRIVE_SAME, None
+    name = device_obj.nvme_bdev or f"{device_obj.nvme_controller}n1"
+    if not name:
+        return DRIVE_SAME, None
+    bdev = rpc_client.bdev_get(name)
+    if not bdev:
+        return DRIVE_ABSENT, None
+    nvme = (bdev.get("driver_specific") or {}).get("nvme") or []
+    if not nvme or "ctrlr_data" not in nvme[0]:
+        return DRIVE_SAME, None
+    found = utils.nvme_namespace_serial(nvme[0], snode.id_device_by_nqn)
+    if found == device_obj.serial_number:
+        return DRIVE_SAME, found
+    return DRIVE_OTHER, found
+
+
+def _refuse_foreign_drive(device_obj, snode, found, doing):
+    logger.error(
+        "Device %s: %s on node %s holds a drive with serial %s, and this device "
+        "is the drive with serial %s. That is another disk, in the slot this "
+        "device had on another host; %s would put a second stack on a drive "
+        "another device owns. Not touching it.",
+        device_obj.get_id(), device_obj.nvme_bdev or device_obj.nvme_controller,
+        snode.get_id(), found, device_obj.serial_number, doing)
+
+
 def probe_device_stack(device_obj, snode, rpc_client=None):
     """Report which layers of a device's stack are present, bottom-up.
 
@@ -477,6 +540,14 @@ def device_repair(device_id, force=False):
         return False
 
     rpc_client = snode.rpc_client()
+    verdict, found = drive_identity(device_obj, snode, rpc_client)
+    if verdict == DRIVE_OTHER:
+        # Not a repair attempt that failed: the drive is not here. The budget
+        # still counts it, so the message repeats on the backoff schedule and
+        # then stops, instead of on every monitor cycle.
+        _refuse_foreign_drive(device_obj, snode, found, "repairing it")
+        return _count_failed_repair(db_controller, snode, device_id, device.repair_attempts)
+
     present, missing = probe_device_stack(device_obj, snode, rpc_client)
     logger.info("Device %s repair probe: present=%s missing=%s",
                 device_id, present, missing)
@@ -520,6 +591,19 @@ def device_repair(device_id, force=False):
             logger.error("Device %s: re-attaching the nvme controller failed: %s",
                          device_id, e)
             ok = False
+        if ok:
+            # The slot was re-attached by address; only now is there a serial
+            # to read. A foreign drive is detached again so nothing of it is
+            # left under this device's names.
+            verdict, found = drive_identity(device_obj, snode, rpc_client)
+            if verdict == DRIVE_OTHER:
+                _refuse_foreign_drive(device_obj, snode, found, "rebuilding its stack")
+                try:
+                    rpc_client.bdev_nvme_detach_controller(device_obj.nvme_controller)
+                except Exception as e:
+                    logger.error("Device %s: detaching the foreign controller %s failed: %s",
+                                 device_id, device_obj.nvme_controller, e)
+                return _count_failed_repair(db_controller, snode, device_id, attempts)
 
     if ok:
         try:
@@ -542,7 +626,12 @@ def device_repair(device_id, force=False):
         device_set_online(device_id, cause=CAUSE_DEVICE_RESTART, connect_peers=True)
         return True
 
-    # Count the failed attempt and arm the next backoff step.
+    return _count_failed_repair(db_controller, snode, device_id, attempts)
+
+
+def _count_failed_repair(db_controller, snode, device_id, attempts):
+    """Count a failed repair attempt and arm the next backoff step. Always
+    returns False, so an exit can ``return`` it."""
     attempts += 1
     exhausted = attempts >= len(constants.DEVICE_REPAIR_BACKOFF_SEC)
 
@@ -604,6 +693,14 @@ def _def_create_device_stack(device_obj, snode, force=False, clear_data=False):
     db_controller = DBController()
 
     rpc_client = snode.rpc_client(timeout=600)
+
+    # Every path that builds a device's stack comes through here, so this is
+    # where a record is held to the drive it describes. force forgives a layer
+    # that fails to build; it does not make another disk this device.
+    verdict, found = drive_identity(device_obj, snode, rpc_client)
+    if verdict == DRIVE_OTHER:
+        _refuse_foreign_drive(device_obj, snode, found, "building its stack")
+        return False
 
     nvme_bdev = device_obj.nvme_bdev
     if snode.enable_test_device:
@@ -861,22 +958,17 @@ def restart_device(device_id, force=False):
             ret = rpc_client.bdev_get(jm_dev_part)
             if ret:
                 logger.info(f"JM part found: {jm_dev_part}")
-                if snode.jm_device.status in [JMDevice.STATUS_UNAVAILABLE, JMDevice.STATUS_REMOVED]:
-                    if snode.rpc_client().bdev_get(snode.jm_device.raid_bdev):
+                jm_down = snode.jm_device.status in [JMDevice.STATUS_UNAVAILABLE, JMDevice.STATUS_REMOVED]
+                if rpc_client.bdev_get(snode.jm_device.raid_bdev):
+                    # Re-add the leg whatever the JM status: removing a leg
+                    # while another one remains leaves the JM ONLINE.
+                    _readd_jm_raid_leg(snode, jm_dev_part, rpc_client)
+                    if jm_down:
                         logger.info("Raid found, setting jm device online")
-                        ret = snode.rpc_client().bdev_raid_get_bdevs()
-                        has_bdev = any(
-                            bdev["name"] == jm_dev_part
-                            for raid in ret
-                            for bdev in raid.get("base_bdevs_list", [])
-                        )
-                        if not has_bdev:
-                            logger.info(f"Adding to raid: {jm_dev_part}")
-                            snode.rpc_client().bdev_raid_add_base_bdev(snode.jm_device.raid_bdev, jm_dev_part)
                         set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
-                    else:
-                        logger.info("Raid not found, restarting jm device")
-                        restart_jm_device(snode.jm_device.get_id(), force=True)
+                elif jm_down:
+                    logger.info("Raid not found, restarting jm device")
+                    restart_jm_device(snode.jm_device.get_id(), force=True)
 
     return "Done"
 
@@ -1083,28 +1175,118 @@ def device_remove(device_id, force=True, cause=CAUSE_OTHER):
     # was a SPDK-event-driven remove), but we pass it through for symmetry.
     device_set_state(device_id, NVMeDevice.STATUS_REMOVED, cause=cause)
 
-    if not snode.jm_device.raid_bdev:
-        remove_jm_device(snode.jm_device.get_id())
-    else:
-        nvme_controller = device.nvme_controller
-        dev_to_remove = None
-        for part in snode.jm_device.jm_nvme_bdev_list:
-            if part.startswith(nvme_controller):
-                dev_to_remove = part
-                break
-
-        if dev_to_remove:
-            raid_found = False
-            for raid_info in rpc_client.bdev_raid_get_bdevs():
-                if raid_info["name"] == snode.jm_device.raid_bdev:
-                    raid_found = True
-                    base_bdevs = raid_info.get("base_bdevs_list", [])
-                    if any(bdev["name"] == dev_to_remove for bdev in base_bdevs):
-                        remove_from_jm_device(snode.jm_device.get_id(), dev_to_remove)
-            if not raid_found:
-                set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
+    if snode.jm_device and not snode.jm_device.raid_bdev:
+        # A JM on a dedicated device: tear it down only when it is that device
+        # that went away, not on the removal of any device of the node.
+        jm_base = snode.jm_device.nvme_bdev
+        if _on_controller(jm_base, device.nvme_controller) and not rpc_client.bdev_get(jm_base):
+            remove_jm_device(snode.jm_device.get_id())
+    elif snode.jm_device:
+        _remove_jm_raid_leg_of_device(snode, device, rpc_client)
 
     return True
+
+
+def _remove_jm_raid_leg_of_device(snode: StorageNode, device: NVMeDevice, rpc_client: RPCClient) -> None:
+    """Take the removed device's JM partition out of the JM raid -- but only
+    when that partition is physically gone.
+
+    device_remove() also runs for logical removals (the alceml stuck-IO
+    watchdog, distrib errors) that leave the SSD and its JM partition in
+    place. Pulling a still-present partition out of the raid lets it go stale
+    while the JM keeps writing to the other leg, and the raid is rebuilt
+    without a superblock on node restart, so the stale leg is then mounted as
+    current and the JM alceml fails to load (SFAM-2843).
+    """
+    dev_to_remove = None
+    for part in snode.jm_device.jm_nvme_bdev_list:
+        if _on_controller(part, device.nvme_controller):
+            dev_to_remove = part
+            break
+
+    if not dev_to_remove:
+        return
+
+    if len(snode.jm_device.jm_nvme_bdev_list) == 1:
+        # Single-drive JM: raid_bdev is the bare partition, not a raid.
+        if not rpc_client.bdev_get(dev_to_remove):
+            set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
+        return
+
+    raid_found = False
+    for raid_info in rpc_client.bdev_raid_get_bdevs():
+        if raid_info["name"] == snode.jm_device.raid_bdev:
+            raid_found = True
+            base_bdevs = raid_info.get("base_bdevs_list", [])
+            if any(bdev["name"] == dev_to_remove for bdev in base_bdevs):
+                if rpc_client.bdev_get(dev_to_remove):
+                    logger.info(
+                        "JM partition %s is still present: keeping it in %s",
+                        dev_to_remove, snode.jm_device.raid_bdev)
+                else:
+                    remove_from_jm_device(snode.jm_device.get_id(), dev_to_remove)
+    if not raid_found:
+        set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
+
+
+def _on_controller(bdev_name: str, nvme_controller: str) -> bool:
+    """True if ``bdev_name`` (``<ctrl>n<ns>[p<part>]``) belongs to ``nvme_controller``.
+
+    A bare prefix match is not enough: controller names drop every 0 of the
+    PCI address, so 0000:06:01.0 is nvme_61 and 0000:06:11.0 is nvme_611.
+    """
+    return bool(nvme_controller) and bdev_name.startswith(f"{nvme_controller}n")
+
+
+def _set_jm_leg_stale(db_controller: DBController, node_id: str, leg: str, stale: bool) -> None:
+    """Atomically add ``leg`` to, or drop it from, the JM's stale_jm_legs."""
+    def _mut(n: StorageNode) -> bool:
+        if not n.jm_device:
+            return False
+        legs = [x for x in n.jm_device.stale_jm_legs if x != leg]
+        if stale:
+            legs.append(leg)
+        if legs == n.jm_device.stale_jm_legs:
+            return False
+        n.jm_device.stale_jm_legs = legs
+        return True
+
+    db_controller.atomic_update(db_controller.get_storage_node_by_id(node_id), _mut)
+
+
+def _readd_jm_raid_leg(snode: StorageNode, member: str, rpc_client: RPCClient) -> None:
+    """Put the leg carrying ``member`` back into the JM raid1, which rebuilds it
+    from the surviving leg. The leg stays in stale_jm_legs until
+    clear_rebuilt_jm_legs() sees the rebuild finish."""
+    jm = snode.jm_device
+    leg = jm_raid.leg_of(member, jm.jm_leg_bdevs, jm.jm_leg_members)
+    raid = next((r for r in rpc_client.bdev_raid_get_bdevs() if r["name"] == jm.raid_bdev), None)
+    if raid is None:
+        return
+    if any(b.get("name") == leg for b in raid.get("base_bdevs_list", [])):
+        return
+    if not rpc_client.bdev_get(leg):
+        # A raid0 leg that lost a member is rebuilt from its members on node restart.
+        logger.warning("JM raid leg %s not found: it is re-created on node restart", leg)
+        return
+    _set_jm_leg_stale(DBController(), snode.get_id(), leg, True)
+    logger.info("Adding to raid: %s", leg)
+    rpc_client.bdev_raid_add_base_bdev(jm.raid_bdev, leg)
+
+
+def clear_rebuilt_jm_legs(snode: StorageNode, rpc_client: RPCClient) -> None:
+    """Drop from stale_jm_legs every leg whose raid1 rebuild has finished."""
+    jm = snode.jm_device
+    if not jm or not jm.stale_jm_legs:
+        return
+    raid = next((r for r in rpc_client.bdev_raid_get_bdevs() if r["name"] == jm.raid_bdev), None)
+    if raid is None:
+        return
+    db_controller = DBController()
+    for leg in jm.stale_jm_legs:
+        if jm_raid.leg_in_sync(raid, leg):
+            logger.info("JM raid leg %s rebuilt: no longer stale", leg)
+            _set_jm_leg_stale(db_controller, snode.get_id(), leg, False)
 
 
 def remove_from_jm_device(device_id, jm_bdev):
@@ -1120,16 +1302,23 @@ def remove_from_jm_device(device_id, jm_bdev):
         rpc_client = snode.rpc_client()
 
         if snode.jm_device.raid_bdev:
-            logger.info("device part of raid1: only remove from raid")
+            jm = snode.jm_device
+            # Under RAID 0+1 the partition may sit inside a raid0 leg; the top
+            # raid1 can only drop that whole leg.
+            leg = jm_raid.leg_of(jm_bdev, jm.jm_leg_bdevs, jm.jm_leg_members)
+            logger.info("device part of raid1: only remove leg %s from raid", leg)
             try:
                 has_any = False
                 for raid_info in rpc_client.bdev_raid_get_bdevs():
-                    if raid_info["name"] == snode.jm_device.raid_bdev:
+                    if raid_info["name"] == jm.raid_bdev:
                         base_bdevs = raid_info.get("base_bdevs_list", [])
-                        if any(bdev["name"] and bdev["name"] != jm_bdev for bdev in base_bdevs):
+                        if any(bdev["name"] and bdev["name"] != leg for bdev in base_bdevs):
                             has_any = True
                 if has_any:
-                    rpc_client.bdev_raid_remove_base_bdev(jm_bdev)
+                    # Recorded before the removal: a crash in between must not
+                    # leave a leg that misses writes unrecorded.
+                    _set_jm_leg_stale(db_controller, snode.get_id(), leg, True)
+                    rpc_client.bdev_raid_remove_base_bdev(leg)
                     return True
                 else:
                     set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)

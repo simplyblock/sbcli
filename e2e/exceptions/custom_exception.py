@@ -50,3 +50,37 @@ class NodeUnreachableTimeout(Exception):
     """
     def __init__(self, message) -> None:
         super().__init__(message)
+
+
+class ClusterUnhealthyBeforeTest(RuntimeError):
+    """The cluster was not healthy when a case tried to start.
+
+    Separate from a test failure, because it is not one: the case never ran.
+    Run 40080313048 (2026-10-24) reported 19 failures for one defect -- a
+    migration took the cluster to `suspended` at 10:11:55 and it never came
+    back, so the 18 cases after it each spent 300s failing this check and the
+    rest of their 22-minute box failing teardown against a dead cluster, for
+    6h40m and 190 identical "cluster status is suspended" errors.
+
+    A RuntimeError subclass so the callers that already catch RuntimeError
+    keep working; a distinct type so the runner can tell "the cluster is
+    gone" from "this test found a bug" without matching on a message.
+    """
+    def __init__(self, message) -> None:
+        super().__init__(message)
+
+
+class CapacityCeilingExceeded(Exception):
+    """The cluster was driven past the utilisation the harness is willing to run at.
+
+    A full simplyblock cluster does not fail IO cleanly. At 100% the devices
+    answer writes with error_write_cannot_allocate, every node stops completing
+    IO, and the clients' NVMe multipath exhausts fast_io_fail_tmo and returns
+    EIO -- which aborts ext4 journals and shuts XFS down, destroying the
+    filesystems under test. Run 39565026057 (2026-10-21) lost three that way.
+
+    So the harness stops itself first, while the cluster is still serving IO,
+    and says so. Raised by TestLvolHACluster.assert_capacity_headroom().
+    """
+    def __init__(self, message) -> None:
+        super().__init__(message)

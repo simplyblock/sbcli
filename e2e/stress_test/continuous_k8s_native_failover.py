@@ -45,7 +45,9 @@ from datetime import UTC, datetime, timedelta
 from e2e_tests.cluster_test_base import TestClusterBase
 from exceptions.custom_exception import LvolNotConnectException
 from logger_config import setup_logger
+from stress_test.rapid_fio_lifecycle import RapidFioLifecycle
 from utils.common_utils import sleep_n_sec
+from utils.fio_defaults import FIO_MAX_LATENCY
 from utils.k8s_utils import K8sUtils
 from utils.ssh_utils import RunnerK8sLog
 
@@ -108,8 +110,53 @@ class K8sNativeFailoverTest(TestClusterBase):
         # self.outage_types = ["graceful_shutdown", "interface_full_network_interrupt"]
         # self.outage_types2 = ["container_stop", "graceful_shutdown", "interface_full_network_interrupt"]
 
-        self.outage_types = ["graceful_shutdown"]
-        self.outage_types2 = ["container_stop", "graceful_shutdown", "operator_shutdown"]
+        # graceful_shutdown alone left most of the outage surface untested.
+        # interface_full_network_interrupt was commented out rather than
+        # deleted; it is a blanket DROP restored by a host-level process, and
+        # it already picks its duration from 30/300/600 -- which is both the
+        # brief blip and the two durations long enough for the kubelet to miss
+        # its heartbeats and the scheduler to evict. storage_node_reboot is
+        # new: there was no node reboot on k8s at all.
+        self.outage_types = [
+            "graceful_shutdown",
+            "storage_node_reboot",
+            "interface_full_network_interrupt",
+        ]
+        self.outage_types2 = ["container_stop", "graceful_shutdown",
+                              "operator_shutdown", "storage_node_reboot",
+                              "interface_full_network_interrupt"]
+
+        #: A network outage at or beyond this many seconds should push the
+        #: node past the 300s unreachable toleration and get its pods moved,
+        #: so the eviction and Multi-Attach checks are worth running. Below
+        #: it, nothing is expected to move and the checks would be vacuous.
+        self.EVICTION_THRESHOLD_SEC = 300
+
+        #: Outages that sever the WORKER, not just the storage node on it.
+        #:
+        #: interface_full_network_interrupt is iptables in the host's
+        #: netfilter tables with no port match, so it also cuts the kernel
+        #: nvme-tcp initiator on that worker: every FIO pod scheduled there
+        #: loses every path to every volume, whoever owns it. Those pods are
+        #: stopped before the cut and started again after, because holding
+        #: them to FIO_MAX_LATENCY through it measures where the scheduler
+        #: put them rather than anything about the product.
+        #:
+        #: storage_node_reboot is deliberately NOT here. It evicts, so k8s
+        #: reschedules the client onto a surviving worker, and that
+        #: reschedule is itself worth testing.
+        self.CLIENT_SEVERING_OUTAGES = ("interface_full_network_interrupt",)
+
+        #: How long one client gets to put fio down before we cut its
+        #: network, and how long all of them get together. The total matters
+        #: because this runs inside the outage thread, which the caller joins
+        #: with a 600s timeout: four clients each taking the full per-job
+        #: wait would spend most of that before the outage even started.
+        self.FIO_QUIESCE_WAIT_SEC = 90
+        self.FIO_QUIESCE_TOTAL_SEC = 240
+
+        #: {"pending": [...], "findings": [...], "seq": n}, lazily built.
+        self._quiesce_store = None
 
 
         # ── Tracking dicts ──
@@ -222,16 +269,24 @@ class K8sNativeFailoverTest(TestClusterBase):
         # 5. Clean up old lvols/pools via sbcli (through kubectl exec)
         #    Order: clones → snapshots → lvols → pools
         #    (SPDK refuses to delete a snapshot that still has clones)
-        try:
-            self.sbcli_utils.delete_all_clones()
-            sleep_n_sec(2)
-            self.sbcli_utils.delete_all_snapshots()
-            sleep_n_sec(2)
-            self.sbcli_utils.delete_all_lvols()
-            sleep_n_sec(2)
-            self.sbcli_utils.delete_all_storage_pools()
-        except Exception as e:
-            self.logger.warning(f"Cleanup of old resources failed: {e}")
+        # Skipped on a resumed run: these objects are the run's own, and
+        # adopting them is the entire point of --resume.
+        if not self._should_wipe_existing_objects():
+            self.logger.info(
+                "[K8s setup] resume active: keeping existing clones, "
+                "snapshots, lvols and pools for adoption"
+            )
+        else:
+            try:
+                self.sbcli_utils.delete_all_clones()
+                sleep_n_sec(2)
+                self.sbcli_utils.delete_all_snapshots()
+                sleep_n_sec(2)
+                self.sbcli_utils.delete_all_lvols()
+                sleep_n_sec(2)
+                self.sbcli_utils.delete_all_storage_pools()
+            except Exception as e:
+                self.logger.warning(f"Cleanup of old resources failed: {e}")
 
         # 6. Initialize K8sUtils
         # In local kubectl mode (K8S_LOCAL_KUBECTL=1), mgmt_nodes may be empty
@@ -245,7 +300,15 @@ class K8sNativeFailoverTest(TestClusterBase):
         self.logger.info(f"[K8s] K8sUtils initialized for mgmt_node={mgmt_node!r}")
 
         # 6b. Kill orphaned K8s Jobs/resources from any previous run
-        self._kill_orphaned_k8s_resources()
+        # A resumed run's Jobs are not orphans: killing them would tear
+        # down the FIO the run is about to re-adopt.
+        if self._should_wipe_existing_objects():
+            self._kill_orphaned_k8s_resources()
+        else:
+            self.logger.info(
+                "[K8s setup] resume active: leaving existing K8s "
+                "resources in place"
+            )
 
         # 7. Client-based FIO mode: set up SSH connections to external clients
         client_ip_raw = os.environ.get("CLIENT_IP", "").strip()
@@ -877,7 +940,8 @@ class K8sNativeFailoverTest(TestClusterBase):
 
     # ── FIO config builder ───────────────────────────────────────────────────
 
-    def _build_fio_config(self, name: str) -> tuple[str, str]:
+    def _build_fio_config(self, name: str,
+                          runtime: int | None = None) -> tuple[str, str]:
         """Build FIO main and warmup configs for a benchmark run.
 
         Returns:
@@ -905,7 +969,7 @@ class K8sNativeFailoverTest(TestClusterBase):
             f"size={self.fio_size}\n"
             f"numjobs={self.fio_num_jobs}\n"
             f"time_based\n"
-            f"runtime={self.FIO_RUNTIME}\n"
+            f"runtime={runtime or self.FIO_RUNTIME}\n"
             f"group_reporting\n"
             f"verify=md5\n"
             f"verify_dump=1\n"
@@ -913,7 +977,7 @@ class K8sNativeFailoverTest(TestClusterBase):
             f"verify_backlog=4096\n"
             f"verify_backlog_batch=32\n"
             f"randseed={randseed}\n"
-            f"max_latency=40s\n"
+            f"max_latency={FIO_MAX_LATENCY}\n"
             f"write_iolog=/spdkvol/{name}-iolog.log\n"
             f"log_avg_msec=1000\n"
             f"write_bw_log=/spdkvol/{name}-fio\n"
@@ -1112,8 +1176,14 @@ class K8sNativeFailoverTest(TestClusterBase):
         self.logger.info(f"[warmup] FIO warmup complete on {client}: {name}")
 
     def _start_client_fio(self, name: str, client: str, mount_point: str,
-                          log_file: str, bs: str | None = None, randseed: int | None = None):
-        """Launch FIO in a background thread on *client* via SSH/tmux."""
+                          log_file: str, bs: str | None = None, randseed: int | None = None,
+                          runtime: int | None = None):
+        """Launch FIO in a background thread on *client* via SSH/tmux.
+
+        *runtime* defaults to FIO_RUNTIME, which is what every existing caller
+        gets. The rapid lineage passes its own jittered value so relaunched
+        jobs do not all end at the same moment.
+        """
         if bs is None:
             bs = f"{2 ** random.randint(2, 7)}K"
         if randseed is None:
@@ -1135,7 +1205,7 @@ class K8sNativeFailoverTest(TestClusterBase):
                 "iodepth": 1,
                 "numjobs": self.fio_num_jobs,
                 "time_based": True,
-                "runtime": self.FIO_RUNTIME,
+                "runtime": runtime or self.FIO_RUNTIME,
                 "randseed": randseed,
                 "iolog_file": iolog_file,
                 "fio_log_file": fio_log_file,
@@ -2126,6 +2196,11 @@ class K8sNativeFailoverTest(TestClusterBase):
                 except Exception:
                     pass
 
+                # The Job is gone, the volume is not. Creating the
+                # replacement now races the detach, and the scheduler is
+                # free to put it on another node.
+                self._wait_volume_released(pvc_name)
+
                 fio_config, warmup_config = self._build_fio_config(pvc_name)
                 nid = pvc_info.get("node_id")
                 avoid = self._get_k8s_node_for_storage_node(nid) if nid else None
@@ -2143,6 +2218,9 @@ class K8sNativeFailoverTest(TestClusterBase):
 
                 pvc_info["job_name"] = new_job
                 pvc_info["configmap_name"] = new_cm
+                # A new job needs a new clock, or rapid_overdue judges it
+                # against the one the lifecycle was armed with.
+                self.rapid_note_launched(pvc_name)
                 sleep_n_sec(5)
 
             for clone_name, clone_info in self.clone_details.items():
@@ -2156,6 +2234,11 @@ class K8sNativeFailoverTest(TestClusterBase):
                     self.k8s_utils.delete_configmap(old_cm)
                 except Exception:
                     pass
+
+                # The Job is gone, the volume is not. Creating the
+                # replacement now races the detach, and the scheduler is
+                # free to put it on another node.
+                self._wait_volume_released(clone_name)
 
                 fio_config, warmup_config = self._build_fio_config(clone_name)
                 clone_nid = self._get_pvc_node_id(clone_name)
@@ -2174,9 +2257,237 @@ class K8sNativeFailoverTest(TestClusterBase):
 
                 clone_info["job_name"] = new_job
                 clone_info["configmap_name"] = new_cm
+                self.rapid_note_launched(clone_name)
                 sleep_n_sec(5)
 
     # ── Outage methods ───────────────────────────────────────────────────────
+
+    # ── Quiescing clients that an outage would cut off ───────────────────
+
+    def _quiesce_state(self):
+        """Lazily built so subclasses need not remember to initialise it."""
+        if getattr(self, "_quiesce_store", None) is None:
+            self._quiesce_store = {"pending": [], "findings": [], "seq": 0}
+        return self._quiesce_store
+
+    def _fio_jobs_on_worker(self, k8s_node):
+        """Every live FIO job whose pod currently sits on *k8s_node*."""
+        found = []
+        for label, details in (("pvc", self.pvc_details),
+                               ("clone", self.clone_details)):
+            for name, info in list(details.items()):
+                job = info.get("job_name")
+                if not job:
+                    continue
+                try:
+                    pod = self.k8s_utils.get_job_pod_name(job)
+                    if pod and self.k8s_utils.get_pod_node_name(
+                            pod) == k8s_node:
+                        found.append((label, name, info))
+                except Exception as exc:                  # noqa: BLE001
+                    self.logger.warning(
+                        f"[quiesce] could not locate the pod for job {job}: "
+                        f"{str(exc)[:140]}")
+        return found
+
+    def _quiesce_fio_on_worker(self, node_ip, outage_type):
+        """Stop FIO on the worker about to be isolated. True if safe to cut.
+
+        False means at least one client on that worker is still writing. The
+        caller must then run a different outage -- cutting anyway reproduces
+        the false failure this exists to prevent.
+        """
+        self._ensure_k8s_utils()
+        state = self._quiesce_state()
+        k8s_node = self.k8s_utils._get_k8s_node_name(node_ip)
+        if not k8s_node:
+            self.logger.warning(
+                f"[quiesce] cannot resolve a k8s node for {node_ip}; "
+                f"refusing to run {outage_type} blind")
+            return False
+
+        jobs = self._fio_jobs_on_worker(k8s_node)
+        if not jobs:
+            self.logger.info(
+                f"[quiesce] no FIO pods on {k8s_node}; {outage_type} can "
+                f"proceed untouched")
+            return True
+
+        self.logger.info(
+            f"[quiesce] {len(jobs)} FIO job(s) on {k8s_node}; stopping them "
+            f"before {outage_type}")
+        budget_end = time.time() + self.FIO_QUIESCE_TOTAL_SEC
+        stopped, stuck = [], []
+        for label, name, info in jobs:
+            job = info["job_name"]
+            left = budget_end - time.time()
+            if left <= 0:
+                # Counted as stuck, not skipped. Running out of budget means
+                # we do not know this client is down, and the whole point of
+                # the check is to refuse the cut when we do not know.
+                stuck.append(
+                    f"{name}: quiesce budget "
+                    f"({self.FIO_QUIESCE_TOTAL_SEC}s) spent on earlier "
+                    f"clients")
+                continue
+            res = self.k8s_utils.stop_fio_in_job(
+                job, wait=int(min(self.FIO_QUIESCE_WAIT_SEC, max(10, left))))
+
+            # Judged now, because nothing will judge it later: the Job is
+            # replaced on resume, and a terminated Job never reaches
+            # "succeeded" so validate_fio_job skips it. err=110 counts here
+            # -- the cluster is still whole at this point.
+            if not (res.get("logs") or "").strip():
+                # Warned, not recorded as a finding: an unreadable log is the
+                # harness failing to look, and failing the run for it would
+                # turn a flaky `kubectl logs` into a red cluster. It still has
+                # to be said out loud, because the alternative reading of a
+                # silent pass here is that the client was clean.
+                self.logger.warning(
+                    f"[quiesce] {name}: stopped for the outage but its log "
+                    f"could not be read, so nothing vouches for the IO it "
+                    f"had already done ({res.get('reason') or 'no reason'})")
+            hits = self.k8s_utils.fio_io_errors_in(
+                res.get("logs"), source=f"{label} {name} (job {job})")
+            if hits:
+                state["findings"].extend(hits)
+                self.logger.error(
+                    f"[quiesce] {name}: {len(hits)} IO error(s) in the log "
+                    f"BEFORE the outage -- recorded, not discarded")
+            try:
+                self._save_fio_pod_logs(job, f"{name}-quiesced",
+                                        pvc_name=name)
+            except Exception:                             # noqa: BLE001
+                pass
+
+            if res.get("stopped"):
+                stopped.append({"label": label, "name": name, "info": info,
+                                "node": k8s_node})
+            else:
+                stuck.append(f"{name}: {res.get('reason') or 'unknown'}")
+
+        state["pending"].extend(stopped)
+        if stuck:
+            self.logger.warning(
+                f"[quiesce] could not stop {len(stuck)} client(s) on "
+                f"{k8s_node}: {'; '.join(stuck[:3])}. Not cutting this "
+                f"node's network.")
+            # Whatever did stop goes straight back: the outage is not
+            # happening, so leaving those volumes idle would be a silent gap
+            # in the iteration rather than a deliberate one.
+            self._resume_quiesced_fio()
+            return False
+
+        self.logger.info(
+            f"[quiesce] {len(stopped)} client(s) on {k8s_node} are down; "
+            f"{outage_type} may proceed")
+        return True
+
+    def _resume_quiesced_fio(self):
+        """Start FIO again on every client we stopped. Idempotent, cheap.
+
+        Called from the top of perform_n_plus_k_outages and of
+        validate_fio_jobs rather than wired into one recovery path: those
+        two are the places that need IO to be running, they are on every
+        route through the loop, and a client nobody restarted is a volume
+        the rest of the run quietly stops testing.
+        """
+        state = self._quiesce_state()
+        if not state["pending"]:
+            return
+        self._ensure_k8s_utils()
+        pending, state["pending"] = state["pending"], []
+        state["seq"] += 1
+        tag = f"q{state['seq']}"
+        self.logger.info(
+            f"[quiesce] restarting {len(pending)} client(s) stopped for an "
+            f"outage")
+
+        for item in pending:
+            label, name, info = item["label"], item["name"], item["info"]
+            old_job, old_cm = info.get("job_name"), info.get("configmap_name")
+            new_job, new_cm = f"fio-{name}-{tag}", f"fiocfg-{name}-{tag}"
+            try:
+                if old_job:
+                    self.k8s_utils.delete_job(old_job)
+                if old_cm:
+                    self.k8s_utils.delete_configmap(old_cm)
+            except Exception:                             # noqa: BLE001
+                pass
+            # Same race as the checkpoint relaunch: the Pod goes, the
+            # VolumeAttachment stays, and the replacement may be scheduled
+            # somewhere else.
+            self._wait_volume_released(name)
+            try:
+                fio_config, warmup_config = self._build_fio_config(name)
+                nid = (info.get("node_id") if label == "pvc"
+                       else self._get_pvc_node_id(name))
+                avoid = (self._get_k8s_node_for_storage_node(nid)
+                         if nid else None)
+                self.k8s_utils.create_fio_job(
+                    new_job, name, new_cm, fio_config,
+                    image=self.FIO_IMAGE,
+                    # Same as the checkpoint relaunch. Reusing the files a
+                    # killed job left behind is what produced the verify
+                    # failure in run 20261019-211527: a new seed over an old
+                    # file reads as corruption.
+                    cleanup_before_fio=True,
+                    avoid_node=avoid,
+                    warmup_config=warmup_config,
+                )
+            except Exception as exc:                      # noqa: BLE001
+                # Not swallowed. A client that never came back is a hole in
+                # the rest of the run, and the next checkpoint should say so
+                # rather than cover less ground without mentioning it.
+                state["findings"].append(
+                    f"{label} {name}: FIO was stopped for an outage and "
+                    f"could not be restarted: {str(exc)[:160]}")
+                self.logger.error(
+                    f"[quiesce] could not restart FIO for {name}: {exc}")
+                continue
+            info["job_name"] = new_job
+            info["configmap_name"] = new_cm
+            # Same reason as the checkpoint relaunch: this is a fresh job.
+            self.rapid_note_launched(name)
+            self.logger.info(f"[quiesce] {name}: FIO restarted as {new_job}")
+
+    def _wait_volume_released(self, pvc_name, timeout=240):
+        """Block until *pvc_name*'s PV has no VolumeAttachment left.
+
+        Call between deleting a FIO Job and creating its replacement. The
+        Pod disappears immediately; the VolumeAttachment does not, and a
+        replacement scheduled onto a different node in that window gets
+        "Multi-Attach error ... already exclusively attached to one node".
+
+        A timeout is reported, not raised. The caller goes on to create the
+        Job anyway: a volume left with no IO for the rest of the window is a
+        silent loss of coverage, where a Multi-Attach is at least loud, and
+        assert_no_volume_attach_errors will now name a cause the log explains.
+        """
+        try:
+            pv = self.k8s_utils.get_pvc_volume_handle(pvc_name)
+        except Exception as exc:                          # noqa: BLE001
+            self.logger.warning(
+                f"[detach] could not resolve the PV for {pvc_name}: "
+                f"{str(exc)[:140]}")
+            return
+        if not pv:
+            # Silent before, which made "the wait ran and the volume was
+            # free" indistinguishable from "the wait never looked" -- and
+            # the whole method only logs on failure, so the absence of
+            # [detach] lines proved nothing either way.
+            self.logger.warning(
+                f"[detach] {pvc_name} has no bound PV to wait on; skipping "
+                f"the detach wait. If its replacement reports Multi-Attach, "
+                f"this is why nothing was waited for.")
+            return
+        if not self.k8s_utils.wait_volume_detached(pv, timeout=timeout):
+            held = self.k8s_utils.get_volume_attachments(pv)
+            self.logger.warning(
+                f"[detach] {pvc_name} ({pv}) is still attached after "
+                f"{timeout}s: {held}. Recreating its FIO Job anyway -- if the "
+                f"replacement lands on another node it will report "
+                f"Multi-Attach, and this line is the reason.")
 
     def _build_reverse_secondary_map(self):
         rev = defaultdict(set)
@@ -2217,9 +2528,33 @@ class K8sNativeFailoverTest(TestClusterBase):
             f"[K8s] container_stop: deleted SPDK pod {pod_name!r} for node {node_ip}"
         )
 
+    def _control_plane_downtime(self) -> float:
+        """Seconds the control plane has been unreachable, 0 off the k8s path."""
+        fn = getattr(getattr(self, "k8s_utils", None),
+                     "control_plane_downtime", None)
+        return fn() if callable(fn) else 0.0
+
     def _graceful_shutdown_node(self, node: str):
+        """Ask the control plane to shut *node* down, and wait until it is.
+
+        Two things here are deliberate, and run 41058481784 is why.
+
+        ``node_detail`` is checked before it is indexed. An empty list from
+        `get_storage_node_details` means "could not read it", which is one
+        more not-yet-offline pass, not a result -- the bare ``[0]`` turned a
+        transient read into `IndexError: list index out of range` and took
+        down 9h22m of otherwise-passing failover.
+
+        And the budget does not run while the control plane is unreachable.
+        Five minutes of dead API server is not five minutes of a node
+        refusing to shut down. Without the discount, that same run would
+        still have failed: the deadline fell 45 seconds before the API
+        server came back.
+        """
         self.logger.info(f"Issuing graceful shutdown for node {node}.")
-        deadline = time.time() + 300
+        budget = 300
+        deadline = time.time() + budget
+        cp_seen = self._control_plane_downtime()
         while True:
             try:
                 self.sbcli_utils.shutdown_node(node_uuid=node, force=False)
@@ -2227,61 +2562,206 @@ class K8sNativeFailoverTest(TestClusterBase):
                 self.logger.warning(f"shutdown_node raised: {e}")
             sleep_n_sec(20)
             node_detail = self.sbcli_utils.get_storage_node_details(node)
-            if node_detail[0]["status"] == "offline":
+            if node_detail and node_detail[0].get("status") == "offline":
                 self.logger.info(f"Node {node} is offline.")
                 return
+            if not node_detail:
+                self.logger.warning(
+                    f"No details returned for {node}; treating as "
+                    f"not-yet-offline and retrying.")
+
+            cp_now = self._control_plane_downtime()
+            deadline += cp_now - cp_seen
+            cp_seen = cp_now
+
             if time.time() >= deadline:
                 raise RuntimeError(
-                    f"Node {node} did not go offline within 5 minutes."
+                    f"Node {node} did not go offline within "
+                    f"{budget // 60} minutes "
+                    f"(excluding {cp_now:.0f}s of control-plane downtime)."
                 )
             self.logger.info(f"Node {node} not yet offline; retrying shutdown...")
 
+    def _k8s_disconnect_data_nic(self, node_ip: str, iface: str,
+                                 duration: int = 30) -> int:
+        """Drop traffic on ONE data NIC, self-restoring after *duration*.
+
+        The multipath equivalent of _k8s_network_outage, modelled on it
+        directly: same kubectl exec into the privileged hostNetwork SPDK
+        pod, same host-level nsenter scheduling so the restore survives
+        SPDK's 60-second abort timer killing the container.
+
+        Scoped with -i/-o <iface> rather than a blanket DROP, because the
+        point of the multipath axis is losing one path while the other
+        carries the IO. A blanket rule would be a node outage wearing a
+        different name.
+
+        The restore is an iptables -D of the two specific rules, not -F: a
+        flush would also clear rules a concurrent full-network outage had
+        scheduled, and the two axes are deliberately combinable.
+
+        Returns the duration, matching _k8s_network_outage's contract.
+        """
+        self._ensure_k8s_utils()
+        flush_delay = duration + 5
+        rule_in = f"INPUT -i {iface} -j DROP"
+        rule_out = f"OUTPUT -o {iface} -j DROP"
+
+        # Step 1: schedule the targeted restore ON THE HOST.
+        #
+        # This used to go through `nsenter --target 1` from inside the SPDK
+        # pod, which does not reach the host: the pod is hostNetwork but not
+        # hostPID, so PID 1 in that namespace is the container's own and the
+        # timer died with the container -- precisely the case the comment
+        # claimed it survived. run_on_node goes in via `oc debug node/`,
+        # which chroots /host and gets real systemd.
+        restore_inner = (
+            f"iptables -D {rule_in} 2>/dev/null; "
+            f"iptables -D {rule_out} 2>/dev/null; true"
+        )
+        armed = self.k8s_utils.arm_host_undo_script(
+            node_ip, restore_inner, flush_delay, tag="nic")
+        if not armed:
+            # No host shell (Talos). Keep the in-pod timer so the NIC still
+            # comes back in the common case, and say what we are exposed to.
+            self.k8s_utils.exec_in_spdk_container(node_ip, (
+                f"sudo nohup bash -c 'sleep {flush_delay}; {restore_inner}' "
+                f"> /dev/null 2>&1 &"))
+            self.logger.warning(
+                f"[K8s] restore of {iface} on {node_ip} is armed in the SPDK "
+                f"pod, not on the host. If this outage takes the node down "
+                f"the pod goes with it and the NIC stays dropped.")
+        self.logger.info(
+            f"[K8s] Scheduled restore of {iface} in {flush_delay}s "
+            f"on {node_ip} ({'host' if armed else 'pod fallback'})"
+        )
+
+        # Step 2: apply the DROP rules after a short delay, so kubectl
+        # exec returns before the path goes away.
+        drop_cmd = (
+            "sudo nohup bash -c '"
+            f"sleep 5 && iptables -A {rule_in} && "
+            f"iptables -A {rule_out}"
+            "' > /tmp/k8s_nic_outage.log 2>&1 &"
+        )
+        self.k8s_utils.exec_in_spdk_container(node_ip, drop_cmd)
+        self.logger.info(
+            f"[K8s] Data NIC {iface} disconnected on {node_ip} "
+            f"(self-restoring after {duration}s)"
+        )
+        return duration
+
     def _k8s_network_outage(self, node_ip: str, duration: int) -> int:
-        """Trigger self-restoring full network outage on a K8s storage node.
+        """Cut a K8s storage node off its peers' storage network.
 
-        Uses kubectl exec into the privileged SPDK pod (hostNetwork:true) to
-        run iptables DROP rules with auto-flush after *duration* seconds.
+        Delegates to K8sUtils.cut_storage_network, which every k8s outage
+        test now shares. Two things changed when it moved there, both of
+        them bugs this copy had:
 
-        The iptables flush runs as a **host-level process** via
-        ``nsenter --target 1`` so it survives SPDK container death.  Without
-        this, SPDK's 60-second abort timer kills the container (and all its
-        child processes), leaving iptables DROP rules permanently in place.
+        It used to blanket-DROP everything on the node. That severed the
+        node's spdk-proxy from its peers -- and `simplyblock-monitoring` is
+        scheduled onto a storage node, so when it landed on the node under
+        test it reported three healthy peers as failed and the cluster went
+        degraded, then suspended. It also severed OVN geneve and
+        FoundationDB, which shows up as `FDBError: transaction timed out`
+        and is a broken test environment rather than a storage outage. The
+        cut is now the peers' DATA addresses only (NVMe-oF), leaving
+        management -- and the monitor -- working.
 
-        No SSH to storage nodes required.
+        The undo used to be scheduled with `nsenter --target 1` from inside
+        the SPDK pod, under a comment saying it survived the container being
+        killed. It did not: the pod is hostNetwork but NOT hostPID, so PID 1
+        there is the container's own and the timer died with it. It is now a
+        transient systemd unit armed through `oc debug node/`, and the undo
+        deletes the rules it added instead of running `iptables -F`.
 
         Returns the chosen duration.
         """
         self._ensure_k8s_utils()
-        # Total delay before flush = 5s (pre-DROP delay) + duration
-        flush_delay = duration + 5
-        # Step 1: Schedule the iptables flush as a host-level process via
-        # nsenter into PID 1's namespaces.  This process survives even if
-        # the SPDK container (and all its children) is killed by abort().
-        flush_cmd = (
-            f"sudo nsenter --target 1 --mount --net -- "
-            f"bash -c 'nohup bash -c \"sleep {flush_delay} && iptables -F\" "
-            f"> /dev/null 2>&1 &'"
-        )
-        self.k8s_utils.exec_in_spdk_container(node_ip, flush_cmd)
-        self.logger.info(
-            f"[K8s] Scheduled host-level iptables flush in {flush_delay}s on {node_ip}"
-        )
+        nodes = self.sbcli_utils.get_storage_nodes()["results"]
+        peers = self.k8s_utils.peer_data_ips(nodes, node_ip)
+        return self.k8s_utils.cut_storage_network(node_ip, peers, duration)
 
-        # Step 2: Apply the DROP rules after a short delay (gives kubectl
-        # exec time to return before connectivity is lost).
-        drop_cmd = (
-            "sudo nohup bash -c '"
-            "sleep 5 && "
-            "iptables -A INPUT -j DROP && "
-            "iptables -A OUTPUT -j DROP"
-            "' > /tmp/k8s_nw_outage.log 2>&1 &"
-        )
-        self.k8s_utils.exec_in_spdk_container(node_ip, drop_cmd)
+    def _k8s_reboot_node(self, node_ip: str, node: str):
+        """Really reboot the worker, or say plainly that we could not.
+
+        `oc debug node/<n> -- chroot /host` on OpenShift, `kubectl debug` on
+        vanilla, `talosctl` on Talos. Where none of those work the caller gets
+        a pod restart instead AND a warning, because a reboot that silently
+        became a pod restart is worse than no reboot at all: the result looks
+        like coverage.
+        """
+        self._ensure_k8s_utils()
+        if self.k8s_utils.reboot_node(node_ip):
+            if self.k8s_utils.wait_node_condition(node_ip, ready=False,
+                                                  timeout=300):
+                # Clock starts at the moment it is confirmed gone, not at the
+                # moment we asked it to go: the gap between the two is the
+                # reboot command propagating, during which nothing is evicted.
+                self._node_down_since = getattr(self, "_node_down_since", {})
+                self._node_down_since[node_ip] = time.time()
+            return
+        self.logger.warning(
+            "[K8s] no real reboot available for %s; stopping the SPDK pod "
+            "instead. This iteration does NOT cover kubelet restart, volume "
+            "re-attach or CSI re-registration.", node_ip)
+        self._k8s_stop_spdk_pod(node_ip, node)
+
+    def _note_eviction_expected(self, node_ip: str, duration: int):
+        """Arm the volume-attach check for this node. Always.
+
+        Not gated on whether the outage was long enough to evict. Multi-Attach
+        does not require a full eviction -- any detach/attach cycle can strand
+        a VolumeAttachment, and the pod that wants that volume then waits
+        forever in ContainerCreating. "No volume failed to attach" holds after
+        a 30s blip as much as after a 10-minute isolation, so it is asserted
+        after both.
+
+        *duration* is kept for the log and to widen the event window: a longer
+        outage means a longer stretch of events belongs to it.
+        """
+        self._eviction_expected = getattr(self, "_eviction_expected", set())
+        self._eviction_expected.add(node_ip)
+        self._attach_window_sec = max(
+            getattr(self, "_attach_window_sec", 0), int(duration))
+        past = duration >= self.EVICTION_THRESHOLD_SEC
         self.logger.info(
-            f"[K8s] Network outage triggered on {node_ip} "
-            f"(self-restoring after {duration}s)"
-        )
-        return duration
+            "[K8s] %s was unreachable for %ds (%s the %ds toleration) -- "
+            "checking its volumes re-attached either way",
+            node_ip, duration,
+            "past" if past else "inside", self.EVICTION_THRESHOLD_SEC)
+
+    def assert_no_volume_attach_errors(self, label: str = ""):
+        """Fail if a rescheduled pod could not take its volume with it.
+
+        The failure this is hunting: an RWO volume whose old attachment is not
+        released leaves the new pod in ContainerCreating behind "Multi-Attach
+        error for volume", indefinitely and silently. Called after recovery,
+        and only worth calling when something was actually expected to move.
+        """
+        expected = getattr(self, "_eviction_expected", set())
+        if not expected:
+            return
+        self._ensure_k8s_utils()
+        # Window scoped to this outage plus its recovery, so a real failure in
+        # an earlier iteration cannot re-fail every iteration after it.
+        window = getattr(self, "_attach_window_sec", 0) + 600
+        # Pods still stuck, not raw events: a Multi-Attach that the attach
+        # controller retried and cleared is routine pod churn on an RWO
+        # volume, and our own utility pods produce it. Only something still
+        # not Running is a failure.
+        bad = self.k8s_utils.pods_stuck_on_volumes(within_sec=window)
+        self._eviction_expected = set()
+        self._attach_window_sec = 0
+        if bad:
+            raise RuntimeError(
+                f"[K8s] volume attach errors after the outage on "
+                f"{sorted(expected)}{(' (' + label + ')') if label else ''} -- "
+                f"a volume did not re-attach, so whatever wants it is stuck:"
+                f"\n    " + "\n    ".join(bad[:6]))
+        self.logger.info(
+            "[K8s] volumes on %s all re-attached after the outage, no "
+            "Multi-Attach errors", sorted(expected))
 
     def _operator_shutdown_node(self, node: str):
         """Shut down a storage node via a StorageNodeOps CR.
@@ -2389,6 +2869,11 @@ class K8sNativeFailoverTest(TestClusterBase):
             # FTT=1: pick from primaries only (secondary blocked)
             candidates = list(self.sn_primary_secondary_map.keys())
 
+        # Anything stopped for the previous outage starts again here, before
+        # the next one is chosen. A client left down is a volume the rest of
+        # the run silently stops testing.
+        self._resume_quiesced_fio()
+
         self.current_outage_nodes = []
 
         if len(candidates) < self.npcs:
@@ -2432,13 +2917,36 @@ class K8sNativeFailoverTest(TestClusterBase):
                 # About to make this node unreachable on purpose: reset its SSH
                 # unreachable clock so a planned outage cannot trip the 2h rule.
                 self.ssh_obj.notify_outage_started([node_ip])
+                # Every outage arms the attach check, including the ones
+                # that never evict: a pod recreated in place still detaches
+                # and re-attaches its volume, and that is enough to strand a
+                # VolumeAttachment.
+                self._note_eviction_expected(node_ip, 0)
                 if outage_type == "container_stop":
                     self._k8s_stop_spdk_pod(node_ip, node)
                 elif outage_type == "graceful_shutdown":
                     self._graceful_shutdown_node(node)
-                elif outage_type == "interface_full_network_interrupt":
-                    duration = random.choice([30, 300, 600])
-                    node_outage_dur = self._k8s_network_outage(node_ip, duration)
+                elif outage_type in self.CLIENT_SEVERING_OUTAGES:
+                    # Take the clients on this worker down first. If any of
+                    # them will not stop, we do not cut: running it anyway
+                    # reproduces the false failure this exists to prevent,
+                    # with the difference that we would have known. The
+                    # iteration still gets an outage, just a pod-level one
+                    # that leaves the worker's networking alone.
+                    if self._quiesce_fio_on_worker(node_ip, outage_type):
+                        duration = random.choice([30, 300, 600])
+                        node_outage_dur = self._k8s_network_outage(
+                            node_ip, duration)
+                        self._note_eviction_expected(node_ip, duration)
+                    else:
+                        self.logger.warning(
+                            f"[quiesce] {outage_type} on {node} downgraded "
+                            f"to container_stop: a client on that worker "
+                            f"could not be quiesced")
+                        outage_type = "container_stop"
+                        self._k8s_stop_spdk_pod(node_ip, node)
+                elif outage_type == "storage_node_reboot":
+                    self._k8s_reboot_node(node_ip, node)
                 elif outage_type == "operator_shutdown":
                     self._operator_shutdown_node(node)
                 self.log_outage_event(node, outage_type, "Outage started")
@@ -2467,8 +2975,13 @@ class K8sNativeFailoverTest(TestClusterBase):
 
         outage_combinations = []
         for node, outage_type, node_ip, _rpc_port in node_plans:
-            _, node_outage_dur = outage_results.get(node, (outage_type, 0))
-            outage_combinations.append((node, outage_type, node_outage_dur))
+            # outage_results carries the type that actually RAN, which is not
+            # always the one planned -- a network cut is downgraded when its
+            # worker's clients cannot be quiesced. Reporting the planned name
+            # would put an outage in the summary that never happened.
+            ran_type, node_outage_dur = outage_results.get(
+                node, (outage_type, 0))
+            outage_combinations.append((node, ran_type, node_outage_dur))
 
         self.outage_start_time = int(datetime.now().timestamp())
         return outage_combinations
@@ -2613,6 +3126,49 @@ class K8sNativeFailoverTest(TestClusterBase):
             self._operator_restart_node(node)
             self.sbcli_utils.wait_for_storage_node_status(node, "online", timeout=300)
             self.log_outage_event(node, outage_type, "Node restarted (operator)")
+
+        elif outage_type == "storage_node_reboot":
+            # Nothing to issue: the machine is coming back on its own. What
+            # has to be waited out is the whole stack behind it -- kubelet,
+            # then the CSI plugin re-registering, then SPDK -- which is the
+            # part a pod restart never exercised.
+            self._ensure_k8s_utils()
+            # Only the node UUID is in scope here; resolve its IP the same way
+            # the outage path did.
+            _nd = self.sbcli_utils.get_storage_node_details(node)
+            _ip = (_nd[0].get("mgmt_ip") if _nd else None)
+            if _ip:
+                try:
+                    self.k8s_utils.wait_node_condition(_ip, ready=True,
+                                                       timeout=900)
+                    # How long it was actually gone decides whether the
+                    # scheduler had time to move anything, and so whether the
+                    # Multi-Attach check has something to look for.
+                    _down_at = getattr(self, "_node_down_since", {}).pop(
+                        _ip, None)
+                    if _down_at is not None:
+                        _down = time.time() - _down_at
+                        self.logger.info(
+                            "[K8s] %s was NotReady for %.0fs across the reboot",
+                            _ip, _down)
+                        self._note_eviction_expected(_ip, int(_down))
+                finally:
+                    # reboot_node cordoned this node before draining it, and a
+                    # cordon left behind is silent and cumulative: the node
+                    # accepts no new pods for the rest of the run, so later
+                    # iterations schedule onto a shrinking cluster and fail for
+                    # reasons unrelated to any outage. Always, even if the wait
+                    # above failed.
+                    self.k8s_utils.cordon_node(_ip, cordon=False)
+            self.sbcli_utils.wait_for_storage_node_status(
+                node, "online", timeout=600)
+            self.log_outage_event(node, outage_type, "Node back after reboot")
+
+        # If this outage was long enough to evict, the pods have had the whole
+        # recovery to be rescheduled by now -- so this is the point to ask
+        # whether they took their volumes with them. No-ops unless something
+        # was actually expected to move.
+        self.assert_no_volume_attach_errors(label=outage_type)
 
         # Health check deferred to after all outage nodes are online
         self.outage_end_time = int(datetime.now().timestamp())
@@ -3313,6 +3869,10 @@ class K8sNativeFailoverTest(TestClusterBase):
         """
         self._ensure_k8s_utils()
 
+        # A checkpoint must never validate a job we stopped ourselves: it
+        # would read our own SIGTERM as a failure. Resume first, then judge.
+        self._resume_quiesced_fio()
+
         # Save all FIO logs and mapping summary before validation
         self._save_all_fio_logs()
         self._save_fio_mapping_summary()
@@ -3351,15 +3911,27 @@ class K8sNativeFailoverTest(TestClusterBase):
                         self.logger.error(
                             f"[validate_fio] {label} {name!r} (job {job}): {exc}")
 
-            if failures:
+            # Errors found in a log we terminated ourselves are reported
+            # here and nowhere else. The Job they came from was replaced on
+            # resume, so validate_fio_job can no longer see it -- dropping
+            # them would mean a volume that failed before an outage passed
+            # the run because we happened to stop its client first.
+            quiesce_hits = list(self._quiesce_state()["findings"])
+            self._quiesce_state()["findings"] = []
+
+            if failures or quiesce_hits:
                 total = len(self.pvc_details) + len(self.clone_details)
                 lines = [
                     f"  {label} {name} (job {job}): {exc}"
                     for label, name, job, exc in failures
                 ]
+                lines += [f"  [quiesced client] {h}" for h in quiesce_hits]
                 raise AssertionError(
                     f"FIO validation failed on {len(failures)} of {total} "
-                    f"volume(s):" + chr(10) + chr(10).join(lines))
+                    f"volume(s)"
+                    + (f", plus {len(quiesce_hits)} error(s) in client(s) "
+                       f"stopped for an outage" if quiesce_hits else "")
+                    + ":" + chr(10) + chr(10).join(lines))
             self.logger.info(
                 f"[validate_fio] all "
                 f"{len(self.pvc_details) + len(self.clone_details)} "
@@ -3373,6 +3945,15 @@ class K8sNativeFailoverTest(TestClusterBase):
             return
 
         self.logger.info("[cleanup] Deleting all test K8s resources...")
+
+        # Before anything else, and whatever else fails below: a cordon left
+        # behind makes the NEXT run's bring-up fail, with a message about
+        # stripe width rather than about a cordon.
+        try:
+            self.k8s_utils.uncordon_all_workers()
+        except Exception as exc:                          # noqa: BLE001
+            self.logger.warning(
+                f"[cleanup] could not uncordon: {str(exc)[:140]}")
 
         if self.use_client_fio:
             # ── Client cleanup: stop fio, unmount, disconnect NVMe ──
@@ -5237,8 +5818,16 @@ class K8sNativeResilientFailoverTest(K8sNativeFailoverTest):
         iteration = 1
         test_failed = False
         failure_reasons = []
+        # --resume re-enters mid-run: prefixes restored, objects adopted,
+        # clients remounted without mkfs, FIO re-kicked.
+        resumed_at = self.resume_point()
+        if resumed_at:
+            iteration = resumed_at
+            self.adopt_existing_objects()
+            self.resume_reattach_clients()
         try:
             while True:
+                self.checkpoint(iteration)
                 self.logger.info(f"=== Iteration {iteration} ===")
 
                 validation_thread = threading.Thread(
@@ -5418,7 +6007,8 @@ class K8sNativeResilientFailoverTest(K8sNativeFailoverTest):
                 self._cleanup_all_k8s_resources()
 
 
-class K8sNativeRapidFailoverNoGapTest(K8sNativeResilientFailoverTest):
+class K8sNativeRapidFailoverNoGapTest(RapidFioLifecycle,
+                                      K8sNativeResilientFailoverTest):
     """K8s-native twin of the docker RandomRapidFailoverNoGapV2WithMigration.
 
     Fires outages back-to-back so the next one lands while migration from the
@@ -5561,6 +6151,11 @@ class K8sNativeRapidFailoverNoGapTest(K8sNativeResilientFailoverTest):
         iteration = 1
         test_failed = False
         failure_reasons = []
+        resumed_at = self.resume_point()
+        if resumed_at:
+            iteration = resumed_at
+            self.adopt_existing_objects()
+            self.resume_reattach_clients()
 
         # One monitor for the whole run. The parent starts a fresh daemon
         # thread every iteration and never stops any of them.
@@ -5568,8 +6163,14 @@ class K8sNativeRapidFailoverNoGapTest(K8sNativeResilientFailoverTest):
             target=self.validate_iostats_continuously, daemon=True
         ).start()
 
+        # Split the standing set into a permanent half and a churnable half,
+        # and record the base runtime. Idempotent, and placed after any resume
+        # adoption so a resumed run sees the objects it actually has.
+        self.rapid_fio_init(self.FIO_RUNTIME)
+
         try:
             while True:
+                self.checkpoint(iteration)
                 self.logger.info(f"=== Iteration {iteration} ===")
 
                 # ── Outage phase ──
@@ -5622,6 +6223,14 @@ class K8sNativeRapidFailoverNoGapTest(K8sNativeResilientFailoverTest):
                     self.retry_failed_secondary_connects()
 
                 self._mark_nodes_online()
+
+                # Read the FIO logs now, while the outage that caused any
+                # error is still the last thing that happened. Previously
+                # nothing looked at a log until the checkpoint, so a failure
+                # could not be attributed to an outage at all. Anything real
+                # raises RapidFioFailure out of the loop and into the failure
+                # diagnostics below.
+                self.rapid_after_outage(f"after outage {self._iter + 1}")
 
                 # Nodes are online here and the next cycle opens with
                 # _pace_next_outage()'s 50-90s sleep, so this runs inside time
@@ -5709,13 +6318,287 @@ class K8sNativeRapidFailoverNoGapTest(K8sNativeResilientFailoverTest):
             if test_failed:
                 summary = "; ".join(failure_reasons) if failure_reasons else "unknown error"
                 self.logger.error(f"[cleanup] Test FAILED -- reasons: {summary}")
+                # A cordon is not debug state. Preserving the PVCs, the Jobs
+                # and the cluster for inspection is the point of this branch;
+                # leaving a worker of shared infrastructure unschedulable is
+                # not, and it is not even ours to keep.
+                #
+                # _cleanup_all_k8s_resources uncordons first "whatever else
+                # fails below" -- but this branch skips that method whole, so
+                # the uncordon went with it. Run 41015882185 cordoned
+                # worker-5 at 08:42:15 for a storage_node_reboot, failed at
+                # 08:56:33 before the recovery path uncordoned it, and took
+                # this branch. The next bring-up then saw five workers and
+                # refused the 2+2 stripe, reporting stripe width rather than
+                # a cordon.
+                try:
+                    left = self.k8s_utils.uncordon_all_workers()
+                    if left:
+                        self.logger.warning(
+                            "[cleanup] uncordoned %s on the way out; the run "
+                            "failed between a cordon and its uncordon, and a "
+                            "cordon left behind fails the NEXT bring-up",
+                            ", ".join(left))
+                except Exception as exc:                  # noqa: BLE001
+                    self.logger.error(
+                        "[cleanup] COULD NOT UNCORDON (%s). The next "
+                        "bring-up may refuse on stripe width; uncordon by "
+                        "hand before rerunning.", str(exc)[:140])
                 self.logger.info(
-                    "[cleanup] Skipping resource cleanup to preserve state for debugging"
+                    "[cleanup] Skipping resource cleanup to preserve state "
+                    "for debugging (cordons excepted, see above)"
                 )
                 raise AssertionError(f"Stress test failed: {summary}")
             else:
                 self._cleanup_all_k8s_resources()
 
+
+
+    def rapid_allow_relaunch(self):
+        """No relaunching on the outage immediately before a checkpoint.
+
+        This test's checkpoint still ends in wait_for_fio_complete(), which
+        blocks until every job has finished. A job relaunched on the outage
+        just before it would hold that barrier for a full FIO_RUNTIME, so the
+        checkpoint would be slower than it was before the lifecycle existed.
+        Errors are still scanned for on that outage -- only the relaunch waits.
+        """
+        every = getattr(self, "validate_every", 0) or 0
+        if every <= 0:
+            return True
+        # self._iter has already been advanced for this outage by the time
+        # the checkpoint test runs, so the outage whose NEXT increment lands
+        # on the boundary is the one to hold back.
+        return (self._iter + 1) % every != 0
+
+    def restart_fio_for(self, name, record, runtime=None):
+        """Relaunch a single job's FIO. Every other job keeps running.
+
+        restart_fio(iteration) restarts them all at once, which is the barrier
+        this lifecycle exists to remove. This is the one-job version of the
+        same launch, and it deliberately reuses the same helpers so the FIO
+        parameters cannot drift apart from the per-iteration path.
+
+        *runtime* is applied. Both _start_client_fio and _build_fio_config now
+        take it as an optional argument defaulting to FIO_RUNTIME, so every
+        existing caller is unaffected and the rapid lineage can stagger its
+        relaunches the way the docker one does.
+        """
+        self._ensure_k8s_utils()
+        record = record if record is not None else {}
+        seq = getattr(self, "_rapid_relaunch_seq", 0) + 1
+        self._rapid_relaunch_seq = seq
+
+        if getattr(self, "use_client_fio", False):
+            client = record.get("client")
+            mount_point = record.get("mount_path")
+            if not client or not mount_point:
+                raise RuntimeError(
+                    f"[rapid-fio] cannot relaunch {name}: client={client!r} "
+                    f"mount_path={mount_point!r}")
+            log_file = f"{self.log_path}/{name}-r{seq}.log"
+            # Kill first even though the job is believed finished: a job that
+            # ended cleanly can still have a straggler, and two fio processes
+            # on one mount would report corruption that is ours, not the
+            # product's.
+            self._kill_fio_on_client(name, client)
+            bs = f"{2 ** random.randint(2, 7)}K"
+            try:
+                self._run_fio_warmup_ssh(name, client, mount_point, bs)
+            except Exception as exc:                  # noqa: BLE001
+                self.logger.warning(
+                    "[rapid-fio] warmup failed for %s: %s -- launching anyway; "
+                    "a missed warmup can only cause a stale-header warning, "
+                    "not a missed defect", name, str(exc)[:120])
+            record["log_file"] = log_file
+            self._start_client_fio(name, client, mount_point, log_file, bs=bs,
+                                   runtime=runtime)
+            self.logger.info("[rapid-fio] relaunched %s on %s -> %s",
+                             name, client, log_file)
+            return
+
+        # Job mode: replace the Job and its ConfigMap under fresh names, since
+        # a Job's pod template is immutable and a completed Job cannot be
+        # restarted in place.
+        old_job = record.get("job_name")
+        old_cm = record.get("configmap_name")
+        new_job = f"fio-{name}-r{seq}"[:60]
+        new_cm = f"fiocfg-{name}-r{seq}"[:60]
+        if old_job:
+            try:
+                self.k8s_utils.delete_job(old_job)
+            except Exception as exc:                  # noqa: BLE001
+                self.logger.warning(
+                    "[rapid-fio] could not delete old job %s: %s", old_job,
+                    str(exc)[:120])
+        if old_cm:
+            try:
+                self.k8s_utils.delete_configmap(old_cm)
+            except Exception:                         # noqa: BLE001
+                pass
+        fio_config, warmup_config = self._build_fio_config(name, runtime=runtime)
+        nid = record.get("node_id")
+        avoid = self._get_k8s_node_for_storage_node(nid) if nid else None
+        self.k8s_utils.create_fio_job(
+            new_job, name, new_cm, fio_config,
+            image=self.FIO_IMAGE,
+            cleanup_before_fio=True,
+            avoid_node=avoid,
+            warmup_config=warmup_config,
+        )
+        record["job_name"] = new_job
+        record["configmap_name"] = new_cm
+        self.logger.info("[rapid-fio] relaunched %s as job %s", name, new_job)
+
+    # ── RapidFioLifecycle hooks ──────────────────────────────────────────
+    # Two FIO modes live here. With CLIENT_IP set the suite drives fio over
+    # ssh on client hosts, exactly as docker does, and the log is a file on
+    # the shared mount. Without it fio runs as a k8s Job and the log is inside
+    # a pod. fio_log_text is the seam that hides the difference; everything
+    # above it is identical.
+
+    def fio_jobs(self):
+        """Every PVC and clone currently under FIO."""
+        jobs = []
+        for name, det in (getattr(self, "pvc_details", None) or {}).items():
+            jobs.append((name, det))
+        for name, det in (getattr(self, "clone_details", None) or {}).items():
+            jobs.append((name, det))
+        return jobs
+
+    def fio_log_path(self, name, record):
+        """Only meaningful in client mode; Job mode reads pod logs instead."""
+        if not getattr(self, "use_client_fio", False):
+            return None
+        return (record or {}).get("log_file")
+
+    def fio_log_text(self, name, record):
+        if getattr(self, "use_client_fio", False):
+            return super().fio_log_text(name, record)
+        job = (record or {}).get("job_name")
+        if not job:
+            return ""
+        try:
+            self._ensure_k8s_utils()
+            out = []
+            for pod in (self.k8s_utils.get_job_pod_names(job) or []):
+                out.append(self.k8s_utils.get_pod_logs(pod, tail=2000) or "")
+            return "\n".join(out)
+        except Exception as exc:                      # noqa: BLE001
+            self.logger.warning("[rapid-fio] could not read logs for %s: %s",
+                                name, str(exc)[:120])
+            return ""
+
+    def fio_error_text(self, name, record):
+        """All containers, not just the benchmark.
+
+        The warmup is an init container, and `kubectl logs <pod>` without -c
+        never returns it. It wrote 24 GiB over 8m19s in run 41015882185 while
+        nodes were being shut down and rebooted under it, and not one line of
+        its output was ever read.
+        """
+        if getattr(self, "use_client_fio", False):
+            return super().fio_error_text(name, record)
+        job = (record or {}).get("job_name")
+        if not job:
+            return ""
+        try:
+            self._ensure_k8s_utils()
+            out = []
+            for pod in (self.k8s_utils.get_job_pod_names(job) or []):
+                out.append(
+                    self.k8s_utils.get_pod_logs_all_containers(pod) or "")
+            return chr(10).join(out)
+        except Exception as exc:                      # noqa: BLE001
+            self.logger.warning(
+                "[rapid-fio] could not read every container's log for %s: "
+                "%s", name, str(exc)[:120])
+            return ""
+
+    def fio_job_alive(self, name, record):
+        """Is this job still doing IO?
+
+        Unknown counts as alive in both modes. A job reported dead because one
+        ssh or kubectl call failed would be relaunched on top of one that is
+        still writing, which is worse than checking again next cycle.
+        """
+        if getattr(self, "use_client_fio", False):
+            client = (record or {}).get("client")
+            if not client:
+                return False
+            try:
+                out, _err = self.ssh_obj.exec_command(
+                    node=client,
+                    command=(f"sudo tmux list-sessions -F '#S' 2>/dev/null "
+                             f"| grep -qx '[f]io_{name}_fio' && echo ALIVE "
+                             f"|| echo GONE"),
+                    timeout=60, max_retries=1)
+                return "ALIVE" in (out or "")
+            except Exception:                         # noqa: BLE001
+                return True
+        job = (record or {}).get("job_name")
+        if not job:
+            return False
+        try:
+            self._ensure_k8s_utils()
+            # .status.active, not "does it have pods": a Job that finished
+            # keeps its pod in Completed state forever, so pod existence
+            # would report every finished job as still running and nothing
+            # would ever be relaunched.
+            return self.k8s_utils.job_active(job)
+        except Exception:                             # noqa: BLE001
+            return True
+
+    def rapid_job_was_evicted(self, name, record):
+        """True when this Job has no pod left, or its pod was Evicted.
+
+        storage_node_reboot cordons and drains the worker, which evicts the
+        FIO pod; with restartPolicy: Never and backoffLimit: 0 the Job never
+        gets another one. The Job object survives with zero pods, which is
+        indistinguishable from a silent death by log alone -- and is in fact
+        our own doing.
+
+        Zero pods counts as evicted: whether the drain evicted it or the pod
+        was collected afterwards, the log is gone either way and there is no
+        evidence left for the cautious path to protect.
+        """
+        if getattr(self, "use_client_fio", False):
+            return False
+        job = (record or {}).get("job_name")
+        if not job:
+            return False
+        try:
+            self._ensure_k8s_utils()
+            pods = self.k8s_utils.get_job_pod_names(job) or []
+            if not pods:
+                return True
+            for pod in pods:
+                detail = self.k8s_utils.get_pod_status_detail(pod) or {}
+                reason = f"{detail.get('reason', '')} {detail.get('message', '')}"
+                if "evict" in reason.lower():
+                    return True
+        except Exception as exc:                      # noqa: BLE001
+            # Unknown is not "we did it": fall back to the cautious path
+            # rather than relaunch over something we cannot account for.
+            self.logger.warning(
+                "[rapid-fio] could not tell whether %s was evicted (%s); "
+                "treating it as a silent death", name, str(exc)[:120])
+            return False
+        return False
+
+    def fio_relaunch(self, name, record, runtime):
+        """Start this one job again.
+
+        Deliberately delegates to restart_fio_for rather than reimplementing
+        the launch: the FIO parameters live in one place and a lifecycle that
+        drifted from them would be measuring something else.
+        """
+        if hasattr(self, "restart_fio_for"):
+            return self.restart_fio_for(name, record, runtime)
+        raise NotImplementedError(
+            "[rapid-fio] k8s needs restart_fio_for(name, record, runtime) to "
+            "relaunch a single job; restart_fio(iteration) restarts them all "
+            "and would defeat the point of a per-job lifecycle.")
 
 class K8sNativeQuickFailoverTest(K8sNativeBasicFailoverTest):
     """Quick K8s-native failover test for Talos environments.
@@ -5958,7 +6841,7 @@ class K8sNativeScaleBreakTest(K8sNativeFailoverTest):
       - r/w mix: 70/30
       - iodepth: 32
       - numjobs: 1 (one job per PVC to stay within capacity)
-      - max_latency: 20s
+      - max_latency: suite-wide (utils.fio_defaults.FIO_MAX_LATENCY)
       - runtime: 15 min per iteration
       - no verify (scale test, not integrity test)
     """
@@ -6012,13 +6895,14 @@ class K8sNativeScaleBreakTest(K8sNativeFailoverTest):
 
     # ── FIO config ────────────────────────────────────────────────────────
 
-    def _build_fio_config(self, name: str) -> tuple[str, str | None]:
+    def _build_fio_config(self, name: str,
+                          runtime: int | None = None) -> tuple[str, str | None]:
         """Build FIO config for scale-break test.
 
         Key differences from parent:
           - rwmixread=70 (parent: 50)
           - iodepth=32  (parent: 1)
-          - max_latency=20s (parent: 40s)
+          - max_latency: suite-wide, same as parent
           - No verify, no warmup
         """
         bs = f"{2 ** random.randint(2, 7)}k"
@@ -6037,9 +6921,9 @@ class K8sNativeScaleBreakTest(K8sNativeFailoverTest):
             f"size={self.fio_size}\n"
             f"numjobs={self.fio_num_jobs}\n"
             f"time_based\n"
-            f"runtime={self.FIO_RUNTIME}\n"
+            f"runtime={runtime or self.FIO_RUNTIME}\n"
             f"group_reporting\n"
-            f"max_latency=20s\n"
+            f"max_latency={FIO_MAX_LATENCY}\n"
             f"write_iolog=/spdkvol/{name}-iolog.log\n"
             f"log_avg_msec=1000\n"
             f"write_bw_log=/spdkvol/{name}-fio\n"

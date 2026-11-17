@@ -43,7 +43,7 @@ class TestDistrEventGrouping(unittest.TestCase):
 
         logged = []
 
-        def log_distr_event(cluster_id, node_id, event_dict):
+        def log_distr_event(cluster_id, node_id, event_dict, level=None):
             event = MagicMock()
             event.count = 1
             event.get_id.return_value = f"ev{len(logged)}"

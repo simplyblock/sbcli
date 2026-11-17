@@ -227,17 +227,18 @@ def build_plan(cluster_id, target_cluster_id, pool_id=None, lvol_ids=None,
 
     cluster = db.get_cluster_by_id(cluster_id)
     # Every volume's initial-copy snapshot pins the blocks overwritten while it
-    # is outstanding -- up to the volume's whole used size. A source already
-    # past its warning threshold has no room for that (the EKS bed of
-    # 2026-10-22 filled, went read_only, and its clients got EIO).
+    # is outstanding -- up to the volume's whole used size. Capacity thresholds
+    # are informational: a source past its warning threshold gets a warning on
+    # the plan, never a refusal (bed bf25, 2026-11-16: a refused plan left the
+    # volumes behind; the migration is how a full cluster gets relieved).
     capacity = _source_capacity(db, cluster_id)
     if capacity:
         util, warn, total, used = capacity
         if warn and util >= warn:
-            raise MigrationPlanError(
+            plan.warnings.append(
                 f"source cluster {cluster_id} is at {util}% capacity, at or above "
-                f"its warning threshold of {warn}%: snapshots taken for the "
-                f"migration would fill it")
+                f"its warning threshold of {warn}%: the snapshots taken for the "
+                f"migration need room until it cuts over")
         pin = sum(_used_bytes(db, lv) for lv in selected)
         if total and total - used < pin:
             plan.warnings.append(
@@ -458,11 +459,16 @@ def list_plans(cluster_id):
 
 
 def cancel_plan(plan_id):
-    """Cancel every volume whose cutover has not prepared its target clone.
+    """Cancel every volume whose cutover is not freezing.
 
-    A cutover past that point is already freezing or about to; stopping it
-    there leaves a half-built target, so it is left to finish. Volumes the plan
-    started keep replicating; stop them or commit them again separately.
+    A cutover inside its IO freeze (or already done) is left to finish:
+    stopping it there could leave the volume half moved. Anything before that
+    -- converging, or with its target clone prepared but waiting -- is
+    canceled, and the cutover runner reverts the relationship and deletes the
+    clone. Sparing every prepared cutover (the previous rule) left a volume
+    whose final step had failed uncancelable for good (bf12 2026-11-03).
+    Volumes the plan started keep replicating; stop them or commit them again
+    separately.
     """
     db = DBController()
     plan = get_plan(plan_id, db)
@@ -473,10 +479,8 @@ def cancel_plan(plan_id):
             task = db.get_task_by_id(vol["task_id"])
         except KeyError:
             continue
-        if "tgt_lvol_composite" in (task.function_params or {}):
+        if not tasks_controller.cancel_cutover_unless_freezing(task):
             continue
-        task.canceled = True
-        task.write_to_db(db.kv_store)
         vol["state"] = MigrationPlan.VOL_CANCELED
     if all(v["state"] in MigrationPlan.VOL_TERMINAL for v in plan.volumes):
         plan.status = MigrationPlan.STATUS_CANCELED

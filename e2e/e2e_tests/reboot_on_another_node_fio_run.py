@@ -140,7 +140,12 @@ class TestRestartNodeOnAnotherHost(TestClusterBase):
                 }
 
         # Step 2: Shutdown original node via Proxmox (or graceful fallback)
-        node_details = self.sbcli_utils.get_storage_node_details(restart_target["node_uuid"])[0]
+        _nd = self.sbcli_utils.get_storage_node_details(
+            restart_target["node_uuid"])
+        if not _nd:
+            raise RuntimeError(
+                f"No storage node details for {restart_target['node_uuid']}")
+        node_details = _nd[0]
         old_ip = node_details["mgmt_ip"]
         old_ip_data = node_details["data_nics"][0]["ip4_address"]
 
@@ -201,7 +206,12 @@ class TestRestartNodeOnAnotherHost(TestClusterBase):
                     self.ssh_obj.disconnect_lvol_node_device(self.mgmt_nodes[0], dev["device"])
 
             # Step 6: Reconnect using new IP only
-            node_details = self.sbcli_utils.get_storage_node_details(restart_target["node_uuid"])[0]
+            _nd = self.sbcli_utils.get_storage_node_details(
+                restart_target["node_uuid"])
+            if not _nd:
+                raise RuntimeError(
+                    f"No storage node details for {restart_target['node_uuid']}")
+            node_details = _nd[0]
             new_ip = node_details["data_nics"][0]["ip4_address"]
 
             connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=restart_target["lvol_name"])

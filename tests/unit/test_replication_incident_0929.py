@@ -135,10 +135,14 @@ class TestFinishSkipsConvertedNodes(unittest.TestCase):
         primary = MagicMock()
         primary.get_id.return_value = "n-p"
         primary.secondary_node_id = "n-s"
+        primary.tertiary_node_id = None
         primary.transfer_hublvol = None
         secondary = MagicMock()
         secondary.get_id.return_value = "n-s"
         secondary.status = "online"
+        # the landing volume is registered there, still writable
+        secondary.rpc_client.return_value.bdev_get.return_value = {
+            "driver_specific": {"lvol": {"is_snapshot": False}}}
         secondary.rpc_client.return_value.bdev_lvol_convert.return_value = sec_convert_ok
         primary.rpc_client.return_value.bdev_lvol_convert.return_value = True
         remote_lv = SimpleNamespace(top_bdev="LVS_1/LVOL_92", lvs_name="LVS_1", node_id="n-p")
@@ -171,6 +175,7 @@ class TestFinishSkipsConvertedNodes(unittest.TestCase):
         primary = MagicMock()
         primary.get_id.return_value = "n-p"
         primary.secondary_node_id = "n-s"
+        primary.tertiary_node_id = None
         primary.transfer_hublvol = None
         primary.rpc_client.return_value.bdev_lvol_convert.return_value = True
         secondary = MagicMock()

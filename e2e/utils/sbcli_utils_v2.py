@@ -6,7 +6,6 @@ both the HTTP status and the response payload across interfaces.
 """
 
 import requests
-from http import HTTPStatus
 from logger_config import setup_logger
 from utils.common_utils import sleep_n_sec
 
@@ -26,15 +25,13 @@ class SbcliUtilsV2:
     """
 
     # HTTP status codes considered successful by v2 endpoints
-    SUCCESS_CODES = {200, 201, 202, 204}
+    SUCCESS_CODES = frozenset({200, 201, 202, 204})
 
     def __init__(self, cluster_api_url, cluster_id, cluster_secret):
         # cluster_api_url is something like "http://192.168.10.210"
         # v1 wrapper stores it as "http://192.168.10.210/api/v1" already —
         # strip that suffix if present so we can build our own.
-        raw = cluster_api_url.rstrip("/")
-        if raw.endswith("/api/v1"):
-            raw = raw[: -len("/api/v1")]
+        raw = cluster_api_url.rstrip("/").removesuffix("/api/v1")
         self.base_url = raw
         self.v2_base = f"{self.base_url}/api/v2"
         self.cluster_id = cluster_id

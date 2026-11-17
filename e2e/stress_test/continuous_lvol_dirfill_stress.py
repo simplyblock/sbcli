@@ -41,6 +41,7 @@ ssh_utils for the client-side mount/unmount/fio work.  The test runs on
 the mgmt node of its target cluster, reaches the client node over SSH,
 and never touches the jump host.
 """
+from __future__ import annotations
 
 import os
 import random

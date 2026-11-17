@@ -6,7 +6,7 @@ from flask import Blueprint, abort, request
 
 from simplyblock_core import cluster_ops, db_controller, storage_node_ops
 from simplyblock_core.controllers import device_controller, tasks_controller
-from simplyblock_core.models.cluster import Cluster, HashicorpVaultSettings
+from simplyblock_core.models.cluster import Cluster
 from simplyblock_web import utils
 
 logger = logging.getLogger(__name__)
@@ -58,6 +58,7 @@ def add_cluster():
     rpc_base_port = cl_data.get('rpc_base_port', 8080)
     snode_api_port = cl_data.get('snode_api_port', 50001)
     backup_config = cl_data.get('backup_config')
+    lvol_geometry_enabled = cl_data.get('lvol_geometry_enabled', True)
 
     return utils.get_response(cluster_ops.add_cluster(
         blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
@@ -66,11 +67,8 @@ def add_cluster():
         cr_name, cr_namespace, cr_plural, fabric, client_data_nic=client_data_nic,
         max_fault_tolerance=max_fault_tolerance, backup_config=backup_config,
         nvmf_base_port=nvmf_base_port, rpc_base_port=rpc_base_port, snode_api_port=snode_api_port,
-        hashicorp_vault_settings=(
-            HashicorpVaultSettings(raw_vault)
-            if (raw_vault := cl_data.get('hashicorp_vault_settings')) is not None
-            else None
-        ),
+        kms_settings=cl_data.get('kms_settings'),
+        lvol_geometry_enabled=lvol_geometry_enabled,
     ))
 
 

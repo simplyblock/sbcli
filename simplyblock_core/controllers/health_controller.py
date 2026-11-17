@@ -1,10 +1,18 @@
 
+import ipaddress
+import time
+from concurrent.futures import ThreadPoolExecutor
 from logging import DEBUG, ERROR, INFO
-from typing import Any
+from typing import Any, NamedTuple
 
-from simplyblock_core import distr_controller, storage_node_ops, utils
+from simplyblock_core import constants, distr_controller, storage_node_ops, utils
 from simplyblock_core.controllers import device_controller
 from simplyblock_core.db_controller import DBController
+from simplyblock_core.exceptions import (
+    ReachabilityAddressError,
+    SyncReplicationSiteError,
+    SyncReplicationUnsupportedError,
+)
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.nvme_device import JMDevice, NVMeDevice, RemoteDevice
 from simplyblock_core.models.storage_node import StorageNode
@@ -166,10 +174,109 @@ def check_subsystem(nqn, *, rpc_client=None, nqns=None, ns_uuid=None) -> bool:
     return bool(listeners) and bool(namespaces)
 
 
+# ---- distrib IO errors: the one trace an unreadable stripe leaves ----------
+#
+# A distrib that cannot serve an IO from the chunks it can reach reports
+# ``error_read`` / ``error_write`` / ... through the event collector, which
+# files it under status ``distr error <vuid>``. There is no RPC that lists
+# degraded stripes, so these events are the only read-only signal the control
+# plane has that an lvstore has lost redundancy somewhere. prod 2026-11-01:
+# two weeks of ``distr error 7857`` sat in the cluster log before a planned
+# reboot of one of that stripe's nodes took the volume down. The check
+# surfaces below make them part of ``sbctl volume check`` and
+# ``sbctl cluster check`` so an operator sees them before the next restart.
+
+DISTR_ERROR_STATUS_PREFIX = "distr error "
+
+
+def summarize_distr_errors(events):
+    """{vuid: {"count", "last_ms", "errors", "reported_by"}} over a list of
+    EventObj. Pure: feed it ``DBController.get_events_since``."""
+    summary: dict[int, dict[str, Any]] = {}
+    for ev in events:
+        if ev.vuid is None or ev.vuid < 0 or not str(ev.status).startswith(DISTR_ERROR_STATUS_PREFIX):
+            continue
+        entry = summary.setdefault(ev.vuid, {"count": 0, "last_ms": 0, "errors": set(), "reported_by": set()})
+        entry["count"] += max(1, int(ev.count or 1))
+        entry["last_ms"] = max(entry["last_ms"], int(ev.date or 0))
+        entry["errors"].add(ev.message)
+        if ev.node_id:
+            entry["reported_by"].add(ev.node_id)
+    return summary
+
+
+def lvstore_distrib_vuids(node):
+    """The vuids of the distribs in ``node``'s own lvstore stack."""
+    vuids = set()
+    for bdev in node.lvstore_stack or []:
+        if bdev.get("type") != "bdev_raid":
+            continue
+        for name in bdev.get("distribs_list", []):
+            _, _, vuid = str(name).rpartition("_")
+            if vuid.isdigit():
+                vuids.add(int(vuid))
+    return vuids
+
+
+def distr_errors_for_lvstore(node, summary):
+    """The part of ``summary`` that belongs to ``node``'s lvstore."""
+    mine = lvstore_distrib_vuids(node)
+    return {vuid: info for vuid, info in summary.items() if vuid in mine}
+
+
+def recent_distr_error_summary(db_controller, cluster_id, lookback_sec=None):
+    lookback_sec = constants.DISTR_ERROR_LOOKBACK_SEC if lookback_sec is None else lookback_sec
+    since_ms = int((time.time() - lookback_sec) * 1000)
+    return summarize_distr_errors(db_controller.get_events_since(cluster_id, since_ms))
+
+
+def _describe_distr_error(vuid, info):
+    last = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(info["last_ms"] / 1000)) if info["last_ms"] else "?"
+    errors = ",".join(sorted(info["errors"]))
+    return f"distrib {vuid}: {errors} x{info['count']}, last {last} UTC"
+
+
+def distr_error_is_active(info, now=None) -> bool:
+    """Whether the newest occurrence is inside DISTR_ERROR_ACTIVE_SEC: the
+    error is still arriving, not a trace of an outage that is over."""
+    now = time.time() if now is None else now
+    return now - info["last_ms"] / 1000 < constants.DISTR_ERROR_ACTIVE_SEC
+
+
+def report_lvstore_distr_errors(node, summary, now=None) -> bool:
+    """Log every distrib IO error recorded against ``node``'s lvstore inside
+    the lookback. False only while one is still active; an older error is a
+    warning, not a failed check -- one error must not fail every volume on
+    the lvstore for the whole lookback with no way to clear it (review of
+    #1580)."""
+    now = time.time() if now is None else now
+    errors = distr_errors_for_lvstore(node, summary)
+    if not errors:
+        logger.info(f"Checking distrib IO errors on {node.lvstore} ... ok")
+        return True
+    passed = True
+    for vuid, info in sorted(errors.items()):
+        why = (f"a stripe of this lvstore could not be served from the reachable chunks; its "
+               f"redundancy is lost and volumes on {node.lvstore} fail that IO whenever one of the "
+               f"stripe's nodes is down")
+        if distr_error_is_active(info, now):
+            passed = False
+            logger.error(
+                f"Checking distrib IO errors on {node.lvstore} ... {_describe_distr_error(vuid, info)} "
+                f"-- still failing: {why}")
+        else:
+            logger.warning(
+                f"Checking distrib IO errors on {node.lvstore} ... {_describe_distr_error(vuid, info)} "
+                f"-- not seen in the last {constants.DISTR_ERROR_ACTIVE_SEC // 60} min, reported as a "
+                f"warning: {why}")
+    return passed
+
+
 def check_cluster(cluster_id):
     db_controller = DBController()
     st = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
     data = []
+    distr_summary = recent_distr_error_summary(db_controller, cluster_id)
     result = True
     for node in st:
         # check if node is online, unavailable, restarting
@@ -193,7 +300,7 @@ def check_cluster(cluster_id):
             })
 
     for lvol in db_controller.get_lvols(cluster_id):
-        ret = check_lvol(lvol.get_id())
+        ret = check_lvol(lvol.get_id(), distr_summary=distr_summary)
         result &= ret
         print("*" * 100)
         data.append({
@@ -201,6 +308,17 @@ def check_cluster(cluster_id):
             "UUID": lvol.get_id(),
             "Status": "ok" if ret else "failed"
         })
+
+    for node in st:
+        for vuid, info in sorted(distr_errors_for_lvstore(node, distr_summary).items()):
+            active = distr_error_is_active(info)
+            result &= not active
+            data.append({
+                "Kind": "Distrib",
+                "UUID": f"{node.lvstore}/distrib_{vuid}",
+                "Status": f"{'failed' if active else 'warning'}: {_describe_distr_error(vuid, info)}"
+            })
+
     print(utils.print_table(data))
     return result
 
@@ -274,6 +392,100 @@ def _check_node_ping(ip):
         return False
 
 
+class NodeReachability(NamedTuple):
+    """One node's answer to the management-address probe."""
+    node_id: str
+    mgmt_ip: str
+    site: str
+    reachable: bool
+
+
+#: At most this many management-address probes run at once (each is a
+#: two-packet ping bounded at a few seconds).
+_REACHABILITY_PROBES_IN_PARALLEL = 16
+
+
+def management_reachability(nodes) -> list[NodeReachability]:
+    """Run the storage-node monitor's management-address probe - the first
+    check of its node cycle (storage_node_monitor.check_node:
+    _check_node_ping on ``mgmt_ip``) - once against each of ``nodes``, in
+    parallel; one answer per node, in the order given. Records nothing: the
+    monitor's own cycle decides node states."""
+    nodes = list(nodes)
+    answers = _probe_in_parallel([node.mgmt_ip for node in nodes])
+    return [NodeReachability(node.get_id(), node.mgmt_ip, node.site, answer)
+            for node, answer in zip(nodes, answers)]
+
+
+#: At most this many addresses per address_reachability call.
+MAX_REACHABILITY_ADDRESSES = 64
+
+
+def _probe_in_parallel(addresses: list[str]) -> list[bool]:
+    """_check_node_ping on each address, at most
+    _REACHABILITY_PROBES_IN_PARALLEL at once; answers in the order given."""
+    if not addresses:
+        return []
+    with ThreadPoolExecutor(max_workers=min(len(addresses), _REACHABILITY_PROBES_IN_PARALLEL)) as pool:
+        return [bool(answer) for answer in pool.map(_check_node_ping, addresses)]
+
+
+def _ip_literal(address: str) -> str:
+    """``address`` when it is an IPv4/IPv6 literal - never resolved, no
+    IPv6 zone id, no surrounding whitespace - else ReachabilityAddressError."""
+    try:
+        ipaddress.ip_address(address)
+    except ValueError:
+        valid = False
+    else:
+        valid = "%" not in address and address == address.strip()
+    if not valid:
+        raise ReachabilityAddressError(f"{address!r} is not an IP address literal (IPv4 or IPv6)")
+    return address
+
+
+def address_reachability(addresses) -> list[NodeReachability]:
+    """management_reachability's probe against management ``addresses``
+    rather than nodes - hosts that are not storage nodes (yet), such as the
+    workers a follower operator is about to add (design-stretched §5.4).
+    One answer per address, in the order given, with no node id and no
+    site. Every address is checked before any is probed. Records nothing.
+
+    Raises ReachabilityAddressError for more than MAX_REACHABILITY_ADDRESSES
+    addresses and for an address that is not an IP literal: the probe never
+    resolves a name, so it cannot be turned into a resolver."""
+    addresses = list(addresses)
+    if len(addresses) > MAX_REACHABILITY_ADDRESSES:
+        raise ReachabilityAddressError(
+            f"at most {MAX_REACHABILITY_ADDRESSES} addresses per request ({len(addresses)} given)")
+    addresses = [_ip_literal(a) for a in addresses]
+    return [NodeReachability("", address, "", answer)
+            for address, answer in zip(addresses, _probe_in_parallel(addresses))]
+
+
+def cluster_reachability(cluster_id: str, site: str | None = None) -> list[NodeReachability]:
+    """management_reachability over the nodes of cluster ``cluster_id`` (the
+    removed ones excepted) - only those of ``site`` when given.
+
+    Raises SyncReplicationUnsupportedError for a ``site`` on a cluster
+    without sync replication (it has no sites), SyncReplicationSiteError for
+    a site the cluster does not have."""
+    db = DBController()
+    cluster = db.get_cluster_by_id(cluster_id)
+    nodes = [n for n in db.get_storage_nodes_by_cluster_id(cluster_id)
+             if n.status != StorageNode.STATUS_REMOVED]
+    if site:
+        if not cluster.sync_replication:
+            raise SyncReplicationUnsupportedError(
+                f"cluster {cluster_id} is not a sync-replication cluster; it has no sites")
+        sites = {n.site for n in nodes if n.site}
+        if site not in sites:
+            raise SyncReplicationSiteError(
+                f"site {site!r} is not a site of cluster {cluster_id} (sites: {sorted(sites)})")
+        nodes = [n for n in nodes if n.site == site]
+    return management_reachability(nodes)
+
+
 def _check_ping_from_node(ip, ifname, node):
     # Fail fast on connect errors and don't stack retries: this SnodeAPI call
     # runs in the monitor's per-node check cycle, and against a rebooting host
@@ -307,6 +519,10 @@ def _check_ping_from_node(ip, ifname, node):
 
 
 def _check_node_hublvol(node: StorageNode) -> bool:
+    if not storage_node_ops.lvs_hublvol_expected(node, node.get_id()):
+        logger.info("%s is led from site %s: %s exposes no hublvol",
+                    node.lvstore, storage_node_ops.lvs_active_site_of(node), node.get_id())
+        return True
     if not node.hublvol:
         logger.error(f"Node {node.get_id()} does not have a hublvol")
         return False
@@ -373,7 +589,12 @@ def _check_sec_node_hublvol(node: StorageNode, auto_fix=False, primary_node_id=N
     except KeyError:
         logger.exception("Primary node not found")
         return False
-    
+
+    if not storage_node_ops.lvs_hublvol_expected(primary_node, node.get_id()):
+        logger.info("%s is led from site %s: %s connects to no hublvol",
+                    primary_node.lvstore, storage_node_ops.lvs_active_site_of(primary_node), node.get_id())
+        return True
+
     if not primary_node.hublvol:
         logger.error(f"Primary node {primary_node.get_id()} does not have a hublvol")
         return False
@@ -784,9 +1005,9 @@ def _check_node_lvstore(
             logger.info(f"Checking distr bdev : {distr} ... ok")
             logger.info("Checking distr JM names:")
             if distr in node_distribs_list:
-                jm_names = storage_node_ops.get_node_jm_names(node)
+                jm_names = storage_node_ops.get_node_jm_names(node).names
             elif stack_src_node:
-                jm_names = storage_node_ops.get_node_jm_names(stack_src_node, remote_node=node)
+                jm_names = storage_node_ops.get_node_jm_names(stack_src_node, remote_node=node).names
             else:
                 jm_names = node.jm_ids
             for jm in jm_names:
@@ -1053,7 +1274,9 @@ def check_node(node_id, with_devices=True):
                 node_remote_devices_check &= bool(bdev_info)
                 connected_jms.append(remote_device.get_id())
 
-                controller_info = rpc_client.bdev_nvme_controller_list(f'remote_{remote_device.jm_bdev}')
+                # The controller behind the recorded bdev -- its name depends on the
+                # owner's site on a sync-replication cluster, so it is never rebuilt.
+                controller_info = rpc_client.bdev_nvme_controller_list(name.removesuffix("n1"))
                 if controller_info:
                     addr = controller_info[0]['ctrlrs'][0]['trid']['traddr']
                     port = controller_info[0]['ctrlrs'][0]['trid']['trsvcid']
@@ -1095,8 +1318,11 @@ def check_node(node_id, with_devices=True):
                     lvstore_check &= _check_node_lvstore(lvstore_stack, second_node_1, stack_src_node=snode)
                     print("*" * 100)
                 lvstore_check &= _check_node_hublvol(snode)
-                # Ensure sec_1 has its secondary hublvol exposed (same NQN, non-optimized)
-                if second_node_1.status == StorageNode.STATUS_ONLINE:
+                # Ensure sec_1 has its secondary hublvol exposed (same NQN,
+                # non-optimized) - unless sec_1 is in the passive triplet,
+                # which exposes no hublvol.
+                if second_node_1.status == StorageNode.STATUS_ONLINE \
+                        and storage_node_ops.lvs_hublvol_expected(snode, second_node_1.get_id()):
                     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
                     try:
                         sec1_rpc = second_node_1.rpc_client(timeout=8, retry=1)
@@ -1301,7 +1527,16 @@ def check_lvol_on_node(lvol_id, node_id, node_bdev_names=None, node_lvols_nqns=N
     return passed
 
 
-def check_lvol(lvol_id):
+def check_lvol(lvol_id, distr_summary=None):
+    """The operator's volume check (``sbctl volume check``). Besides the
+    bdev/subsystem presence that ``check_lvol_on_node`` verifies, it fails on
+    any distrib IO error recorded against the volume's lvstore inside
+    ``DISTR_ERROR_LOOKBACK_SEC``: a stripe there has lost its redundancy, and
+    the record cannot say which volume owns it, so every volume on the
+    lvstore is at risk. ``distr_summary`` lets ``check_cluster`` read the
+    event window once for all volumes. The health-check service does not use
+    this function (it calls ``check_lvol_on_node``), so the stored lvol health
+    flag is unaffected."""
     db_controller = DBController()
 
     try:
@@ -1311,8 +1546,7 @@ def check_lvol(lvol_id):
         return False
 
     if lvol.ha_type == 'single':
-        ret = check_lvol_on_node(lvol_id, lvol.node_id)
-        return ret
+        passed = check_lvol_on_node(lvol_id, lvol.node_id)
 
     elif lvol.ha_type == "ha":
         passed = True
@@ -1322,7 +1556,17 @@ def check_lvol(lvol_id):
                 ret = check_lvol_on_node(lvol_id, nodes_id)
                 if not ret:
                     passed = False
-        return passed
+    else:
+        return False
+
+    try:
+        owner = db_controller.get_storage_node_by_id(lvol.node_id)
+    except KeyError:
+        logger.error(f"lvol {lvol_id}: primary node {lvol.node_id} not found")
+        return False
+    if distr_summary is None:
+        distr_summary = recent_distr_error_summary(db_controller, owner.cluster_id)
+    return report_lvstore_distr_errors(owner, distr_summary) and passed
 
 
 def check_snap(snap_id):

@@ -1,8 +1,8 @@
 # syntax=docker/dockerfile:1
 
-ARG UBI_VERSION=10.2
+ARG UBI_VERSION=10.3
 ARG FDB_VERSION=7.3.69
-ARG UV_VERSION=0.12.22
+ARG UV_VERSION=0.13.6
 # Toolchain of the two-node HA event collector (tools/event-collector). The Go
 # toolchain links its own stdlib statically into the built binary, so this is
 # also what the image's scanned Go stdlib version is (grype flags it as
@@ -11,12 +11,16 @@ ARG UV_VERSION=0.12.22
 # does for dnf packages. go.mod's `go 1.24` line is an unrelated minimum
 # language-version requirement, not a toolchain pin, so any newer toolchain
 # here keeps building it fine.
-ARG GO_VERSION=1.27.3
+ARG GO_VERSION=1.27.4
 
 # The application interpreter, free-threaded ("t" suffix). Managed by uv rather
 # than dnf: UBI carries no free-threaded build, and tying the runtime to the
 # platform python is what pinned the image to 3.12 while CI tested another
-# version. Minor-level, so a patch release arrives with the next CACHE_KEY roll.
+# version. Minor-level, but a patch release does NOT arrive with the CACHE_KEY
+# roll: uv resolves the patch from a download list compiled into its own
+# binary, so the image's interpreter only moves when UV_VERSION above does.
+# When the scan flags the `python` binary with a fix in a later 3.14.x, bump
+# UV_VERSION to a release whose notes list that CPython version.
 ARG PYTHON_VERSION=3.14
 
 # Busts the cache of the OS-package layers below. Those layers are pinned only
@@ -190,6 +194,11 @@ COPY . .
 # uv creates the environment without pip, setuptools or wheel, so there is
 # nothing to uninstall afterwards; the interpreter's own pip is removed above.
 RUN uv sync --locked --no-default-groups --python "${PYTHON_VERSION}t"
+
+# PyKMIP ships its demo scripts inside the package, including a private key
+# (kmip/demos/certs/server.key) that the image scan's secret scanner flags.
+# Nothing imports kmip.demos.
+RUN rm -rf /opt/venv/lib/python*/site-packages/kmip/demos
 
 
 # The two-node HA event collector (tools/event-collector, docs/design/two-node-

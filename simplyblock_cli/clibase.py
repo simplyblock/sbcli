@@ -23,6 +23,7 @@ from simplyblock_core.controllers import (
     qos_controller,
     replication_policy_controller,
     snapshot_controller,
+    sync_replication_controller,
     tasks_controller,
 )
 from simplyblock_core.controllers.backup import controller as backup_controller
@@ -34,10 +35,28 @@ from simplyblock_core.controllers.backup.manifest import (
     parse_export,
     parse_group_export,
 )
-from simplyblock_core.exceptions import MigrationConflictError, PreconditionError
+from simplyblock_core.exceptions import (
+    MigrationConflictError,
+    PreconditionError,
+    PromoteIncompleteError,
+)
 from simplyblock_core.models.backup_config import BackupConfig, S3Credentials
-from simplyblock_core.models.cluster import Cluster, HashicorpVaultSettings
+from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.pool import Pool
+
+
+def _kms_settings_from_args(args):
+    """Raw ``kms_settings`` dict for cluster_ops.{create,add}_cluster from the
+    mutually exclusive ``--hashicorp-vault-url``/``--kmip-server-url`` flags."""
+    hashicorp_vault_url = getattr(args, 'hashicorp_vault_url', None)
+    kmip_server_url = getattr(args, 'kmip_server_url', None)
+    if hashicorp_vault_url and kmip_server_url:
+        raise ValueError("--hashicorp-vault-url and --kmip-server-url are mutually exclusive")
+    if hashicorp_vault_url:
+        return {"provider": "vault", "base_url": hashicorp_vault_url}
+    if kmip_server_url:
+        return {"provider": "kmip", "server_url": kmip_server_url}
+    return None
 
 
 def range_type(min, max):
@@ -91,6 +110,41 @@ def _format_json(data, *, sort_keys: bool = False) -> str:
 
 def _format_result(data, *, json: bool) -> str:
     return _format_json(data) if json else utils.print_table(data, unwrap_secrets=True)
+
+
+def _iso(value) -> str | None:
+    return value.isoformat() if value is not None else None
+
+
+def _sync_status_fields(status) -> dict:
+    """The cluster-wide fields of a ``sync_replication_controller.ClusterSyncStatus``."""
+    return {
+        "state": status.state,
+        "completed": status.completed,
+        "degraded": status.degraded,
+        "resyncing": status.resyncing,
+        "peer_ready": status.peer_ready,
+        "diverged": status.diverged,
+        "last_replicated_at": _iso(status.last_replicated_at),
+        "lag_seconds": status.lag_seconds,
+        "bytes_behind": status.bytes_behind,
+    }
+
+
+def _sync_lvs_row(lvs) -> dict:
+    """One ``LvsSyncStatus`` as a row."""
+    return {
+        "lvs": lvs.lvs_name,
+        "owner": lvs.owner_id,
+        "state": lvs.state,
+        "worst_status": lvs.worst_status,
+        "mode_full": lvs.mode_full,
+        "bytes_behind": lvs.bytes_behind,
+        "remote_journal_in_sync": lvs.remote_journal_in_sync,
+        "last_replicated_at": _iso(lvs.last_replicated_at),
+        "answering": len(lvs.answering),
+        "gate_problems": "; ".join(lvs.gate_problems),
+    }
 
 
 def _format_timestamp(seconds) -> str:
@@ -314,6 +368,7 @@ class CLIWrapperBase:
                 expansion=expansion,
                 failure_domain=failure_domain,
                 force_format=getattr(args, 'force_format', False),
+                site=getattr(args, 'site', None),
             )
         except Exception as e:
             print(e)
@@ -533,7 +588,11 @@ class CLIWrapperBase:
 
     def storage_node__make_primary(self, sub_command, args):
         node_id = args.node_id
-        return storage_ops.make_sec_new_primary(node_id)
+        try:
+            return storage_ops.make_sec_new_primary(node_id)
+        except PromoteIncompleteError as e:
+            print(e)
+            return False
 
     def storage_node__dump_lvstore(self, sub_command, args):
         node_id = args.node_id
@@ -760,6 +819,10 @@ class CLIWrapperBase:
         return cluster_ops.set_shared_placement(
             args.cluster_id, enable=enable, force=force)
 
+    def cluster__set_lvol_geometry(self, sub_command, args):
+        cluster_ops.set_lvol_geometry(args.cluster_id, enable=not args.disable)
+        return True
+
     def cluster__change_name(self, sub_command, args):
         cluster_id = args.cluster_id
         cluster_name = args.name
@@ -937,6 +1000,15 @@ class CLIWrapperBase:
             table += chr(10) + chr(10).join("WARNING: " + w for w in warnings)
         return table
 
+    def cluster__sync_status(self, sub_command, args):
+        status = sync_replication_controller.cluster_sync_status(args.cluster_id)
+        fields = _sync_status_fields(status)
+        lvs = [_sync_lvs_row(s) for s in status.lvs]
+        if args.json:
+            return _format_json({**fields, "lvs": lvs})
+        table = utils.print_table([{"key": key, "value": value} for key, value in fields.items()])
+        return table + "\n" + (utils.print_table(lvs) if lvs else "No lvstores")
+
     def volume__replication_policy_set(self, sub_command, args):
         return replication_policy_controller.attach_policy(args.volume_id, args.policy)
 
@@ -1049,6 +1121,8 @@ class CLIWrapperBase:
             kwargs['ctrl_loss_tmo'] = ctrl_loss_tmo
         if args.host_nqn:
             kwargs['host_nqn'] = args.host_nqn
+        if args.site:
+            kwargs['site'] = args.site
 
         data, err = lvol_controller.connect_lvol(args.volume_id, **kwargs)
         if err:
@@ -1157,6 +1231,27 @@ class CLIWrapperBase:
 
     def volume__replication_trigger(self, sub_command, args):
         return lvol_controller.replication_trigger(args.lvol_id)
+
+    def volume__sync_promote(self, sub_command, args):
+        result = sync_replication_controller.sync_promote_lvol(args.volume_id, args.site, force=args.force)
+        if result.in_progress:
+            task = f" (task {result.task_id})" if result.task_id else ""
+            return (f"Promote of volume {args.volume_id} on site {args.site} in progress{task}; "
+                    f"run the command again for its result")
+        entries = (result.connection_strings or {}).get(args.volume_id, [])
+        return "\n".join(entry.connect for entry in entries)
+
+    def volume__sync_demote(self, sub_command, args):
+        if sync_replication_controller.sync_demote_lvol(args.volume_id, args.site):
+            return f"Volume {args.volume_id} demoted on site {args.site}"
+        return f"Volume {args.volume_id} is not served on site {args.site}; nothing to do"
+
+    def volume__sync_status(self, sub_command, args):
+        status = sync_replication_controller.volume_sync_status_by_id(args.volume_id, args.site)
+        data = {"site": status.site, "role": status.role, **_sync_status_fields(status.cluster)}
+        if args.json:
+            return _format_json(data)
+        return utils.print_table([{"key": key, "value": value} for key, value in data.items()])
 
     def volume__suspend(self, sub_command, args):
         return lvol_controller.suspend_lvol(args.lvol_id)
@@ -1871,6 +1966,7 @@ class CLIWrapperBase:
         is_single_node = args.is_single_node
         client_data_nic = args.client_data_nic
         enable_failure_domain = getattr(args, 'enable_failure_domain', False)
+        lvol_geometry_enabled = not args.disable_lvol_geometry
         device_mode = getattr(args, 'device_mode', 'nvme')
         inline_checksum = getattr(args, 'inline_checksum', False)
 
@@ -1882,18 +1978,22 @@ class CLIWrapperBase:
                 backup_config = json.load(f)
 
         atomic_4k = getattr(args, 'atomic_4k', False)
+        md_journal = getattr(args, 'md_journal', True)
         return cluster_ops.add_cluster(
             blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
             distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity,
             qpair_count, max_queue_size, inflight_io_threshold, strict_node_anti_affinity, is_single_node, name, fabric,
             client_data_nic, max_fault_tolerance=max_fault_tolerance, backup_config=backup_config,
             nvmf_base_port=args.nvmf_base_port, rpc_base_port=args.rpc_base_port, snode_api_port=args.snode_api_port,
-            hashicorp_vault_settings=HashicorpVaultSettings({"base_url": args.hashicorp_vault_url}) if args.hashicorp_vault_url else None,
+            kms_settings=_kms_settings_from_args(args),
             enable_failure_domain=enable_failure_domain,
+            lvol_geometry_enabled=lvol_geometry_enabled,
             device_mode=device_mode,
             inline_checksum=inline_checksum,
             atomic_4k=atomic_4k,
+            sync_replication=getattr(args, 'sync_replication', False),
             page_copy=getattr(args, 'page_copy', False),
+            md_journal=md_journal,
         )
 
     def cluster_create(self, args):
@@ -1931,11 +2031,13 @@ class CLIWrapperBase:
         fabric = args.fabric
         client_data_nic = args.client_data_nic
         enable_failure_domain = getattr(args, 'enable_failure_domain', False)
+        lvol_geometry_enabled = not args.disable_lvol_geometry
         device_mode = getattr(args, 'device_mode', 'nvme')
         # Private (developer-mode-only) arg: absent unless sbctl was run with --dev.
         enable_hang_device = getattr(args, "enable_hang_device", False)
         inline_checksum = getattr(args, 'inline_checksum', False)
         atomic_4k = getattr(args, 'atomic_4k', False)
+        md_journal = getattr(args, 'md_journal', True)
 
         max_fault_tolerance = min(distr_npcs, 2) if distr_npcs >= 1 else 1
         cluster_vip = getattr(args, 'cluster_vip', '')
@@ -1955,8 +2057,9 @@ class CLIWrapperBase:
             max_fault_tolerance=max_fault_tolerance,
             backup_config=backup_config,
             nvmf_base_port=args.nvmf_base_port, rpc_base_port=args.rpc_base_port, snode_api_port=args.snode_api_port,
-            hashicorp_vault_settings=HashicorpVaultSettings({"base_url": args.hashicorp_vault_url}) if args.hashicorp_vault_url else None,
+            kms_settings=_kms_settings_from_args(args),
             enable_failure_domain=enable_failure_domain,
+            lvol_geometry_enabled=lvol_geometry_enabled,
             device_mode=device_mode,
             enable_hang_device=enable_hang_device,
             max_subsys=args.max_subsys or 0,
@@ -1967,7 +2070,9 @@ class CLIWrapperBase:
             inline_checksum=inline_checksum,
             atomic_4k=atomic_4k,
             cluster_vip=cluster_vip,
+            sync_replication=getattr(args, 'sync_replication', False),
             page_copy=getattr(args, 'page_copy', False),
+            md_journal=md_journal,
         )
 
     def query_yes_no(self, question, default="yes"):

@@ -31,16 +31,22 @@ class FakeCluster:
     """Stand-in for ``models.cluster.Cluster``. Captures every write_to_db
     snapshot so tests can assert per-step persistence."""
 
-    def __init__(self, expand_state=None):
+    def __init__(self, expand_state=None, activated_node_ids=()):
         self.uuid = "cluster-fake"
         self.expand_state = expand_state or {}
+        # The node set re-activation holds the cluster to (cluster_ops'
+        # growth guard); an expansion must extend it. Snapshotted per write
+        # alongside the state, so a test can tell which write carried it.
+        self.activated_node_ids = list(activated_node_ids)
         self.write_history: list[dict] = []
+        self.activated_history: list[list[str]] = []
 
     def write_to_db(self):
         # Snapshot the current state at write time so we can assert ordering
         # and that the cursor was persisted before the next executor call.
         import copy
         self.write_history.append(copy.deepcopy(self.expand_state))
+        self.activated_history.append(list(self.activated_node_ids))
 
 
 class FailingExecutor(MoveExecutor):
@@ -119,6 +125,55 @@ class TestFreshStartHappyPath(unittest.TestCase):
         # Final write is the completion phase.
         self.assertEqual(
             self.cluster.write_history[-1]["phase"], EXPAND_PHASE_COMPLETED)
+
+    # -- the activation guard's node set ------------------------------------
+    #
+    # cluster_ops._cluster_activate refuses to activate a cluster whose nodes
+    # exceed activated_node_ids ("re-activation must not grow a cluster"), with
+    # no --force. The set is written at activation only, so an expansion that
+    # did not extend it left every later activation refused -- including the
+    # monitor's own resume from suspended (Talos lab, 2026-11-11: four nodes
+    # online, cluster suspended for good).
+
+    def test_completion_registers_the_new_node_with_the_activation_set(self):
+        cluster = FakeCluster(activated_node_ids=["n1", "n2", "n3", "n4"])
+        execute_expand_plan(
+            cluster, self.executor, planned_moves=self.moves, new_node_id="n5")
+        self.assertEqual(cluster.activated_node_ids, ["n1", "n2", "n3", "n4", "n5"])
+
+    def test_registration_lands_in_the_same_write_as_the_completed_phase(self):
+        # Not before: a crash after the registration but before the completion
+        # would leave an in-progress plan whose node is already counted. Not
+        # after: a crash in between would leave a completed expansion the guard
+        # still refuses.
+        cluster = FakeCluster(activated_node_ids=["n1", "n2", "n3", "n4"])
+        execute_expand_plan(
+            cluster, self.executor, planned_moves=self.moves, new_node_id="n5")
+        for state, activated in zip(cluster.write_history, cluster.activated_history):
+            self.assertEqual("n5" in activated, state["phase"] == EXPAND_PHASE_COMPLETED,
+                             (state["phase"], activated))
+
+    def test_a_cluster_without_a_set_is_left_without_one(self):
+        # Activated before the set existed: the guard is off for it, and one
+        # registered node would switch the guard on against every original.
+        cluster = FakeCluster(activated_node_ids=[])
+        execute_expand_plan(
+            cluster, self.executor, planned_moves=self.moves, new_node_id="n5")
+        self.assertEqual(cluster.activated_node_ids, [])
+
+    def test_a_node_already_in_the_set_is_not_registered_twice(self):
+        cluster = FakeCluster(activated_node_ids=["n1", "n2", "n3", "n4", "n5"])
+        execute_expand_plan(
+            cluster, self.executor, planned_moves=self.moves, new_node_id="n5")
+        self.assertEqual(cluster.activated_node_ids, ["n1", "n2", "n3", "n4", "n5"])
+
+    def test_an_aborted_expansion_does_not_register_the_node(self):
+        cluster = FakeCluster(activated_node_ids=["n1", "n2", "n3", "n4"])
+        executor = FailingExecutor(fail_at=1, exc=RuntimeError("boom"))
+        with self.assertRaises(RuntimeError):
+            execute_expand_plan(
+                cluster, executor, planned_moves=self.moves, new_node_id="n5")
+        self.assertEqual(cluster.activated_node_ids, ["n1", "n2", "n3", "n4"])
 
     def test_cursor_advanced_after_executor_returns(self):
         # If the orchestrator advanced cursor *before* calling execute, a

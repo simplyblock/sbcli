@@ -194,6 +194,7 @@ class TestTheV2NodeAdd:
 
         cluster = MagicMock()
         cluster.get_id.return_value = "00000000-0000-0000-0000-0000000000c1"
+        cluster.sync_replication = False
         parameters = StorageNodeParams(node_address="10.0.0.1:5000", interface_name="", pod_network=True)
 
         with patch.object(v2.tasks_controller, "add_node_add_task", return_value="00000000-0000-0000-0000-000000000001") as add, \

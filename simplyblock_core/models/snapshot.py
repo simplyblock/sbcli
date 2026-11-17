@@ -36,6 +36,10 @@ class SnapShot(BaseModel):
     STATUS_OFFLINE = 'offline'
     STATUS_IN_DELETION = 'in_deletion'
     STATUS_IN_REPLICATION = 'in_replication'
+    # Intent record: written BEFORE the snapshot is created in SPDK, set online
+    # once it exists everywhere. A record left in_creation (the creating
+    # process died) is resolved by snapshot_controller.reap_snapshot_intents.
+    STATUS_IN_CREATION = 'in_creation'
 
     # User-created snapshots are kept indefinitely on the replication target.
     # Internal snapshots are taken automatically at a fixed interval purely to

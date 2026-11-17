@@ -129,7 +129,7 @@ class TestAddClusterDuplicateName:
         _seed_cluster(db, uuid="cluster-1", name="other-cluster")
         _seed_deploy_config(db)
 
-        with patch("simplyblock_core.cluster_ops._create_update_user"):
+        with patch("simplyblock_core.cluster_ops._sync_grafana_user"):
             new_id = _add_cluster("new-cluster")
 
         stored = db.get_cluster_by_id(new_id)
@@ -143,7 +143,7 @@ class TestAddClusterDuplicateName:
         _seed_cluster(db, uuid="cluster-1", name="some-cluster")
         _seed_deploy_config(db)
 
-        with patch("simplyblock_core.cluster_ops._create_update_user"):
+        with patch("simplyblock_core.cluster_ops._sync_grafana_user"):
             new_id = _add_cluster(None)
 
         assert db.get_cluster_by_id(new_id).uuid == new_id
@@ -159,7 +159,7 @@ class TestAddClusterDuplicateName:
                     return_value=SecretStr("fdb-conn-string")), \
              patch("simplyblock_core.cluster_ops.mgmt_node_ops.add_mgmt_node") as mock_add_mgmt, \
              patch("simplyblock_core.cluster_ops.utils.patch_prometheus_configmap"), \
-             patch("simplyblock_core.cluster_ops._create_update_user"):
+             patch("simplyblock_core.cluster_ops._sync_grafana_user"):
             new_id = _add_cluster("first-cluster")
 
         mock_add_mgmt.assert_called_once_with("0.0.0.0", "kubernetes", new_id)
@@ -194,7 +194,7 @@ class TestAddClusterDuplicateName:
                     return_value=SecretStr("fdb-conn-string")), \
              patch("simplyblock_core.cluster_ops.mgmt_node_ops.add_mgmt_node"), \
              patch("simplyblock_core.cluster_ops.utils.patch_prometheus_configmap"), \
-             patch("simplyblock_core.cluster_ops._create_update_user"):
+             patch("simplyblock_core.cluster_ops._sync_grafana_user"):
             threads = [threading.Thread(target=worker) for _ in range(5)]
             for t in threads:
                 t.start()

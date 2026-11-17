@@ -230,6 +230,22 @@ class StorageNode(BaseNodeObject):
     # placement and emitted verbatim into the distrib cluster map for the data
     # plane.
     failure_domain: int = -1
+    # Sync-replication site of the node (operator-supplied at add-node).
+    # Mandatory on a cluster with sync_replication, empty everywhere else.
+    site: str = ""
+    # Sync replication: the remote triplet of the LVS this node owns (the
+    # primary of an LVS stores them, like secondary_node_id /
+    # tertiary_node_id for the home triplet). Empty on non-sync clusters.
+    remote_primary_node_id: str = ""
+    remote_secondary_node_id: str = ""
+    remote_tertiary_node_id: str = ""
+    # Sync replication, on the owner node of an LVS: the remote-triplet
+    # members whose instance of this LVS has not been built since the refs
+    # above named them. Written together with the refs, cleared by the build.
+    remote_instances_pending: list[str] = default_factory(list)
+    # Sync replication, on the owner node of an LVS: the site whose triplet
+    # currently leads the LVS. Empty means the home site (this node's site).
+    lvs_active_site: str = ""
     hublvol: HubLVol = None  # type: ignore[assignment]
     active_tcp: bool = True
     active_rdma: bool = False
@@ -1011,9 +1027,14 @@ class StorageNode(BaseNodeObject):
 
         return True
 
-    def add_hublvol_failover_path(self, primary_node, failover_node):
+    def add_hublvol_failover_path(self, primary_node, failover_node, lvs_node=None):
         """Ensure this node's hublvol controller for primary_node's LVStore
         has both ``primary_node`` and ``failover_node`` paths attached.
+
+        ``lvs_node`` separates the LVS metadata source (lvstore name, NQN,
+        port) from the path target, as in connect_to_hublvol: pass it when
+        ``primary_node`` leads an LVS it does not own. Defaults to
+        ``primary_node``.
 
         Delegated to :class:`HublvolReconnectCoordinator` so attach / detach
         is serialized (FDB lock) and cooldown-gated across all callers. The
@@ -1036,7 +1057,7 @@ class StorageNode(BaseNodeObject):
         )
         coordinator = HublvolReconnectCoordinator(DBController())
         return coordinator.reconcile(
-            self, primary_node, [primary_node, failover_node],
+            self, lvs_node or primary_node, [primary_node, failover_node],
             role="failover_repair",
         )
 

@@ -335,10 +335,10 @@ def main():
         "dnf install git python3-pip nvme-cli -y",
         "/usr/bin/python3 -m pip install --upgrade pip setuptools wheel",
         "/usr/bin/python3 -m pip install ruamel.yaml",
-        f"pip install git+https://github.com/simplyblock-io/sbcli@{shlex.quote(args.branch)} "
-        "--upgrade --force --ignore-installed requests",
-        "grep -q 'export PATH=/usr/local/bin:\\$PATH' ~/.bashrc || "
-        "echo 'export PATH=/usr/local/bin:$PATH' >> ~/.bashrc",
+        (f"pip install git+https://github.com/simplyblock-io/sbcli@{shlex.quote(args.branch)} "
+        "--upgrade --force --ignore-installed requests"),
+        ("grep -q 'export PATH=/usr/local/bin:\\$PATH' ~/.bashrc || "
+        "echo 'export PATH=/usr/local/bin:$PATH' >> ~/.bashrc"),
     ]
 
     print("Phase 1: Starting Universal Parallel Setup...")
@@ -351,8 +351,8 @@ def main():
     # --- Phase 2: cluster create + sn configure/deploy ---
     print("Phase 2a: Creating cluster on management node...")
     ssh_exec(mgmt_ip, [
-        "/usr/local/bin/sbctl -d cluster create --enable-node-affinity"
-        " --data-chunks-per-stripe 2 --parity-chunks-per-stripe 2"
+        ("/usr/local/bin/sbctl -d cluster create --enable-node-affinity"
+        " --data-chunks-per-stripe 2 --parity-chunks-per-stripe 2")
     ], check=True)
     print("Phase 2a: DONE - cluster created.")
 
@@ -399,9 +399,9 @@ def main():
         for attempt in range(5):
             try:
                 ssh_exec(mgmt_ip, [
-                    f"/usr/local/bin/sbctl -d sn add-node {cluster_uuid} {sn_ip}:5000 "
+                    (f"/usr/local/bin/sbctl -d sn add-node {cluster_uuid} {sn_ip}:5000 "
                     f"{shlex.quote(args.iface)} --data-nics {shlex.quote(args.data_iface)} "
-                    f"--ha-jm-count 4"
+                    f"--ha-jm-count 4")
                 ], check=True)
                 break
             except RuntimeError:

@@ -1,0 +1,64 @@
+# Turn on kernel pressure-stall information on the OpenShift storage workers.
+#
+# PSI is the cheapest direct answer to "was this node starved of CPU, memory or
+# IO?", which is the question left open every time nodes stall together and
+# nothing in the application logs explains it. The harness collects it already
+# (cluster_test_base.collect_pressure_stall), but on OpenShift it finds nothing:
+#
+#     $ cat /proc/cmdline
+#     ... psi=0 ...
+#     $ ls /proc/pressure
+#     No such file or directory
+#
+# RHCOS builds the kernel CONFIG_PSI=y with CONFIG_PSI_DEFAULT_DISABLED=y and
+# ships psi=0, so /proc/pressure does not exist until the command line says
+# otherwise. e2e/scripts/enable_psi.sh uses grubby, which is right for the
+# docker lab's RHEL hosts and wrong here: RHCOS boots an immutable image and
+# the machine-config operator owns its kernel arguments. Editing grub by hand
+# is reverted on the next MachineConfig the pool applies.
+#
+# ---------------------------------------------------------------------------
+# Why the role is `worker` and not the storage pool's own name
+# ---------------------------------------------------------------------------
+# The StorageCluster creates a MachineConfigPool per cluster -- storage-63f493,
+# storage-f284f4, and seven more left over from earlier bring-ups -- so its name
+# changes every time the cluster is rebuilt. Each one selects MachineConfigs by
+#
+#     machineconfiguration.openshift.io/role In (worker, storage-<hash>)
+#
+# so a MachineConfig labelled `worker` is picked up by whichever storage pool
+# exists now AND by every one created later. Labelling it with today's pool name
+# would mean re-applying it after every cluster rebuild.
+#
+# ---------------------------------------------------------------------------
+# Applying it
+# ---------------------------------------------------------------------------
+#     kubectl apply -f e2e/scripts/openshift-psi-machineconfig.yaml
+#
+# THIS REBOOTS EVERY WORKER. The machine-config operator drains, reboots and
+# rejoins them one at a time (maxUnavailable on the pool), so on six workers
+# expect roughly 30-60 minutes end to end. A storage node cannot serve IO while
+# its worker is cordoned, so run it against an idle lab, not during a test.
+#
+# Watch it:
+#     kubectl get mcp -w
+#     kubectl get nodes -w
+# Done when the storage pool reports UPDATED=True, UPDATING=False and
+# MACHINECOUNT == READYMACHINECOUNT.
+#
+# Confirm afterwards, from any SPDK pod (it shares the host's /proc):
+#     kubectl -n simplyblock exec <snode-spdk-pod> -c spdk-container -- \
+#         sh -c 'cat /proc/cmdline; ls /proc/pressure'
+# Expect `psi=1` and cpu/io/memory/irq.
+#
+# To undo: delete this MachineConfig. That is another rolling reboot.
+---
+apiVersion: machineconfiguration.openshift.io/v1
+kind: MachineConfig
+metadata:
+  name: 99-worker-psi-enable
+  labels:
+    machineconfiguration.openshift.io/role: worker
+spec:
+  kernelArguments:
+    - psi=1

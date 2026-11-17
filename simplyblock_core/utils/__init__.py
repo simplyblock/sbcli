@@ -15,7 +15,7 @@ import time
 import uuid
 from collections.abc import Iterable
 from datetime import UTC, datetime
-from typing import Annotated, Any
+from typing import Annotated, Any, NamedTuple
 
 from docker.errors import APIError, DockerException, ImageNotFound, NotFound
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
@@ -702,29 +702,83 @@ def calculate_pool_count(alceml_count, number_of_distribs, cpu_count, poller_cou
     '''
     poller_number = poller_count if poller_count else cpu_count
 
-    # Small buffers are sized off the max number of subsystems (max_lvol /
-    # --max-subsys) on the node: a fixed base plus 16 small bufs per
-    # NS-add poll group (128) per subsystem.
-    small_pool_count = 100000 + max_lvol * 16 * 128
-    # Large buffers are effectively unused, so the computed count is reduced
-    # by 3x to reclaim huge-page memory.
-    large_pool_count = (48 * (alceml_count + number_of_distribs + 3 + poller_count) + (
-            6 + alceml_count + number_of_distribs) * 32 + poller_number * 15 + 384 + 16 * poller_number + constants.EXTRA_LARGE_POOL_COUNT) / 3
+    # Small buffers are sized for the data in flight at the node's saturation
+    # point (see the hugepage budget in constants), not off max_lvol: a fixed
+    # data reserve, blobstore merge/CoW pieces, and IOBUF_SMALL_POOL_EXTRA_BYTES
+    # of 8 KiB buffers for replication (its transfers and landing merges take
+    # chains of 8 KiB from the small pool). Plus the buffers that sit in
+    # per-thread caches and are not available to other threads: the NVMe-oF
+    # poll-group cache (one poll group per core) and the bdev/accel caches
+    # (threads estimated as BDEV_IO_POOL_THREADS_PER_CORE per core + 8).
+    threads = constants.BDEV_IO_POOL_THREADS_PER_CORE * max(cpu_count, 1) + 8
+    small_pool_count = (constants.IOBUF_SMALL_DATA_COUNT
+                        + constants.IOBUF_SMALL_MERGE_COW_COUNT
+                        + constants.IOBUF_SMALL_POOL_EXTRA_BYTES // constants.IOBUF_SMALL_BUFSIZE
+                        + constants.NVMF_BUF_CACHE_SIZE * (max(cpu_count, 1) + 1)
+                        + (constants.BDEV_IOBUF_SMALL_CACHE_SIZE + constants.ACCEL_SMALL_CACHE_SIZE) * threads)
+    # Large buffers are not used in the data path: the NVMe-oF transport's
+    # io_unit_size is 8 KiB (small buffers only), no exported bdev supports
+    # zcopy, and every bdev caller supplies aligned buffers, so the bdev layer
+    # never draws one. The pool used to be ~3800 x 132 KiB (~490 MiB of
+    # hugepages per node) -- memory the heap ran short of (bed bf18
+    # 2026-11-09: 5816 DMA allocation failures). A fixed reserve covers the
+    # per-thread caches (bdev 16 + accel ACCEL_LARGE_CACHE_SIZE per thread)
+    # and the rare bounce buffer. The previous formula is kept below for
+    # reference only.
+    #   (48 * (alceml + distribs + 3 + pollers) + (6 + alceml + distribs) * 32
+    #    + pollers * 15 + 384 + 16 * pollers + EXTRA_LARGE_POOL_COUNT) / 3
+    large_pool_count = constants.IOBUF_LARGE_POOL_BYTES // constants.IOBUF_LARGE_BUFSIZE
+    # floor: room for the per-thread caches twice over (threads ~ pollers)
+    min_large = (constants.BDEV_IOBUF_LARGE_CACHE_SIZE + constants.ACCEL_LARGE_CACHE_SIZE) \
+        * max(poller_number, 1) * 2
+    if large_pool_count < min_large:
+        large_pool_count = min_large
 
     return int(small_pool_count), int(large_pool_count)
 
 
+def calculate_bdev_io_pool_size(spdk_cpu_mask):
+    """bdev_io_pool_size for a node with the given SPDK core mask.
+
+    Room for every thread's bdev_io cache (threads estimated as
+    BDEV_IO_POOL_THREADS_PER_CORE per core plus a few app threads) plus
+    BDEV_IO_POOL_SIZE (the SPDK default, sized for saturation -- see
+    constants), raised only if the thread caches would otherwise take more
+    than half of it.
+    """
+    try:
+        cores = int(str(spdk_cpu_mask), 16).bit_count() if spdk_cpu_mask else 0
+    except ValueError:
+        cores = 0
+    return _bdev_io_pool_size_for_cores(cores)
+
+
+def _bdev_io_pool_size_for_cores(cores):
+    threads = constants.BDEV_IO_POOL_THREADS_PER_CORE * max(int(cores or 0), 1) + 8
+    return int(max(constants.BDEV_IO_POOL_SIZE, 2 * constants.BDEV_IO_CACHE_SIZE * (threads + 1)))
+
+
 def calculate_minimum_hp_memory(small_pool_count, large_pool_count, lvol_count, max_prov, cpu_count):
-    pool_consumption = (small_pool_count * 8 + large_pool_count * 128) / 1024
-    memory_consumption = (4 * cpu_count + 1.1 * pool_consumption + 22 * lvol_count) * (
-            1024 * 1024) + constants.EXTRA_HUGE_PAGE_MEMORY
-    # The computed pool + EXTRA_HUGE_PAGE_MEMORY figure is the reservation; it
-    # is not doubled. The historical 2.0x safety factor reserved ~twice the
-    # memory SPDK actually needs -- on a two-instances-per-socket host that was
-    # the difference between fitting a node and starving it -- so it is gone.
-    # If a workload is ever shown to need headroom, reintroduce it as a small,
-    # measured factor (peak_used / computed), not a blanket 2x.
-    return int(memory_consumption)
+    """Hugepage memory SPDK needs on a node: the explicit sum of its consumers
+    (see the hugepage budget in constants), times HP_OVERHEAD_FACTOR.
+
+    lvol_count is the node's max subsystems (each with CLIENT_QPAIR_COUNT IO
+    qpairs + 1 admin qpair from its host); cpu_count its SPDK cores. max_prov
+    is not used here (callers apply it as a floor).
+    """
+    cpu_count = max(int(cpu_count or 0), 1)
+    lvol_count = max(int(lvol_count or 0), 0)
+    pools = (small_pool_count * constants.IOBUF_SMALL_BUFSIZE
+             + large_pool_count * constants.IOBUF_LARGE_BUFSIZE)
+    bdev_io = _bdev_io_pool_size_for_cores(cpu_count) * constants.BDEV_IO_SIZE_ESTIMATE
+    peer_qpairs = constants.HP_PEER_QPAIRS_PER_CORE * cpu_count
+    qpairs_in = lvol_count * (constants.CLIENT_QPAIR_COUNT + 1) + peer_qpairs
+    qpairs = (qpairs_in * constants.HP_NVMF_QPAIR_BYTES
+              + peer_qpairs * constants.HP_NVME_INITIATOR_QPAIR_BYTES)
+    threads = constants.HP_THREAD_BYTES_BASE + constants.HP_THREAD_BYTES_PER_CORE * cpu_count
+    total = (pools + bdev_io + constants.HP_DISTRIB_DATA_BUF_BYTES + constants.HP_MD_JOURNAL_BYTES
+             + qpairs + constants.HP_BLOBSTORE_BYTES + threads)
+    return int(total * constants.HP_OVERHEAD_FACTOR)
 
 
 def calculate_minimum_sys_memory(ssd_list):
@@ -966,6 +1020,36 @@ def first_six_chars(s: str) -> str:
     If the string is shorter than six characters, returns the entire string.
     """
     return s[:6]
+
+
+class StorageMcoNames(NamedTuple):
+    """The OpenShift objects the CPU-topology job writes for one cluster."""
+    pool: str
+    machine_config: str
+    kubelet_config: str
+    kubelet_label: str
+    master_kubelet_config: str
+    # Matches the master KubeletConfig of any cluster, this one's included.
+    master_kubelet_config_pattern: str
+
+
+def storage_mco_names(cluster_id: str) -> StorageMcoNames:
+    """Names of a cluster's storage MachineConfigPool and the objects that give
+    it its settings.
+
+    The CPU-topology job creates them from these names, which the agent hands
+    to its template, and the agent's convergence gate and the pool's
+    maxUnavailable reads them back, so the names are spelled here only.
+    """
+    short_id = first_six_chars(cluster_id)
+    return StorageMcoNames(
+        pool=f"storage-{short_id}",
+        machine_config=f"storage-mc-{short_id}",
+        kubelet_config=f"storage-kubelet-{short_id}",
+        kubelet_label=f"storage-cpumanager-{short_id}",
+        master_kubelet_config=f"storage-kubelet-{short_id}-master",
+        master_kubelet_config_pattern="^storage-kubelet-.*-master$",
+    )
 
 
 def nearest_upper_power_of_2(n):
@@ -1411,6 +1495,26 @@ def alceml_checksum_params(cluster, nvme_device):
     return 2, 0, 0
 
 
+def nvme_namespace_serial(nvme_driver_data: dict, id_device_by_nqn: bool = False) -> str:
+    """The serial a device record carries for an NVMe namespace bdev, from the
+    bdev's ``driver_specific.nvme[0]`` block.
+
+    It is the controller's serial, except on a node that identifies devices by
+    NQN, where it is the PCI address joined with the namespace id. The device
+    inventory records it, and every later check of "is the drive SPDK holds
+    under this name the one the record describes" compares against it, so
+    both have to derive it the same way.
+    """
+    serial_number = nvme_driver_data['ctrlr_data']['serial_number']
+    if id_device_by_nqn:
+        if "ns_data" in nvme_driver_data:
+            # SPDK reports the namespace id as a number.
+            serial_number = nvme_driver_data['pci_address'] + str(nvme_driver_data['ns_data']['id'])
+        else:
+            logger.error(f"No subsystem nqn found for device: {nvme_driver_data['pci_address']}")
+    return serial_number
+
+
 def addNvmeDevices(rpc_client, snode, devs):
     devices = []
     ret = rpc_client.bdev_nvme_controller_list()
@@ -1430,7 +1534,8 @@ def addNvmeDevices(rpc_client, snode, devs):
             # Node-add cold path: full dump is fine, the node carries no lvols yet.
             bdevs = rpc_client.bdev_list()
             for bdev in bdevs:
-                if bdev['name'].startswith(nvme_controller):
+                # <ctrl>n...: nvme_61 must not pick up nvme_611's bdevs.
+                if bdev['name'].startswith(f"{nvme_controller}n"):
                     nvme_bdevs.append(bdev['name'])
         else:
             pci_st = str(pcie).replace("0", "").replace(":", "").replace(".", "")
@@ -1467,12 +1572,7 @@ def addNvmeDevices(rpc_client, snode, devs):
                 )
                 continue
 
-            serial_number = nvme_driver_data['ctrlr_data']['serial_number']
-            if snode.id_device_by_nqn:
-                if "ns_data" in nvme_driver_data:
-                    serial_number = nvme_driver_data['pci_address'] + nvme_driver_data['ns_data']['id']
-                else:
-                    logger.error(f"No subsystem nqn found for device: {nvme_driver_data['pci_address']}")
+            serial_number = nvme_namespace_serial(nvme_driver_data, snode.id_device_by_nqn)
 
             # SPDK exposes per-namespace metadata size as a top-level uint32 in bdev_get_bdevs JSON
             # (lib/bdev/bdev_rpc.c writes "md_size" via spdk_bdev_get_md_size). >=8 means alceml can run
@@ -3633,7 +3733,7 @@ def set_storage_mcp_max_unavailable(cluster_id: str, max_unavailable: int) -> bo
     # at 1. The MCP name mirrors the CPU-topology job template
     # (storage-<first-6-of-cluster-id>).
     value = max(int(max_unavailable), 1)
-    mcp_name = f"storage-{first_six_chars(cluster_id)}"
+    mcp_name = storage_mco_names(cluster_id).pool
     try:
         load_kube_config_with_fallback()
         api = client.CustomObjectsApi()
@@ -4130,6 +4230,46 @@ def build_graylog_patch(cluster_secret: str) -> dict:
         }
     }
     return graylog_patch
+
+
+PROMETHEUS_CONFIGMAP = "simplyblock-prometheus-config"
+
+
+def replace_secret_token(text: str, old: str, new: str) -> tuple[str, int]:
+    """Replace every occurrence of ``old`` that stands as a whole token.
+
+    A token is bounded by whitespace, a colon or a quote, which is how a secret
+    sits in the monitoring configs (``password: '<s>'``, ``credentials: <s>``,
+    ``"Bearer <s>"``), so the quoting around it is left as it was. Returns the
+    new text and the number of replacements; zero means the text does not
+    carry ``old``.
+    """
+    if not old:
+        return text, 0
+    pattern = re.compile(rf"(?<![^\s:'\"]){re.escape(old)}(?![^\s'\"])")
+    return pattern.subn(lambda _: new, text)
+
+
+def rotate_prometheus_configmap_secret(old_secret: str, new_secret: str) -> bool:
+    """Swap ``old_secret`` for ``new_secret`` in the Prometheus ConfigMap.
+
+    Keyed on the old value rather than on field names, so only the scrape jobs
+    that authenticate as this cluster change, whichever cluster the ConfigMap
+    was last pointed at. Returns whether the ConfigMap carried the old secret;
+    raises ``kubernetes.client.exceptions.ApiException`` when it cannot be read
+    or patched.
+    """
+    load_kube_config_with_fallback()
+    v1 = client.CoreV1Api()
+    cm = v1.read_namespaced_config_map(name=PROMETHEUS_CONFIGMAP, namespace=constants.K8S_NAMESPACE)
+    rotated, count = replace_secret_token((cm.data or {}).get("prometheus.yml", ""), old_secret, new_secret)
+    if not count:
+        return False
+    v1.patch_namespaced_config_map(
+        name=PROMETHEUS_CONFIGMAP, namespace=constants.K8S_NAMESPACE,
+        body={"data": {"prometheus.yml": rotated}})
+    logger.info(f"Rotated the cluster secret in the {PROMETHEUS_CONFIGMAP} ConfigMap")
+    return True
 
 
 def patch_prometheus_configmap(username: str, password: str):

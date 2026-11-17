@@ -13,7 +13,7 @@ import errno
 import time
 
 from simplyblock_core import db_controller, utils
-from simplyblock_core.controllers import backup_events
+from simplyblock_core.controllers import backup_events, tasks_controller
 from simplyblock_core.controllers.backup import controller as backup_controller
 from simplyblock_core.controllers.backup import device as backup_device
 from simplyblock_core.controllers.backup import group_backup
@@ -483,6 +483,13 @@ def process_task(task):
     _HANDLERS[task.function_name](task)
 
 
+def _is_eligible(task, cluster):
+    """Left untouched while the cluster is in_activation, or while a site
+    activation holds the LVS of the task's node."""
+    return (cluster.status != Cluster.STATUS_IN_ACTIVATION
+            and not tasks_controller.site_activation_holds(cluster, task.node_id))
+
+
 def finalize_resource(task):
     """Release the backup/restore/merge the task was driving, once it is over.
 
@@ -565,7 +572,7 @@ SPEC = RunnerSpec(
     function_names=list(_HANDLERS),
     handler=process_task,
     on_finish=finalize_resource,
-    is_eligible=lambda task, cluster: cluster.status != Cluster.STATUS_IN_ACTIVATION,
+    is_eligible=_is_eligible,
 )
 
 

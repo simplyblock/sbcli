@@ -1,4 +1,5 @@
 """HTML + JSON report generator for CLI / v1 / v2 parity audit."""
+from __future__ import annotations
 
 import json
 import os

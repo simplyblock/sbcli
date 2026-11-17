@@ -433,8 +433,8 @@ def main():
         "sudo dnf install git python3-pip nvme-cli pciutils -y",
         "sudo /usr/bin/python3 -m pip install --upgrade pip setuptools wheel",
         "sudo /usr/bin/python3 -m pip install ruamel.yaml",
-        f"sudo pip install git+https://github.com/simplyblock-io/sbcli@{BRANCH}"
-        " --upgrade --force --ignore-installed requests",
+        (f"sudo pip install git+https://github.com/simplyblock-io/sbcli@{BRANCH}"
+        " --upgrade --force --ignore-installed requests"),
         "echo 'export PATH=/usr/local/bin:$PATH' >> ~/.bashrc",
     ]
     with ThreadPoolExecutor(max_workers=len(setup_ips)) as ex:
@@ -446,9 +446,9 @@ def main():
     # Fix env_var on mgmt node to pull the correct branch image before cluster create
     print("Patching SIMPLY_BLOCK_DOCKER_IMAGE in env_var on mgmt node...")
     ssh_exec(mgmt_pub_ip, [
-        "sudo sed -i 's|SIMPLY_BLOCK_DOCKER_IMAGE=.*"
+        ("sudo sed -i 's|SIMPLY_BLOCK_DOCKER_IMAGE=.*"
         "|SIMPLY_BLOCK_DOCKER_IMAGE=public.ecr.aws/simply-block/simplyblock:lvol-migration-fresh|' "
-        "$(find /usr/local/lib -name env_var -path '*/simplyblock_core/*' 2>/dev/null | head -1)",
+        "$(find /usr/local/lib -name env_var -path '*/simplyblock_core/*' 2>/dev/null | head -1)"),
     ], check=True)
 
     # --- 6. Phase 2: Cluster setup ---
@@ -515,8 +515,8 @@ def main():
         for attempt in range(5):
             try:
                 ssh_exec(mgmt_pub_ip, [
-                    f"sudo /usr/local/bin/sbctl -d sn add-node"
-                    f" {cluster_uuid} {priv_ip}:5000 {IFACE} --ha-jm-count 3"
+                    (f"sudo /usr/local/bin/sbctl -d sn add-node"
+                    f" {cluster_uuid} {priv_ip}:5000 {IFACE} --ha-jm-count 3")
                 ], check=True)
                 break
             except RuntimeError:

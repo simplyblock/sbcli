@@ -1374,9 +1374,9 @@ class SoakRunner:
                 if strict_latency:
                     faults.append((
                         job, "max_latency",
-                        f"{new} new max_latency violation(s) — a single-NIC "
+                        (f"{new} new max_latency violation(s) — a single-NIC "
                         f"outage must not stall IO past "
-                        f"{self.args.fio_max_latency}s"))
+                        f"{self.args.fio_max_latency}s")))
                     continue
                 self.latency_violations += new
                 self.logger.log(

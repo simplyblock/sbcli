@@ -1,9 +1,16 @@
 import time
 
-from simplyblock_core import db_controller, distr_controller, storage_node_ops, utils
+from simplyblock_core import (
+    constants,
+    db_controller,
+    distr_controller,
+    storage_node_ops,
+    utils,
+)
 from simplyblock_core.controllers import (
     device_controller,
     health_controller,
+    port_release_budget,
     storage_events,
     tasks_controller,
     tcp_ports_events,
@@ -151,7 +158,9 @@ def _verify_or_reconnect_peer_hublvol(peer_node, primary_node):
     """Up to _HUBLVOL_MAX_ATTEMPTS verify+reconnect attempts, with
     exponential backoff (1, 2, 4, 8, 16 s) between them. Returns True iff
     any attempt yields a verified-open hublvol from ``peer_node`` to
-    ``primary_node``; False on exhaustion.
+    ``primary_node``; False on exhaustion. Also True, with no attempt, when
+    ``peer_node`` is in the passive triplet of ``primary_node``'s LVS
+    (storage_node_ops.lvs_hublvol_expected): it connects to no hublvol.
 
     Each attempt runs in three steps:
 
@@ -175,6 +184,12 @@ def _verify_or_reconnect_peer_hublvol(peer_node, primary_node):
     On exhaustion the caller's port-allow path aborts the recovering
     node rather than risk unblocking with a half-open peer hublvol.
     """
+    if not storage_node_ops.lvs_hublvol_expected(primary_node, peer_node.get_id()):
+        logger.info("%s is led from site %s: %s connects to no hublvol",
+                    primary_node.lvstore, storage_node_ops.lvs_active_site_of(primary_node),
+                    peer_node.get_id())
+        return True
+
     label = f"{peer_node.get_id()[:8]} <- {primary_node.get_id()[:8]}"
     have_metadata = bool(primary_node.hublvol)
 
@@ -244,9 +259,13 @@ def _reconnect_own_sec_tert_hublvols(node):
       - if P is not reachable but P's secondary is the acting leader, the
         tertiary connects to that acting-leader secondary instead.
 
-    A connection is skipped only if its target peer is neither ONLINE nor
-    DOWN. INBOUND hublvols (peers -> this node) and ALL leadership changes are
-    handled separately in the inbound/leadership step — never here. A
+    A connection is skipped when the primary's record or its hublvol
+    metadata is missing, when no target peer is ONLINE or DOWN, or when the
+    node is in the PASSIVE triplet of that lvstore
+    (storage_node_ops.lvs_hublvol_expected) - the LVS is led from the other
+    site, and the passive triplet connects to no hublvol. INBOUND hublvols
+    (peers -> this node) and ALL leadership changes are handled separately
+    in the inbound/leadership step — never here. A
     network-outage recovery has no recreate_lvstore pass, so this must run
     before the port is allowed, or the node's follower listeners serve client
     IO they cannot forward.
@@ -265,6 +284,11 @@ def _reconnect_own_sec_tert_hublvols(node):
         except KeyError:
             logger.warning("Primary %s referenced by %s not found; skipping",
                            pid[:8], node.get_id()[:8])
+            continue
+        if not storage_node_ops.lvs_hublvol_expected(primary, node.get_id()):
+            logger.info("%s is led from site %s: %s connects to no hublvol",
+                        primary.lvstore, storage_node_ops.lvs_active_site_of(primary),
+                        node.get_id())
             continue
         if not primary.hublvol:
             logger.info("Skipping outbound hublvol toward %s (no hublvol metadata)",
@@ -475,6 +499,10 @@ def _reconnect_inbound_hublvols(node):
     connected, return False so the port stays blocked — a reopened secondary
     listener with no tertiary redirect path is a dual-writer risk once
     leadership sits on the tertiary. Returns ``(ok, msg)``.
+
+    Nothing is repaired when the node is in the PASSIVE triplet of the LVS
+    (storage_node_ops.lvs_hublvol_expected): the LVS is led from the other
+    site, and the passive triplet neither exposes nor connects a hublvol.
     """
     if not node.lvstore_stack_secondary:
         return True, ""
@@ -483,6 +511,11 @@ def _reconnect_inbound_hublvols(node):
     except KeyError:
         return True, ""
     if primary.secondary_node_id != node.get_id() or not primary.hublvol:
+        return True, ""
+    if not storage_node_ops.lvs_hublvol_expected(primary, node.get_id()):
+        logger.info("%s is led from site %s: no secondary hublvol on %s, and no tertiary "
+                    "path to it", primary.lvstore,
+                    storage_node_ops.lvs_active_site_of(primary), node.get_id())
         return True, ""
 
     # 1- re-expose this node's secondary hublvol (local to this node).
@@ -836,11 +869,12 @@ def exec_port_allow_task(task):
         if node.tertiary_node_id:
             sec_ids.append(node.tertiary_node_id)
         if sec_ids:
-            # Primary-side hublvol exposure is the precondition; if the
-            # primary hasn't (re)registered its hublvol subsystem yet there's
-            # nothing useful the port_allow runner can drive from the peer
-            # side. Stay with suspend-and-retry for this gate -- this is a
-            # primary-local recovery step, not a peer reconnect.
+            # Where a hublvol is expected, the primary must expose it first.
+            # If the primary has not registered its hublvol subsystem yet,
+            # reconnecting the peers cannot fix that, so the task is deferred
+            # and retried: this is a recovery step on the primary itself. A
+            # primary in the passive triplet (its LVS is led from the other
+            # site) exposes no hublvol, and the check returns success for it.
             primary_hublvol_check = health_controller._check_node_hublvol(node)
             if not primary_hublvol_check:
                 raise TaskDefer("Node hublvol check fail, retry later")
@@ -910,8 +944,13 @@ def exec_port_allow_task(task):
     # recovery path ever reconciles the ex-leader's state afterwards, its
     # redirect stays broken, and the monitor flips it DOWN, unable to
     # redirect IO to the primary.
+    #
+    # Sync replication: only while the LVS is led from its home triplet. Led
+    # from the other site's triplet, or being moved there, its leadership is
+    # not this node's to take back (storage_node_ops.lvs_active_triplet).
     node = db.get_storage_node_by_id(task.node_id)
     if node.lvstore and node.lvstore_status == "ready" and \
+            storage_node_ops.lvs_led_from_home(node) and \
             not tasks_controller.get_active_node_restart_task(task.cluster_id, task.node_id):
         failback_peers = []
         for sec_id in [node.secondary_node_id, node.tertiary_node_id]:
@@ -969,9 +1008,31 @@ def exec_port_allow_task(task):
     if port_number and port_number not in lvs_ports:
         lvs_ports.append(port_number)
     logger.info(f"Allow LVS ports {lvs_ports} on node {node.get_id()}")
+    # Release budget (models/fence_release.py): a port whose lvstore this
+    # control plane already reopened FENCE_RELEASE_BUDGET times inside the
+    # window is being re-fenced by SPDK on every IO. Skip it and reopen the
+    # others -- but never abort here: the ANA promotion and the device
+    # re-admit below are the last steps of the node's recovery and must run
+    # whatever happened to one port (review of #1580). The budget exempts the
+    # lvstore's preferred path and is reset by a restart, so a healthy node
+    # coming back is not what gets skipped.
+    looping = [p for p in lvs_ports if port_release_budget.exhausted(db, node, p)]
     for p in lvs_ports:
+        if p in looping:
+            logger.warning(
+                "Port %s on %s: its lvstore's paths were released %d times in the last "
+                "%ds and SPDK fenced them again each time; leaving it blocked",
+                p, node.get_id(), constants.FENCE_RELEASE_BUDGET, constants.FENCE_RELEASE_WINDOW_SEC)
+            continue
         node.rpc_client(timeout=5, retry=2).nvmf_port_unblock(p)
+        port_release_budget.record_release(db, node, p)
         tcp_ports_events.port_allowed(node, p)
+    left_blocked = ""
+    if port_number in looping:
+        left_blocked = (
+            f" (port {port_number} left blocked: its lvstore's paths were released "
+            f"{constants.FENCE_RELEASE_BUDGET} times in {constants.FENCE_RELEASE_WINDOW_SEC}s "
+            f"and fenced again each time -- fence loop)")
 
     # Deferred ANA failover, AFTER the port release: a secondary recovering
     # while its primary is OFFLINE returns with non-optimized listeners
@@ -981,7 +1042,13 @@ def exec_port_allow_task(task):
     # tertiary to this secondary gradually rather than gating the recovery.
     # The tertiary→secondary hublvol hard gate above already guaranteed the
     # tertiary can redirect here before any client lands on this node.
-    if node.lvstore_stack_secondary:
+    if storage_node_ops._sync_site(node):
+        # Sync replication: this node may be the secondary of the ACTIVE
+        # triplet of several LVS (a local one, or another owner's remote
+        # triplet); each whose active primary is OFFLINE is promoted here,
+        # under the site rule.
+        storage_node_ops.promote_active_secondary_ana(node)
+    elif node.lvstore_stack_secondary:
         try:
             # reverse ref holds the primary's node id (str at runtime despite
             # the model's List[dict] annotation — see field-semantics note)
@@ -1038,7 +1105,7 @@ def exec_port_allow_task(task):
     except Exception as e:
         logger.error(f"Device re-admit after port allow failed: {e}")
 
-    set_result(task, f"Port {port_number} allowed on node")
+    set_result(task, f"Port {port_number} allowed on node{left_blocked}")
 
 
 SPEC = RunnerSpec(

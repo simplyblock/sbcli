@@ -158,7 +158,7 @@ class BatchListenerBarrierTest(unittest.TestCase):
                 order.append(("listener", lvol.get_id()))
             return True, None
 
-        def fake_publish(lvol, snode, rpc_client, lvol_ana_state):
+        def fake_publish(lvol, snode, rpc_client, lvol_ana_state, **kwargs):
             order.append(("listener", lvol.get_id()))
             return True, None
 
@@ -207,7 +207,7 @@ class BatchSkipsFailedRegistrationsTest(unittest.TestCase):
                 return False, "add_ns failed"
             return True, None
 
-        def fake_publish(lvol, snode, rpc_client, lvol_ana_state):
+        def fake_publish(lvol, snode, rpc_client, lvol_ana_state, **kwargs):
             published.append(lvol.get_id())
             return True, None
 

@@ -208,6 +208,31 @@ def get_qos_weights_list(cluster_id=None):
     return lst
 
 
+def set_node_qos_weights(rpc_client, weights) -> bool:
+    """Give one node's distrib AND alceml the class shares; True when distrib
+    took them.
+
+    Classes are scheduled at both levels: distrib splits each lvstore's IO,
+    and every alceml mixes what all distribs send it. With only distrib set,
+    alceml schedules with its built-in {75, 25, 0, ...} and a zero-weight
+    class (replication, user classes) gets the minimum budget per round once
+    the device is busy. distrib decides success, as before; an alceml refusal
+    or a build without its RPC is logged and does not fail node start-up.
+    """
+    from simplyblock_core.rpc_client import RPC_UNSUPPORTED, RPCException
+    ok = rpc_client.distrib_set_qos_weights(weights)
+    try:
+        aret = rpc_client.alceml_set_qos_weights(weights)
+    except RPCException as e:
+        aret = str(e)
+    if aret is RPC_UNSUPPORTED:
+        logger.warning("alceml has no alceml_set_qos_weights; its class shares stay "
+                       "at the built-in defaults")
+    elif aret is not True:
+        logger.warning("alceml QoS weights not set: %s", aret)
+    return bool(ok)
+
+
 def push_qos_weights(cluster_id) -> list[str]:
     """Send the cluster's weights to every online node; the ids that failed.
 
@@ -222,7 +247,7 @@ def push_qos_weights(cluster_id) -> list[str]:
         if node.status != StorageNode.STATUS_ONLINE:
             continue
         try:
-            ret = node.rpc_client().alceml_set_qos_weights(weights)
+            ret = set_node_qos_weights(node.rpc_client(), weights)
         except RPCException:
             ret = False
         if not ret:

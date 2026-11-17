@@ -35,6 +35,8 @@ def _recovery_migration_open(cluster_id):
 
 def task_runner(task):
     snode = mig.require_node(task)
+    mig.place_on_role_node(task, snode)
+    mig.defer_for_sync_resync(task)
 
     if snode.status != StorageNode.STATUS_ONLINE:
         raise TaskRetry("node is not online, retrying")
@@ -56,6 +58,7 @@ def task_runner(task):
     if not mig.migration_started(task):
         if not _all_devices_online_or_written_off(task.cluster_id):
             raise TaskRetry("Some devs are offline, retrying")
+        mig.defer_while_unhealthy(task)
 
         try:
             db.get_storage_device_by_id(task.device_id)

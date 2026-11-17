@@ -614,9 +614,10 @@ def test_interrupted_landing_volume_is_adopted_or_cleared():
     import inspect
 
     from simplyblock_core.services import snapshot_replication as sr
-    src = inspect.getsource(sr)
+    src = inspect.getsource(sr.process_snap_replicate_start)
     probe = src.index('rep_name = f"REP_{snapshot.snap_name}"')
-    create = src.index("lvol_controller.add_lvol_ha")
+    create = src.index("_create_landing_volume(")
+    assert "lvol_controller.add_lvol_ha" in inspect.getsource(sr._create_landing_volume)
     assert probe < create, "the adopt/clear probe must run before the create"
     adopt = src.index("Adopting landing volume")
     assert probe < adopt < create

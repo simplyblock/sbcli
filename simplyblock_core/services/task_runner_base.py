@@ -16,7 +16,8 @@ writing those) but it MUST NOT touch task lifecycle state (``status`` /
 that. The handler signals its outcome purely through ordinary Python control
 flow:
 
-- **return** (``None``) — the task is terminally complete → ``STATUS_DONE``.
+- **return** (``None``) — the task is terminally complete → ``STATUS_DONE``,
+  unless the spec's ``finish`` re-arms it (see *Terminal commit*).
 - **raise** :class:`TaskDefer` — cannot proceed yet, blocked on external state.
   Suspend and re-poll next cycle; **no retry consumed**; no backoff.
 - **raise** :class:`TaskProgress` — the work is under way and this poll found it
@@ -27,7 +28,8 @@ flow:
   attempt. A failure whose message differs from the previous attempt's also
   fires the spec's ``on_failure`` alert.
 - **raise** :class:`TaskAbort` — a permanent, non-retryable stop (missing param,
-  object gone, "not needed"). Finish the task (``STATUS_DONE``) with the reason.
+  object gone, "not needed"). Finish the task (``STATUS_DONE``) with the reason,
+  unless the spec's ``finish`` re-arms it.
 
 The task the handler receives is a frozen view: writing to it, or to its
 ``function_params``, raises :class:`~simplyblock_core.models.job_schedule.FrozenTaskError`.
@@ -48,6 +50,23 @@ driver's pre-run re-fetch is authoritative for the *lifecycle* decisions it
 makes, but it happens before the handler starts, and by the time a long handler
 reaches its point of no return the task may have been canceled.
 
+Terminal commit
+---------------
+Every terminal transition ends in one commit of the task row: DONE with the
+result. A runner whose final step must land domain state in the SAME
+transaction as that DONE supplies :attr:`RunnerSpec.finish`, which replaces the
+driver's own commit and is told why the task ends (:class:`Ending`):
+``SUCCEEDED`` (the handler returned), ``ABORTED`` (:class:`TaskAbort`),
+``CANCELED`` (canceled before the handler ran) or ``GAVE_UP`` (retry ceiling).
+It commits onto the row as it stands now and returns it, or None when it
+committed nothing. It may also *re-arm* the task — commit it non-DONE — and the
+driver then forgets it, so the next cycle dispatches it again with no backoff.
+``on_finish`` runs only after a commit that left the row DONE. An exception from
+``finish`` propagates exactly like one from the default commit: the worker logs
+it, the row is not DONE, and the next cycle handles the task again. A hook falls
+back to :func:`finish_done`, the driver's own commit, for the endings it does
+not specialise.
+
 DB errors are deliberately NOT caught: an unhandled ``get_clusters`` /
 ``get_job_tasks`` failure propagates out of :func:`serve`, exits the process
 non-zero, and lets the orchestrator restart it with a fresh FDB connection.
@@ -56,6 +75,7 @@ Task writes are compare-and-set, never full-object writes: see
 :meth:`TaskRunner._cas`.
 """
 import datetime
+import enum
 import threading
 import time
 from collections.abc import Callable, Sequence
@@ -99,6 +119,15 @@ class TaskRetry(Exception):
 
 class TaskAbort(Exception):
     """Handler signal: a permanent, non-retryable stop. Finish the task."""
+
+
+class Ending(enum.Enum):
+    """Why a task reaches its terminal commit; see :attr:`RunnerSpec.finish`."""
+
+    SUCCEEDED = "succeeded"   # the handler returned
+    ABORTED = "aborted"       # the handler raised TaskAbort
+    CANCELED = "canceled"     # canceled before the handler ran
+    GAVE_UP = "gave_up"       # the retry ceiling was reached
 
 
 def _default_eligible(task: JobSchedule, cluster: Any) -> bool:
@@ -224,6 +253,22 @@ def set_result(task: JobSchedule, message: str) -> JobSchedule | None:
     return _frozen_or_none(_commit(task, _apply))
 
 
+def finish_done(task: JobSchedule, result: str,
+                context: str = "task-runner") -> JobSchedule | None:
+    """The driver's own terminal commit: DONE with ``result``.
+
+    A spec's ``finish`` hook calls it for the endings it does not specialise.
+    Finishes a canceled task (that is the cancellation being carried out) and
+    refuses one already DONE. Returns the committed task, or None if another
+    actor already owns the outcome.
+    """
+    def _apply(fresh: JobSchedule) -> None:
+        fresh.status = JobSchedule.STATUS_DONE
+        fresh.function_result = result
+
+    return _commit(task, _apply, terminal=True, context=context)
+
+
 @dataclass
 class RunnerSpec:
     """Describes one task runner. ``function_names`` and ``handler`` are the only
@@ -248,8 +293,19 @@ class RunnerSpec:
     # written — whichever way it got there (handler success, TaskAbort, cancel
     # or retry ceiling). For releasing state the task held, which would
     # otherwise leak on the terminal paths the handler never sees. Runs only
-    # for the caller that won the terminal transition.
+    # for the caller that won the terminal transition, and not when ``finish``
+    # re-arms the task instead.
     on_finish: Callable[[JobSchedule], None] | None = None
+    # Optional terminal commit, called with (task, ending, result) in place of
+    # the driver's own DONE write on every terminal transition. For a runner
+    # whose final step must commit domain state in the same transaction as
+    # DONE, which ``on_finish`` cannot do: it runs after the commit, at most
+    # once. The hook commits onto the row as it stands now (``task`` is a
+    # frozen copy, read before the call) and returns the row as committed, or
+    # None when it committed nothing. A returned row that is not DONE re-arms
+    # the task: no ``on_finish``, no backoff, the next cycle dispatches it
+    # again. Endings it does not specialise go to ``finish_done``.
+    finish: Callable[[JobSchedule, Ending, str], JobSchedule | None] | None = None
     # Optional alert, called with (task, reason) when a task fails with a
     # message DIFFERENT from the one its previous attempt recorded. For a
     # failure an operator must see in the cluster event log rather than only in
@@ -466,12 +522,12 @@ class TaskRunner:
             return
 
         if task.canceled:
-            self._finish(task, "canceled")
+            self._finish(task, "canceled", Ending.CANCELED)
             return
         if 0 <= task.max_retry <= task.retry:
             reason = _give_up_reason(task)
             logger.error(f"{self.spec.name}: task {uuid} gave up: {reason}")
-            self._finish(task, reason)
+            self._finish(task, reason, Ending.GAVE_UP)
             return
 
         if task.status != JobSchedule.STATUS_RUNNING:
@@ -523,7 +579,7 @@ class TaskRunner:
         elif isinstance(signal, TaskDefer):
             self._defer(task, str(signal))
         elif isinstance(signal, TaskAbort):
-            self._finish(task, str(signal) or "aborted")
+            self._finish(task, str(signal) or "aborted", Ending.ABORTED)
         elif isinstance(signal, TaskRetry):
             self._fail(task, str(signal) or "retry", previous_result)
         elif signal is not None:
@@ -531,7 +587,7 @@ class TaskRunner:
         else:
             self._succeed(task, previous_result)
 
-    # -- outcome transitions (the only places task state is mutated) --------
+    # -- outcome transitions (with RunnerSpec.finish, the only task writes) --
 
     def _cas(self, task: JobSchedule, apply: Callable[[JobSchedule], None],
              terminal: bool = False) -> JobSchedule | None:
@@ -553,17 +609,23 @@ class TaskRunner:
         result = task.function_result
         if not result or result == previous_result:
             result = "completed"
-        self._write_terminal(task, result)
+        self._write_terminal(task, result, Ending.SUCCEEDED)
 
-    def _finish(self, task: JobSchedule, result: str) -> None:
+    def _finish(self, task: JobSchedule, result: str, ending: Ending) -> None:
         """Terminal DONE for a non-handler-success reason (canceled, max retry,
-        abort)."""
-        self._write_terminal(task, result)
+        abort), unless the spec's ``finish`` re-arms the task."""
+        self._write_terminal(task, result, ending)
 
-    def _write_terminal(self, task: JobSchedule, result: str) -> None:
-        committed = self._cas(task, self._to(JobSchedule.STATUS_DONE, result),
-                              terminal=True)
+    def _write_terminal(self, task: JobSchedule, result: str, ending: Ending) -> None:
+        if self.spec.finish is None:
+            committed = finish_done(task, result, context=self.spec.name)
+        else:
+            committed = self.spec.finish(task.frozen_view(), ending, result)
         self._forget(task.uuid)
+        if committed is not None and committed.status != JobSchedule.STATUS_DONE:
+            logger.info(f"{self.spec.name}: task {task.uuid} re-armed as "
+                        f"{committed.status} by the spec's finish ({ending.name})")
+            return
         if committed is None or self.spec.on_finish is None:
             # Losing the transition means someone else finished the task and
             # owns its cleanup too; running it here would release the resource

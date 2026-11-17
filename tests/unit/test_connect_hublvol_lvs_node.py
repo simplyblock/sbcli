@@ -266,9 +266,11 @@ class TestSourceCallSites(unittest.TestCase):
         # client write, producing a dual-leader writer conflict.
         # (incident 2026-05-21 05:38:14 k8s_native_resilient_failover-
         # 20260520-231822, LVS_270 takeover by worker-4.)
-        start = self.src.index("def _recreate_lvstore_impl(")
-        end = self.src.index("\ndef ", start + 1)
-        body = self.src[start:end]
+        # The leader path's peer connects live in the fenced hand-off
+        # recreate_lvstore runs through (transfer_lvs_leadership).
+        body = "".join(
+            self.src[self.src.index(name):self.src.index("\ndef ", self.src.index(name) + 1)]
+            for name in ("def _fence_and_demote_leader(", "def _wire_taker_hublvol("))
         # The peer-loop connect call uses sec_node.connect_to_hublvol(snode, ...)
         idx = body.index("sec_node.connect_to_hublvol(snode")
         window = body[idx:idx + 800]
@@ -285,9 +287,11 @@ class TestSourceCallSites(unittest.TestCase):
         recreate_lvstore must pass lvs_node= explicitly. Guards against
         a regression that adds a new call site in the takeover path
         without re-applying the metadata-routing arg."""
-        start = self.src.index("def _recreate_lvstore_impl(")
-        end = self.src.index("\ndef ", start + 1)
-        body = self.src[start:end]
+        # The leader path's peer connects live in the fenced hand-off
+        # recreate_lvstore runs through (transfer_lvs_leadership).
+        body = "".join(
+            self.src[self.src.index(name):self.src.index("\ndef ", self.src.index(name) + 1)]
+            for name in ("def _fence_and_demote_leader(", "def _wire_taker_hublvol("))
         cursor = 0
         call_token = "connect_to_hublvol("
         offenders = []

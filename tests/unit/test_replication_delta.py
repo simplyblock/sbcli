@@ -4,6 +4,7 @@ A delta transfer sends only the blocks the source's leader saw written since
 the predecessor. These tests pin what the control plane must establish before
 it asks for one, and that every doubt falls back to a full transfer.
 """
+import time
 import unittest
 from types import SimpleNamespace
 from typing import ClassVar
@@ -168,12 +169,17 @@ class TestOverlapWithMerge(unittest.TestCase):
     def _decide(self, pred, sec_status=None):
         task = SimpleNamespace(function_params={}, write_to_db=MagicMock(), uuid="t")
         remote_lv = SimpleNamespace(get_id=lambda: "landing")
+        # sec_status "offline" = the secondary cannot be reached: members are
+        # judged by whether they answer, not by DB status (replica_chain)
         node = SimpleNamespace(secondary_node_id="sec" if sec_status else "",
-                               get_id=lambda: "tgt")
+                               tertiary_node_id="", get_id=lambda: "tgt")
         db = MagicMock()
-        db.get_storage_node_by_id.return_value = SimpleNamespace(status=sec_status)
+        db.get_storage_node_by_id.return_value = SimpleNamespace(
+            status=sec_status, get_id=lambda: "sec")
         prechain = MagicMock()
         with patch.object(snapshot_replication, "_finishing_predecessor", return_value=pred), \
+                patch.object(snapshot_replication.replica_chain, "reachable",
+                             return_value=sec_status != "offline"), \
                 patch.object(snapshot_replication, "_prechain_landing_volume", prechain), \
                 patch.object(snapshot_replication, "db", db):
             res = snapshot_replication._partial_transfer_decision(
@@ -186,7 +192,7 @@ class TestOverlapWithMerge(unittest.TestCase):
         self.assertEqual(res, (True, 0x88))
         self.assertEqual(params["chain_deferred_to"], "snap")
 
-    def test_an_offline_secondary_makes_it_full_but_still_deferred(self):
+    def test_an_unreachable_secondary_makes_it_full_but_still_deferred(self):
         (res, params) = self._decide(_snap(before=CLEAN, blobid=0x88), sec_status="offline")
         self.assertEqual(res, (False, 0))
         self.assertEqual(params["chain_deferred_to"], "snap")
@@ -284,7 +290,7 @@ class TestLandingMerge(unittest.TestCase):
     #: what bdev_lvol_merge_base_stat answers before any job ran
     NONE: ClassVar[dict] = {"state": "none", "rc": 0}
 
-    def _merge(self, params, start=None, stats=(NONE,), side_effect=None):
+    def _merge(self, params, start=None, stats=(NONE,), side_effect=None, class_on=False):
         task = SimpleNamespace(function_params=params, write_to_db=MagicMock(), uuid="t")
         lv = SimpleNamespace(get_id=lambda: "landing", top_bdev="LVS/LAND")
         node = MagicMock()
@@ -293,7 +299,7 @@ class TestLandingMerge(unittest.TestCase):
         rpc.bdev_lvol_merge_base.return_value = start
         rpc.bdev_lvol_merge_base.side_effect = side_effect
         rpc.bdev_lvol_merge_base_stat.side_effect = list(stats)
-        with patch.object(snapshot_replication.constants, "REPL_MERGE_INLINE_WAIT_SEC", 0.05),                 patch.object(snapshot_replication.constants, "REPL_MERGE_POLL_SEC", 0.01):
+        with patch.object(snapshot_replication, "_replication_class_on", return_value=class_on),                 patch.object(snapshot_replication.constants, "REPL_MERGE_INLINE_WAIT_SEC", 0.05),                 patch.object(snapshot_replication.constants, "REPL_MERGE_POLL_SEC", 0.01):
             return snapshot_replication._merge_landing(task, lv, node), rpc, task
 
     def test_a_full_transfer_needs_no_merge(self):
@@ -305,7 +311,7 @@ class TestLandingMerge(unittest.TestCase):
         res, rpc, task = self._merge({"partial_base": 7}, start={"state": "running"},
                                      stats=[self.NONE, {"state": "done", "rc": 0, "clusters": 3}])
         self.assertEqual(res, "ok")
-        rpc.bdev_lvol_merge_base.assert_called_once_with("LVS/LAND")
+        rpc.bdev_lvol_merge_base.assert_called_once_with("LVS/LAND", priority_class=None)
         self.assertEqual(task.function_params["merged_landing"], "landing")
         res, rpc, _ = self._merge(dict(task.function_params))
         self.assertEqual(res, "ok")
@@ -329,6 +335,15 @@ class TestLandingMerge(unittest.TestCase):
         self.assertEqual(res, "restart")
         rpc.bdev_lvol_merge_base.assert_not_called()
 
+    def test_the_merge_runs_in_the_replication_class(self):
+        # bf10 2026-11-02: the merge ran in Default, outside the replication's
+        # share, and starved the target's journal heartbeats.
+        res, rpc, _ = self._merge({"partial_base": 7}, start={"state": "running"},
+                                  stats=[self.NONE, {"state": "done", "rc": 0}], class_on=True)
+        self.assertEqual(res, "ok")
+        rpc.bdev_lvol_merge_base.assert_called_once_with(
+            "LVS/LAND", priority_class=snapshot_replication.constants.QOS_REPLICATION_WIRE_CLASS)
+
     def test_a_running_merge_is_not_started_again(self):
         res, rpc, _ = self._merge({"partial_base": 7}, stats=[{"state": "running"}] * 50)
         self.assertEqual(res, "pending")
@@ -338,7 +353,7 @@ class TestLandingMerge(unittest.TestCase):
         res, rpc, _ = self._merge({"partial_base": 7}, start={"state": "running"},
                                   stats=[{"state": "failed", "rc": -5}] + [{"state": "running"}] * 50)
         self.assertEqual(res, "pending")
-        rpc.bdev_lvol_merge_base.assert_called_once_with("LVS/LAND")
+        rpc.bdev_lvol_merge_base.assert_called_once_with("LVS/LAND", priority_class=None)
 
     def test_other_failures_retry_the_finish(self):
         from simplyblock_core.rpc_client import RPCRemoteError
@@ -347,6 +362,56 @@ class TestLandingMerge(unittest.TestCase):
         res, _, _ = self._merge({"partial_base": 7},
                                 side_effect=RPCRemoteError("No such device", -19))
         self.assertEqual(res, "retry")
+
+    def test_a_failed_merge_backs_off_before_the_relaunch(self):
+        # bf18 2026-11-09: a merge failing with -12 within 5 ms was relaunched
+        # every pass, 1883 times in 37 min, without any event.
+        res, rpc, task = self._merge({"partial_base": 7}, start={"state": "failed", "rc": -12},
+                                     stats=[self.NONE])
+        self.assertEqual(res, "retry")
+        p = task.function_params
+        self.assertEqual(p["merge_fails"], 1)
+        self.assertGreater(p["merge_retry_at"], time.time())
+        # within the back-off the failed job is not relaunched
+        res, rpc, _ = self._merge(p, stats=[{"state": "failed", "rc": -12}])
+        self.assertEqual(res, "pending")
+        rpc.bdev_lvol_merge_base.assert_not_called()
+        # after it, it is
+        p["merge_retry_at"] = time.time() - 1
+        res, rpc, _ = self._merge(p, start={"state": "failed", "rc": -12},
+                                  stats=[{"state": "failed", "rc": -12}])
+        self.assertEqual(res, "retry")
+        rpc.bdev_lvol_merge_base.assert_called_once()
+        self.assertEqual(p["merge_fails"], 2)
+
+    def test_the_backoff_doubles_up_to_its_cap(self):
+        b = snapshot_replication._merge_backoff
+        c = snapshot_replication.constants
+        self.assertEqual(b(1), c.REPL_MERGE_RETRY_MIN_SEC)
+        self.assertEqual(b(2), 2 * c.REPL_MERGE_RETRY_MIN_SEC)
+        self.assertEqual(b(30), c.REPL_MERGE_RETRY_MAX_SEC)
+
+    def test_a_merge_that_keeps_failing_raises_one_event(self):
+        p = {"partial_base": 7, "snapshot_id": "s1",
+             "merge_fails": snapshot_replication.constants.REPL_MERGE_FAIL_ALERT - 1}
+        with patch.object(snapshot_replication, "lvol_events") as ev,                 patch.object(snapshot_replication, "db") as db:
+            res, _, task = self._merge(p, start={"state": "failed", "rc": -12}, stats=[self.NONE])
+            self.assertEqual(res, "retry")
+            ev.replication_merge_failing.assert_called_once()
+            self.assertIs(ev.replication_merge_failing.call_args.args[0],
+                          db.get_snapshot_by_id.return_value.lvol)
+            # rate-limited: the next failure inside the window raises none
+            task.function_params["merge_retry_at"] = 0
+            self._merge(task.function_params, start={"state": "failed", "rc": -12},
+                        stats=[{"state": "failed", "rc": -12}])
+            ev.replication_merge_failing.assert_called_once()
+
+    def test_a_done_merge_clears_the_backoff(self):
+        p = {"partial_base": 7, "merge_fails": 4, "merge_retry_at": 0, "merge_alerted_at": 1}
+        res, _, task = self._merge(p, stats=[{"state": "done", "rc": 0}])
+        self.assertEqual(res, "ok")
+        for k in ("merge_fails", "merge_retry_at", "merge_alerted_at"):
+            self.assertNotIn(k, task.function_params)
 
 
 

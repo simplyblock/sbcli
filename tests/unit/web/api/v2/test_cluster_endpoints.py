@@ -1,5 +1,7 @@
 """Unit tests for /api/v2/clusters endpoints (cluster_ops mocked)."""
 
+import json
+
 import pytest
 
 from simplyblock_core.models.cluster import Cluster
@@ -131,6 +133,28 @@ class TestCreateCluster:
         # derivation live instead of frozen into the record.
         assert 'bucket_name' not in cluster_ops.add_cluster.call_args.kwargs['backup_config']
 
+    def test_backup_config_credentials_reach_add_cluster_unmasked(self, client, db, cluster, cluster_ops):
+        """model_dump(mode="json") masks SecretStr to "**********" -- a real
+        regression here, since add_cluster persists whatever it is handed.
+        The wrap-early-unwrap-late convention means this layer must still see
+        the actual secret, wrapped, not pydantic's own masked literal."""
+        cluster_ops.add_cluster.return_value = CLUSTER_ID
+        body = {
+            'name': 'cluster-1', 'distr_ndcs': 1, 'distr_npcs': 2, **SIZING,
+            'backup_config': {
+                'bucket_name': 'chosen',
+                'access_key_id': 'minioadmin',
+                'secret_access_key': 'topsecret',
+            },
+        }
+
+        response = client.post('/api/v2/clusters/', json=body)
+
+        assert response.status_code == 201
+        credentials = cluster_ops.add_cluster.call_args.kwargs['backup_config']['credentials']
+        assert credentials['access_key_id'].get_secret_value() == 'minioadmin'
+        assert credentials['secret_access_key'].get_secret_value() == 'topsecret'
+
     def test_a_named_backup_bucket_is_passed_through(self, client, db, cluster, cluster_ops):
         cluster_ops.add_cluster.return_value = CLUSTER_ID
         body = {
@@ -142,6 +166,22 @@ class TestCreateCluster:
 
         assert response.status_code == 201
         assert cluster_ops.add_cluster.call_args.kwargs['backup_config']['bucket_name'] == 'chosen'
+
+    def test_vault_kms_settings_reach_add_cluster_as_json(self, client, db, cluster, cluster_ops):
+        """The record stores kms_settings as given and write_to_db json-encodes
+        it, so a pydantic AnyUrl in base_url failed every KMS-enabled create."""
+        cluster_ops.add_cluster.return_value = CLUSTER_ID
+        body = {
+            'name': 'cluster-1', 'distr_ndcs': 1, 'distr_npcs': 2, **SIZING,
+            'kms_settings': {'provider': 'vault', 'base_url': 'https://openbao.simplyblock.svc:8200'},
+        }
+
+        response = client.post('/api/v2/clusters/', json=body)
+
+        assert response.status_code == 201
+        kms_settings = cluster_ops.add_cluster.call_args.kwargs['kms_settings']
+        assert isinstance(kms_settings['base_url'], str)
+        json.dumps(kms_settings)
 
     def test_an_invalid_backup_config_is_still_rejected(self, client, db, cluster_ops):
         """Dropping the bucket requirement must not drop the rest of them."""
@@ -168,20 +208,31 @@ class TestCreateCluster:
         assert response.status_code == 201
         assert cluster_ops.add_cluster.call_args.kwargs['hugepages_mem'] == 0
 
-    def test_passes_inline_checksum_and_atomic_4k(self, client, db, cluster, cluster_ops):
+    def test_passes_inline_checksum_atomic_4k_and_md_journal(self, client, db, cluster, cluster_ops):
         cluster_ops.add_cluster.return_value = CLUSTER_ID
 
         response = client.post('/api/v2/clusters/', json={
             'name': 'cluster-1', 'distr_ndcs': 1, 'distr_npcs': 2, **SIZING,
-            'inline_checksum': True, 'atomic_4k': True,
+            'inline_checksum': True, 'atomic_4k': True, 'md_journal': True,
         })
         response.raise_for_status()
 
         kwargs = cluster_ops.add_cluster.call_args.kwargs
         assert kwargs['inline_checksum'] is True
         assert kwargs['atomic_4k'] is True
+        assert kwargs['md_journal'] is True
 
-    def test_inline_checksum_and_atomic_4k_default_false(self, client, db, cluster, cluster_ops):
+    def test_refuses_atomic_4k_without_inline_checksum(self, client, db, cluster, cluster_ops):
+        response = client.post('/api/v2/clusters/', json={
+            'name': 'cluster-1', 'distr_ndcs': 1, 'distr_npcs': 2, **SIZING,
+            'atomic_4k': True,
+        })
+
+        assert response.status_code == 422
+        assert 'atomic_4k requires inline_checksum' in response.text
+        cluster_ops.add_cluster.assert_not_called()
+
+    def test_integrity_defaults(self, client, db, cluster, cluster_ops):
         cluster_ops.add_cluster.return_value = CLUSTER_ID
 
         response = client.post('/api/v2/clusters/', json={'name': 'cluster-1', 'distr_ndcs': 1, 'distr_npcs': 2, **SIZING})
@@ -190,6 +241,17 @@ class TestCreateCluster:
         kwargs = cluster_ops.add_cluster.call_args.kwargs
         assert kwargs['inline_checksum'] is False
         assert kwargs['atomic_4k'] is False
+        assert kwargs['md_journal'] is True
+
+    def test_md_journal_can_be_turned_off(self, client, db, cluster, cluster_ops):
+        cluster_ops.add_cluster.return_value = CLUSTER_ID
+
+        response = client.post('/api/v2/clusters/', json={
+            'name': 'cluster-1', 'distr_ndcs': 1, 'distr_npcs': 2, **SIZING, 'md_journal': False,
+        })
+        response.raise_for_status()
+
+        assert cluster_ops.add_cluster.call_args.kwargs['md_journal'] is False
 
 
     def test_workload_names_are_passed_through(self, client, db, cluster, cluster_ops):
@@ -269,6 +331,29 @@ class TestGetCluster:
         response = client.get(f'/api/v2/clusters/{CLUSTER_ID}/')
 
         assert response.status_code == 404
+
+    def test_reports_the_sync_replication_site_record(self, client, db, cluster):
+        """Regression: 2026-10-22-cluster-dto-hides-site-record. The operators of
+        a stretched cluster project the monitor's site record (lost_site,
+        lost_site_state) and whether the cluster is a sync cluster into their
+        StorageCluster status; the model carried all three and the DTO dropped
+        them, so neither site could see a site being drained or fenced."""
+        cluster.sync_replication = True
+        cluster.lost_site = 'b'
+        cluster.lost_site_state = 'fencing'
+
+        body = client.get(f'/api/v2/clusters/{CLUSTER_ID}/').json()
+
+        assert body['sync_replication'] is True
+        assert body['lost_site'] == 'b'
+        assert body['lost_site_state'] == 'fencing'
+
+    def test_a_cluster_with_no_site_record_reports_empty_strings(self, client, db, cluster):
+        body = client.get(f'/api/v2/clusters/{CLUSTER_ID}/').json()
+
+        assert body['sync_replication'] is False
+        assert body['lost_site'] == ''
+        assert body['lost_site_state'] == ''
 
 
 class TestUpdateCluster:

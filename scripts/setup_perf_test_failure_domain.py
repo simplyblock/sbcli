@@ -554,8 +554,8 @@ def main():
     print(f"Phase 2a: Creating cluster on management node (failure-domain enabled, "
           f"{NDCS}+{NPCS})...")
     ssh_exec(mgmt_ip, [
-        f"sudo /usr/local/bin/sbctl -d cluster create --enable-node-affinity --enable-failure-domain --max-subsys {MAX_LVOL}"
-        f" --data-chunks-per-stripe {NDCS} --parity-chunks-per-stripe {NPCS}"
+        (f"sudo /usr/local/bin/sbctl -d cluster create --enable-node-affinity --enable-failure-domain --max-subsys {MAX_LVOL}"
+        f" --data-chunks-per-stripe {NDCS} --parity-chunks-per-stripe {NPCS}")
     ], check=True)
     print("Phase 2a: DONE - cluster created.")
 
@@ -704,8 +704,8 @@ def main():
                 # SSH timeout must sit above that — killing the channel here
                 # orphans a server-side add (2026-07-15 live-lock).
                 ssh_exec(mgmt_ip, [
-                    f"sudo /usr/local/bin/sbctl -d sn add-node {cluster_uuid} {priv_ip}:5000 {IFACE}"
-                    f" --ha-jm-count 4 --failure-domain {fd}"
+                    (f"sudo /usr/local/bin/sbctl -d sn add-node {cluster_uuid} {priv_ip}:5000 {IFACE}"
+                    f" --ha-jm-count 4 --failure-domain {fd}")
                 ], check=True, cmd_timeout=3600)
                 return
             except RuntimeError:

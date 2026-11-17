@@ -27,8 +27,14 @@ function lock(mode, { hosts, job, label, grace }) {
   if (job) args.push('--job', job)
   if (label) args.push('--label', label)
   if (mode === 'acquire' && grace) args.push('--grace-seconds', grace)
+  // GH_TOKEN is what lets acquire tell a live holder from a dead one. The
+  // script degrades to "never take over" without it, so an empty value is a
+  // safe default rather than an error.
+  const env = { ...process.env }
+  const token = input('token')
+  if (token) env.GH_TOKEN = token
   // status is null when the child died on a signal, which is a failure too.
-  return spawnSync('bash', args, { stdio: 'inherit' }).status ?? 1
+  return spawnSync('bash', args, { stdio: 'inherit', env }).status ?? 1
 }
 
 // What the post step needs to release, written before the hosts are taken:
