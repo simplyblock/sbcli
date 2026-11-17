@@ -12,20 +12,17 @@ target has not merged its earlier layers away (or the source has too many
 replication snapshots pending); spares are not re-created after the discard
 and are swept once their volume no longer replicates.
 """
-import inspect
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from simplyblock_core import constants
-from simplyblock_core import replication_spare as rs
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.services import snapshot_monitor as sm
 from simplyblock_core.services import snapshot_replication as sr
-from simplyblock_core.services import tasks_runner_replication_final as final
 
 ONLINE = SnapShot.STATUS_ONLINE
 DELETING = SnapShot.STATUS_IN_DELETION
