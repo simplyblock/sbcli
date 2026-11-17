@@ -668,6 +668,16 @@ REPL_CUTOVER_DIRECT_ROUNDS = True
 # Sends of one direct round (a failed or vanished transfer is sent again)
 # before the endgame is abandoned.
 REPL_CUTOVER_DIRECT_ROUND_SUBMITS = 3
+# A replication snapshot that nothing pairs with or builds on any more (an
+# orphaned landing copy: its source was retired at a --delete-source cutover,
+# it is no live volume's base, its landing volume is gone) is handed to the
+# retired-snapshot reaper once it is this old. The age keeps the sweep clear
+# of a copy whose replicate-finish is still writing its links.
+REPL_ORPHAN_SNAPSHOT_GRACE_SEC = 600
+# The orphan sweep reads the full record of every candidate and asks SPDK
+# about each one it would mark; run it at most this often per cluster. A
+# chain of orphans drains one layer per sweep.
+REPL_ORPHAN_SWEEP_INTERVAL_SEC = 120
 # --- catch-up throttle ------------------------------------------------------
 # A volume whose replication persistently cannot catch up never reaches the
 # endgame: the target cannot absorb what the source writes (bf17, 2026-11-08:
