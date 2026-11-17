@@ -310,6 +310,8 @@ def _node_info(slots=1, host_ip=HOST_IP):
                            "huge_total": 16 * 1024 ** 3, "huge_free": 16 * 1024 ** 3},
         "cpu_count": 16,
         "spdk_pcie_list": [],
+        # kernel-visible NVMe devices: add_node sizes the SPDK memory limit from them
+        "nvme_devices": [{"address": f"0000:0{slot}:00.0", "size": 1024 ** 4} for slot in range(slots)],
     }
 
 
