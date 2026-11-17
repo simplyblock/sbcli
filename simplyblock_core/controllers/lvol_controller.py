@@ -4757,8 +4757,8 @@ def demote_lvol(lvol_id, superseded=False):
 
     ``superseded``: the caller says this volume was failed over elsewhere (the
     fence order of the control-plane split; the layer above decides it, never
-    this control plane). The volume is fenced, its replication stopped, and it
-    is demoted at once with no demote cut: its data is stale, and the record
+    this control plane). The volume's replication is stopped and it is demoted
+    at once with no demote cut: its data is stale, and the record
     of the failover is on the other site. See :func:`_demote_superseded`.
 
     The lossless half of a planned swap (design-csi-addons-replication.md
@@ -4885,8 +4885,8 @@ def demote_lvol(lvol_id, superseded=False):
 
 
 def _demote_superseded(db_controller, lvol):
-    """Demote a volume the caller says was failed over elsewhere: fence it,
-    stop its replication, and mark it demoted, with no demote cut.
+    """Demote a volume the caller says was failed over elsewhere: stop its
+    replication and mark it demoted, with no demote cut and no path cut.
 
     The control-plane split's fence order (Michael, 2026-11-16): the returning
     old source does not detect its own supersession; the layer above orders it.
@@ -4902,9 +4902,13 @@ def _demote_superseded(db_controller, lvol):
             and not lvol.do_replicate):
         return {"demoted": True}
 
+    # The paths stay up. The order arrives when the site reconnects, while its
+    # copy of the application may still run: a guest whose disk goes dark hangs
+    # on shutdown, the site is never cleaned up, and Ramen never makes it
+    # secondary (bed run 20261117-0616). What it writes stays on this site and
+    # ships nowhere. Ramen's own DemoteVolume comes once the workload is
+    # unmounted, and a later relocate's cutover fences as it always does.
     source_node = db_controller.get_storage_node_by_id(lvol.node_id)
-    replication_final_step.fence_source_paths(
-        source_node, source_node.lvstore, lvol.nqn, lvol.ns_id)
 
     def _demoted(fresh):
         # Cleared before the tasks are cancelled: the cadence reads
@@ -4917,8 +4921,8 @@ def _demote_superseded(db_controller, lvol):
     tasks = db_controller.get_job_tasks(source_node.cluster_id)
     _cancel_snapshot_replication_tasks(db_controller, lvol.get_id(), tasks)
     _cancel_replication_cutover(lvol.get_id(), tasks)
-    logger.info("Volume %s demoted as superseded (failed over elsewhere): fenced, "
-                "replication stopped, no demote cut", lvol.get_id())
+    logger.info("Volume %s demoted as superseded (failed over elsewhere): "
+                "replication stopped, no demote cut, paths left up", lvol.get_id())
     return {"demoted": True}
 
 

@@ -5,9 +5,13 @@ After a manual failover with site B cut off, site A holds B's group as clones.
 When B returns, its control plane does not find out on its own that it was
 superseded: the layer above (the DR hub, a person, any other component that
 detects the failover) orders it, through the operator, as a demote with
-``superseded=True``. That demote fences each member, stops its replication and
-takes no demote cut: B's data is stale, and shipping it would land as one more
-generation of B's group on A.
+``superseded=True``. That demote stops each member's replication and takes no
+demote cut: B's data is stale, and shipping it would land as one more
+generation of B's group on A. It leaves the paths up: the order arrives while
+B's copy of the application may still run, and a guest whose disk goes dark
+hangs on shutdown, so B is never cleaned up and Ramen never makes it secondary
+(bed run 20261117-0616). Ramen's own DemoteVolume, which comes only once the
+workload is unmounted, cuts the paths.
 
 The order and Ramen's own DemoteVolume can reach B in either order, and B's old
 replication tasks can resume before either. So the new primary also guards its
@@ -81,7 +85,7 @@ def _group(db, cluster, vols):
 
 # ------------------------------------------------------------------ one volume
 
-def test_a_superseded_demote_fences_and_stops_replication_without_a_cut(
+def test_a_superseded_demote_stops_replication_and_leaves_the_paths_up(
         db, fences, no_snapshots):
     cluster, (vol,) = _replicating(db)
     task, _ = deferred._task(db, cluster, vol)
@@ -89,7 +93,7 @@ def test_a_superseded_demote_fences_and_stops_replication_without_a_cut(
     assert lvol_controller.demote_lvol(vol.get_id(), superseded=True) == {"demoted": True}
 
     stored = db.get_lvol_by_id(vol.get_id())
-    assert fences == [(vol.nqn, vol.ns_id)]
+    assert fences == [], "the paths stay up: the old site's workload may still run"
     assert no_snapshots == [], "no demote cut: the data is stale"
     assert stored.replication_demote_state == LVol.REPLICATION_DEMOTE_DONE
     assert stored.do_replicate is False, "nothing ships toward the new primary"
@@ -110,7 +114,7 @@ def test_a_superseded_demote_overrides_a_demote_cut_already_started(db, fences, 
     assert stored.replication_demote_state == LVol.REPLICATION_DEMOTE_DONE
     assert stored.do_replicate is False
     assert db.get_task_by_id(cut_task.uuid).canceled
-    assert fences == [(vol.nqn, vol.ns_id)], "fenced again: the order does not trust the earlier state"
+    assert fences == [], "the order cuts no paths of its own"
 
 
 def test_a_repeated_order_and_a_later_ramen_demote_answer_done(db, fences, no_snapshots):
@@ -138,7 +142,7 @@ def test_a_plain_demote_still_takes_a_cut(db, fences, no_snapshots):
 
 # ------------------------------------------------------------------ a group
 
-def test_a_superseded_group_demote_fences_every_member_without_a_group_cut(
+def test_a_superseded_group_demote_stops_every_member_without_a_group_cut(
         db, fences, no_snapshots, monkeypatch):
     cluster, vols = _replicating(db, members=2)
     group = _group(db, cluster, vols)
@@ -151,7 +155,7 @@ def test_a_superseded_group_demote_fences_every_member_without_a_group_cut(
     assert result["demoted"] is True
     assert {m["lvol_id"] for m in result["members"]} == {v.get_id() for v in vols}
     assert cuts == [] and no_snapshots == []
-    assert sorted(fences) == sorted((v.nqn, v.ns_id) for v in vols)
+    assert fences == [], "no member's paths are cut"
     for v in vols:
         stored = db.get_lvol_by_id(v.get_id())
         assert (stored.replication_demote_state, stored.do_replicate) == \
