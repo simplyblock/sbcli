@@ -106,6 +106,7 @@ def delete_pool(uuid):
         return utils.get_response_error(msg, 400)
 
     pool.remove(db.kv_store)
+    db.delete_pool_stats(pool)
     return utils.get_response("Done")
 
 
