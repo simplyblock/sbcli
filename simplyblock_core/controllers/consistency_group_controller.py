@@ -201,8 +201,9 @@ def add_member_to_group(group, lvol):
             f"{group.node_id[:8]}/{group.lvs_name}; all members of a "
             f"consistency group must share one LVS")
 
-    if not pin_is_live and (group.node_id != lvol.node_id
-                            or group.lvs_name != lvol.lvs_name):
+    repin = not pin_is_live and (group.node_id != lvol.node_id
+                                 or group.lvs_name != lvol.lvs_name)
+    if repin:
         if group.lvs_name:
             logger.info("Consistency group %s re-pinned from %s/%s to %s/%s "
                         "(no live members; stale pin reset)", group.uuid[:8],
@@ -212,17 +213,28 @@ def add_member_to_group(group, lvol):
             logger.info("Consistency group %s pinned to node %s / %s by its "
                         "first member %s", group.uuid[:8], lvol.node_id[:8],
                         lvol.lvs_name, lvol.get_id())
-        group.node_id = lvol.node_id
-        group.lvs_name = lvol.lvs_name
 
-    members[lvol.get_id()] = {"joined_seq": group.last_group_seq + 1,
-                              "removed_seq": 0}
-    group.members = members
-    group.write_to_db(db.kv_store)
+    # Written onto the record as stored: the caller's copy may predate another
+    # member's join (a fail-back reconstitutes the group one clone at a time)
+    # or a generation, and a whole-record write of it drops what landed since.
+    def _join(fresh):
+        if repin:
+            fresh.node_id = lvol.node_id
+            fresh.lvs_name = lvol.lvs_name
+        fresh_members = dict(fresh.members or {})
+        fresh_members[lvol.get_id()] = {"joined_seq": fresh.last_group_seq + 1,
+                                        "removed_seq": 0}
+        fresh.members = fresh_members
+        return True
+
+    written = _update_group(group, _join)
+    if written is None:
+        raise ConsistencyGroupError(f"consistency group {group.uuid[:8]} no longer exists; "
+                                    f"volume {lvol.get_id()} cannot join")
     logger.info("Volume %s joined consistency group %s at generation %d "
                 "(effective from the next group snapshot)",
-                lvol.get_id(), group.uuid[:8], group.last_group_seq + 1)
-    return group
+                lvol.get_id(), written.uuid[:8], written.last_group_seq + 1)
+    return written
 
 
 def join_new_volume(cluster_id, lvol, name):
@@ -1371,8 +1383,25 @@ def create_group_snapshot_for_group(group, snap_type=SnapShot.TYPE_INTERNAL, loc
 
         # The generation exists in full: bump the counter, then enqueue the
         # per-member replication tasks (transfer machinery is per-snapshot).
-        group.last_group_seq = group_seq
-        group.write_to_db(db.kv_store)
+        # Only the counter is written, onto the record as stored: the copy read
+        # under the lock predates any member that joined during the take, and
+        # writing it back whole dropped that member, so it never replicated and
+        # the next fail-over was refused (bed run 20261117-1534). A member that
+        # joined during the take expects this generation but is not in it; its
+        # epoch starts at the next one.
+        planned = {p["lvol"].get_id() for p in plan}
+
+        def _counted(fresh):
+            fresh.last_group_seq = max(fresh.last_group_seq, group_seq)
+            fresh_members = dict(fresh.members or {})
+            for lvol_id, entry in fresh_members.items():
+                if (lvol_id not in planned and entry.get("removed_seq", 0) == 0
+                        and entry.get("joined_seq", 0) == group_seq):
+                    fresh_members[lvol_id] = {**entry, "joined_seq": group_seq + 1}
+            fresh.members = fresh_members
+            return True
+
+        _update_group(group, _counted)
 
         for p in plan:
             lvol = p["lvol"]
