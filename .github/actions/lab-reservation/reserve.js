@@ -131,6 +131,35 @@ async function waitReady(id, timeoutSeconds) {
     `long usually means a host in the group is unreachable.`)
 }
 
+// The kubeconfig of a k3s cluster this service stood up.
+//
+// Served only while the reservation asked for `bootstrap` and is still active:
+// the service knows about k3s it installed and nothing else, so a cluster
+// somebody stood up by hand is invisible here however healthy it is. It reads
+// /etc/rancher/k3s/k3s.yaml off the group's first host and rewrites k3s's
+// 127.0.0.1 to that host's address, so what comes back works from anywhere
+// that can reach the lab -- a runner included.
+//
+// Not routed through call(): the body is a YAML document, not JSON, and
+// parsing it as JSON would turn a perfectly good kubeconfig into { raw }.
+async function kubeconfig(id) {
+  const token = process.env.LABRES_TOKEN || ''
+  if (!token) throw new Error('LABRES_TOKEN is empty')
+  const res = await fetch(`${API}/reservations/${id}/kubeconfig`, {
+    headers: { Authorization: `Bearer ${token}` },
+  })
+  const text = await res.text()
+  if (res.status === 200) return text
+  // The service answers errors as JSON even here, and its `code` is the part
+  // worth reading: `invalid` is the reservation not having asked for k3s, or
+  // not being active yet, which is a different problem from a 404.
+  let code = ''
+  try { code = JSON.parse(text).code || '' } catch { /* not JSON, show raw */ }
+  throw new Error(
+    `kubeconfig for ${id}: HTTP ${res.status}${code ? ` ${code}` : ''} ` +
+    `${text.slice(0, 300)}`)
+}
+
 async function release(id) {
   const { status } = await call('DELETE', `/reservations/${id}`)
   // 404 means it is already gone -- expired, or released by something else.
@@ -146,5 +175,5 @@ const saveState = (name, value) =>
 
 module.exports = {
   BASE, input, warn, fail, log, call, existing, existingAll, reserve,
-  waitReady, release, setOutput, saveState,
+  waitReady, kubeconfig, release, setOutput, saveState,
 }

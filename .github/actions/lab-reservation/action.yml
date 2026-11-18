@@ -55,6 +55,14 @@ inputs:
     default: "false"
 
 outputs:
+  kubeconfig:
+    description: >-
+      Path to a kubeconfig for the cluster this reservation had k3s stood up on,
+      empty unless `bootstrap` was asked for. A path rather than the document,
+      because the document carries a client certificate for the cluster and an
+      output is echoed into the step log. The service only knows about k3s it
+      installed itself, so a cluster stood up by hand has none however healthy
+      it is.
   id:
     description: Comma-separated reservation ids, for extending or releasing by hand.
   cluster:

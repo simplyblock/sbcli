@@ -10,9 +10,12 @@
 //
 // So the clearing happens here instead, immediately before a new booking, by
 // the run that is about to wipe those hosts anyway. See post.js.
+const fs = require('node:fs')
+const path = require('node:path')
+const os = require('node:os')
 const {
-  input, warn, fail, log, existing, existingAll, reserve, waitReady, release,
-  setOutput, saveState,
+  input, warn, fail, log, existing, existingAll, reserve, waitReady,
+  kubeconfig, release, setOutput, saveState,
 } = require('./reserve.js')
 
 async function main() {
@@ -43,6 +46,11 @@ async function main() {
   const allHosts = []
   const names = []
   let expiresAt = ''
+  // The reservation that had k3s stood up for it, if any. Only one of a lane's
+  // clusters is ever the Kubernetes one -- the others are clients and a
+  // management node -- so the first that reports `bootstrap` is the cluster
+  // whose kubeconfig a caller means.
+  let bootstrapped = null
 
   // Each in turn. A failure part-way gives back what this job already took:
   // a lane holding three of four clusters it cannot use is worse than one
@@ -111,6 +119,7 @@ async function main() {
         : await waitReady(res.id, Number(input('ready-timeout') || '900'))
       names.push(r.cluster)
       allHosts.push(...(r.hosts || []))
+      if (!bootstrapped && r.bootstrap === true) bootstrapped = r
       if (!expiresAt || (r.expires_at && r.expires_at < expiresAt)) {
         expiresAt = r.expires_at || expiresAt
       }
@@ -142,6 +151,35 @@ async function main() {
     warn('Lab reservation', `${msg}. Those hosts are NOT reserved.`)
   }
 
+  // The kubeconfig, for a lane whose cluster this service built.
+  //
+  // A path, not the document: a kubeconfig in an output is a kubeconfig in
+  // the step log and in every later `env` dump, and it carries a working
+  // client certificate for the cluster. The file lands in RUNNER_TEMP, which
+  // the runner clears between jobs.
+  //
+  // A failure here does not fail the reservation. The hosts are booked and
+  // the cluster is up; a lane that does not want the kubeconfig must not lose
+  // its lab because fetching one did not work.
+  let kubePath = ''
+  if (bootstrapped) {
+    try {
+      const content = await kubeconfig(bootstrapped.id)
+      const dir = process.env.RUNNER_TEMP || os.tmpdir()
+      kubePath = path.join(dir, `labres-kubeconfig-${bootstrapped.cluster}.yaml`)
+      fs.writeFileSync(kubePath, content, { mode: 0o600 })
+      log(`kubeconfig for ${bootstrapped.cluster} written to ${kubePath} ` +
+          `(server ${(content.match(/server:\s*(\S+)/) || [])[1] || '?'})`)
+    } catch (err) {
+      kubePath = ''
+      warn('Lab reservation',
+           `${bootstrapped.cluster} was bootstrapped but its kubeconfig could ` +
+           `not be fetched: ${err.message}. The reservation stands; a lane ` +
+           `that needs the kubeconfig will fail on the empty output.`)
+    }
+  }
+
+  setOutput('kubeconfig', kubePath)
   setOutput('id', ready.id)
   setOutput('cluster', ready.cluster)
   setOutput('hosts', hosts)
