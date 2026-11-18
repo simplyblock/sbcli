@@ -59,3 +59,23 @@ def test_a_succeeded_job_reads_no_log():
             mock.patch.object(node_utils_k8s, "get_k8s_core_client", return_value=core):
         assert node_utils_k8s.wait_for_job_completion("snode-core-master-2", "simplyblock") is True
     core.list_namespaced_pod.assert_not_called()
+
+
+def test_a_job_deleted_while_it_ran_is_not_a_success():
+    """Lab OKD, 2026-11-17: a retried spdk_process_start deleted the CPU topology
+    Job the first call was waiting on, at NUMA retry 31 of 36, and the first
+    call logged it as "completed successfully"."""
+    batch = mock.Mock()
+    batch.read_namespaced_job.side_effect = [_job(), node_utils_k8s.ApiException(status=404)]
+    with mock.patch.object(node_utils_k8s, "get_k8s_batch_client", return_value=batch), \
+            mock.patch.object(node_utils_k8s.time, "sleep"):
+        with pytest.raises(RuntimeError, match="was deleted before it completed"):
+            node_utils_k8s.wait_for_job_completion("snode-spdk-enable-cpu-topology-master-1", "simplyblock")
+
+
+def test_another_api_error_is_passed_on():
+    batch = mock.Mock()
+    batch.read_namespaced_job.side_effect = node_utils_k8s.ApiException(status=500)
+    with mock.patch.object(node_utils_k8s, "get_k8s_batch_client", return_value=batch):
+        with pytest.raises(node_utils_k8s.ApiException):
+            node_utils_k8s.wait_for_job_completion("snode-core-master-2", "simplyblock")

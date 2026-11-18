@@ -1,11 +1,14 @@
 import json
 import logging
 import os
+import threading
 import time
 import traceback
+from concurrent.futures import Future
 from typing import Annotated
 
 import yaml
+from flask import Response
 from flask_openapi3 import APIBlueprint
 from jinja2 import Environment, PackageLoader
 from kubernetes.client import ApiException, V1DeleteOptions
@@ -571,12 +574,64 @@ def spdk_service_delete(query: utils.RPCPortParams):
     return utils.get_response(True)
 
 
+class _SingleFlight:
+    """Runs one call per key at a time; a repeat that arrives meanwhile waits
+    for the running call and gets its outcome.
+
+    The control plane's client re-sends a request it has waited 300 s on, while
+    this agent is still working on it. Run again, spdk_process_start deletes
+    the node-preparation Job the first call is waiting on and starts over, so a
+    Job that needs more than 300 s never finishes.
+
+    The state is this process's own on purpose: the agent is one process
+    serving one node, and what it tracks is a request that process is
+    handling. An agent that restarts has no call running, and a Job it finds
+    is a leftover of the previous one, which the call replaces.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._running: dict[str, Future] = {}
+
+    def run(self, key, call):
+        with self._lock:
+            running = self._running.get(key)
+            if running is None:
+                mine: Future = Future()
+                self._running[key] = mine
+        if running is not None:
+            logger.info("The same call is already running; waiting for its outcome")
+            return running.result()
+        try:
+            outcome = call()
+        except BaseException as e:
+            mine.set_exception(e)
+            raise
+        else:
+            mine.set_result(outcome)
+            return outcome
+        finally:
+            with self._lock:
+                del self._running[key]
+
+
+_spdk_process_starts = _SingleFlight()
+
+
 @api.post('/spdk_process_start', responses={
     200: {'content': {'application/json': {'schema': utils.response_schema({
         'type': 'boolean'
     })}}},
 })
 def spdk_process_start(body: SPDKParams):
+    # Keyed by the whole request: secrets dump masked, which is enough to tell
+    # a repeat of the running call from a call with other parameters.
+    outcome = _spdk_process_starts.run(body.model_dump_json(), lambda: _start_spdk_process(body))
+    # Each request gets a response of its own; the outcome may be shared.
+    return Response(outcome.get_data(), status=outcome.status_code, mimetype=outcome.mimetype)
+
+
+def _start_spdk_process(body: SPDKParams):
     settings = Settings()
     ssd_pcie_params = " ".join(" -A " + addr for addr in body.ssd_pcie) if body.ssd_pcie else "none"
     ssd_pcie_list = " ".join(body.ssd_pcie)
