@@ -170,13 +170,29 @@ class _ObjectStoreBase(TestClusterBase):
                 f"no node carries {self.KVM_LABEL}, so no MDS guest can run "
                 f"and every bucket's pnfs volume stays Pending")
 
-        out, _ = self.k8s_utils._exec_kubectl(
-            "kubectl get simplyblockdriver simplyblock "
-            "-o jsonpath='{.spec.pnfs}' 2>/dev/null || true", supress_logs=True)
+        # -n is not optional here. SimplyblockDriver is namespaced, and the
+        # two checks above are not: CRDs and nodes are cluster-scoped, so this
+        # is the one query in the probe that needs a namespace and the one
+        # that was missing it. Without it kubectl looks in the context's
+        # default namespace, finds nothing, and `2>/dev/null || true` turns
+        # that NotFound into an empty string -- which reads here exactly like
+        # a driver that genuinely has no pnfs block.
+        #
+        # Run 44289765204 failed all eighteen cases that way, on a cluster
+        # whose driver was carrying {"mds":{"resources":{},"stateSize":"1Gi"}}
+        # the whole time, patched on by the workflow step four steps earlier.
+        # So keep stderr and say what it said: an empty answer and a refused
+        # question are different failures and must not read the same.
+        out, err = self.k8s_utils._exec_kubectl(
+            f"kubectl get simplyblockdriver simplyblock -n {self.ns} "
+            "-o jsonpath='{.spec.pnfs}' || true", supress_logs=True)
         if not (out or "").strip():
+            detail = next((ln.strip() for ln in reversed((err or "").splitlines())
+                           if ln.strip()), "")
             missing.append(
-                "SimplyblockDriver/simplyblock has no spec.pnfs -- the pnfs "
-                "fstype is not enabled on this cluster")
+                f"SimplyblockDriver/simplyblock in namespace {self.ns} has no "
+                f"spec.pnfs -- the pnfs fstype is not enabled on this cluster"
+                + (f" (kubectl said: {detail[:160]})" if detail else ""))
 
         if missing:
             raise s3.S3ProbeError(
