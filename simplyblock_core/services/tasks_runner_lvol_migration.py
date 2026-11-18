@@ -1452,19 +1452,6 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc, primary_s
                 existing_stat = src_rpc.bdev_lvol_transfer_stat(src_composite)
                 if (existing_stat is not None
                         and existing_stat.get('transfer_state') == 'In progress'):
-                    if not tgt_rpc.bdev_get(tgt_composite):
-                        # The transfer is writing into a bdev that no longer
-                        # exists: the intermediate-snap path deletes its target
-                        # when a poll fails or times out, but cannot stop the
-                        # source side. Resuming it marked the transfer done and
-                        # then failed post-processing on the missing bdev on
-                        # every retry until the budget ran out. Wait for the
-                        # stale transfer to settle; the next pass sees it no
-                        # longer in progress and starts a fresh one.
-                        return False, True, (
-                            f"Transfer of snap {snap_uuid} is in progress but its "
-                            f"target {tgt_composite} is gone; waiting for it to "
-                            f"settle before restarting it")
                     logger.info(
                         f"Resuming in-progress transfer for snap {snap_uuid}")
                     transfers.append({
