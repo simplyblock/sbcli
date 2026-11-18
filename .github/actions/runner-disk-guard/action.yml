@@ -20,6 +20,25 @@ inputs:
       than the failure it prevents.
     required: false
     default: "15"
+  nfs-mountpoint:
+    description: >-
+      The shared run-artifact filesystem to check alongside the local disk.
+      Skipped silently when the path is absent or is not a mount, so a lane
+      that does not use the share is unaffected.
+    required: false
+    default: "/mnt/nfs_share"
+  nfs-min-free-gb:
+    description: >-
+      Fail the job when the NFS share has less free space than this. 0 only
+      reports.
+
+      50 GiB, which is far below what a long stress run writes (268 GB over
+      29h) and deliberately so: this is not a quota, it is the margin a run
+      needs to fail CLEANLY. Below it, log collection and the stall dumps are
+      what break, so the run loses exactly the evidence that would explain
+      why it stopped.
+    required: false
+    default: "50"
   token:
     description: >-
       Token for asking the API whether another run's debris belongs to a run
@@ -35,6 +54,8 @@ runs:
       shell: bash
       env:
         MIN_FREE_GB: ${{ inputs.min-free-gb }}
+        NFS_MOUNTPOINT_CHECK: ${{ inputs.nfs-mountpoint }}
+        NFS_MIN_FREE_GB: ${{ inputs.nfs-min-free-gb }}
         GH_TOKEN: ${{ inputs.token }}
       run: |
         set -uo pipefail
@@ -162,4 +183,50 @@ runs:
           echo "::endgroup::"
           echo "::error::Only ${free_gb} GiB free where this run needs ${MIN_FREE_GB} GiB. Refusing to start: a run that fills this disk does not fail with a test error, it kills the Actions worker mid-step with exit 134 and loses every hour it had already spent."
           exit 1
+        fi
+
+        # ---------------------------------------------------------------- #
+        # The NFS share.
+        #
+        # Everything above guards the runner's local disk. The share is where
+        # a run actually puts its artifacts, and until now nothing looked at
+        # it at all. On 2026-11-18 it reached 100% -- 1.0 MB free of 3.5 TB --
+        # and the failures it caused did not mention disk space anywhere a
+        # reader would look:
+        #
+        #   * the 29h docker stress run (43971050826), at outage 171 with no
+        #     product failure, died in log collection on
+        #       OSError: [Errno 28] No space left on device
+        #     and was reported as a run failure;
+        #   * the k8s run (44253615116) could not write its bring-up stall
+        #     dump -- the one file that explains a bring-up timeout -- and
+        #     printed "could not save the stall dump" as an aside.
+        #
+        # Both had already spent their time by then. Checking here costs one
+        # df and turns "failed after 29 hours" into "refused in 3 seconds".
+        # ---------------------------------------------------------------- #
+        nfs="${NFS_MOUNTPOINT_CHECK:-}"
+        if [ -n "${nfs}" ] && [ -d "${nfs}" ] && mountpoint -q "${nfs}" 2>/dev/null; then
+          nfs_free_kb=$(df -Pk "${nfs}" 2>/dev/null | awk 'NR==2 {print $4}')
+          nfs_free_gb=$(( ${nfs_free_kb:-0} / 1048576 ))
+          echo "::group::Share ${nfs}"
+          df -h "${nfs}"
+          echo "::endgroup::"
+          echo "free on ${nfs}: ${nfs_free_gb} GiB"
+
+          if [ "${NFS_MIN_FREE_GB}" -gt 0 ] && [ "${nfs_free_gb}" -lt "$(( NFS_MIN_FREE_GB * 4 ))" ] \
+             && [ "${nfs_free_gb}" -ge "${NFS_MIN_FREE_GB}" ]; then
+            echo "::warning::${nfs_free_gb} GiB free on ${nfs} is above the ${NFS_MIN_FREE_GB} GiB floor but not by much. A long stress run writes hundreds of GB; the largest run folders are listed below."
+            du -sh "${nfs}"/* 2>/dev/null | sort -h | tail -8
+          fi
+
+          if [ "${NFS_MIN_FREE_GB}" -gt 0 ] && [ "${nfs_free_gb}" -lt "${NFS_MIN_FREE_GB}" ]; then
+            echo "::group::Largest run folders on ${nfs}"
+            du -sh "${nfs}"/* 2>/dev/null | sort -h | tail -15
+            echo "::endgroup::"
+            echo "::error title=run artifact share is full::Only ${nfs_free_gb} GiB free on ${nfs}, below the ${NFS_MIN_FREE_GB} GiB this run needs to collect its own logs. Refusing to start: a run that fills this share does not fail with a test error, it fails hours in while writing evidence, and loses the evidence. Delete old run folders (listed above) and retry."
+            exit 1
+          fi
+        elif [ -n "${nfs}" ]; then
+          echo "${nfs} is not a mountpoint on $(hostname); skipping the share check"
         fi
