@@ -206,6 +206,33 @@ def test_failover_preserves_nqn_ns_and_returns_paths(monkeypatch, patched):
         ("N_tgt", True), ("N_sec", False), ("N_ter", False)]
 
 
+def test_failover_still_answers_when_the_connect_is_refused_by_a_move(monkeypatch, patched):
+    """connect_lvol refuses with SubsystemMoveInProgressError while a
+    consistency-group move holds the subsystem. The fail-over has already
+    created the volume by then: it answers without connection strings, as it
+    does for any other failed connection-string build, instead of crashing."""
+    from simplyblock_core.exceptions import SubsystemMoveInProgressError
+    nodes = {
+        "N_src": _node("N_src", "CL_src"),
+        "N_tgt": _node("N_tgt", "CL_tgt", secondary="N_sec", tertiary="N_ter", lvstore="lvs_tgt"),
+        "N_sec": _node("N_sec", "CL_tgt"),
+        "N_ter": _node("N_ter", "CL_tgt"),
+    }
+    clusters = {
+        "CL_src": _cluster("CL_src", target_cluster="CL_tgt", target_pool="POOL_tgt"),
+        "CL_tgt": _cluster("CL_tgt"),
+    }
+    _install_db(monkeypatch, _FakeDB(nodes, clusters))
+
+    def refuse(uid, **kw):
+        raise SubsystemMoveInProgressError(f"volume {uid} is in a subsystem a move holds")
+    monkeypatch.setattr(lvol_controller, "connect_lvol", refuse)
+
+    result = lvol_controller.replicate_lvol_on_target_cluster("LV1")
+    assert result["nqn"] == "nqn.orig:lvol:LV1"
+    assert result["connection_strings"] == []
+
+
 def test_failover_secondary_only_no_tertiary(monkeypatch, patched):
     nodes = {
         "N_src": _node("N_src", "CL_src"),

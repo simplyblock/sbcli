@@ -14,6 +14,7 @@ from simplyblock_core.controllers import (
 )
 from simplyblock_core.controllers.backup import controller as backup_controller
 from simplyblock_core.db_controller import DBController
+from simplyblock_core.exceptions import SubsystemMoveInProgressError
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.utils.nvme import (
     HostConnectAuth,
@@ -318,7 +319,12 @@ def connect(cluster: Cluster, pool: StoragePool, volume: Volume, host_nqn: str |
         raise HTTPException(403, str(e)) from e
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
-    details, err = lvol_controller.connect_lvol(volume.get_id(), host_nqn=host_nqn)
+    try:
+        details, err = lvol_controller.connect_lvol(volume.get_id(), host_nqn=host_nqn)
+    except SubsystemMoveInProgressError as e:
+        # The volume exists and the host is allowed; its subsystem is mid-move.
+        # A 409 is what the CSI node retries without touching the source.
+        raise HTTPException(409, str(e)) from e
     if err:
         raise HTTPException(404, err)
     return details

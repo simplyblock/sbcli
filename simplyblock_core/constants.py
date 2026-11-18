@@ -357,6 +357,16 @@ PORT_RESERVATION_TTL_SEC = 600
 # needs to outlast the holder's own read-then-write.
 NODE_ADD_TASK_LOCK_WAIT_TIMEOUT_SEC = 10
 
+# A consistency-group subsystem move runs step by step (prepare, move, commit,
+# rollback), each a loop of JSON-RPC calls over the group's HA nodes that no
+# FDB transaction can cover, and the operator may send the next step, or a
+# rollback, to another API replica before the last one answered. Serialized
+# per group behind "cg_subsystem_move/<group_id>". A waiter outlasts one
+# step's loop over the HA nodes, seconds per node; the move step also checks
+# the hosts' suspend deadline once it holds the lock, so waiting cannot make
+# it act late.
+CG_SUBSYSTEM_MOVE_LOCK_WAIT_TIMEOUT_SEC = 60
+
 # Snapshot create concurrency: the primary-create + replica-register sequence of
 # a snapshot is serialized per lvstore behind an LVStoreMutationLock so that
 # concurrent snapshot creates of the same lvstore register on the
