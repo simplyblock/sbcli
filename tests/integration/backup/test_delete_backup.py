@@ -266,6 +266,23 @@ def test_a_chain_already_being_merged_refuses_a_delete_of_another_backup(db, buc
     assert _status(db, other_leaf) == Backup.STATUS_COMPLETED
 
 
+def test_a_backup_claimed_for_delete_refuses_a_concurrent_merge_claim(db, bucket):
+    """claim_backup_chain_op's own-targets exemption must only cover a target
+    already sitting in new_status (resuming the identical claim) -- not a
+    target held in the OTHER status by a genuinely different operation."""
+    base = _backup(db, bucket, "base")
+    _backup(db, bucket, "next", prev="base")
+
+    ok, reason = db.claim_backup_chain_op(LVOL, [base.uuid], Backup.STATUS_DELETING)
+    assert ok, reason
+
+    ok, reason = db.claim_backup_chain_op(LVOL, [base.uuid], Backup.STATUS_MERGING)
+
+    assert not ok
+    assert base.uuid in reason
+    assert _status(db, base) == Backup.STATUS_DELETING
+
+
 def test_a_chain_read_by_an_active_restore_refuses_a_delete(db, bucket):
     leaf = _backup(db, bucket, "leaf")
     _restore_task(db, [leaf.s3_id])

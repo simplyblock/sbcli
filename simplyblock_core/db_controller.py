@@ -1574,13 +1574,14 @@ class DBController(metaclass=Singleton):
 
         target_set = set(target_ids)
         # A sibling already MERGING/DELETING blocks the claim UNLESS it is one
-        # of this call's own targets: re-claiming backups already in the state
-        # this call is about to set is what makes resuming an interrupted
-        # delete (the caller is retrying, not racing itself) safe, while a
-        # DIFFERENT concurrent operation's claim still refuses.
+        # of this call's own targets AND already sitting in new_status: that
+        # is what makes resuming an interrupted delete/merge (the caller is
+        # retrying, not racing itself) safe. A target held in the OTHER
+        # status -- claimed by a genuinely different operation -- still
+        # blocks, same as any other sibling.
         blocking = next((b for b in siblings.values()
                          if b.status in (Backup.STATUS_MERGING, Backup.STATUS_DELETING)
-                         and b.uuid not in target_set), None)
+                         and not (b.uuid in target_set and b.status == new_status)), None)
         if blocking is not None:
             return False, f"backup {blocking.uuid} of this chain is already {blocking.status}"
 
@@ -1616,12 +1617,13 @@ class DBController(metaclass=Singleton):
         by their bare ``uuid``, not ``get_id()``) for a destructive operation
         (merge or delete).
 
-        Refuses, as ``(False, reason)``, if any OTHER backup of the chain --
-        one not in ``target_ids`` -- is already ``MERGING``/``DELETING``, or if
-        any backup in the chain (target or not) is named by an active
-        restore's own chain (``JobSchedule.restore_chain_s3_id``). On success,
-        every id in ``target_ids`` is flipped to ``new_status`` and
-        ``(True, None)`` is returned.
+        Refuses, as ``(False, reason)``, if any backup of the chain is already
+        ``MERGING``/``DELETING`` under a status other than ``new_status`` --
+        whether or not it is one of ``target_ids`` -- or if any backup in the
+        chain (target or not) is named by an active restore's own chain
+        (``JobSchedule.restore_chain_s3_id``). On success, every id in
+        ``target_ids`` is flipped to ``new_status`` and ``(True, None)`` is
+        returned.
 
         Idempotent by design, not exclusive between identical claims: a target
         already in ``new_status`` -- this call resuming one that claimed it
