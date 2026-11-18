@@ -131,6 +131,9 @@ class TestSyncGrafanaUser:
         assert session.request.call_count == 3
 
 
+PREFIXED_IMAGE = "proxy.example/mirror/simplyblock/simplyblock:main"
+
+
 class TestRotateOnAllManagers:
 
     def test_only_copies_carrying_the_old_secret_are_rewritten(self):
@@ -138,22 +141,51 @@ class TestRotateOnAllManagers:
         files = {"10.0.0.1": f"password: '{OLD}'", "10.0.0.2": "password: 'already-rotated-123456'"}
         writes = []
 
+        images = set()
+
         def run(node, command, directory, image):
+            images.add(image)
             if command[0] == "cat":
                 return files[node.mgmt_ip].encode()
             writes.append(node.mgmt_ip)
             return b""
 
         with patch.object(cluster_ops, "_run_on_mgmt_node", side_effect=run):
-            assert cluster_ops._rotate_secret_on_all_managers(nodes, "/x/prometheus.yml", OLD, NEW, "img") is True
+            assert cluster_ops._rotate_secret_on_all_managers(
+                nodes, "/x/prometheus.yml", OLD, NEW, PREFIXED_IMAGE) is True
         assert writes == ["10.0.0.1"]
+        # Reads and writes alike run the image the caller resolved for the cluster.
+        assert images == {PREFIXED_IMAGE}
 
     def test_an_unreachable_manager_raises(self):
         nodes = [MagicMock(mgmt_ip="10.0.0.1")]
         with patch.object(cluster_ops, "_run_on_mgmt_node",
                           side_effect=cluster_ops.DockerException("connection refused")):
             with pytest.raises(MonitoringConfigError, match="10.0.0.1"):
-                cluster_ops._rotate_secret_on_all_managers(nodes, "/x/prometheus.yml", OLD, NEW, "img")
+                cluster_ops._rotate_secret_on_all_managers(nodes, "/x/prometheus.yml", OLD, NEW, PREFIXED_IMAGE)
+
+    def test_the_helper_container_runs_the_image_it_is_given(self):
+        # Not constants.SIMPLY_BLOCK_DOCKER_IMAGE: behind a registry prefix the
+        # node holds the image under the prefixed name only.
+        node = MagicMock(docker_ip_port="10.0.0.1:2375")
+        with patch.object(cluster_ops.docker, "DockerClient") as client:
+            cluster_ops._run_on_mgmt_node(node, ["cat", "/x/prometheus.yml"], "/x", PREFIXED_IMAGE)
+        assert client.return_value.containers.run.call_args.args[0] == PREFIXED_IMAGE
+
+
+class TestRotateDockerMonitoringSecret:
+
+    def test_the_cluster_prefix_reaches_the_helper_container(self):
+        cluster = Cluster()
+        cluster.container_image_prefix = "proxy.example/mirror"
+        service = MagicMock()
+        with patch.object(cluster_ops.utils, "get_docker_client") as docker_client,                 patch.object(cluster_ops, "db_controller") as db,                 patch.object(cluster_ops, "_service_mount_source", return_value="/x/prometheus.yml"),                 patch.object(cluster_ops, "_rotate_secret_on_all_managers", return_value=False) as rotate:
+            docker_client.return_value.services.get.return_value = service
+            db.get_cluster_by_id.return_value = cluster
+            cluster_ops._rotate_docker_monitoring_secret("cluster-id", OLD, NEW)
+        assert rotate.call_count == 2
+        for call in rotate.call_args_list:
+            assert call.args[-1] == f"proxy.example/mirror/{cluster_ops.constants.SIMPLY_BLOCK_DOCKER_IMAGE}"
 
 
 class TestAddGrafanaUserOrDisableMonitoring:

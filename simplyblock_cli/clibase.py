@@ -1995,6 +1995,7 @@ class CLIWrapperBase:
             sync_replication=getattr(args, 'sync_replication', False),
             page_copy=getattr(args, 'page_copy', False),
             md_journal=md_journal,
+            container_image_prefix=args.container_image_prefix,
         )
 
     def cluster_create(self, args):
