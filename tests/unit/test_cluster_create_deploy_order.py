@@ -44,7 +44,7 @@ class TestCreateClusterDeployOrder(unittest.TestCase):
     def test_db_is_configured_between_fdb_and_app_deploy(self):
         calls = []
 
-        def deploy_stack(*args, phase):
+        def deploy_stack(*args, phase, image_prefix=""):
             calls.append(f"deploy:{phase}")
             if phase == "app":
                 raise _StopAfterBootstrap
@@ -73,7 +73,14 @@ class TestDeployStackPhase(unittest.TestCase):
         with patch.object(scripts.subprocess, "check_output", return_value="") as run:
             scripts.deploy_stack("pass", "10.0.0.1", "img", "graylog", "cid",
                                  "3d", "7d", "INFO", "", "False", phase="fdb")
-        self.assertEqual(run.call_args.args[0][-3], "fdb")
+        self.assertEqual(run.call_args.args[0][-4], "fdb")
+
+    def test_image_prefix_is_passed_to_the_script(self):
+        with patch.object(scripts.subprocess, "check_output", return_value="") as run:
+            scripts.deploy_stack("pass", "10.0.0.1", "img", "graylog", "cid",
+                                 "3d", "7d", "INFO", "", "False", phase="fdb",
+                                 image_prefix="proxy.example/docker.io")
+        self.assertEqual(run.call_args.args[0][-1], "proxy.example/docker.io")
 
     def test_unknown_phase_is_rejected(self):
         with patch.object(scripts.subprocess, "check_output") as run:
@@ -148,7 +155,7 @@ class TestWaitTimeoutBelowScriptTimeout(unittest.TestCase):
         with patch.object(scripts.subprocess, "check_output", return_value="") as run:
             scripts.deploy_stack("pass", "10.0.0.1", "img", "graylog", "cid",
                                  "3d", "7d", "INFO", "", "False", phase="app")
-        self.assertEqual(run.call_args.args[0][-2], str(scripts.STACK_WAIT_TIMEOUT_SEC))
+        self.assertEqual(run.call_args.args[0][-3], str(scripts.STACK_WAIT_TIMEOUT_SEC))
         self.assertEqual(run.call_args.kwargs["timeout"], scripts.SCRIPT_TIMEOUT_SEC)
 
     def test_every_wait_goes_through_wait_stack(self):
@@ -169,7 +176,7 @@ class TestFailureIsReported(unittest.TestCase):
 
     def _fail(self, exc, report=REPORT):
         def run(args, **kwargs):
-            self.report_path = args[-1]
+            self.report_path = args[-2]
             with open(self.report_path, "w") as f:
                 f.write(report)
             raise exc
