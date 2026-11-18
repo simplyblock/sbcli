@@ -644,6 +644,36 @@ class DBController(metaclass=Singleton):
                                               reverse=True)
         return stats
 
+    @staticmethod
+    def _clear_prefixes_tx(tr, prefixes):
+        for prefix in prefixes:
+            tr.clear_range_startswith(prefix)
+
+    def _clear_prefixes(self, prefixes: list[bytes]) -> None:
+        kv = self.kv_store
+        if kv is not None and hasattr(kv, 'create_transaction'):
+            fdb.transactional(DBController._clear_prefixes_tx)(kv, prefixes)
+        elif kv is not None and hasattr(kv, 'clear_range_startswith'):
+            # Transactionless store (unit-tier fdb stub): same clears, not atomic.
+            DBController._clear_prefixes_tx(kv, prefixes)
+
+    def delete_lvol_stats(self, lvol) -> None:
+        """Clear every stats record of ``lvol``. Call it only once the lvol's
+        record is gone for good: the stats are keyed by its uuid, so an id that
+        lives on (the failback UUID swap) must keep them. The trailing ``/``
+        keeps the prefix from matching another id that merely starts with this
+        one."""
+        self._clear_prefixes([
+            LVolStatObject().get_db_id(f"{lvol.pool_uuid}/{lvol.get_id()}/").encode(),
+            CachedLVolStatObject().get_db_id(f"{lvol.get_id()}/{lvol.get_id()}/").encode(),
+        ])
+
+    def delete_pool_stats(self, pool) -> None:
+        """Clear every stats record of ``pool``; see ``delete_lvol_stats``."""
+        self._clear_prefixes([
+            PoolStatObject().get_db_id(f"{pool.get_id()}/{pool.get_id()}/").encode(),
+        ])
+
     def get_cluster_stats(self, cluster, limit=20) -> list[ClusterStatObject]:
         return self.get_cluster_capacity(cluster, limit)
 
