@@ -3235,7 +3235,14 @@ def format_device_with_4k(pci_device):
 _HUGEPAGES_BASELINE_DIR = "/var/run/simplyblock"
 
 
-def _get_user_hugepages_baseline(node, current_hugepages, state_dir=_HUGEPAGES_BASELINE_DIR):
+def _hugepages_state_dir(state_dir: str | None) -> str:
+    """The directory the huge-page records live in: the caller's, or the
+    module's default read when called, not when the helpers were defined, so a
+    test that patches ``_HUGEPAGES_BASELINE_DIR`` reaches them."""
+    return state_dir if state_dir is not None else _HUGEPAGES_BASELINE_DIR
+
+
+def _get_user_hugepages_baseline(node, current_hugepages, state_dir: str | None = None):
     """Return the per-NUMA user hugepage baseline, persisted across calls within a boot.
 
     On first call for a given NUMA node (no baseline file), the current allocatable
@@ -3248,6 +3255,7 @@ def _get_user_hugepages_baseline(node, current_hugepages, state_dir=_HUGEPAGES_B
     machine config) keeps its files in a directory that survives too, or the
     next boot would count simplyblock's own pages as the user's.
     """
+    state_dir = _hugepages_state_dir(state_dir)
     baseline_file = os.path.join(state_dir, f"hugepages_baseline_node{node}")
 
     if os.path.exists(baseline_file):
@@ -3271,8 +3279,9 @@ def _get_user_hugepages_baseline(node, current_hugepages, state_dir=_HUGEPAGES_B
     return current_hugepages
 
 
-def _get_sb_hugepages_allocation(node, state_dir=_HUGEPAGES_BASELINE_DIR):
+def _get_sb_hugepages_allocation(node, state_dir: str | None = None):
     """Return the simplyblock hugepage allocation stored from the previous deploy, or None."""
+    state_dir = _hugepages_state_dir(state_dir)
     sb_file = os.path.join(state_dir, f"hugepages_sb_node{node}")
     if os.path.exists(sb_file):
         try:
@@ -3285,10 +3294,11 @@ def _get_sb_hugepages_allocation(node, state_dir=_HUGEPAGES_BASELINE_DIR):
     return None
 
 
-def save_sb_hugepages_allocation(node, hugepages_total, state_dir=_HUGEPAGES_BASELINE_DIR) -> bool:
+def save_sb_hugepages_allocation(node, hugepages_total, state_dir: str | None = None) -> bool:
     """Record the pool total simplyblock last set on NUMA ``node`` (the user's
     pages plus its own), which is what the next call of
     user_hugepages_baseline measures the user's later changes against."""
+    state_dir = _hugepages_state_dir(state_dir)
     sb_file = os.path.join(state_dir, f"hugepages_sb_node{node}")
     try:
         os.makedirs(state_dir, exist_ok=True)
@@ -3300,7 +3310,8 @@ def save_sb_hugepages_allocation(node, hugepages_total, state_dir=_HUGEPAGES_BAS
         return False
 
 
-def _save_user_hugepages_baseline(node, baseline, state_dir=_HUGEPAGES_BASELINE_DIR):
+def _save_user_hugepages_baseline(node, baseline, state_dir: str | None = None):
+    state_dir = _hugepages_state_dir(state_dir)
     baseline_file = os.path.join(state_dir, f"hugepages_baseline_node{node}")
     try:
         os.makedirs(state_dir, exist_ok=True)
@@ -3395,7 +3406,7 @@ def release_hugepages() -> dict[int, int]:
     return released
 
 
-def user_hugepages_baseline(node, current_hugepages, state_dir=_HUGEPAGES_BASELINE_DIR):
+def user_hugepages_baseline(node, current_hugepages, state_dir: str | None = None):
     """The 2 MiB pages on NUMA ``node`` that are the user's, not simplyblock's,
     given the ``current_hugepages`` the host carries right now: what the host
     had the first time simplyblock saw it, plus whatever the user added on top
@@ -3408,6 +3419,7 @@ def user_hugepages_baseline(node, current_hugepages, state_dir=_HUGEPAGES_BASELI
     Talos machine-config patch both add simplyblock's pages on top of what it
     returns, so a host shared with another huge-page consumer keeps that
     consumer's pages in either case."""
+    state_dir = _hugepages_state_dir(state_dir)
     user_baseline = _get_user_hugepages_baseline(node, current_hugepages, state_dir)
     prev_sb = _get_sb_hugepages_allocation(node, state_dir)
 
