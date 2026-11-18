@@ -30,6 +30,7 @@ from simplyblock_core.models.backup_config import (
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.utils.helpers import single_or_none
 
 logger = logging.getLogger()
 
@@ -1160,7 +1161,8 @@ def delete_backup(backup_id):
     dependents = [b for b in db_controller.get_backups_by_lvol_id(backup.lvol_id)
                   if b.prev_backup_id == backup.uuid]
     if dependents:
-        successor = next((b for b in dependents if b.status == Backup.STATUS_COMPLETED), None)
+        successor = single_or_none(
+            dependent for dependent in dependents if dependent.status == Backup.STATUS_COMPLETED)
         if successor is None:
             raise PreconditionError(
                 f"backup {backup.uuid} is the predecessor of "
