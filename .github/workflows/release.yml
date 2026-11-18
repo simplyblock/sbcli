@@ -29,9 +29,12 @@ jobs:
         run: |
           # Published as both the PyPI version and every image tag, so a
           # shape nothing downstream can parse must fail here rather than
-          # publish.
-          if [[ ! "$tag" =~ ^[0-9]+(\.[0-9]+){1,3}(-[A-Za-z0-9]+)?$ ]]; then
-            echo "Release tag '$tag' does not match <major>.<minor>[.<patch>[.<hotfix>]][-<suffix>]." >&2
+          # publish. The trailing "(.<hotfix>)?" on the suffix mirrors the
+          # hotfix-on-prerelease shape _to_pep440() in simplyblock_core/
+          # _version.py normalizes for PyPI (e.g. 26.4.0-beta6.1) -- keep
+          # the two in sync if either grows a new shape.
+          if [[ ! "$tag" =~ ^[0-9]+(\.[0-9]+){1,3}(-[A-Za-z0-9]+(\.[0-9]+)?)?$ ]]; then
+            echo "Release tag '$tag' does not match <major>.<minor>[.<patch>[.<hotfix>]][-<suffix>[.<hotfix>]]." >&2
             exit 1
           fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
