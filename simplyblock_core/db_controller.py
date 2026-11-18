@@ -397,6 +397,34 @@ class DBController(metaclass=Singleton):
             PoolStatObject().get_db_id(f"{pool.get_id()}/{pool.get_id()}/").encode(),
         ])
 
+    @staticmethod
+    def _write_stat_if_owner_exists_tx(tr, owner_key, stat_key, stat_value):
+        if not tr.get(owner_key).wait().present():
+            return False
+        tr.set(stat_key, stat_value)
+        return True
+
+    def write_stat_if_owner_exists(self, owner, stat) -> bool:
+        """Write ``stat`` only while ``owner``'s record (an lvol or a pool)
+        still exists, in ONE transaction, and say whether it was written.
+
+        A collector works from a list it read at the start of its pass, so by
+        the time it writes, the owner may be deleted and its stats cleared
+        (``delete_lvol_stats`` / ``delete_pool_stats``). A plain write then
+        leaves a record nothing ever removes. Reading the owner's key here
+        makes the write conflict with the removal: it either commits first,
+        and the clear that follows the removal takes it, or it sees no owner
+        and writes nothing."""
+        kv = self.kv_store
+        if kv is None:
+            return False
+        args = (owner.get_db_id().encode(), stat.get_db_id().encode(),
+                json.dumps(stat.to_dict(unwrap_secrets=True)).encode())
+        if hasattr(kv, 'create_transaction'):
+            return fdb.transactional(DBController._write_stat_if_owner_exists_tx)(kv, *args)
+        # Transactionless store (unit-tier fdb stub): same logic, not atomic.
+        return DBController._write_stat_if_owner_exists_tx(_NoTxnStore(kv), *args)
+
     def get_cluster_stats(self, cluster, limit=20) -> List[ClusterStatObject]:
         return self.get_cluster_capacity(cluster, limit)
 

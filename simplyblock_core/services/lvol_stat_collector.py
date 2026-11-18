@@ -182,9 +182,12 @@ def add_lvol_stats(cluster, lvol, stats_list, capacity_dict=None, snode=None):
                         changed["v"] = True
                         return True
 
-                    lvol = db.atomic_update(db.get_lvol_by_id(lvol.get_id()), _mut)
-                    if lvol is not None and changed["v"]:
-                        lvol_events.lvol_io_error_change(lvol, False, True, caused_by="monitor")
+                    # Not rebound to ``lvol``: atomic_update answers None for a
+                    # record deleted meanwhile, and the write below needs the
+                    # lvol's id either way.
+                    fresh = db.atomic_update(lvol, _mut)
+                    if fresh is not None and changed["v"]:
+                        lvol_events.lvol_io_error_change(fresh, False, True, caused_by="monitor")
 
         else:
             logger.warning("last record not found")
@@ -192,7 +195,12 @@ def add_lvol_stats(cluster, lvol, stats_list, capacity_dict=None, snode=None):
         logger.error("Error getting stats")
 
     stat_obj = LVolStatObject(data=data)
-    stat_obj.write_to_db(db.kv_store)
+    # ``lvol`` comes from the list read at the start of the pass; it may have
+    # been deleted, and its stats cleared, since.
+    if not db.write_stat_if_owner_exists(lvol, stat_obj):
+        logger.info("LVol %s no longer exists, dropping its stats sample", lvol.get_id())
+        last_object_record.pop(lvol.get_id(), None)
+        return None
     last_object_record[lvol.get_id()] = stat_obj
 
     all_stats = db.get_lvol_stats(lvol, limit=0)
@@ -218,7 +226,9 @@ def add_pool_stats(pool, records):
     })
 
     stat_obj = PoolStatObject(data=data)
-    stat_obj.write_to_db(db.kv_store)
+    if not db.write_stat_if_owner_exists(pool, stat_obj):
+        logger.info("Pool %s no longer exists, dropping its stats sample", pool.get_id())
+        return False
 
     all_stats = db.get_pool_stats(pool, limit=0)
     if len(all_stats) > 10:

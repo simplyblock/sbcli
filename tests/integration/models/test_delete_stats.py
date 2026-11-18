@@ -52,8 +52,12 @@ def test_delete_lvol_stats_clears_only_that_lvol(db):
     for date in (1, 2, 3):
         _stat(LVolStatObject, pool_id, lvol.uuid, date).write_to_db(db.kv_store)
         _stat(LVolStatObject, pool_id, neighbour.uuid, date).write_to_db(db.kv_store)
+    # A cached record is keyed "<cluster_id>/<uuid>/<date>/<duration>", and its
+    # reader and the clear both look under "<lvol>/<lvol>/": the lvol's id goes
+    # in cluster_id, or the record lands where neither of them looks.
     CachedLVolStatObject().from_dict(
-        {"uuid": lvol.uuid, "pool_id": lvol.uuid, "date": 1}).write_to_db(db.kv_store)
+        {"uuid": lvol.uuid, "cluster_id": lvol.uuid, "date": 1}).write_to_db(db.kv_store)
+    assert _count(db, CachedLVolStatObject, f"{lvol.uuid}/{lvol.uuid}/") == 1
 
     db.delete_lvol_stats(lvol)
 
@@ -61,7 +65,7 @@ def test_delete_lvol_stats_clears_only_that_lvol(db):
     # trailing "/", so for this deliberately prefix-sharing id it would also
     # return the neighbour's records. Real ids are fixed-length uuids.
     assert _count(db, LVolStatObject, f"{pool_id}/{lvol.uuid}/") == 0
-    assert db.get_cached_lvol_stats(lvol.uuid, limit=0) == []
+    assert _count(db, CachedLVolStatObject, f"{lvol.uuid}/{lvol.uuid}/") == 0
     assert _count(db, LVolStatObject, f"{pool_id}/{neighbour.uuid}/") == 3
 
 
@@ -80,3 +84,39 @@ def test_delete_pool_stats_clears_only_that_pool(db):
     assert len(db.get_pool_stats(other, limit=0)) == 2
     # The pool's lvols' stats are theirs to clear, on their own delete.
     assert len(db.get_lvol_stats(lvol, limit=0)) == 1
+
+
+def test_stat_of_a_deleted_lvol_is_not_written(db):
+    """The stats collector writes from a list it read at the start of its pass.
+    A sample for an lvol deleted since must not come back after the clear:
+    nothing would ever remove it."""
+    pool_id = str(uuid.uuid4())
+    lvol = _lvol(pool_id)
+    lvol.write_to_db(db.kv_store)
+
+    assert db.write_stat_if_owner_exists(
+        lvol, _stat(LVolStatObject, pool_id, lvol.uuid, 1)) is True
+    assert _count(db, LVolStatObject, f"{pool_id}/{lvol.uuid}/") == 1
+
+    db.release_lvol_ns_slot(lvol)
+    db.delete_lvol_stats(lvol)
+
+    assert db.write_stat_if_owner_exists(
+        lvol, _stat(LVolStatObject, pool_id, lvol.uuid, 2)) is False
+    assert _count(db, LVolStatObject, f"{pool_id}/{lvol.uuid}/") == 0
+
+
+def test_stat_of_a_deleted_pool_is_not_written(db):
+    pool = Pool()
+    pool.uuid = str(uuid.uuid4())
+    pool.write_to_db(db.kv_store)
+
+    assert db.write_stat_if_owner_exists(
+        pool, _stat(PoolStatObject, pool.uuid, pool.uuid, 1)) is True
+
+    pool.remove(db.kv_store)
+    db.delete_pool_stats(pool)
+
+    assert db.write_stat_if_owner_exists(
+        pool, _stat(PoolStatObject, pool.uuid, pool.uuid, 2)) is False
+    assert _count(db, PoolStatObject, f"{pool.uuid}/{pool.uuid}/") == 0
