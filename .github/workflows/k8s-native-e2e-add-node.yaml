@@ -1344,7 +1344,7 @@ jobs:
           CORE_PERCENTAGE="${{ inputs.cluster_environment == 'aws-openshift' && '50' || inputs.cluster_environment == 'openshift-local' && '50' || inputs.cluster_environment == 'openshift-baremetal' && '50' || inputs.cluster_environment == 'local' && '35' || '65' }}"
           SKIP_KUBELET_CONFIG="${{ (inputs.cluster_environment == 'aws-openshift' || inputs.cluster_environment == 'openshift-local' || inputs.cluster_environment == 'openshift-baremetal') && 'false' || 'true' }}"
           FORCE_FORMAT_4K="${{ (inputs.cluster_environment == 'aws-openshift' || inputs.cluster_environment == 'openshift-local' || inputs.cluster_environment == 'openshift-baremetal') && 'true' || 'false' }}"
-          DRIVE_SIZE_RANGE="${{ inputs.cluster_environment == 'openshift-baremetal' && '1500G-2000G' || '1.7T-2T' }}"
+          DRIVE_SIZE_RANGE="${{ inputs.cluster_environment == 'openshift-baremetal' && '1500G-2000G' || '1700G-2000G' }}"
           ENABLE_CPU_TOPOLOGY="true"
           CLUSTER_ENV="${{ inputs.cluster_environment || 'local' }}"
           if [ "$CLUSTER_ENV" = "local" ]; then
