@@ -2553,17 +2553,20 @@ def get_total_capacity_of_nvme_devices(pci_lst):
     return int(total_capacity)
 
 
-def wait_for_nvme_capacity(pci, timeout=30, interval=1) -> int:
-    """Raw capacity of one kernel-visible NVMe controller, waiting for its
-    namespaces. A controller just bound to nvme (detect_nvmes takes back
-    devices a previous deployment left on vfio/uio) is listed before the
-    kernel's asynchronous scan has found its namespaces, and reads 0 until
-    then. Returns 0 if none appears within timeout seconds."""
+def wait_for_nvme_capacities(pcis, timeout=30, interval=1) -> dict:
+    """Raw capacity of each kernel-visible NVMe controller in pcis, waiting
+    for their namespaces under one shared deadline. A controller just bound to
+    nvme (detect_nvmes takes back devices a previous deployment left on
+    vfio/uio) is listed before the kernel's asynchronous scan has found its
+    namespaces, and reads 0 until then. A controller whose namespace did not
+    appear within timeout seconds maps to 0."""
     deadline = time.monotonic() + timeout
+    capacities = {pci: 0 for pci in pcis}
     while True:
-        capacity = get_total_capacity_of_nvme_devices([pci])
-        if capacity > 0 or time.monotonic() >= deadline:
-            return capacity
+        for pci in [p for p, c in capacities.items() if not c]:
+            capacities[pci] = get_total_capacity_of_nvme_devices([pci])
+        if all(capacities.values()) or time.monotonic() >= deadline:
+            return capacities
         time.sleep(interval)
 
 
@@ -2868,7 +2871,7 @@ def regenerate_config(new_config, old_config, force=False):
         old_config["nodes"][i]["number_of_distribs"] = number_of_distribs
         # ssd_capacity was measured for one device set; an edited set drops it
         # rather than carry a figure for devices the node no longer has.
-        if old_config["nodes"][i]["ssd_pcis"] != new_config["nodes"][i]["ssd_pcis"]:
+        if set(old_config["nodes"][i]["ssd_pcis"]) != set(new_config["nodes"][i]["ssd_pcis"]):
             old_config["nodes"][i].pop("ssd_capacity", None)
         old_config["nodes"][i]["ssd_pcis"] = new_config["nodes"][i]["ssd_pcis"]
         if new_config["nodes"][i].get("lblk_devices") is not None:
@@ -3014,15 +3017,23 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
         else:
             system_info.setdefault(numa, {"cores": [], "nics": [], "nvmes": []})["nics"].append(nic)
 
+    if not lblk_mode:
+        # nvme-cli sees a device only while the kernel driver holds it, so
+        # every capacity is read before the first unbind. A node whose
+        # capacity misses a controller would get an SPDK memory limit too low
+        # for its devices, so an unmeasured controller fails configure.
+        capacities = wait_for_nvme_capacities([val["pci_address"] for val in nvmes.values()])
+        unmeasured = sorted(pci for pci, capacity in capacities.items() if not capacity)
+        if unmeasured:
+            logger.error(f"No namespace of the NVMe devices {unmeasured} appeared; their capacity is unknown")
+            return False, False
+        for val in nvmes.values():
+            val["capacity"] = capacities[val["pci_address"]]
+
     for nvme, val in nvmes.items():
         pci = val["pci_address"]
         numa = int(val["numa_node"])
         if not lblk_mode:
-            # nvme-cli sees the device only while the kernel driver holds it,
-            # so its capacity is read before the unbind.
-            val["capacity"] = wait_for_nvme_capacity(pci)
-            if not val["capacity"]:
-                logger.warning(f"No namespace of the NVMe device {pci} appeared; its capacity is unknown")
             # lblk keeps the kernel driver — the AIO bdev needs the block
             # device usable by the kernel, the exact opposite of DPDK claim.
             pci_utils.unbind_driver(pci)
