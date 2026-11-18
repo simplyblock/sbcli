@@ -1705,7 +1705,21 @@ def _jc_compression_status_with_retry(leader: StorageNode, jm_vuid, timeout_s=No
                            "(journal re-level in progress?)", leader.get_id(), e)
 
 
-def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode: StorageNode, after_restart):
+class JMRaidNoCurrentLeg(Exception):
+    """No leg of a node's JM raid that holds the current journal can be built:
+    the member drives that are present make up no complete leg, or only legs
+    that missed writes. The node has no usable journal of its own."""
+
+
+def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode: StorageNode, after_restart,
+                             missing=()):
+    # ``jm_nvme_bdevs`` is always the JM's full member list, in the order it
+    # was first built in. ``missing`` names the members that are not there
+    # (a node restart with a drive gone): the geometry is still planned over
+    # the full list and only the legs whose members are all present are
+    # built -- see jm_raid.mountable_top_legs. Raises JMRaidNoCurrentLeg when
+    # that leaves no leg holding the current journal.
+    #
     # RAID 0+1 journal layout (see simplyblock_core/jm_raid.py):
     #   1 device   -> no raid (bare device)
     #   2 devices  -> raid1 over two single-device legs  (a 2-way mirror)
@@ -1743,33 +1757,57 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode: StorageNode, afte
                 node[:8], layout, len(jm_nvme_bdevs))
 
     plan = jm_raid.plan_topology(jm_nvme_bdevs, layout=layout)
+    missing = set(missing)
     leg_bdevs = []
     leg_members = []
+    # The base bdevs of the top raid1 in planned order, and those of them that
+    # cannot be built because a member is missing.
+    top_legs: list[str] = []
+    missing_legs: list[str] = []
     if plan["level"] == jm_raid.RAID_NONE:
+        if plan["base"] in missing:
+            raise JMRaidNoCurrentLeg(f"the JM device {plan['base']} of node {node} is missing")
         raid_bdev = plan["base"]
     elif plan["level"] == jm_raid.RAID_1_NWAY:
         # Legacy: one raid1 mirror across every JM partition. Reproduces the
         # pre-RAID0+1 on-disk layout so the existing journal reads back intact.
         # leg_bdevs/leg_members stay empty -- the record keeps its legacy shape.
-        raid_bdev = f"raid_jm_{node}"
-        if not rpc_client.bdev_raid_create(raid_bdev, plan["members"], "1"):
-            logger.error(f"Failed to create legacy N-way raid_jm_{node}")
-            return False
+        top_legs = list(plan["members"])
+        missing_legs = [m for m in top_legs if m in missing]
     else:
         for i, leg in enumerate(plan["legs"]):
-            if len(leg) == 1:
-                leg_bdev = leg[0]  # single-drive leg: use the bare device
-            else:
-                leg_bdev = f"raid_jm_{node}_l{i}"
-                if not rpc_client.bdev_raid_create(leg_bdev, leg, "0"):
-                    logger.error(f"Failed to create JM raid0 leg {leg_bdev}")
-                    return False
+            leg_bdev = leg[0] if len(leg) == 1 else f"raid_jm_{node}_l{i}"
             leg_bdevs.append(leg_bdev)
             leg_members.append(leg)
-        raid_bdev = f"raid_jm_{node}"
-        if not rpc_client.bdev_raid_create(raid_bdev, leg_bdevs, "1"):
-            logger.error(f"Failed to create raid_jm_{node}")
-            return False
+            if any(m in missing for m in leg):
+                # A raid0 leg is nothing without all of its members.
+                missing_legs.append(leg_bdev)
+            elif len(leg) > 1 and not rpc_client.bdev_raid_create(leg_bdev, leg, "0"):
+                logger.error(f"Failed to create JM raid0 leg {leg_bdev}")
+                return False
+        top_legs = list(leg_bdevs)
+
+    prior_stale = list(jm_dev.stale_jm_legs) if after_restart and jm_dev else []
+    mounted_legs = top_legs
+    if top_legs:
+        mounted_legs = jm_raid.mountable_top_legs(top_legs, missing_legs, prior_stale)
+        if not mounted_legs:
+            raise JMRaidNoCurrentLeg(
+                f"JM raid of node {node}: legs {missing_legs} cannot be built (members "
+                f"{sorted(missing)} missing) and no other leg holds the current journal "
+                f"(stale: {prior_stale})")
+        if len(mounted_legs) == 1:
+            # One leg of the mirror left. A raid1 cannot be created over a
+            # single base bdev, and the leg is a complete copy by itself: the
+            # JM runs on it directly until a restart finds every member.
+            raid_bdev = mounted_legs[0]
+            logger.warning("JM raid of %s: legs %s are missing, running the JM on %s alone",
+                           node[:8], missing_legs, raid_bdev)
+        else:
+            raid_bdev = f"raid_jm_{node}"
+            if not rpc_client.bdev_raid_create(raid_bdev, mounted_legs, "1"):
+                logger.error(f"Failed to create raid_jm_{node}")
+                return False
 
     # The raid has no superblock, so creating it with both legs neither resyncs
     # nor tells a stale leg from a current one: a leg taken out of the raid
@@ -1777,10 +1815,9 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode: StorageNode, afte
     # fails to load (SFAM-2843). Drop such legs before the alceml reads, and
     # re-add them (raid1 rebuilds them from the current leg) once it is up.
     stale_legs: list[str] = []
-    if after_restart and jm_dev and plan["level"] != jm_raid.RAID_NONE:
-        top_legs = leg_bdevs or plan["members"]
-        stale_legs = [leg for leg in jm_dev.stale_jm_legs if leg in top_legs]
-        if len(stale_legs) >= len(top_legs):
+    if len(mounted_legs) > 1:
+        stale_legs = [leg for leg in prior_stale if leg in mounted_legs]
+        if len(stale_legs) >= len(mounted_legs):
             logger.error("Every JM raid leg of %s is marked stale (%s): mounting them all",
                          node[:8], stale_legs)
             stale_legs = []
@@ -1792,6 +1829,10 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode: StorageNode, afte
             except RPCRemoteError as e:
                 logger.error("Failed to remove stale JM raid leg %s: %s", leg, e)
                 return False
+    # A leg that could not be built misses every write from here on. Recorded
+    # as stale, it is rebuilt from the current leg instead of being mounted as
+    # current by the restart that finds its drive again.
+    recorded_stale = stale_legs + [leg for leg in missing_legs if leg not in stale_legs]
 
     alceml_id = snode.get_id()
     alceml_name = f"alceml_jm_{snode.get_id()}"
@@ -1874,7 +1915,7 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode: StorageNode, afte
         'raid_bdev': raid_bdev,
         'jm_leg_bdevs': leg_bdevs,
         'jm_leg_members': leg_members,
-        'stale_jm_legs': stale_legs,
+        'stale_jm_legs': recorded_stale,
         'alceml_bdev': alceml_name,
         'alceml_name': alceml_name,
         'jm_bdev': jm_bdev,
@@ -2229,7 +2270,16 @@ def _prepare_cluster_devices_partitions(snode: StorageNode, devices):
     return True
 
 
-def _prepare_cluster_devices_jm_on_dev(snode: StorageNode, devices):
+def _prepare_cluster_devices_jm_on_dev(snode: StorageNode, devices, jm_raid_members=None):
+    """Build the journal and the data-device stacks of a node whose journal
+    lives on devices of its own rather than on a partition SPDK cuts from
+    every drive.
+
+    The journal is the device flagged STATUS_JM, or, when ``jm_raid_members``
+    is given (lblk nodes whose devices each carry a journal partition), the
+    RAID 0+1 over those members, in the order given: the order decides the
+    raid geometry and is what JMDevice.jm_nvme_bdev_list reproduces at every
+    restart. The members are journal only and never become data devices."""
     db_controller = DBController()
     if not devices:
         return True
@@ -2238,8 +2288,18 @@ def _prepare_cluster_devices_jm_on_dev(snode: StorageNode, devices):
     dev_order = get_next_cluster_device_order(db_controller, snode.cluster_id)
     rpc_client = snode.rpc_client()
     new_devices = []
+    member_serials = {d.serial_number for d in jm_raid_members or []}
+    if jm_raid_members:
+        jm_device = _create_jm_stack_on_raid(
+            rpc_client, [d.nvme_bdev for d in jm_raid_members], snode, after_restart=False)
+        if not jm_device:
+            logger.error("Failed to create JM device")
+            return False
+        snode.jm_device = jm_device
     for index, nvme in enumerate(devices):
         if nvme.status == "not_found":
+            continue
+        if nvme.serial_number in member_serials:
             continue
 
         if nvme.status == NVMeDevice.STATUS_JM:
@@ -2313,39 +2373,32 @@ def _prepare_cluster_devices_on_restart(snode: StorageNode, clear_data=False):
     jm_device.status = JMDevice.STATUS_UNAVAILABLE
 
     if jm_device.jm_nvme_bdev_list:
-        if len(jm_device.jm_nvme_bdev_list) == 1:
-            ret = rpc_client.bdev_get(jm_device.jm_nvme_bdev_list[0])
-            if not ret:
-                logger.error(f"BDev not found: {jm_device.jm_nvme_bdev_list[0]}")
-                jm_device.status = JMDevice.STATUS_REMOVED
-                return True
-            ret = _create_jm_stack_on_raid(rpc_client, jm_device.jm_nvme_bdev_list, snode, after_restart=not clear_data)
-            if not ret:
-                logger.error("Failed to create JM device")
-                return False
-            snode.jm_device = ret
-            snode.write_to_db()
-            return True
-
-        jm_bdevs_found = []
+        # The raid is always rebuilt over the member list it was first built
+        # with, never over the members found: its geometry is recorded
+        # nowhere else, and a list re-planned over the survivors puts them in
+        # other positions than the ones they were written in. A missing
+        # member costs the leg it belongs to, and the JM runs on the other.
+        jm_bdevs_missing = []
         for bdev_name in jm_device.jm_nvme_bdev_list:
-            ret = rpc_client.bdev_get(bdev_name)
-            if ret:
+            if rpc_client.bdev_get(bdev_name):
                 logger.info(f"JM bdev found: {bdev_name}")
-                jm_bdevs_found.append(bdev_name)
             else:
                 logger.error(f"JM bdev not found: {bdev_name}")
-
-        if len(jm_bdevs_found) > 1:
-            ret = _create_jm_stack_on_raid(rpc_client, jm_bdevs_found, snode, after_restart=not clear_data)
-            if not ret:
-                logger.error("Failed to create JM device")
-                return False
-            snode.jm_device = ret
-            snode.write_to_db()
-        else:
-            logger.error("Only one jm nvme bdev found, setting jm device to removed")
+                jm_bdevs_missing.append(bdev_name)
+        try:
+            ret = _create_jm_stack_on_raid(
+                rpc_client, jm_device.jm_nvme_bdev_list, snode, after_restart=not clear_data,
+                missing=jm_bdevs_missing)
+        except JMRaidNoCurrentLeg as e:
+            logger.error(f"{e}; setting jm device to removed")
             jm_device.status = JMDevice.STATUS_REMOVED
+            return True
+        if not ret:
+            logger.error("Failed to create JM device")
+            return False
+        snode.jm_device = ret
+        snode.write_to_db()
+        if len(jm_device.jm_nvme_bdev_list) == 1:
             return True
 
     else:
@@ -3538,6 +3591,28 @@ def _find_flagged_journal_device(snode, devices):
                    f"among the node's devices; falling back to smallest-device "
                    f"journal selection")
     return None
+
+
+def _lblk_journal_raid_members(lblk_entries, devices):
+    """The devices that are the members of an lblk node's journal raid, and
+    the member entries no device was found for.
+
+    ``lblk_entries`` are the node's block devices as resolved against the
+    host (utils.resolve_lblk_entries), ``devices`` the AIO devices built from
+    them. The members come back in the order of the entries, which is the
+    order the raid is built in. Both lists are empty for a node without a
+    journal raid."""
+    by_serial = {d.serial_number: d for d in devices}
+    members, missing = [], []
+    for entry in lblk_entries or []:
+        if not entry.get("journal_raid"):
+            continue
+        dev = by_serial.get(entry.get("serial"))
+        if dev is None:
+            missing.append(entry)
+        else:
+            members.append(dev)
+    return members, missing
 
 
 def _classify_existing_endpoint_record(db_controller, cluster_id, node_addr, ssd_pcie,
@@ -5013,18 +5088,29 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
             # prepare devices
             if snode.num_partitions_per_dev == 0 or snode.jm_percent == 0:
 
-                # Partition-backed lblk nodes carry an explicit journal entry
-                # (the configure-time partition split); otherwise the
-                # smallest device becomes the journal.
-                jm_device = _find_flagged_journal_device(snode, nvme_devs)
-                if jm_device is None:
-                    jm_device = nvme_devs[0]
-                    for index, nvme in enumerate(nvme_devs):
-                        if nvme.size < jm_device.size:
-                            jm_device = nvme
-                jm_device.status = NVMeDevice.STATUS_JM
+                # An lblk node whose devices each carry a journal partition
+                # runs its journal on the raid over them. Otherwise an lblk
+                # node carries one explicit journal entry (the configure-time
+                # split of a single device), and failing that the smallest
+                # device becomes the journal.
+                jm_members, jm_missing = _lblk_journal_raid_members(lblk_resolved, nvme_devs)
+                if jm_missing:
+                    logger.error(
+                        f"Journal raid member(s) "
+                        f"{[e.get('name') for e in jm_missing]} are not usable block "
+                        f"devices; the journal raid is not built without them")
+                    return False
+                if not jm_members:
+                    jm_device = _find_flagged_journal_device(snode, nvme_devs)
+                    if jm_device is None:
+                        jm_device = nvme_devs[0]
+                        for index, nvme in enumerate(nvme_devs):
+                            if nvme.size < jm_device.size:
+                                jm_device = nvme
+                    jm_device.status = NVMeDevice.STATUS_JM
 
-                ret = _prepare_cluster_devices_jm_on_dev(snode, nvme_devs)
+                ret = _prepare_cluster_devices_jm_on_dev(
+                    snode, nvme_devs, jm_raid_members=jm_members)
             else:
                 ret = _prepare_cluster_devices_partitions(snode, nvme_devs)
             if not ret:
@@ -9149,11 +9235,19 @@ def _reconcile_discovered_devices(snode, nvme_devs):
     if snode.jm_device and "serial_number" in snode.jm_device.device_data_dict:
         jm_dev_sn = snode.jm_device.device_data_dict['serial_number']
         known_devices_sn.append(jm_dev_sn)
+    # The members of an lblk journal raid are block devices of their own. The
+    # JM record keeps them by bdev name, which for an AIO device is derived
+    # from its serial (utils.aio_bdev_name_for_serial); they are journal, and
+    # never a new data device.
+    jm_raid_members = set(snode.jm_device.jm_nvme_bdev_list) if snode.jm_device else set()
 
     for dev in nvme_devs:
         if dev.serial_number == jm_dev_sn:
             logger.info(f"JM device found: {snode.jm_device.get_id()}")
             snode.jm_device.nvme_bdev = dev.nvme_bdev
+
+        elif dev.nvme_bdev in jm_raid_members:
+            logger.info(f"JM raid member found: {dev.nvme_bdev}")
 
         elif dev.serial_number not in known_devices_sn:
             if dev.serial_number in admin_removed_sn:
@@ -9795,18 +9889,31 @@ def _restart_storage_node_impl(
         # prepare devices on new node
         if snode.num_partitions_per_dev == 0 or snode.jm_percent == 0:
 
-            jm_device = _find_flagged_journal_device(snode, snode.nvme_devices)
-            if jm_device is None:
-                jm_device = snode.nvme_devices[0]
-                for index, nvme in enumerate(snode.nvme_devices):
-                    if nvme.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_NEW] and nvme.size < jm_device.size:
-                        jm_device = nvme
-            jm_device.status = NVMeDevice.STATUS_JM
+            # The members of an lblk journal raid are taken from what was
+            # just discovered: the ones the node already knows are not among
+            # its data devices (_reconcile_discovered_devices).
+            jm_members, jm_missing = _lblk_journal_raid_members(
+                lblk_resolved if lblk_mode else [], nvme_devs)
+            if jm_missing:
+                logger.error(
+                    f"Journal raid member(s) {[e.get('name') for e in jm_missing]} "
+                    f"are not usable block devices; the journal raid is not built "
+                    f"without them")
+                return False
+            if not jm_members:
+                jm_device = _find_flagged_journal_device(snode, snode.nvme_devices)
+                if jm_device is None:
+                    jm_device = snode.nvme_devices[0]
+                    for index, nvme in enumerate(snode.nvme_devices):
+                        if nvme.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_NEW] and nvme.size < jm_device.size:
+                            jm_device = nvme
+                jm_device.status = NVMeDevice.STATUS_JM
 
-            if snode.jm_device and snode.jm_device.get_id():
-                jm_device.uuid = snode.jm_device.get_id()
+                if snode.jm_device and snode.jm_device.get_id():
+                    jm_device.uuid = snode.jm_device.get_id()
 
-            ret = _prepare_cluster_devices_jm_on_dev(snode, snode.nvme_devices)
+            ret = _prepare_cluster_devices_jm_on_dev(
+                snode, snode.nvme_devices, jm_raid_members=jm_members)
         else:
             ret = _prepare_cluster_devices_partitions(snode, snode.nvme_devices)
         if not ret:

@@ -413,6 +413,31 @@ def get_block_devices_info() -> list[dict]:
 SB_GPT_PARTITION_TYPECODE = "6527994e-2c5a-4eec-9613-8f5944074e8b"
 
 
+# GPT names of the partitions a journal split lays out. A journal partition
+# that is the node's whole journal is ``sb_jm``; one that is a member of the
+# node's journal raid (one per device of the node, all of one size) is
+# ``sb_jmr``. The name is the only record of which layout a device was given,
+# and a configure that runs again must reproduce it: the raid has no
+# superblock, and a single journal partition must never be completed into a
+# raid over devices that hold data.
+SB_JOURNAL_PARTITION_NAME = "sb_jm"
+SB_JOURNAL_RAID_PARTITION_NAME = "sb_jmr"
+SB_DATA_PARTITION_NAME = "sb_data"
+_SB_JOURNAL_PARTITION_NAMES = (SB_JOURNAL_PARTITION_NAME, SB_JOURNAL_RAID_PARTITION_NAME)
+
+
+def _checked_journal_partition_name(name: str) -> str:
+    if name not in _SB_JOURNAL_PARTITION_NAMES:
+        raise ValueError(f"unknown journal partition name {name!r}")
+    return name
+
+
+def is_journal_raid_member(part_name: str) -> bool:
+    """Whether a journal partition was laid out as a member of a journal raid
+    (``sb_jmr``) rather than as a node's single journal (``sb_jm``)."""
+    return _partition_entry_fields(part_name).get("name") == SB_JOURNAL_RAID_PARTITION_NAME
+
+
 ALCEML_STORAGE_SIGNATURE = b"ALCEML_STORAGE\x00"
 
 
@@ -452,7 +477,8 @@ def split_partition_partner(part: dict, devices: list[dict]) -> tuple[dict, dict
     """The ``(journal, data)`` pair a previous split_partition_for_journal
     made of a partition, when ``part`` is one of the two; otherwise None.
 
-    The journal partition (``sb_jm``) keeps the number, the start, and the
+    The journal partition (``sb_jm``, or ``sb_jmr`` for a member of a journal
+    raid) keeps the number, the start, and the
     PARTUUID of the partition that was split, so a re-configure that selects
     the original partition gets the journal partition. Its data partition
     (``sb_data``) is the simplyblock partition that starts right after it.
@@ -460,7 +486,9 @@ def split_partition_partner(part: dict, devices: list[dict]) -> tuple[dict, dict
     partition without its partner, which is never treated as a fresh
     partition: splitting it again would destroy the journal or the data."""
     fields = _partition_entry_fields(part["name"])
-    if fields.get("type") != SB_GPT_PARTITION_TYPECODE or fields.get("name") not in ("sb_jm", "sb_data"):
+    is_journal = fields.get("name") in _SB_JOURNAL_PARTITION_NAMES
+    if fields.get("type") != SB_GPT_PARTITION_TYPECODE or not (
+            is_journal or fields.get("name") == SB_DATA_PARTITION_NAME):
         return None
     parent = part.get("parent_name", "")
 
@@ -476,24 +504,26 @@ def split_partition_partner(part: dict, devices: list[dict]) -> tuple[dict, dict
     siblings = [d for d in devices
                 if d.get("type") == "part" and d.get("parent_name") == parent
                 and d.get("name") != part["name"]]
-    want = "sb_data" if fields["name"] == "sb_jm" else "sb_jm"
+    wanted = (SB_DATA_PARTITION_NAME,) if is_journal else _SB_JOURNAL_PARTITION_NAMES
     for sibling in siblings:
         extent = _extent(sibling["name"])
         if own is None or extent is None:
             continue
-        adjacent = extent[0] == own[1] if want == "sb_data" else extent[1] == own[0]
+        adjacent = extent[0] == own[1] if is_journal else extent[1] == own[0]
         if not adjacent:
             continue
         sibling_fields = _partition_entry_fields(sibling["name"])
         if (sibling_fields.get("type") == SB_GPT_PARTITION_TYPECODE
-                and sibling_fields.get("name") == want):
-            return (part, sibling) if want == "sb_data" else (sibling, part)
+                and sibling_fields.get("name") in wanted):
+            return (part, sibling) if is_journal else (sibling, part)
+    want = SB_DATA_PARTITION_NAME if is_journal else SB_JOURNAL_PARTITION_NAME
     raise ValueError(
         f"partition {part['name']} is a simplyblock {fields['name']} partition, but its "
         f"{want} partner was not found next to it on {parent}; it is not split again")
 
 
-def split_partition_for_journal(part_name: str, jm_bytes: int) -> tuple[dict, dict]:
+def split_partition_for_journal(part_name: str, jm_bytes: int,
+                                journal_name: str = SB_JOURNAL_PARTITION_NAME) -> tuple[dict, dict]:
     """Split an existing GPT partition into two: a journal partition of
     ``jm_bytes`` at its original start and a data partition covering the
     remainder. Used by lblk nodes running on partitions, where the journal
@@ -512,9 +542,14 @@ def split_partition_for_journal(part_name: str, jm_bytes: int) -> tuple[dict, di
     data_device)`` -- the two new partitions' inventory dicts
     (get_block_devices_info shape). Raises ValueError on any precondition or
     tool failure.
+
+    ``journal_name`` is the GPT name the journal partition is given:
+    ``sb_jm`` for a node's single journal, ``sb_jmr`` for a member of its
+    journal raid.
     """
     import math
 
+    journal_name = _checked_journal_partition_name(journal_name)
     inventory = {d["name"]: d for d in get_block_devices_info()}
     part = inventory.get(part_name)
     if part is None or part.get("type") != "part":
@@ -565,9 +600,9 @@ def split_partition_for_journal(part_name: str, jm_bytes: int) -> tuple[dict, di
     cmds = [
         f"sgdisk -d {part_number} /dev/{parent}",
         (f"sgdisk -a 1 -n {part_number}:{start_sector}:{data_start - 1} "
-         f"-t {part_number}:{SB_GPT_PARTITION_TYPECODE} -c {part_number}:sb_jm{guid} /dev/{parent}"),
+         f"-t {part_number}:{SB_GPT_PARTITION_TYPECODE} -c {part_number}:{journal_name}{guid} /dev/{parent}"),
         (f"sgdisk -a 1 -n 0:{data_start}:{end_sector} "
-         f"-t 0:{SB_GPT_PARTITION_TYPECODE} -c 0:sb_data /dev/{parent}"),
+         f"-t 0:{SB_GPT_PARTITION_TYPECODE} -c 0:{SB_DATA_PARTITION_NAME} /dev/{parent}"),
     ]
     for cmd in cmds:
         out, err, rc = shell_utils.run_command(cmd)
@@ -645,16 +680,17 @@ def journal_split_partitions(disk_name: str, devices: list[dict]) -> tuple[dict,
         entry = _partition_entry_fields(part["name"])
         if entry.get("type") != SB_GPT_PARTITION_TYPECODE:
             return None
-        if entry.get("name") == "sb_jm":
+        if entry.get("name") in _SB_JOURNAL_PARTITION_NAMES:
             jm = part
-        elif entry.get("name") == "sb_data":
+        elif entry.get("name") == SB_DATA_PARTITION_NAME:
             data = part
     if jm is None or data is None:
         return None
     return jm, data
 
 
-def partition_disk_for_journal(disk_name: str, jm_bytes: int) -> tuple[dict, dict]:
+def partition_disk_for_journal(disk_name: str, jm_bytes: int,
+                               journal_name: str = SB_JOURNAL_PARTITION_NAME) -> tuple[dict, dict]:
     """Lay out an unpartitioned whole disk as a journal partition of
     ``jm_bytes`` followed by a data partition covering the rest.
 
@@ -666,9 +702,14 @@ def partition_disk_for_journal(disk_name: str, jm_bytes: int) -> tuple[dict, dic
     both partitions start on a 1 MiB boundary. Returns ``(jm_device,
     data_device)`` in the get_block_devices_info() shape. Raises ValueError
     on any precondition or tool failure.
+
+    ``journal_name`` is the GPT name the journal partition is given:
+    ``sb_jm`` for a node's single journal, ``sb_jmr`` for a member of its
+    journal raid.
     """
     import math
 
+    journal_name = _checked_journal_partition_name(journal_name)
     inventory = {d["name"]: d for d in get_block_devices_info()}
     disk = inventory.get(disk_name)
     if disk is None or disk.get("type") != "disk":
@@ -696,8 +737,8 @@ def partition_disk_for_journal(disk_name: str, jm_bytes: int) -> tuple[dict, dic
     dev = f"/dev/{disk_name}"
     cmds = [
         f"sgdisk -o {dev}",
-        f"sgdisk -n 1:0:+{jm_mib}M -t 1:{SB_GPT_PARTITION_TYPECODE} -c 1:sb_jm {dev}",
-        f"sgdisk -n 2:0:0 -t 2:{SB_GPT_PARTITION_TYPECODE} -c 2:sb_data {dev}",
+        f"sgdisk -n 1:0:+{jm_mib}M -t 1:{SB_GPT_PARTITION_TYPECODE} -c 1:{journal_name} {dev}",
+        f"sgdisk -n 2:0:0 -t 2:{SB_GPT_PARTITION_TYPECODE} -c 2:{SB_DATA_PARTITION_NAME} {dev}",
     ]
     for cmd in cmds:
         out, err, rc = shell_utils.run_command(cmd)

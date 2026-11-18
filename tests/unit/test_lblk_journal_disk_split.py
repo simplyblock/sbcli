@@ -1,8 +1,9 @@
 """Unit tests for the lblk journal split.
 
-By default every lblk storage node gets its journal from a partition of its
-own devices (its smallest whole disk is partitioned, or its smallest
-partition is split) instead of a dedicated journal device;
+By default every lblk storage node gets its journal from its own devices
+instead of a dedicated journal device: a node of several devices from a
+journal partition of the same size on each of them, mirrored (RAID 0+1), a
+node of a single device from one journal partition of it;
 --lblk-journal-device keeps the dedicated device for whole disks:
 
   - lblk_node_journal_layout: the default, the opt-out, and the safety
@@ -74,6 +75,7 @@ class TestNodeJournalLayout(unittest.TestCase):
     def _layout(self, entries, signatures=None, **kwargs):
         signatures = signatures or {}
         disk_calls, part_calls = [], []
+        self.raid_calls = []
 
         def fake_disk(entries_, jm_percent=3):
             disk_calls.append(sorted(entries_))
@@ -83,8 +85,13 @@ class TestNodeJournalLayout(unittest.TestCase):
             part_calls.append(sorted(entries_))
             return {"split-part": True}
 
+        def fake_raid(entries_, member_bytes, names=None):
+            self.raid_calls.append((sorted(names if names is not None else entries_), member_bytes))
+            return {"split-raid": True}
+
         with patch.object(utils, "split_lblk_journal_disk", side_effect=fake_disk), \
                 patch.object(utils, "split_lblk_journal_partition", side_effect=fake_part), \
+                patch.object(utils, "split_lblk_journal_raid", side_effect=fake_raid), \
                 patch.object(utils.node_utils, "simplyblock_data_signature",
                              side_effect=lambda n: signatures.get(n, False)):
             result = utils.lblk_node_journal_layout(entries, **kwargs)
@@ -94,10 +101,66 @@ class TestNodeJournalLayout(unittest.TestCase):
         _, disk_calls, _ = self._layout({"sdb": _entry("sdb", GIB)})
         self.assertEqual(disk_calls, [["sdb"]])
 
-    def test_several_whole_disks_are_split_by_default(self):
-        entries = {"sdb": _entry("sdb", GIB), "sdc": _entry("sdc", GIB)}
-        _, disk_calls, _ = self._layout(entries)
-        self.assertEqual(disk_calls, [["sdb", "sdc"]])
+    def test_several_whole_disks_each_get_a_journal_raid_member(self):
+        entries = {"sdb": _entry("sdb", 100 * GIB), "sdc": _entry("sdc", 200 * GIB)}
+        result, disk_calls, _ = self._layout(entries)
+        self.assertEqual(result, {"split-raid": True})
+        self.assertEqual(disk_calls, [])
+        # 3% of 300G usable, on a two-member mirror: 9G on each disk.
+        self.assertEqual(self.raid_calls, [(["sdb", "sdc"], 9 * GIB)])
+
+    def test_single_partition_is_split(self):
+        _, disk_calls, part_calls = self._layout({"sdb1": _entry("sdb1", GIB, type="part")})
+        self.assertEqual(part_calls, [["sdb1"]])
+        self.assertEqual((disk_calls, self.raid_calls), ([], []))
+
+    def test_partitions_and_disks_of_one_node_all_get_a_member(self):
+        entries = {"sdb1": _entry("sdb1", 100 * GIB, type="part"),
+                   "sdc": _entry("sdc", 100 * GIB)}
+        self._layout(entries)
+        self.assertEqual(self.raid_calls, [(["sdb1", "sdc"], 6 * GIB)])
+
+    # A node whose devices already carry journal raid members.
+
+    @staticmethod
+    def _member_node(**extra):
+        entries = {
+            "sdb1": _entry("sdb1", 9 * GIB, type="part", journal=True, journal_raid=True,
+                           data_serial="SER-sdb2"),
+            "sdb2": _entry("sdb2", 91 * GIB, type="part"),
+            "sdc1": _entry("sdc1", 9 * GIB, type="part", journal=True, journal_raid=True,
+                           data_serial="SER-sdc2"),
+            "sdc2": _entry("sdc2", 191 * GIB, type="part"),
+        }
+        entries.update(extra)
+        return entries
+
+    def test_existing_journal_raid_members_are_kept(self):
+        entries = self._member_node()
+        result, disk_calls, part_calls = self._layout(entries)
+        self.assertEqual(result, entries)
+        self.assertEqual((disk_calls, part_calls, self.raid_calls), ([], [], []))
+
+    def test_device_without_a_member_is_split_to_the_existing_member_size(self):
+        # A split that failed half way, or a device added to the selection:
+        # the size is the existing members', whatever jm_percent says now.
+        entries = self._member_node(sdd=_entry("sdd", 500 * GIB))
+        self._layout(entries, jm_percent=10)
+        self.assertEqual(self.raid_calls, [(["sdd"], 9 * GIB)])
+
+    def test_device_with_data_never_joins_a_journal_raid(self):
+        entries = self._member_node(sdd=_entry("sdd", 500 * GIB))
+        with self.assertRaises(ValueError) as ctx:
+            self._layout(entries, signatures={"sdd": True})
+        self.assertIn("not split", str(ctx.exception))
+        self.assertEqual(self.raid_calls, [])
+
+    def test_single_journal_and_raid_members_do_not_mix(self):
+        entries = self._member_node(
+            sdd1=_entry("sdd1", GIB, type="part", journal=True),
+            sdd2=_entry("sdd2", GIB, type="part"))
+        with self.assertRaises(ValueError):
+            self._layout(entries)
 
     def test_journal_device_opt_out(self):
         entries = {"sdb": _entry("sdb", GIB), "sdc": _entry("sdc", GIB)}
@@ -121,11 +184,11 @@ class TestNodeJournalLayout(unittest.TestCase):
         self.assertEqual(disk_calls, [])
 
     def test_partitions_are_split_even_with_opt_out(self):
-        entries = {"sdb1": _entry("sdb1", GIB, type="part"),
-                   "sdb2": _entry("sdb2", GIB, type="part")}
+        entries = {"sdb1": _entry("sdb1", 100 * GIB, type="part"),
+                   "sdb2": _entry("sdb2", 100 * GIB, type="part")}
         _, disk_calls, part_calls = self._layout(entries, journal_device=True)
-        self.assertEqual(part_calls, [["sdb1", "sdb2"]])
-        self.assertEqual(disk_calls, [])
+        self.assertEqual(self.raid_calls, [(["sdb1", "sdb2"], 6 * GIB)])
+        self.assertEqual((disk_calls, part_calls), ([], []))
 
     def test_empty(self):
         self.assertEqual(self._layout({})[0], {})
@@ -206,7 +269,7 @@ class TestGenerateConfigsPerNode(unittest.TestCase):
         signatures = signatures or {}
         split_calls = []
 
-        def fake_partition(disk_name, jm_bytes):
+        def fake_partition(disk_name, jm_bytes, journal_name="sb_jm"):
             split_calls.append(disk_name)
             jm = _blk(f"{disk_name}1", dtype="part", parent=disk_name,
                       partuuid=f"J-{disk_name}", size=jm_bytes)
@@ -250,20 +313,33 @@ class TestGenerateConfigsPerNode(unittest.TestCase):
         self.assertEqual(self._names(config), [["sdb1", "sdb2"]])
         self.assertTrue(config["nodes"][0]["lblk_devices"][0]["journal"])
 
-    def test_several_disks_one_node_split_by_default(self):
+    def test_several_disks_one_node_each_carry_a_journal_raid_member(self):
         config, calls = self._run({"sdb": _entry("sdb", 100 * GIB),
                                    "sdc": _entry("sdc", 50 * GIB)})
-        self.assertEqual(calls, ["sdc"])
-        self.assertEqual(self._names(config), [["sdb", "sdc1", "sdc2"]])
+        self.assertEqual(calls, ["sdb", "sdc"])
+        self.assertEqual(self._names(config), [["sdb1", "sdb2", "sdc1", "sdc2"]])
+        devices = {e["name"]: e for e in config["nodes"][0]["lblk_devices"]}
+        for jm, data in (("sdb1", "sdb2"), ("sdc1", "sdc2")):
+            self.assertTrue(devices[jm]["journal"] and devices[jm]["journal_raid"])
+            self.assertEqual(devices[jm]["data_serial"], devices[data]["serial"])
+            # 3% of 150G usable on a two-member mirror: the same on both disks.
+            self.assertEqual(devices[jm]["size"], 150 * GIB * 3 // 100)
+            self.assertFalse(devices[data].get("journal"))
+        # The members are one journal device, not an alceml each.
+        self.assertEqual(config["nodes"][0]["number_of_alcemls"], 3)
 
-    def test_two_nodes_per_host_each_split_their_own_disk(self):
+    def test_two_nodes_per_host_each_mirror_over_their_own_disks(self):
         entries = {n: _entry(n, s * GIB) for n, s in
                    (("sdb", 100), ("sdc", 200), ("sdd", 300), ("sde", 400))}
         config, calls = self._run(entries, nodes_per_socket=2)
-        self.assertEqual(sorted(calls), ["sdb", "sdc"])
-        self.assertEqual(self._names(config), [["sdb1", "sdb2", "sdd"], ["sdc1", "sdc2", "sde"]])
-        for node in config["nodes"]:
-            self.assertEqual(sum(1 for e in node["lblk_devices"] if e.get("journal")), 1)
+        self.assertEqual(sorted(calls), ["sdb", "sdc", "sdd", "sde"])
+        self.assertEqual(self._names(config), [["sdb1", "sdb2", "sdd1", "sdd2"],
+                                               ["sdc1", "sdc2", "sde1", "sde2"]])
+        for node, total in zip(config["nodes"], (400, 600)):
+            members = [e for e in node["lblk_devices"] if e.get("journal")]
+            self.assertEqual(len(members), 2)
+            self.assertTrue(all(e.get("journal_raid") for e in members))
+            self.assertEqual({e["size"] for e in members}, {total * GIB * 3 // 100})
 
     def test_journal_device_opt_out(self):
         config, calls = self._run({"sdb": _entry("sdb", 100 * GIB),

@@ -362,6 +362,30 @@ class TestValidateNodeConfig(unittest.TestCase):
             {"name": "sdb2", "serial": "S2", "size": 100, "journal": True}])
         self.assertFalse(utils.validate_node_config(node))
 
+    def _raid_node(self, members=2):
+        devices = []
+        for i in range(members):
+            devices.append({"name": f"sd{i}1", "serial": f"J{i}", "size": 100,
+                            "journal": True, "journal_raid": True, "data_serial": f"D{i}"})
+            devices.append({"name": f"sd{i}2", "serial": f"D{i}", "size": 900})
+        return self._node(lblk_devices=devices)
+
+    def test_journal_raid_members_valid(self):
+        for members in (2, 3):
+            self.assertTrue(utils.validate_node_config(self._raid_node(members)))
+
+    def test_single_journal_raid_member_rejected(self):
+        self.assertFalse(utils.validate_node_config(self._raid_node(1)))
+
+    def test_journal_raid_members_mixed_with_a_single_journal_rejected(self):
+        node = self._raid_node(2)
+        node["lblk_devices"].append({"name": "sdz1", "serial": "JZ", "size": 100, "journal": True})
+        self.assertFalse(utils.validate_node_config(node))
+
+    def test_journal_raid_members_count_as_one_device(self):
+        # 3 data devices + the one journal the three members form.
+        self.assertEqual(utils.node_config_device_count(self._raid_node(3)), 4)
+
     def test_one_journal_flag_valid(self):
         node = self._node(lblk_devices=[
             {"name": "sdb1", "serial": "S1", "size": 100, "journal": True},
