@@ -87,6 +87,7 @@ on:
           - aws-openshift
           - openshift-local
           - openshift-baremetal
+          - k3s-baremetal
           - gcp
       skip_nfs:
         description: 'Skip NFS mounting (use local logs directory instead)'
@@ -136,7 +137,11 @@ env:
   # every one of these workflows already has a long input list; an
   # env is overridable per run from the UI's re-run dialog and keeps
   # the dispatch form readable.
-  LABRES_CLUSTER: openshift_enterprise
+  # k3s-baremetal runs on the docker lab's own machines (192.168.10.201-204),
+  # which the reservations console calls `baremetal`. Booking
+  # openshift_enterprise for it would hold a lab it never touches and leave
+  # the ones it wipes open to whatever asks next.
+  LABRES_CLUSTER: ${{ github.event.inputs.cluster_environment == 'k3s-baremetal' && 'baremetal' || 'openshift_enterprise' }}
   LABRES_DURATION: "24h"
   # Set to "true" to run without booking the lab, for the case where
   # the reservation service itself is what is broken.
@@ -255,12 +260,20 @@ jobs:
       # concurrent runs off them. These lanes have no lock at all today,
       # so this is their first protection.
       - name: Reserve the lab
+        id: reserve
         uses: ./.github/actions/lab-reservation
         with:
           cluster: ${{ env.LABRES_CLUSTER }}
           duration: ${{ env.LABRES_DURATION }}
           expect-hosts: ""
           disabled: ${{ env.LABRES_DISABLE }}
+          # Every other environment is a cluster that outlives the run and is
+          # reached with a kubeconfig held as a secret. k3s-baremetal has no
+          # standing cluster at all: the reservation service wipes the hosts
+          # and stands k3s up on them (group[0] the server, the rest agents
+          # with k8s_snode on), which is why this lane can ask for its
+          # kubeconfig below and the others cannot.
+          bootstrap: ${{ github.event.inputs.cluster_environment == 'k3s-baremetal' }}
         env:
           LABRES_TOKEN: ${{ secrets.LABRES_TOKEN }}
 
@@ -593,12 +606,29 @@ jobs:
 
       - name: Setup kubeconfig
         run: |
+          set -euo pipefail
           mkdir -p $HOME/.kube
           KUBECONFIG_FILE="$HOME/.kube/config-${{ github.run_id }}"
-          echo "${KUBECONFIG_DATA}" > "$KUBECONFIG_FILE"
+          # The reservation's own kubeconfig wins where there is one, and there
+          # is one only when this run had the cluster built for it. Keying off
+          # the output rather than the environment name keeps the two from
+          # drifting: a lane that stops bootstrapping stops getting a
+          # kubeconfig here in the same edit.
+          if [ -n "${RESERVED_KUBECONFIG:-}" ] && [ -s "${RESERVED_KUBECONFIG}" ]; then
+            echo "using the kubeconfig of the cluster this run reserved: ${RESERVED_KUBECONFIG}"
+            cp "${RESERVED_KUBECONFIG}" "$KUBECONFIG_FILE"
+          else
+            if [ -z "${KUBECONFIG_DATA:-}" ]; then
+              echo "::error title=no kubeconfig::${CLUSTER_ENV} has no kubeconfig secret set and this run reserved no cluster of its own. Set the secret for this environment, or dispatch with cluster_environment=k3s-baremetal to have one built."
+              exit 1
+            fi
+            echo "${KUBECONFIG_DATA}" > "$KUBECONFIG_FILE"
+          fi
           chmod 600 "$KUBECONFIG_FILE"
           echo "KUBECONFIG=$KUBECONFIG_FILE" >> $GITHUB_ENV
         env:
+          CLUSTER_ENV: ${{ github.event.inputs.cluster_environment || 'local' }}
+          RESERVED_KUBECONFIG: ${{ steps.reserve.outputs.kubeconfig }}
           KUBECONFIG_DATA: ${{
             github.event.inputs.cluster_environment == 'aws-openshift' && secrets.KUBECONFIG_AWS_OPENSHIFT ||
             github.event.inputs.cluster_environment == 'openshift-local' && secrets.KUBECONFIG_OPENSHIFT_LOCAL ||
@@ -696,6 +726,34 @@ jobs:
       - name: Verify kubectl connectivity
         run: kubectl get nodes
 
+      # The worker list is an input with an OpenShift-shaped default, which is
+      # right for every lane whose cluster outlives the run. k3s-baremetal's
+      # nodes are named for whichever hosts the reservation service
+      # bootstrapped (vm201.simplyblock2.localdomain and friends), so for that
+      # lane the only correct source is the cluster itself. Resolved once here,
+      # after connectivity is known good so a dead API server is still
+      # reported as a dead API server, and read from here by the eight users
+      # downstream.
+      - name: Resolve worker node names
+        run: |
+          set -euo pipefail
+          if [ "${CLUSTER_ENV}" = "k3s-baremetal" ] || [ -z "${WORKERS_IN// /}" ]; then
+            WORKERS=$(kubectl get nodes               -l '!node-role.kubernetes.io/control-plane,!node-role.kubernetes.io/master'               -o jsonpath='{range .items[*]}{.metadata.name}{","}{end}' 2>/dev/null | sed 's/,$//')
+            if [ -z "${WORKERS}" ]; then
+              echo "::error title=no worker nodes::The cluster reports no node outside the control plane, so there is nothing to place storage on. 'kubectl get nodes' follows."
+              kubectl get nodes -o wide 2>&1 | head -20
+              exit 1
+            fi
+            echo "resolved worker nodes from the cluster: ${WORKERS}"
+          else
+            WORKERS="${WORKERS_IN}"
+            echo "worker nodes from the dispatch input: ${WORKERS}"
+          fi
+          echo "WORKER_NODES=${WORKERS}" >> "$GITHUB_ENV"
+        env:
+          CLUSTER_ENV: ${{ github.event.inputs.cluster_environment || 'local' }}
+          WORKERS_IN: ${{ github.event.inputs.worker_nodes }}
+
       - name: Ensure OVN-Kubernetes routingViaHost is enabled
         if: ${{ github.event.inputs.cluster_environment == 'aws-openshift' || github.event.inputs.cluster_environment == 'openshift-local' }}
         run: |
@@ -738,7 +796,7 @@ jobs:
           bash $GITHUB_WORKSPACE/e2e/scripts/cleanup_upgrade_test.sh \
             -n "$NAMESPACE" \
             -e "$CLUSTER_ENV" \
-            -w "${{ github.event.inputs.worker_nodes }}" \
+            -w "${WORKER_NODES}" \
             -c "$GITHUB_WORKSPACE/simplyblock-operator/helm-charts/charts/simplyblock-operator/crds/"
 
           # The operator's own cleanup, second: it picks up anything the
@@ -779,7 +837,7 @@ jobs:
 
           echo "=== Phase 9: Reset hugepages and restart kubelet on worker nodes ==="
           CLUSTER_ENV="${{ github.event.inputs.cluster_environment || 'local' }}"
-          IFS=',' read -ra NODES <<< "${{ github.event.inputs.worker_nodes }}"
+          IFS=',' read -ra NODES <<< "${WORKER_NODES}"
           for NODE in "${NODES[@]}"; do
             echo "Disconnecting stale NVMe-oF and resetting hugepages on $NODE..."
             if [[ "$CLUSTER_ENV" == *"openshift"* ]]; then
@@ -893,7 +951,7 @@ jobs:
         if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
         run: |
           echo "Removing stale io.simplyblock.storagenodeset label from all worker nodes..."
-          IFS=',' read -ra NODES <<< "${{ github.event.inputs.worker_nodes }}"
+          IFS=',' read -ra NODES <<< "${WORKER_NODES}"
           for NODE in "${NODES[@]}"; do
             echo "Removing storagenodeset label from $NODE"
             kubectl label node "$NODE" io.simplyblock.storagenodeset- 2>/dev/null || true
@@ -906,7 +964,7 @@ jobs:
         if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
         run: |
           CLUSTER_ENV="${{ github.event.inputs.cluster_environment || 'local' }}"
-          IFS=',' read -ra NODES <<< "${{ github.event.inputs.worker_nodes }}"
+          IFS=',' read -ra NODES <<< "${WORKER_NODES}"
           for NODE in "${NODES[@]}"; do
             if [ "$CLUSTER_ENV" = "local" ] || [ "$CLUSTER_ENV" = "openshift-local" ]; then
               echo "Labeling node $NODE with zone=default (local cluster)"
@@ -1477,7 +1535,7 @@ jobs:
         if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
         run: |
           CLUSTER_ENV="${{ github.event.inputs.cluster_environment || 'local' }}"
-          IFS=',' read -ra NODES <<< "${{ github.event.inputs.worker_nodes }}"
+          IFS=',' read -ra NODES <<< "${WORKER_NODES}"
           for NODE in "${NODES[@]}"; do
             echo "Cleaning stale CSI hostpath data on $NODE..."
             if [[ "$CLUSTER_ENV" == *"openshift"* ]]; then
@@ -1569,7 +1627,7 @@ jobs:
             VCPU_COUNT="${VCPU_COUNT_PARAM}"
             echo "Using vcpuCount=${VCPU_COUNT} from cluster_params (skipping CPU-count query)"
           else
-            FIRST_WORKER="${{ github.event.inputs.worker_nodes }}"
+            FIRST_WORKER="${WORKER_NODES}"
             FIRST_WORKER="${FIRST_WORKER%%,*}"
             if [ "$OPENSHIFT_CLUSTER" = "true" ]; then
               TOTAL_CPUS=$(oc debug node/"${FIRST_WORKER}" -- chroot /host nproc 2>/dev/null || echo "0")
@@ -1756,7 +1814,7 @@ jobs:
           # waiving the refusal WITHOUT wiping would hand the cluster a disk
           # with a live partition table on it.
           export ENABLE_PARTITIONED="${FORCE_FORMAT_4K}"
-          export WORKER_NODES="${{ github.event.inputs.worker_nodes }}"
+          export WORKER_NODES="${WORKER_NODES}"
           # No BLOCK_DENY_LIST. This used to deny /dev/sda on lblk, on the
           # reasoning that the workers boot from it and the draft would
           # otherwise offer the root disk as storage. Both halves were wrong.
@@ -1969,7 +2027,7 @@ jobs:
           fi
 
           # Expected number of snode-spdk pods = number of worker nodes
-          IFS=',' read -ra NODES <<< "${{ github.event.inputs.worker_nodes }}"
+          IFS=',' read -ra NODES <<< "${WORKER_NODES}"
           EXPECTED_SNODES=${#NODES[@]}
           echo "=== Waiting for $EXPECTED_SNODES snode-spdk pods to be ready (MAX_POLL=$MAX_POLL) ==="
 
