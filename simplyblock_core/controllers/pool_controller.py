@@ -395,6 +395,7 @@ def delete_pool(uuid):
     logger.info(f"Deleting pool {pool.get_id()}")
     pool_events.pool_remove(pool)
     pool.remove(db_controller.kv_store)
+    db_controller.delete_pool_stats(pool)
     cluster = db_controller.get_cluster_by_id(pool.cluster_id)
 
     with create_kms_connection(cluster) as kms:
@@ -437,8 +438,10 @@ def force_delete_pool(pool_id) -> None:
         snapshot.remove(db_controller.kv_store)
     for lvol in lvols:
         lvol.remove(db_controller.kv_store)
+        db_controller.delete_lvol_stats(lvol)
     pool_events.pool_remove(pool)
     pool.remove(db_controller.kv_store)
+    db_controller.delete_pool_stats(pool)
     logger.info(f"Force-deleted pool {pool_id} with {len(lvols)} volume(s) and {len(snapshots)} snapshot(s)")
 
 
