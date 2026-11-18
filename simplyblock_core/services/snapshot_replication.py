@@ -890,6 +890,7 @@ def process_snap_replicate_finish(task, snapshot):
                      f"retiring its record anyway (its bdev lives on as the "
                      f"converted snapshot)")
     remote_lv.remove(db.kv_store)
+    db.delete_lvol_stats(remote_lv)
     snapshot_events.replication_task_finished(snapshot)
     _prune_internal_snapshots(snapshot.lvol)
     return new_snapshot_uuid
