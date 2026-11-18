@@ -367,6 +367,64 @@ class DBController(metaclass=Singleton):
                                               reverse=True)
         return stats
 
+    @staticmethod
+    def _clear_prefixes_tx(tr, prefixes):
+        for prefix in prefixes:
+            tr.clear_range_startswith(prefix)
+
+    def _clear_prefixes(self, prefixes: list[bytes]) -> None:
+        kv = self.kv_store
+        if kv is not None and hasattr(kv, 'create_transaction'):
+            fdb.transactional(DBController._clear_prefixes_tx)(kv, prefixes)
+        elif kv is not None and hasattr(kv, 'clear_range_startswith'):
+            # Transactionless store (unit-tier fdb stub): same clears, not atomic.
+            DBController._clear_prefixes_tx(kv, prefixes)
+
+    def delete_lvol_stats(self, lvol) -> None:
+        """Clear every stats record of ``lvol``. Call it only once the lvol's
+        record is gone for good: the stats are keyed by its uuid, so an id that
+        lives on (the failback UUID swap) must keep them. The trailing ``/``
+        keeps the prefix from matching another id that merely starts with this
+        one."""
+        self._clear_prefixes([
+            LVolStatObject().get_db_id(f"{lvol.pool_uuid}/{lvol.get_id()}/").encode(),
+            CachedLVolStatObject().get_db_id(f"{lvol.get_id()}/{lvol.get_id()}/").encode(),
+        ])
+
+    def delete_pool_stats(self, pool) -> None:
+        """Clear every stats record of ``pool``; see ``delete_lvol_stats``."""
+        self._clear_prefixes([
+            PoolStatObject().get_db_id(f"{pool.get_id()}/{pool.get_id()}/").encode(),
+        ])
+
+    @staticmethod
+    def _write_stat_if_owner_exists_tx(tr, owner_key, stat_key, stat_value):
+        if not tr.get(owner_key).wait().present():
+            return False
+        tr.set(stat_key, stat_value)
+        return True
+
+    def write_stat_if_owner_exists(self, owner, stat) -> bool:
+        """Write ``stat`` only while ``owner``'s record (an lvol or a pool)
+        still exists, in ONE transaction, and say whether it was written.
+
+        A collector works from a list it read at the start of its pass, so by
+        the time it writes, the owner may be deleted and its stats cleared
+        (``delete_lvol_stats`` / ``delete_pool_stats``). A plain write then
+        leaves a record nothing ever removes. Reading the owner's key here
+        makes the write conflict with the removal: it either commits first,
+        and the clear that follows the removal takes it, or it sees no owner
+        and writes nothing."""
+        kv = self.kv_store
+        if kv is None:
+            return False
+        args = (owner.get_db_id().encode(), stat.get_db_id().encode(),
+                json.dumps(stat.to_dict(unwrap_secrets=True)).encode())
+        if hasattr(kv, 'create_transaction'):
+            return fdb.transactional(DBController._write_stat_if_owner_exists_tx)(kv, *args)
+        # Transactionless store (unit-tier fdb stub): same logic, not atomic.
+        return DBController._write_stat_if_owner_exists_tx(_NoTxnStore(kv), *args)
+
     def get_cluster_stats(self, cluster, limit=20) -> List[ClusterStatObject]:
         return self.get_cluster_capacity(cluster, limit)
 
