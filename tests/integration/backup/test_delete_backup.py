@@ -22,6 +22,7 @@ import pytest
 from botocore.exceptions import ClientError
 
 from simplyblock_core.controllers.backup import controller as backup_controller
+from simplyblock_core.controllers.backup import group_backup
 from simplyblock_core.controllers.backup import manifest as backup_manifest
 from simplyblock_core.controllers.backup.manifest import (
     BackupManifest,
@@ -228,6 +229,23 @@ def test_a_backup_with_an_incomplete_successor_is_refused(db, bucket):
     assert _status(db, base) == Backup.STATUS_COMPLETED
 
 
+def test_a_forked_predecessor_raises_instead_of_merging_into_one_arbitrarily(db, bucket):
+    """Two backups naming the same predecessor is a chain fork that should
+    never occur (snapshot chains are linear and backup creation locks the
+    whole ancestry) -- if one gets into the chain anyway (e.g. a corrupted
+    import), deleting the predecessor must fail loudly, not silently merge it
+    into whichever fork happens to be completed and ignore the other, even
+    one still being uploaded."""
+    base = _backup(db, bucket, "base")
+    _backup(db, bucket, "completed_fork", prev="base")
+    _backup(db, bucket, "uploading_fork", prev="base", status=Backup.STATUS_IN_PROGRESS)
+
+    with pytest.raises(ValueError, match="Multiple values present"):
+        backup_controller.delete_backup(base.uuid)
+
+    assert _status(db, base) == Backup.STATUS_COMPLETED
+
+
 def test_a_member_of_a_group_backup_that_exists_is_refused(db, bucket):
     gb = _group_backup(db)
     member = _backup(db, bucket, "member", group_backup_id=gb.get_id())
@@ -244,6 +262,21 @@ def test_a_member_whose_group_backup_is_gone_is_queued_for_deletion(db, bucket):
     backup_controller.delete_backup(orphan.uuid)
 
     assert _status(db, orphan) == Backup.STATUS_DELETING
+
+
+def test_retire_orphaned_member_backups_raises_on_a_forked_chain(db, bucket):
+    """retire_orphaned_member_backups indexes a chain by prev_backup_id to
+    find each orphan's successor; two backups sharing one predecessor must
+    raise instead of silently keeping whichever the index construction saw
+    last and losing the other."""
+    orphan = _backup(db, bucket, "orphan", group_backup_id=f"{CLUSTER}/{_uuid('gone')}")
+    _backup(db, bucket, "next_a", prev="orphan")
+    _backup(db, bucket, "next_b", prev="orphan")
+
+    with pytest.raises(ValueError, match="multiple successors"):
+        group_backup.retire_orphaned_member_backups([LVOL], db=db)
+
+    assert _status(db, orphan) == Backup.STATUS_COMPLETED
 
 
 def test_an_unknown_backup_raises(db):
