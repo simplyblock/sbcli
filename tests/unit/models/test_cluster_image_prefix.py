@@ -1,6 +1,7 @@
 import pytest
 
-from simplyblock_core.models.cluster import Cluster, prefix_image
+from simplyblock_core import cluster_ops
+from simplyblock_core.models.cluster import Cluster, normalize_image_prefix, prefix_image
 
 PREFIX = "quay-proxy.grupawp.pl/docker.io"
 
@@ -47,3 +48,33 @@ def test_prefix_image_without_cluster_accepts_missing_prefix(prefix):
 def test_prefix_image_matches_cluster_method():
     assert (prefix_image(PREFIX, "simplyblock/simplyblock:main")
             == _cluster(PREFIX).prefixed_image("simplyblock/simplyblock:main"))
+
+
+@pytest.mark.parametrize("raw", [PREFIX, f"{PREFIX}/", f"{PREFIX}//", f"  {PREFIX}/ "])
+def test_normalize_gives_one_spelling(raw):
+    # deploy_stack.sh appends the '/' the compose files rely on, and strips at
+    # most one; anything else it is handed ends up inside an image name.
+    assert normalize_image_prefix(raw) == PREFIX
+
+
+@pytest.mark.parametrize("raw", [None, "", "  ", "/"])
+def test_normalize_of_nothing_is_empty(raw):
+    assert normalize_image_prefix(raw) == ""
+
+
+class TestPrefixForAddedCluster:
+    """`cluster add` puts a cluster on a control plane that already has one."""
+
+    def test_unstated_inherits_from_an_existing_cluster(self):
+        clusters = [_cluster(""), _cluster(f"{PREFIX}/")]
+        assert cluster_ops._image_prefix_for_added_cluster(None, clusters) == PREFIX
+
+    def test_unstated_with_no_prefixed_cluster_is_empty(self):
+        assert cluster_ops._image_prefix_for_added_cluster(None, [_cluster("")]) == ""
+        assert cluster_ops._image_prefix_for_added_cluster(None, []) == ""
+
+    def test_a_given_prefix_wins_and_is_normalized(self):
+        assert cluster_ops._image_prefix_for_added_cluster(" other.example/hub/ ", [_cluster(PREFIX)]) == "other.example/hub"
+
+    def test_an_empty_prefix_opts_out_of_inheriting(self):
+        assert cluster_ops._image_prefix_for_added_cluster("", [_cluster(PREFIX)]) == ""

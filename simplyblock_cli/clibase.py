@@ -1460,6 +1460,7 @@ class CLIWrapperBase:
             enable_failure_domain=enable_failure_domain,
             jc_compression_enabled=jc_compression_enabled,
             lvol_geometry_enabled=lvol_geometry_enabled,
+            container_image_prefix=args.container_image_prefix,
         )
 
     def cluster_create(self, args):

@@ -9,6 +9,16 @@ from simplyblock_core.models.backup_config import BackupConfig
 from simplyblock_core.models.base_model import BaseModel, default_factory
 
 
+def normalize_image_prefix(prefix: Optional[str]) -> str:
+    """The registry/proxy ``prefix`` in the one form it is stored and compared in.
+
+    No surrounding whitespace and no trailing ``/``; ``""`` for none. Everything
+    that takes a prefix from outside (the CLI, the API, a cluster record) goes
+    through here, so the shell and compose side never sees another spelling.
+    """
+    return (prefix or "").strip().rstrip("/")
+
+
 def prefix_image(prefix: Optional[str], image: str) -> str:
     """``image`` behind the registry/proxy ``prefix``.
 
@@ -19,7 +29,7 @@ def prefix_image(prefix: Optional[str], image: str) -> str:
     earlier call -- is returned unchanged, so callers can apply it to any image
     without tracking where it came from.
     """
-    prefix = (prefix or "").strip().rstrip("/")
+    prefix = normalize_image_prefix(prefix)
     if not prefix or not image or image.startswith(f"{prefix}/"):
         return image
     return f"{prefix}/{image}"

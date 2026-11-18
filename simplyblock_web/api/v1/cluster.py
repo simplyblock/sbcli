@@ -77,6 +77,8 @@ def add_cluster():
         ),
         jc_compression_enabled=jc_compression_enabled,
         lvol_geometry_enabled=lvol_geometry_enabled,
+        # Absent inherits the prefix of a cluster already on this control plane.
+        container_image_prefix=cl_data.get('container_image_prefix'),
     ))
 
 
