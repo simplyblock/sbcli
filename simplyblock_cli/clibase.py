@@ -149,7 +149,8 @@ class CLIWrapperBase:
 
     def storage_node__deploy(self, sub_command, args):
         isolate_cores = args.isolate_cores
-        return storage_ops.deploy(args.ifname, isolate_cores, args.cluster_vip)
+        return storage_ops.deploy(args.ifname, isolate_cores, args.cluster_vip,
+                                  container_image_prefix=args.container_image_prefix)
 
     def storage_node__configure_upgrade(self, sub_command, args):
         storage_ops.upgrade_automated_deployment_config()
@@ -1528,6 +1529,7 @@ class CLIWrapperBase:
             hugepages_mem=utils.parse_size(args.hugepages_mem) if args.hugepages_mem else 0,
             spdk_vcpu_count=args.vcpu_count or 0,
             cluster_vip=cluster_vip,
+            container_image_prefix=args.container_image_prefix,
         )
 
     def query_yes_no(self, question, default="yes"):
