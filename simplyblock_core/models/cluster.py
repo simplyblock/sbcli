@@ -15,7 +15,7 @@ _KMS_SETTINGS_ADAPTER: TypeAdapter[Any] = TypeAdapter(KMSSettings)
 def prefix_image(prefix: str | None, image: str) -> str:
     """``image`` behind the registry/proxy ``prefix``.
 
-    The prefix is a path such as ``quay-proxy.grupawp.pl/docker.io``, joined
+    The prefix is a path such as ``registry-1.docker.io``, joined
     with exactly one ``/`` whether or not it carries a trailing slash. An empty
     prefix leaves the image as named. Idempotent: an image already carrying the
     prefix -- e.g. one read back from a storage node record written by an

@@ -26,7 +26,7 @@ STACK_WAIT_TIMEOUT=${13}
 # debug level and this file is the readable account of a failure.
 REPORT_FILE=${14:-/dev/null}
 # Registry/proxy prefix for the third-party images in the compose files, e.g.
-# quay-proxy.grupawp.pl/docker.io. Normalised to end in exactly one '/' so the
+# registry-1.docker.io. Normalised to end in exactly one '/' so the
 # compose files can write ${IMAGE_PREFIX}foundationdb/foundationdb:...; empty
 # keeps the images as written. $SIMPLYBLOCK_DOCKER_IMAGE arrives already prefixed.
 IMAGE_PREFIX=${15:-}

@@ -2,7 +2,7 @@ import pytest
 
 from simplyblock_core.models.cluster import Cluster, prefix_image
 
-PREFIX = "quay-proxy.grupawp.pl/docker.io"
+PREFIX = "registry-1.docker.io"
 
 
 def _cluster(prefix):
