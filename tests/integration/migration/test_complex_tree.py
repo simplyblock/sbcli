@@ -717,3 +717,42 @@ class TestCrashRestartResilience:
 
         lvol = db.get_lvol_by_id(ctx.lvol_uuid("l2"))
         assert lvol.node_id == tgt.uuid
+
+    def test_intermediate_poll_failure_does_not_resume_into_a_deleted_target(
+            self, topology_complex_tree, mock_src_server, mock_tgt_server, monkeypatch):
+        """A failed intermediate-snap poll deletes the target bdev while the
+        source transfer keeps running. The next pass used to resume that
+        transfer, mark it done, and fail post-processing on the missing bdev
+        on every retry until the budget ran out (the deterministic core of
+        test_crash_with_failure_rate's flake)."""
+        from simplyblock_core.services import tasks_runner_lvol_migration as runner
+
+        ctx = topology_complex_tree
+        tgt = ctx.node("tgt")
+        _seed_all(mock_src_server, ctx, "src")
+
+        real_poll = runner._poll_intermediate_transfer
+        failed = []
+
+        def poll_fails_once(src_rpc, src_composite):
+            if failed:
+                return real_poll(src_rpc, src_composite)
+            failed.append(src_composite)
+            # Keep the source side in flight past the next pass, as a slow
+            # real transfer would be.
+            with mock_src_server.state.lock:
+                mock_src_server.state.transfer_ops[src_composite]['complete_at'] = \
+                    time.time() + 0.3
+            return runner._TRANSFER_STAT_FAILED
+
+        monkeypatch.setattr(runner, "_poll_intermediate_transfer", poll_fails_once)
+
+        mig_id, err = start_migration(
+            ctx.lvol_uuid("l3"), tgt.uuid, max_retries=100, deadline_seconds=0)
+        assert err is None
+
+        m = run_migration_task(mig_id, max_steps=2000)
+        assert failed, "the intermediate snapshot poll was never reached"
+        assert m.status == LVolMigration.STATUS_DONE, \
+            f"Expected DONE, got {m.status}; error={m.error_message}"
+        assert db.get_lvol_by_id(ctx.lvol_uuid("l3")).node_id == tgt.uuid
