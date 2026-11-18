@@ -3459,22 +3459,22 @@ def set_lvol(uuid, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes, name=
     snode = db_controller.get_storage_node_by_id(lvol.node_id)
     rpc_client = snode.rpc_client()
 
-    if max_rw_iops < 0:
+    if max_rw_iops is not None and max_rw_iops < 0:
         msg = "max_rw_iops can not be negative"
         logger.error(msg)
         return False
 
-    if max_rw_mbytes < 0:
+    if max_rw_mbytes is not None and max_rw_mbytes < 0:
         msg = "max_rw_mbytes can not be negative"
         logger.error(msg)
         return False
 
-    if max_r_mbytes < 0:
+    if max_r_mbytes is not None and max_r_mbytes < 0:
         msg = "max_r_mbytes can not be negative"
         logger.error(msg)
         return False
 
-    if max_w_mbytes < 0:
+    if max_w_mbytes is not None and max_w_mbytes < 0:
         msg = "max_w_mbytes can not be negative"
         logger.error(msg)
         return False
