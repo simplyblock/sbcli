@@ -35,10 +35,12 @@ spec:
     - effect: NoExecute
       operator: Exists
   volumes:
+    # holds only the SPDK RPC socket (+ lock); tmpfs counts against the pod's
+    # memory limit, so keep it small
     - name: socket-dir
       emptyDir:
         medium: Memory
-        sizeLimit: 1Gi
+        sizeLimit: 16Mi
     - name: host-sys
       hostPath:
         path: /sys
@@ -150,16 +152,16 @@ spec:
         limits:
           hugepages-2Mi: {{ MEM_MEGA }}Mi
           cpu: {{ CORES }}
-          {% if CPU_TOPOLOGY_ENABLED %}
           memory: {{ MEM2_MEGA }}Mi
+          {% if CPU_TOPOLOGY_ENABLED %}
           numa-align/numa-{{ NSOCKET }}: 1
           {% endif %}
           {% for name, count in (DEVICE_RESOURCES or {}).items() %}
           {{ name }}: {{ count }}
           {% endfor %}
         requests:
-          {% if CPU_TOPOLOGY_ENABLED %}
           memory: {{ MEM2_MEGA }}Mi
+          {% if CPU_TOPOLOGY_ENABLED %}
           numa-align/numa-{{ NSOCKET }}: 1
           {% endif %}
           {% for name, count in (DEVICE_RESOURCES or {}).items() %}

@@ -86,16 +86,19 @@ class TestPoolLevel(unittest.TestCase):
 
 
 class TestClusterLevel(unittest.TestCase):
-    """Cluster limit = prov_cap_crit% of effective capacity; the collector's
-    size_prov is lvol-only, snapshot utilization is added on top."""
+    """prov_cap_crit is an alarm, never an admission limit (bed bf26
+    2026-11-17: refused shrink-round snapshots stalled every cutover). The
+    collector's size_prov is lvol-only, snapshot utilization is added on top."""
 
-    def test_rejected_when_snapshot_would_cross_the_cap(self):
-        # 100T cluster, cap 100%: 80T volumes + 15T snapshots + 6T source
-        # utilization = 101% -> block.
-        err = _check(pool_max=0, source_prov=20 * G, source_used=6 * G,
-                     pool_total=0, prov_cap_crit=100, cl_size_prov=80 * G,
-                     cl_size_total=100 * G, cl_snap_used=15 * G)
-        self.assertIn("cluster provisioned cap", err)
+    def test_crossing_the_critical_threshold_warns_but_admits(self):
+        # 100T cluster, threshold 100%: 80T volumes + 15T snapshots + 6T
+        # source utilization = 101% -> logged, and the snapshot is taken.
+        with self.assertLogs(snapshot_controller.logger, level="WARNING") as logs:
+            err = _check(pool_max=0, source_prov=20 * G, source_used=6 * G,
+                         pool_total=0, prov_cap_crit=100, cl_size_prov=80 * G,
+                         cl_size_total=100 * G, cl_snap_used=15 * G)
+        self.assertIsNone(err)
+        self.assertTrue(any("provisioned cap reaches 101%" in m for m in logs.output))
 
     def test_admitted_within_the_cap(self):
         # 80T + 15T + 5T = exactly 100% -> admit (limit is exceeded-only).

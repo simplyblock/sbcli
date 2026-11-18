@@ -64,36 +64,39 @@ class TestPrestage:
         node = MagicMock()
         create = MagicMock(return_value=("NEW", None))
         with patch.object(rs.db, "get_lvol_by_name", side_effect=KeyError), \
+                patch.object(rs, "may_stage", return_value=True), \
                 patch.object(rs.db, "get_storage_node_by_id", return_value=node):
-            assert rs.prestage(_snapshot(), remote_lv, create) == "NEW"
+            assert rs.prestage(_snapshot(), remote_lv, create, "C1") == "NEW"
         create.assert_called_once()
         assert create.call_args.args[0] == rs.spare_name("LV1")
         assert create.call_args.args[2] is node and create.call_args.args[3] == "POOL"
 
     def test_an_existing_spare_is_not_duplicated(self):
         create = MagicMock()
-        with patch.object(rs.db, "get_lvol_by_name", return_value=_spare()):
-            assert rs.prestage(_snapshot(), MagicMock(pool_uuid="POOL"), create) is None
+        with patch.object(rs.db, "get_lvol_by_name", return_value=_spare()), \
+                patch.object(rs, "may_stage", return_value=True):
+            assert rs.prestage(_snapshot(), MagicMock(pool_uuid="POOL"), create, "C1") is None
         create.assert_not_called()
 
     def test_a_failed_create_is_not_fatal(self):
         create = MagicMock(return_value=(None, "no space"))
         with patch.object(rs.db, "get_lvol_by_name", side_effect=KeyError), \
+                patch.object(rs, "may_stage", return_value=True), \
                 patch.object(rs.db, "get_storage_node_by_id", return_value=MagicMock()):
-            assert rs.prestage(_snapshot(), MagicMock(pool_uuid="POOL"), create) is None
+            assert rs.prestage(_snapshot(), MagicMock(pool_uuid="POOL"), create, "C1") is None
 
 
 class TestDiscard:
 
     def test_the_spare_is_deleted(self):
         spare = _spare()
-        with patch.object(rs.db, "get_lvol_by_name", return_value=spare), \
+        with patch.object(rs.db, "query", return_value=[spare]), \
                 patch("simplyblock_core.controllers.lvol_controller.delete_lvol") as delete:
             assert rs.discard("LV1") is True
         delete.assert_called_once_with(spare, force_delete=True)
 
     def test_nothing_to_discard(self):
-        with patch.object(rs.db, "get_lvol_by_name", side_effect=KeyError):
+        with patch.object(rs.db, "query", return_value=[]):
             assert rs.discard("LV1") is False
 
 
@@ -108,7 +111,7 @@ class TestRunnerUsesTheSpare:
     def test_the_spare_is_prestaged_after_the_submit_outside_an_endgame(self):
         src = inspect.getsource(sr.process_snap_replicate_start)
         submit = src.index("task.status = JobSchedule.STATUS_RUNNING")
-        prestage = src.index("replication_spare.prestage(snapshot, remote_lv, _create_landing_volume)")
+        prestage = src.index("replication_spare.prestage(snapshot, remote_lv, _create_landing_volume,")
         assert submit < prestage
         guard = src.rindex("if not _cutover_owns(", 0, prestage)
         assert guard < prestage
@@ -117,4 +120,5 @@ class TestRunnerUsesTheSpare:
         from simplyblock_core.controllers import replication_policy_controller as rpc
         from simplyblock_core.services import tasks_runner_replication_final as final
         assert "replication_spare.discard(lvol_id)" in inspect.getsource(rpc.detach_policy)
-        assert "replication_spare.discard(lvol_id)" in inspect.getsource(final._discard_spare_landing)
+        assert "_discard_cadence_spare(" in inspect.getsource(final._discard_spare_landing)
+        assert "replication_spare.discard(lvol_id)" in inspect.getsource(final._discard_cadence_spare)

@@ -435,7 +435,79 @@ BDEV_IOBUF_SMALL_CACHE_SIZE = 16
 BDEV_IOBUF_LARGE_CACHE_SIZE = 2
 ACCEL_SMALL_CACHE_SIZE = 32
 ACCEL_LARGE_CACHE_SIZE = 2
-EXTRA_HUGE_PAGE_MEMORY = 3221225472
+
+# Hugepage budget (calculate_pool_count, calculate_bdev_io_pool_size,
+# calculate_minimum_hp_memory). Every pool is sized for the saturation point
+# of a 200 Gbit node -- 2M 4K-read / 1M 4K-write IOPS at 7-8 ms latency
+# (Little's law: concurrency = IOPS x latency) -- so that no pool and no heap
+# allocation limits IOPS below saturation; above it, more IO only adds latency.
+# The figure is an explicit sum of the consumers, not pools + a flat reserve:
+# the old 4*cpu + 1.1*pools + 22 MiB*max_lvol + 3 GiB had no term for the
+# bdev_io pool, the NVMe/TCP qpairs, distrib's parity buffers or the blobstore
+# masks, and when max_lvol was 30 instead of 60 the 22 MiB term no longer
+# covered them (pnfs_rwx_rapid_nogap_k8s 2026-11-13: lvol registration and
+# failover "Cannot update lvolstore ... rc = -12", qpair allocation failures).
+#
+# Small iobuf pool: data in flight at saturation -- 200 Gbit x 8 ms = 200 MB
+# (24.4k buffers) of 128K IO, or 16k 4K reads plus ~13k peer reads -- with
+# headroom; plus blobstore merge/CoW pieces, the replication reserve
+# (IOBUF_SMALL_POOL_EXTRA_BYTES) and the buffers parked in per-thread caches.
+IOBUF_SMALL_DATA_COUNT = 40960          # 320 MiB
+IOBUF_SMALL_MERGE_COW_COUNT = 4608      # 36 MiB
+NVMF_BUF_CACHE_SIZE = 512               # NVMe-oF transport buf_cache_size, per poll group
+# bdev_io pool (bdev_set_options bdev_io_pool_size). At 8 ms a 4K-write
+# saturation holds ~16k top-level bdev_ios (lvol + raid0 per IO) plus, while
+# distrib processes them, ~5 children per write and ~2 per peer IO arriving
+# at alceml: 36k-118k depending on where the queueing happens. The SPDK
+# default of 65535 is kept (not cut): a smaller pool would cap write IOPS at
+# saturation. bf20 (2026-11-10, heavy IO + migration) peaked at 6861 in use.
+# Every SPDK thread takes BDEV_IO_CACHE_SIZE into its cache at start and SPDK
+# aborts if the pool runs dry, so the pool also covers the caches.
+BDEV_IO_CACHE_SIZE = 64
+BDEV_IO_POOL_SIZE = 65535
+BDEV_IO_POOL_THREADS_PER_CORE = 4
+# Bytes per bdev_io: sizeof(spdk_bdev_io) + the largest module context
+# (bdev_get_io_pool_stats bdev_io_size). 1792 B measured on ultra main since
+# #241 (7f08f4c2) moved distrib's t_task out of the bdev_io (53280 B before),
+# rounded up to 2 KiB. Needs an ultra image with #241; release branches whose
+# ultra lacks it keep 53 KiB.
+BDEV_IO_SIZE_ESTIMATE = 2 * 1024
+# distrib parity/recovery buffers in flight at saturation (node-wide).
+HP_DISTRIB_DATA_BUF_BYTES = 512 * 1024 * 1024
+# Blobstore md journal: 64 MiB per lvstore, up to 3 lvstores (primary,
+# secondary, tertiary) per node.
+HP_MD_JOURNAL_BYTES = 3 * 64 * 1024 * 1024
+# NVMe/TCP target qpair: max_queue_depth (128) x in_capsule_data_size (8 KiB)
+# plus 2 x 128 + 1 PDUs of ~1.1 KiB. Initiator qpair: request buffer + send PDUs.
+HP_NVMF_QPAIR_BYTES = 128 * 8192 + 257 * 1152
+HP_NVME_INITIATOR_QPAIR_BYTES = 360 * 1024
+# qpairs to/from other storage nodes (remote devices, JM, hublvol), per core.
+HP_PEER_QPAIRS_PER_CORE = 16
+# Blobstore: used-clusters bit array and a load/failover mask of the same size
+# per lvstore copy (40 MiB each at 1.25 PiB provisioned, 4 MiB clusters),
+# 3 copies, plus the 16 MiB dump page buffer and the md-page arrays.
+HP_BLOBSTORE_BYTES = 272 * 1024 * 1024
+HP_THREAD_BYTES_BASE = 16 * 1024 * 1024     # SPDK message mempool etc.
+HP_THREAD_BYTES_PER_CORE = 4 * 1024 * 1024  # thread rings, per-thread channels
+HP_OVERHEAD_FACTOR = 1.15                   # DPDK heap headers and fragmentation
+# Unassigned hugepage reserve, added after HP_OVERHEAD_FACTOR. When the bdev_io
+# estimate dropped from 53 KiB to 2 KiB (ultra #241), the budget was lowered by
+# only 2 GiB, not by the full amount freed: the rest (~1.67 GiB) stays as a reserve.
+HP_RESERVE_BYTES = (int(BDEV_IO_POOL_SIZE * (53 * 1024 - BDEV_IO_SIZE_ESTIMATE) * HP_OVERHEAD_FACTOR)
+                    - 2 * 1024 ** 3)
+# One hugepage figure for all usual node sizes: every node gets at least the
+# budget of this reference node (6.5 GiB); only larger nodes get more. Smaller
+# nodes would save under 2.3 GiB, which isn't worth a per-size figure.
+HP_REFERENCE_CORES = 32
+HP_REFERENCE_SUBSYSTEMS = 250
+# System (non-hugepage) memory of the SPDK container, also its hard memory
+# limit (k8s request = limit, docker mem_limit): a base for the process
+# (binary, DPDK, threads, RPC) plus the metadata that grows with capacity --
+# distrib placement maps (544-1504 B per 4 MiB page, 3 copies) and alceml
+# (~170 B per 2 MiB page): ~0.6 GiB per TiB with compact page maps, 1.3 GiB
+# with bitmap page maps. The limit takes the upper value.
+SYS_MEMORY_BASE_BYTES = 2 * 1024 ** 3
+SYS_MEMORY_PER_TIB_BYTES = int(1.3 * 1024 ** 3)
 EXTRA_SYS_MEMORY = 0.10
 
 INSTANCE_STORAGE_DATA = {
@@ -567,6 +639,25 @@ REPL_CUTOVER_MAX_SHRINK_ROUNDS = 12
 # deletion (in deletion, or replicated beyond what retention keeps). Sized to
 # match the endgame's round bound (2026-11-04).
 REPL_MAX_DELETION_BACKLOG = REPL_CUTOVER_MAX_SHRINK_ROUNDS
+# Bounded chains in the replication phase (not the final cutover, whose rounds
+# have their own bound above). Every transfer adds a layer on the target (its
+# landing copy, converted into a snapshot) and retention merges the oldest one
+# away by deleting it (swap-merge into its successor). When that merge falls
+# behind, each further layer pins every page the client rewrites since: bed
+# bf21 2026-11-10 reached blob-chain depth 7 under rewrite load and 93-99 %
+# device use (cannot_allocate, client EIO). So a volume's next transfer and its
+# next cadence snapshot wait while more than this many of its target layers
+# are not merged yet (beyond retention, being deleted, or a landing copy still
+# merging with its base) -- replication slows to the speed of the merge.
+REPL_MAX_UNMERGED_LANDING_LAYERS = 1
+# The same bound on the source side: no cadence snapshot while more than this
+# many of the volume's replication snapshots are unreplicated or replicated
+# but not pruned yet (beyond retention, or being deleted).
+REPL_MAX_PENDING_SOURCE_SNAPSHOTS = 2
+# A hold that sees no progress (the backlog does not shrink) for this long is
+# released once, loudly: a merge that never completes (a prune deferred for
+# good) must not turn into a silent replication stop.
+REPL_MERGE_HOLD_MAX_SEC = 1800
 # Hard limit SPDK puts on bdev_lvol_transfer_final_step: the final step's
 # terminate_timeout is armed when it starts and fails the transfer ("Task
 # transfer terminate timeout ...", transfer_state 'Failed') once it passes.
@@ -616,6 +707,16 @@ REPL_CUTOVER_DIRECT_ROUNDS = True
 # Sends of one direct round (a failed or vanished transfer is sent again)
 # before the endgame is abandoned.
 REPL_CUTOVER_DIRECT_ROUND_SUBMITS = 3
+# A replication snapshot that nothing pairs with or builds on any more (an
+# orphaned landing copy: its source was retired at a --delete-source cutover,
+# it is no live volume's base, its landing volume is gone) is handed to the
+# retired-snapshot reaper once it is this old. The age keeps the sweep clear
+# of a copy whose replicate-finish is still writing its links.
+REPL_ORPHAN_SNAPSHOT_GRACE_SEC = 600
+# The orphan sweep reads the full record of every candidate and asks SPDK
+# about each one it would mark; run it at most this often per cluster. A
+# chain of orphans drains one layer per sweep.
+REPL_ORPHAN_SWEEP_INTERVAL_SEC = 120
 # --- catch-up throttle ------------------------------------------------------
 # A volume whose replication persistently cannot catch up never reaches the
 # endgame: the target cannot absorb what the source writes (bf17, 2026-11-08:
@@ -759,6 +860,12 @@ REPL_MERGE_RETRY_MIN_SEC = 5.0
 REPL_MERGE_RETRY_MAX_SEC = 120.0
 REPL_MERGE_FAIL_ALERT = 3
 REPL_MERGE_ALERT_EVERY_SEC = 600.0
+# A transfer waiting for its TARGET lvstore to have a leader raises a
+# REPLICATION_STALLED event once it has waited this long, then at most every
+# REPL_MERGE_ALERT_EVERY_SEC. The node monitor gives a leaderless target a
+# leader within about a minute of its primary going down (crashed or shut
+# down); a wait beyond this means no member could be proven safe to lead.
+REPL_TARGET_LEADERLESS_ALERT_SEC = 180
 # Pass interval of the snapshot replication runner while any transfer or
 # merge is in flight; TASK_EXEC_INTERVAL_SEC when idle. Not sub-second: each
 # pass reads the task table (see test_transfer_completion_latency).
@@ -1448,3 +1555,8 @@ LEADERSHIP_SAFETY_WINDOW_SEC = 10
 # whose process died: snapshot_controller.reap_snapshot_intents rolls it back.
 # Far above any create (lock waits included).
 SNAPSHOT_INTENT_REAP_SEC = 600
+
+# How long the post-cutover --delete-source waits for every host connected to
+# the source to show a controller on the target (ns_host_guard); the CSI
+# reconnect loop connects new paths within seconds.
+REPL_NS_HOST_RECONNECT_WAIT_SEC = 120

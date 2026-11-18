@@ -37,6 +37,7 @@ class TestFinishOnASingleNodeTarget(unittest.TestCase):
         primary = MagicMock()
         primary.get_id.return_value = "n-p"
         primary.secondary_node_id = ""
+        primary.tertiary_node_id = ""
         primary.transfer_hublvol = None
         primary.rpc_client.return_value.bdev_lvol_convert.return_value = True
         remote_lv = MagicMock(top_bdev="LVS_1/LVOL_92", lvs_name="LVS_1", node_id="n-p")
@@ -67,6 +68,7 @@ class TestDeltaIntoASingleNodeTarget(unittest.TestCase):
         node = MagicMock()
         node.get_id.return_value = "n-p"
         node.secondary_node_id = ""
+        node.tertiary_node_id = ""   # the pre-chain covers every replica now
         node.rpc_client.return_value.bdev_lvol_add_clone.return_value = True
         remote_lv = SimpleNamespace(top_bdev="LVS_1/LVOL_92")
         db = MagicMock()

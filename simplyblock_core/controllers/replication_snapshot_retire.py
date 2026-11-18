@@ -16,15 +16,33 @@ record is gone, no volume is cloned from it, no snapshot record chains onto
 it, and SPDK on the lvstore leader reports no clones. Leaf-first, a delete
 never swap-merges into a neighbour, so the order of the chain does not matter.
 User snapshots are never marked.
+
+The lineage does not reach every copy the leg left on the target cluster:
+the cutover clone is built early, on the newest copy that had landed then,
+and a cadence snapshot still in flight lands afterwards, chained onto that
+same copy beside the clone. Retention keeps it (it is the newest pair), the
+retire above detaches it from its source, and from then on nothing pairs with
+it, builds on it or ever deletes it -- and the clone base under it, retired on
+the next leg, is never a leaf either (bed bf25 2026-11-16: 166 such copies
+after 8 back-and-forth rounds, each pinning up to the whole volume; the
+clusters filled up and the clients got EIO). sweep_orphaned hands those to the
+reaper: a replication snapshot whose volume is gone, that no volume builds on,
+and whose replication pair is broken.
 """
-from simplyblock_core import utils
+import time
+
+from simplyblock_core import constants, utils
 from simplyblock_core.controllers import replication_recovery_points
+from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.snapshot import SnapShot, SnapShotMini
 from simplyblock_core.models.storage_node import StorageNode
 
 logger = utils.get_logger(__name__)
 
-_REPLICATION_NAME_PREFIXES = ("repl_internal_", "repl_commit_", "demote_")
+# repl_round_: the landing copy of an endgame round that was re-queued as an
+# ordinary transfer; not recognised, it was never retired and stopped the
+# lineage walk, leaving every older copy below it.
+_REPLICATION_NAME_PREFIXES = ("repl_internal_", "repl_commit_", "repl_round_", "demote_")
 
 
 def is_replication_snapshot(snap):
@@ -80,6 +98,168 @@ def retire_source_lineage(db, src_lvol):
         logger.info("Retiring %d replication snapshot(s) of migrated-away volume %s: %s",
                     len(retired), src_lvol.get_id(), ", ".join(retired))
     return retired
+
+
+# An orphaned replication copy must be at least this old before the sweep
+# retires it: a landing copy is born before its transfer is finalized and
+# chained, so a young one may still be about to gain a successor or a clone.
+ORPHAN_COPY_MIN_AGE_SEC = 900
+
+
+_COLLAPSE_WALK_LIMIT = 64
+#: Ancestor deletes collapse_migrated_chains issues per cluster and pass: one
+#: per volume at most, and the whole pass bounded on top.
+COLLAPSE_PER_PASS = 8
+
+
+def collapse_migrated_chains(db, cluster_id):
+    """Merge away the landing history under the volumes migrated to *cluster_id*.
+
+    A migrated (or failed-over) volume is a clone of the newest landing copy,
+    and that copy sits on every older copy of its chain: the volume's own
+    earlier rounds, and the chain ancestors earlier legs sent with it. Nothing
+    collapses those -- retention prunes only a live volume's OWN pairs, and
+    the reaper and the orphan sweep only take leaves -- so each round trip
+    added its history as further layers (bed bf21 2026-11-10: depth up to 7
+    after five rounds, each layer pinning data the client had since
+    overwritten; 93-99 % device use, client EIO).
+
+    Per pass and volume this deletes at most ONE ancestor below the volume's
+    clone base, through the ordinary snapshot delete: an ancestor with exactly
+    one child swap-merges into it, so the volume reads the same data and the
+    chain is one layer shorter. Over a few passes the volume is left on its
+    base alone -- the newest replicated copy, which is the delta base of a
+    migration back and is never touched. An ancestor is merged away only when
+    it is a replication snapshot (never a user snapshot: the walk stops at
+    one) whose volume record is gone, no volume is cloned from it, exactly one
+    snapshot chains onto it in the DB and SPDK reports exactly one clone, it
+    is not a group recovery point, and its source on the other cluster does
+    not belong to a live volume (that pair is the live volume's retention's).
+    A chain with a delete in flight, a snapshot in replication or a live
+    replication task on any of its members is left for a later pass.
+    Returns the number of deletes issued."""
+    from simplyblock_core.controllers import snapshot_controller
+    minis = db.get_mini_snapshots()
+    lvols = db.get_mini_lvols()
+    lvol_ids = {lv.get_id() for lv in lvols}
+    cloned_from = {lv.cloned_from_snap for lv in lvols if lv.cloned_from_snap}
+    children: dict = {}
+    for m in minis:
+        if m.prev_snap_uuid:
+            children.setdefault(m.prev_snap_uuid, []).append(m.get_id())
+    busy = _snapshots_in_transfer(db, cluster_id)
+    if busy is None:
+        return 0
+    issued = 0
+    for lv in lvols:
+        if issued >= COLLAPSE_PER_PASS:
+            break
+        if not lv.cloned_from_snap or lv.status == LVol.STATUS_IN_DELETION \
+                or (getattr(lv, "lvol_name", "") or "").startswith("REP_"):
+            continue
+        try:
+            base = db.get_snapshot_by_id(lv.cloned_from_snap)
+        except KeyError:
+            continue
+        if base.cluster_id != cluster_id or not is_replication_snapshot(base):
+            continue
+        chain = _chain_below(db, base)
+        if not chain or not _chain_idle(db, [base] + chain, busy, lvol_ids):
+            continue
+        child = base
+        for snap in chain:
+            if not is_replication_snapshot(snap):
+                break                                       # never past a user snapshot
+            if _collapsible(db, snap, child, lvol_ids, cloned_from, children):
+                logger.info("Merging landing history %s (%s) of migrated volume %s into %s",
+                            snap.get_id(), snap.snap_bdev, lv.get_id(), child.get_id())
+                fresh = db.atomic_update(snap, _retire)
+                if fresh is not None:
+                    _sync_mini(db, fresh)
+                    _unlink_from_source(db, fresh)
+                if snapshot_controller.delete(snap.get_id()):
+                    issued += 1
+                break
+            child = snap
+    if issued:
+        logger.info("Collapsing migrated chains on cluster %s: %d ancestor delete(s) issued",
+                    cluster_id, issued)
+    return issued
+
+
+def _chain_below(db, base):
+    """The snapshots under *base* through prev_snap_uuid, nearest first."""
+    chain: list = []
+    node = base
+    while node.prev_snap_uuid and len(chain) < _COLLAPSE_WALK_LIMIT:
+        try:
+            node = db.get_snapshot_by_id(node.prev_snap_uuid)
+        except KeyError:
+            break
+        chain.append(node)
+    return chain
+
+
+def _chain_idle(db, chain, busy, lvol_ids):
+    """Whether nothing else works on *chain*: no delete in flight (deletes of
+    one chain swap-merge into each other), nothing in replication or with a
+    live replication task (a transfer reads the cluster map a merge changes),
+    and no member still owned by a live volume's retention (its own snapshot,
+    or the copy of one)."""
+    for s in chain:
+        if s.status in (SnapShot.STATUS_IN_DELETION, SnapShot.STATUS_IN_REPLICATION) \
+                or s.get_id() in busy:
+            return False
+        if s.lvol and s.lvol.get_id() in lvol_ids:
+            return False
+        if _source_is_live(db, s, lvol_ids):
+            return False
+    return True
+
+
+def _collapsible(db, snap, child, lvol_ids, cloned_from, children):
+    """Whether deleting *snap* merges it into *child* and nothing else."""
+    uuid = snap.get_id()
+    if snap.status != SnapShot.STATUS_ONLINE or uuid in cloned_from:
+        return False
+    if snap.lvol and snap.lvol.get_id() in lvol_ids:
+        return False
+    if children.get(uuid, []) != [child.get_id()]:
+        return False
+    group = getattr(snap, "group_id", "") or ""
+    if group and uuid in replication_recovery_points.group_recovery_point_ids({group}, db=db):
+        return False
+    # SPDK is the authority on what the delete merges into: its one clone
+    # must be the child the DB names.
+    clones = _spdk_clones(db, snap)
+    return (clones is not None and len(clones) == 1
+            and str(clones[0]).split("/")[-1] == (child.snap_bdev or "").split("/")[-1])
+
+
+def _snapshots_in_transfer(db, cluster_id):
+    """Ids of the snapshots with a live replication task on *cluster_id*, or
+    None when the tasks cannot be read."""
+    from simplyblock_core.models.job_schedule import JobSchedule
+    try:
+        tasks = db.get_job_tasks_by_function(cluster_id, JobSchedule.FN_SNAPSHOT_REPLICATION)
+    except Exception as e:                                  # noqa: BLE001
+        logger.warning("Cannot read replication tasks of cluster %s: %s", cluster_id, e)
+        return None
+    return {(t.function_params or {}).get("snapshot_id") for t in tasks
+            if t.status != JobSchedule.STATUS_DONE and not t.canceled}
+
+
+def _source_is_live(db, snap, lvol_ids):
+    """True when *snap* is a landing copy whose source snapshot still belongs
+    to a live volume on the other cluster."""
+    src_id = snap.source_replicated_snap_uuid
+    if not src_id:
+        return False
+    try:
+        src = db.get_snapshot_by_id(src_id)
+    except KeyError:
+        return False
+    return bool(src.lvol) and src.lvol.get_id() in lvol_ids and not src.deleted
 
 
 def _retire(snap):
@@ -171,12 +351,210 @@ def _spdk_clones(db, snap):
     return None
 
 
+def _live_bases(minis, lvols):
+    """Ids of every snapshot a volume reads through: each volume's clone base
+    and the recorded chain below it. Volumes being deleted count too -- their
+    data-plane delete may not have finished."""
+    by_id = {m.get_id(): m for m in minis}
+    bases: set = set()
+    for lv in lvols:
+        snap_id = lv.cloned_from_snap
+        while snap_id and snap_id not in bases:
+            bases.add(snap_id)
+            mini = by_id.get(snap_id)
+            snap_id = mini.prev_snap_uuid if mini is not None else ""
+    return bases
+
+
+def _links_back(counterpart, snap_id):
+    """True when *counterpart* still records *snap_id* as its replicated pair."""
+    if snap_id in (counterpart.target_replicated_snap_uuid,
+                   counterpart.source_replicated_snap_uuid):
+        return True
+    return any(_instance_uuid(i) == snap_id for i in (counterpart.instances or []))
+
+
+def _pair_is_live(db, snap, moved_on=frozenset()):
+    """True while *snap* belongs to a replication pair: a counterpart on the
+    other cluster still exists and still links back to it. A live pair is
+    retention's business (or a fail-over's hold, KI-12), never the sweep's.
+    An instance recorded on another cluster counts as a pair as long as it
+    exists: instance-mode replication links only that way.
+
+    A counterpart in *moved_on* (_moved_on_orphans) does not keep the pair
+    live: both halves are leftovers of a volume that migrated on."""
+    for other_id in (snap.source_replicated_snap_uuid, snap.target_replicated_snap_uuid):
+        if not other_id or other_id in moved_on:
+            continue
+        try:
+            other = db.get_snapshot_by_id(other_id)
+        except KeyError:
+            continue
+        if _links_back(other, snap.get_id()):
+            return True
+    for inst in snap.instances or []:
+        inst_id = _instance_uuid(inst)
+        if not inst_id or inst_id == snap.get_id() or inst_id in moved_on or \
+                _instance_cluster(inst) in ("", snap.cluster_id):
+            continue
+        try:
+            db.get_snapshot_by_id(inst_id)
+        except KeyError:
+            continue
+        return True
+    return False
+
+
+def _orphan_candidates(minis, lvols, now, include_marked=False):
+    """Mini records that may be orphaned replication snapshots: online, not
+    yet marked (unless *include_marked*), past the grace age, no volume of
+    their own, no volume reading through them. The full record decides the
+    rest."""
+    lvol_ids = {lv.get_id() for lv in lvols}
+    bases = _live_bases(minis, lvols)
+    grace = constants.REPL_ORPHAN_SNAPSHOT_GRACE_SEC
+    out = []
+    for m in minis:
+        if (m.deleted and not include_marked) or m.status != SnapShot.STATUS_ONLINE:
+            continue
+        if m.snap_type != SnapShot.TYPE_INTERNAL and \
+                not (m.snap_name or "").startswith(_REPLICATION_NAME_PREFIXES):
+            continue
+        if not m.created_at or now - m.created_at < grace:
+            continue
+        if m.get_id() in bases:
+            continue
+        if m.lvol is not None and m.lvol.get_id() in lvol_ids:
+            continue
+        out.append(m)
+    return out
+
+
+def _cadence_owner(snap_name):
+    """The volume-id prefix a cadence snapshot is named after
+    (repl_internal_<id[:8]>_<ts>, snapshot_monitor); "" for any other name."""
+    if not (snap_name or "").startswith("repl_internal_"):
+        return ""
+    parts = snap_name[len("repl_internal_"):].split("_")
+    return parts[0] if len(parts) >= 2 and len(parts[0]) == 8 else ""
+
+
+def _moved_on_orphans(candidates, lvols):
+    """Ids of the orphan candidates (of every cluster) whose volume migrated
+    on: a cadence copy named after a volume that is still alive -- a migrated
+    volume keeps its id -- but that is not its own volume and that no volume
+    reads through (both already ruled out by _orphan_candidates).
+
+    A volume that migrates back re-sends the chain under it, so both halves of
+    a pair can be left like that, one per cluster, each linking back to the
+    other: judged one at a time, each kept the other "live" for ever (bed
+    bf26, 2026-11-17: 90 of 131 snapshots after 8 back-and-forth rounds). A
+    pair whose volume is gone altogether (a deleted DR source) has no live
+    namesake and stays retention's business."""
+    live = {lv.get_id()[:8] for lv in lvols
+            if getattr(lv, "status", "") not in (LVol.STATUS_IN_DELETION, LVol.STATUS_DELETED)}
+    return frozenset(m.get_id() for m in candidates
+                     if _cadence_owner(m.snap_name) in live)
+
+
+def sweep_orphaned(db, cluster_id, now=None):
+    """Mark the orphaned replication snapshots of *cluster_id* for the reaper;
+    returns their ids.
+
+    Orphaned: a replication snapshot (is_replication_snapshot) whose volume is
+    gone, that no volume reads through (clone base or the chain below one),
+    and whose replication pair is broken -- the counterpart is gone or no
+    longer links back, as after retire_source_lineage detached it. Typically
+    the copy of a cadence snapshot that landed after the cutover clone was
+    built on the copy before it (see the module docstring).
+
+    Only a leaf is marked -- SPDK on the lvstore leader reports no clones of
+    it -- and reap_retired checks again before it deletes (no clone, no
+    chained successor, no SPDK clones), so a snapshot something still sits on
+    is never touched, whatever the records say. A consistency group's newest
+    generation is never marked."""
+    now = time.time() if now is None else now
+    minis = db.get_mini_snapshots()
+    lvols = db.get_mini_lvols()
+    orphans = []
+    candidates = _orphan_candidates(minis, lvols, now)
+    # A half marked on an earlier sweep (of either cluster) still counts.
+    moved_on = _moved_on_orphans(
+        _orphan_candidates(minis, lvols, now, include_marked=True), lvols)
+    for mini in candidates:
+        try:
+            snap = db.get_snapshot_by_id(mini.get_id())
+        except KeyError:
+            continue
+        # A landing copy re-sent onward when its volume migrated back lost its
+        # source link and reads as a plain user snapshot; a moved-on cadence
+        # copy (named after a live volume that is not its own) is one anyway.
+        if snap.cluster_id != cluster_id or snap.deleted or \
+                snap.status != SnapShot.STATUS_ONLINE or \
+                not (is_replication_snapshot(snap) or snap.get_id() in moved_on):
+            continue
+        if _pair_is_live(db, snap, moved_on):
+            continue
+        # Something still sits on it in the data plane (a landing volume
+        # being chained onto it, a successor the records missed), or the
+        # leader cannot be asked: not now. A chain of orphans is marked leaf
+        # by leaf, one layer per sweep.
+        if _spdk_clones(db, snap) != []:
+            continue
+        orphans.append(snap)
+    if not orphans:
+        return []
+    keep = replication_recovery_points.group_recovery_point_ids(
+        {getattr(s, "group_id", "") for s in orphans}, db=db)
+    marked = []
+    for snap in orphans:
+        if snap.get_id() in keep:
+            continue
+        fresh = db.atomic_update(snap, _mark_deleted)
+        if fresh is None:
+            continue
+        _sync_mini(db, fresh)
+        marked.append(snap.get_id())
+    if marked:
+        logger.info("Handing %d orphaned replication snapshot(s) of cluster %s to the "
+                    "reaper (volume gone, no volume reads through them, pair broken): %s",
+                    len(marked), cluster_id, ", ".join(marked))
+    return marked
+
+
+def _mark_deleted(snap):
+    snap.deleted = True
+
+
+# Process-local on purpose: a rate limit only. Marking is idempotent (an
+# atomic update of one flag), so two monitor processes sweeping the same
+# cluster at once mark the same snapshots twice and nothing else.
+_LAST_SWEEP: dict = {}
+
+
+def _sweep_due(cluster_id, now):
+    last = _LAST_SWEEP.get(cluster_id)
+    if last is not None and now - last < constants.REPL_ORPHAN_SWEEP_INTERVAL_SEC:
+        return False
+    _LAST_SWEEP[cluster_id] = now
+    return True
+
+
 def reap_retired(db, cluster_id):
     """Delete the retired replication snapshots of *cluster_id* that are leaves.
 
     Each pass removes the current leaves; the next layer becomes a leaf once
-    their deletes complete, so a chain drains over a few monitor cycles."""
+    their deletes complete, so a chain drains over a few monitor cycles.
+    Orphaned replication snapshots (sweep_orphaned) are marked first, at most
+    every REPL_ORPHAN_SWEEP_INTERVAL_SEC."""
     from simplyblock_core.controllers import snapshot_controller
+    now = time.time()
+    if _sweep_due(cluster_id, now):
+        try:
+            sweep_orphaned(db, cluster_id, now=now)
+        except Exception as e:                              # noqa: BLE001
+            logger.error("Orphaned replication snapshot sweep failed for cluster %s: %s",
+                         cluster_id, e)
     minis = db.get_mini_snapshots()
     candidates = [m for m in minis
                   if m.deleted and m.status == SnapShot.STATUS_ONLINE]
@@ -195,7 +573,10 @@ def reap_retired(db, cluster_id):
             snap = db.get_snapshot_by_id(uuid)
         except KeyError:
             continue
-        if snap.cluster_id != cluster_id or not is_replication_snapshot(snap):
+        # A cadence copy re-sent onward reads as a user snapshot (no source
+        # link); sweep_orphaned marked it as a moved-on half.
+        if snap.cluster_id != cluster_id or not (
+                is_replication_snapshot(snap) or _cadence_owner(snap.snap_name)):
             continue
         if not snap.lvol or snap.lvol.get_id() in lvol_ids:
             continue
