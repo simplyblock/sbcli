@@ -1,5 +1,5 @@
 """SPDK container memory: system (non-hugepage) memory is a 2 GiB base plus
-1.3 GiB per TiB of the node's raw capacity (distrib placement maps + alceml),
+0.7 GiB per TiB of the node's raw capacity (distrib placement maps + alceml),
 and it is the container's hard memory limit on k8s (request = limit, with or
 without CPU topology) and docker (mem_limit) (2026-11-17)."""
 import json
@@ -14,12 +14,12 @@ GiB = 1024 ** 3
 TiB = 1024 ** 4
 
 
-def test_formula_is_base_plus_1_3_gib_per_tib():
+def test_formula_is_base_plus_0_7_gib_per_tib():
     assert utils.sys_memory_for_capacity(0) == 2 * GiB
-    assert utils.sys_memory_for_capacity(TiB) == 2 * GiB + int(1.3 * GiB)
-    # 250 TiB over 3 nodes: ~83 TiB per node -> ~110 GiB
+    assert utils.sys_memory_for_capacity(TiB) == 2 * GiB + int(0.7 * GiB)
+    # 250 TiB over 3 nodes: ~83 TiB per node -> ~60 GiB
     per_node = utils.sys_memory_for_capacity(250 * TiB // 3)
-    assert 109 * GiB < per_node < 111 * GiB
+    assert 60 * GiB < per_node < 61 * GiB
 
 
 def test_nvme_capacity_is_summed_over_all_devices():

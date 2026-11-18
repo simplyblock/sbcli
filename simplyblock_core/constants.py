@@ -531,11 +531,13 @@ HP_REFERENCE_SUBSYSTEMS = 250
 # System (non-hugepage) memory of the SPDK container, also its hard memory
 # limit (k8s request = limit, docker mem_limit): a base for the process
 # (binary, DPDK, threads, RPC) plus the metadata that grows with capacity --
-# distrib placement maps (544-1504 B per 4 MiB page, 3 copies) and alceml
-# (~170 B per 2 MiB page): ~0.6 GiB per TiB with compact page maps, 1.3 GiB
-# with bitmap page maps. The limit takes the upper value.
+# distrib placement maps (3 role maps + one JM compression map) and alceml
+# (~170 B per 2 MiB page). Measured on ultra with the compact page table
+# (ultra #245/#247): a compact page costs 15-30 B, a page with 10 page-copy
+# layers 2.8-7.9 KiB. Planned for 80% compact pages and 20% at the page-copy
+# chain cap (CoW, outages): 0.60-0.64 GiB per raw TiB, so 0.7 GiB per TiB.
 SYS_MEMORY_BASE_BYTES = 2 * 1024 ** 3
-SYS_MEMORY_PER_TIB_BYTES = int(1.3 * 1024 ** 3)
+SYS_MEMORY_PER_TIB_BYTES = int(0.7 * 1024 ** 3)
 EXTRA_SYS_MEMORY = 0.10
 
 INSTANCE_STORAGE_DATA = {
