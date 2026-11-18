@@ -725,6 +725,55 @@ jobs:
       - name: Verify kubectl connectivity
         run: kubectl get nodes
 
+      # A node can report Ready and still be unable to start a single pod.
+      # The kubelet renews its Lease from a separate, lightweight loop, so the
+      # lease stays current -- and the node stays Ready -- while the pod sync
+      # loop and the node-status updater are both wedged. Run 44196131061 hit
+      # exactly that on worker-5: lease renewed 3s earlier, node status frozen
+      # for 62 minutes, nine pods Pending with no startTime and not one event
+      # after "Scheduled". `kubectl get nodes` printed Ready for all six.
+      #
+      # The run then spent nineteen minutes before dying in the KMS step on
+      #   error: timed out waiting for the condition on pods/openbao-0
+      # which names neither the node nor the reason.
+      #
+      # The Ready condition's lastHeartbeatTime is the signal the lease hides:
+      # the kubelet rewrites it every node-status-update-frequency (5m on
+      # OpenShift), so more than 15m stale means the status loop is stuck.
+      # Nothing later in this workflow can recover from it -- the node needs a
+      # reboot -- so fail here, naming the node, rather than timing out twice.
+      - name: Gate on worker kubelets that are Ready but wedged
+        run: |
+          set -uo pipefail
+          now=$(date -u +%s)
+          stale=""
+          heartbeats=$(kubectl get nodes -l '!node-role.kubernetes.io/master' \
+            -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.conditions[?(@.type=="Ready")].lastHeartbeatTime}{"\n"}{end}')
+          while read -r node ts; do
+            [ -z "${node:-}" ] && continue
+            if [ -z "${ts:-}" ]; then
+              echo "::warning::${node} reports no Ready condition heartbeat"
+              continue
+            fi
+            if ! hb=$(date -u -d "${ts}" +%s 2>/dev/null); then
+              echo "::warning::${node} has an unparseable heartbeat '${ts}'"
+              continue
+            fi
+            age=$(( now - hb ))
+            printf '%s status heartbeat %ss ago\n' "${node}" "${age}"
+            if [ "${age}" -gt 900 ]; then
+              stale="${stale} ${node}(${age}s)"
+            fi
+          done <<< "${heartbeats}"
+
+          if [ -n "${stale// /}" ]; then
+            echo "::error title=wedged kubelet::These nodes report Ready but have not updated node status in over 15 minutes, so they accept pods and never start them:${stale}. The node needs a reboot; no later step can wait this out."
+            echo "--- pods already stuck Pending cluster-wide ---"
+            kubectl get pods -A --field-selector status.phase=Pending -o wide 2>&1 | head -20
+            exit 1
+          fi
+          echo "every worker kubelet is posting fresh node status"
+
       - name: Ensure OVN-Kubernetes routingViaHost is enabled
         if: ${{ github.event.inputs.cluster_environment == 'aws-openshift' || github.event.inputs.cluster_environment == 'openshift-local' }}
         run: |
@@ -778,6 +827,38 @@ jobs:
           helm uninstall openbao -n vault 2>/dev/null || true
           # Remove Helm release secrets in case uninstall left a broken/pending state
           kubectl delete secret -n vault -l name=openbao,owner=helm 2>/dev/null || true
+
+          # helm uninstall does NOT delete a StatefulSet's volumeClaimTemplate
+          # PVCs, and deleting the namespace does not reliably take them
+          # either. In run 44196131061 data-openbao-0 was created at 16:02 by
+          # the previous run and was still present inside a namespace created
+          # at 23:21 -- it outlived its own namespace, held by a
+          # pvc-protection finalizer that a pod on a wedged kubelet could
+          # never release.
+          #
+          # That matters more than an ordinary leak: the PVC binds a
+          # local-path PV, and a local-path PV carries nodeAffinity for the
+          # single node holding the directory. A leaked PVC therefore pins
+          # openbao to that one node for every future run on this cluster, so
+          # if that node is unhealthy the KMS step can never pass again, on
+          # any branch, until someone deletes these two objects by hand.
+          echo "=== Removing leaked openbao PVCs and their PVs ==="
+          for pvc in $(kubectl get pvc -n vault -o name 2>/dev/null); do
+            pv=$(kubectl get "${pvc}" -n vault -o jsonpath='{.spec.volumeName}' 2>/dev/null)
+            echo "  ${pvc} -> ${pv:-<unbound>}"
+            kubectl delete "${pvc}" -n vault --timeout=30s 2>/dev/null || true
+            kubectl patch "${pvc}" -n vault --type=merge \
+              -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
+            if [ -n "${pv:-}" ]; then
+              # Reclaim policy is Delete, but local-path removes the directory
+              # with a helper pod ON that node -- which is precisely the node
+              # that may not be starting pods. Remove the object regardless.
+              kubectl delete "pv/${pv}" --timeout=30s 2>/dev/null || true
+              kubectl patch "pv/${pv}" --type=merge \
+                -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
+            fi
+          done
+
           kubectl delete namespace vault --wait=false 2>/dev/null || true
 
           # Orphaned aggregated APIServices are WHY this namespace hangs.
@@ -1372,10 +1453,41 @@ jobs:
           echo "Using StorageClass for KMS: $STORAGE_CLASS"
 
           export STORAGE_CLASS
-          UNSEAL_KEYS_FILE=./openbao-init.txt bash $GITHUB_WORKSPACE/simplyblock-operator/helm-charts/scripts/setup-kms.sh
+
+          # setup-kms.sh's own wait prints exactly one line when it gives up:
+          #   error: timed out waiting for the condition on pods/openbao-0
+          # That line was the entire output of run 44196131061, and it is the
+          # same line for a PVC bound to a dead node, an image that will not
+          # pull, and a kubelet that starts nothing. Dump the state that tells
+          # those apart before failing, so the next reader does not have to go
+          # to the live cluster to find out which one it was.
+          kms_diagnostics() {
+            echo "::group::openbao did not start -- state at failure"
+            kubectl get pods -n vault -o wide 2>&1 | head
+            kubectl describe pod -n vault -l app.kubernetes.io/name=openbao 2>&1 \
+              | sed -n '/^Events:/,$p' | head -20
+            kubectl get pvc -n vault 2>&1 | head
+            kubectl get pv 2>&1 | grep -E 'vault|NAME' | head
+            # A pod with a node assigned and NO events at all is the node's
+            # fault rather than openbao's, and this is what proves it.
+            echo "--- node status heartbeats ---"
+            kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{" ready-heartbeat="}{.status.conditions[?(@.type=="Ready")].lastHeartbeatTime}{"\n"}{end}' 2>&1
+            date -u +'now=%Y-%m-%dT%H:%M:%SZ'
+            echo "::endgroup::"
+          }
+
+          if ! UNSEAL_KEYS_FILE=./openbao-init.txt bash $GITHUB_WORKSPACE/simplyblock-operator/helm-charts/scripts/setup-kms.sh; then
+            kms_diagnostics
+            echo "::error title=KMS setup failed::openbao never became ready. The group above has the pod's events, its volumes, and every node's kubelet heartbeat -- a stale heartbeat there means the node is wedged, not that openbao is slow."
+            exit 1
+          fi
 
           echo "Waiting for vault pods to be ready..."
-          kubectl wait --for=condition=Ready pods -l app.kubernetes.io/name=openbao -n vault --timeout=300s
+          if ! kubectl wait --for=condition=Ready pods -l app.kubernetes.io/name=openbao -n vault --timeout=300s; then
+            kms_diagnostics
+            echo "::error title=openbao not ready::openbao was installed but never became Ready."
+            exit 1
+          fi
           echo "openbao is unsealed and ready."
 
           # ── Keep it that way ────────────────────────────────────────────
