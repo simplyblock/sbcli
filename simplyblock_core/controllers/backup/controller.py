@@ -1161,13 +1161,11 @@ def delete_backup(backup_id):
     dependents = [b for b in db_controller.get_backups_by_lvol_id(backup.lvol_id)
                   if b.prev_backup_id == backup.uuid]
     if dependents:
-        successor = single_or_none(
-            dependent for dependent in dependents if dependent.status == Backup.STATUS_COMPLETED)
-        if successor is None:
+        successor = single_or_none(dependents)
+        if successor.status != Backup.STATUS_COMPLETED:
             raise PreconditionError(
-                f"backup {backup.uuid} is the predecessor of "
-                f"{', '.join(d.uuid[:8] for d in dependents)}, none of which is "
-                "completed yet; it cannot be merged or deleted")
+                f"backup {backup.uuid} is the predecessor of {successor.uuid}, "
+                "which is not completed yet; it cannot be merged or deleted")
         ok, reason = trigger_merge(successor, backup)
         if not ok:
             raise PreconditionError(f"Cannot delete backup {backup.uuid}: {reason}")
