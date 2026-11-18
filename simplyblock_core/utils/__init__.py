@@ -2508,21 +2508,22 @@ def lblk_device_serials(lblk_devices) -> set[str]:
     return {e["serial"] for e in (lblk_devices or []) if e.get("serial")}
 
 
-# Sys-memory sizing intent (see generate_automated_deployment_config):
-# "RAM 4GB min. Plus 0.2% of the storage." The nvme path nominally adds the
-# FULL device capacity but in practice always measures 0 — capacity is read
-# via `nvme list` AFTER the devices were unbound from the kernel driver. The
 def node_config_min_sys_memory(node) -> int:
     """Minimum system memory for a node-config entry: sys_memory_for_capacity
-    of its total device capacity. lblk entries carry their sizes; nvme goes
-    through nvme-cli."""
+    of its total device capacity. lblk entries carry their sizes; nvme entries
+    carry ssd_capacity, measured by generate_configs before it unbound the
+    devices, since nvme-cli no longer sees them afterwards. An entry written
+    before that field existed goes through nvme-cli."""
     lblk = node.get("lblk_devices") or []
     if lblk:
         capacity = sum(int(e.get("size") or 0) for e in lblk)
-        total = sys_memory_for_capacity(capacity)
-        logger.debug(f"Minimum system memory is {humanbytes(total)}")
-        return int(total)
-    return calculate_minimum_sys_memory(node.get("ssd_pcis") or [])
+    elif node.get("ssd_capacity"):
+        capacity = int(node["ssd_capacity"])
+    else:
+        return calculate_minimum_sys_memory(node.get("ssd_pcis") or [])
+    total = sys_memory_for_capacity(capacity)
+    logger.debug(f"Minimum system memory is {humanbytes(total)}")
+    return int(total)
 
 
 def get_total_capacity_of_nvme_devices(pci_lst):
@@ -2550,6 +2551,20 @@ def get_total_capacity_of_nvme_devices(pci_lst):
                     total_capacity += int(namespaces[0].get("PhysicalSize") or 0)
 
     return int(total_capacity)
+
+
+def wait_for_nvme_capacity(pci, timeout=30, interval=1) -> int:
+    """Raw capacity of one kernel-visible NVMe controller, waiting for its
+    namespaces. A controller just bound to nvme (detect_nvmes takes back
+    devices a previous deployment left on vfio/uio) is listed before the
+    kernel's asynchronous scan has found its namespaces, and reads 0 until
+    then. Returns 0 if none appears within timeout seconds."""
+    deadline = time.monotonic() + timeout
+    while True:
+        capacity = get_total_capacity_of_nvme_devices([pci])
+        if capacity > 0 or time.monotonic() >= deadline:
+            return capacity
+        time.sleep(interval)
 
 
 def nvme_capacity_from_node_info(nvme_devices, pci_lst) -> int:
@@ -2851,6 +2866,10 @@ def regenerate_config(new_config, old_config, force=False):
         elif number_of_distribs_cores > 12:
             number_of_distribs = 12
         old_config["nodes"][i]["number_of_distribs"] = number_of_distribs
+        # ssd_capacity was measured for one device set; an edited set drops it
+        # rather than carry a figure for devices the node no longer has.
+        if old_config["nodes"][i]["ssd_pcis"] != new_config["nodes"][i]["ssd_pcis"]:
+            old_config["nodes"][i].pop("ssd_capacity", None)
         old_config["nodes"][i]["ssd_pcis"] = new_config["nodes"][i]["ssd_pcis"]
         if new_config["nodes"][i].get("lblk_devices") is not None:
             old_config["nodes"][i]["lblk_devices"] = new_config["nodes"][i]["lblk_devices"]
@@ -2999,6 +3018,11 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
         pci = val["pci_address"]
         numa = int(val["numa_node"])
         if not lblk_mode:
+            # nvme-cli sees the device only while the kernel driver holds it,
+            # so its capacity is read before the unbind.
+            val["capacity"] = wait_for_nvme_capacity(pci)
+            if not val["capacity"]:
+                logger.warning(f"No namespace of the NVMe device {pci} appeared; its capacity is unknown")
             # lblk keeps the kernel driver — the AIO bdev needs the block
             # device usable by the kernel, the exact opposite of DPDK claim.
             pci_utils.unbind_driver(pci)
@@ -3099,6 +3123,9 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
                     node_info["ssd_pcis"].append(nvmes[nvme_name]["pci_address"])
                 for nvme_name in nvme_per_core_group[idx]:
                     node_info["ssd_pcis"].append(nvmes[nvme_name]["pci_address"])
+                node_info["ssd_capacity"] = sum(
+                    nvmes[nvme_name]["capacity"]
+                    for nvme_name in list(nvme_neg1_list) + list(nvme_per_core_group[idx]))
             number_of_alcemls = node_config_device_count(node_info)
             node_info["number_of_alcemls"] = number_of_alcemls
             small_pool_count, large_pool_count = calculate_pool_count(number_of_alcemls, 2 * number_of_distribs,
