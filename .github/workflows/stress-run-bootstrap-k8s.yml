@@ -110,17 +110,28 @@ on:
         required: false
         default: false
 
+      LABRES_CLUSTER:
+        description: >-
+          Lab cluster(s) to reserve, spelled as the reservations console spells
+          them. This must name the hosts the run actually touches, which are
+          themselves inputs: the k3s lane on 192.168.10.201-204 with clients
+          .165/.166 is "baremetal host_165 host_166", not the OpenShift lab.
+        required: false
+        default: "openshift_enterprise"
+
 concurrency:
   group: simplyblock-lab-k8s-stress-${{ inputs.K3S_MNODES }}
   cancel-in-progress: false
 
 env:
   # The lab cluster this workflow's hosts belong to, as
-  # ansible/inventory.yaml names it. An input would be better but
-  # every one of these workflows already has a long input list; an
-  # env is overridable per run from the UI's re-run dialog and keeps
-  # the dispatch form readable.
-  LABRES_CLUSTER: openshift_enterprise
+  # ansible/inventory.yaml names it. It was a fixed env on the reasoning
+  # that the re-run dialog could override it, which a fresh dispatch
+  # cannot. The hosts are inputs, so the lab that owns them has to be an
+  # input too: pointed at a different lab, a run books hosts it never
+  # touches -- leaving its own open to the next run's disk reset -- while
+  # holding a lab some other run is waiting for.
+  LABRES_CLUSTER: ${{ inputs.LABRES_CLUSTER || 'openshift_enterprise' }}
   LABRES_DURATION: "24h"
   # Set to "true" to run without booking the lab, for the case where
   # the reservation service itself is what is broken.
