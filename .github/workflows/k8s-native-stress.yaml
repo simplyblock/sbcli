@@ -1607,7 +1607,12 @@ jobs:
           VCPU_COUNT_PARAM=$(echo "${VCPU_COUNT_PARAM:-0}" | tr -d '[:space:]')
           OPENSHIFT_CLUSTER="${{ (github.event.inputs.cluster_environment == 'aws-openshift' || github.event.inputs.cluster_environment == 'openshift-local' || github.event.inputs.cluster_environment == 'openshift-baremetal') && 'true' || 'false' }}"
           CORE_PERCENTAGE="${{ github.event.inputs.cluster_environment == 'aws-openshift' && '50' || github.event.inputs.cluster_environment == 'openshift-local' && '50' || github.event.inputs.cluster_environment == 'openshift-baremetal' && '50' || github.event.inputs.cluster_environment == 'local' && '35' || '65' }}"
-          FORCE_FORMAT_4K="${{ (github.event.inputs.cluster_environment == 'aws-openshift' || github.event.inputs.cluster_environment == 'openshift-local' || github.event.inputs.cluster_environment == 'openshift-baremetal') && 'true' || 'false' }}"
+          # k3s-baremetal belongs here and OPENSHIFT_CLUSTER above it does
+          # not: this flag tracks the DISKS, not the distribution. These are
+          # the docker lane's own 1.9TB NVMe, and they arrive carrying that
+          # lane's partition table, which discovery declines before
+          # enableDriveFormat is ever consulted.
+          FORCE_FORMAT_4K="${{ (github.event.inputs.cluster_environment == 'aws-openshift' || github.event.inputs.cluster_environment == 'openshift-local' || github.event.inputs.cluster_environment == 'openshift-baremetal' || github.event.inputs.cluster_environment == 'k3s-baremetal') && 'true' || 'false' }}"
           DRIVE_SIZE_RANGE="${{ github.event.inputs.cluster_environment == 'openshift-baremetal' && '1500G-2000G' || '1700G-2000G' }}"
           CLUSTER_ENV="${{ github.event.inputs.cluster_environment || 'local' }}"
           if [ "$CLUSTER_ENV" = "local" ]; then
