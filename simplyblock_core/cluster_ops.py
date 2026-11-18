@@ -39,7 +39,7 @@ from simplyblock_core.db_controller import DBController
 from simplyblock_core import jm_raid
 from simplyblock_core.exceptions import MonitoringConfigError
 from simplyblock_core.models.backup_config import UnresolvedBackupConfig
-from simplyblock_core.models.cluster import Cluster, HashicorpVaultSettings, DeployConfig
+from simplyblock_core.models.cluster import Cluster, HashicorpVaultSettings, DeployConfig, normalize_image_prefix
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.mgmt_node import MgmtNode
@@ -509,7 +509,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.nvmf_base_port = nvmf_base_port
     cluster.rpc_base_port = rpc_base_port
     cluster.snode_api_port = snode_api_port
-    cluster.container_image_prefix = container_image_prefix or ""
+    cluster.container_image_prefix = normalize_image_prefix(container_image_prefix)
     cluster.hashicorp_vault_settings = hashicorp_vault_settings
     cluster.backup_local_path = os.path.join(constants.KVD_DB_BACKUP_PATH, cluster.uuid)
     cluster.cluster_vip = cluster_vip or ""
@@ -599,6 +599,24 @@ def _cleanup_nvme(mount_point, nqn_value) -> None:
     logger.info(f"Removed mount point: {mount_point}")
 
 
+def _image_prefix_for_added_cluster(container_image_prefix: t.Optional[str], clusters) -> str:
+    """The registry prefix a cluster added to this control plane is stored with.
+
+    ``None`` -- the caller did not say -- inherits the prefix of a cluster
+    already here: they are served by the same management hosts, and a registry
+    those cannot reach is not reachable for the new cluster's images either. A
+    given value is taken as is, ``""`` included, which is how a caller opts the
+    new cluster out.
+    """
+    if container_image_prefix is not None:
+        return normalize_image_prefix(container_image_prefix)
+    for existing in clusters or []:
+        inherited = normalize_image_prefix(existing.container_image_prefix)
+        if inherited:
+            return inherited
+    return ""
+
+
 def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
                 distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity, qpair_count,
                 max_queue_size, inflight_io_threshold, strict_node_anti_affinity, is_single_node, name, cr_name=None,
@@ -610,6 +628,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
                 enable_failure_domain=False,
                 jc_compression_enabled=True,
                 lvol_geometry_enabled=True,
+                container_image_prefix: t.Optional[str] = None,
 ) -> str:
     """Thin wrapper around _add_cluster_impl() that serializes create calls
     for the same name behind a ClusterCreateLock.
@@ -637,6 +656,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
         nvmf_base_port=nvmf_base_port, rpc_base_port=rpc_base_port, snode_api_port=snode_api_port,
         hashicorp_vault_settings=hashicorp_vault_settings, enable_failure_domain=enable_failure_domain,
         jc_compression_enabled=jc_compression_enabled, lvol_geometry_enabled=lvol_geometry_enabled,
+        container_image_prefix=container_image_prefix,
     )
     if not name:
         return _add_cluster_impl(**kwargs)
@@ -663,6 +683,7 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
                 enable_failure_domain=False,
                 jc_compression_enabled=True,
                 lvol_geometry_enabled=True,
+                container_image_prefix: t.Optional[str] = None,
 ) -> str:
 
     clusters = db_controller.get_clusters()
@@ -795,6 +816,7 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
     cluster.nvmf_base_port = nvmf_base_port
     cluster.rpc_base_port = rpc_base_port
     cluster.snode_api_port = snode_api_port
+    cluster.container_image_prefix = _image_prefix_for_added_cluster(container_image_prefix, clusters)
     cluster.hashicorp_vault_settings = hashicorp_vault_settings
     if backup_config:
         cluster.set_backup_config(backup_config)
@@ -2896,19 +2918,21 @@ def _service_mount_source(service, target: str) -> t.Optional[str]:
     return {mount.get('Target'): mount.get('Source') for mount in mounts}.get(target)
 
 
-def _run_on_mgmt_node(node, command: builtins.list[str], directory: str) -> bytes:
+def _run_on_mgmt_node(node, command: builtins.list[str], directory: str, image: str) -> bytes:
     """Run ``command`` as root on a management node, with ``directory`` mounted.
 
     Host paths of the monitoring stack belong to root, and the image runs as
-    USER simplyblock; see _install_provisioning_on_all_managers.
+    USER simplyblock; see _install_provisioning_on_all_managers. ``image`` is
+    the management image as the cluster pulls it (Cluster.prefixed_image): the
+    node may hold it under no other name, and may reach no other registry.
     """
     node_docker = docker.DockerClient(base_url=f"tcp://{node.docker_ip_port}", version="auto", timeout=60)
     return node_docker.containers.run(
-        constants.SIMPLY_BLOCK_DOCKER_IMAGE, command, user="root",
+        image, command, user="root",
         volumes=[f"{directory}:{directory}"], remove=True, detach=False)
 
 
-def _rotate_secret_on_all_managers(nodes, path: str, old: str, new: str) -> bool:
+def _rotate_secret_on_all_managers(nodes, path: str, old: str, new: str, image: str) -> bool:
     """Swap ``old`` for ``new`` in the host file ``path`` on every management node.
 
     Each manager holds its own copy (the monitoring services are global on, or
@@ -2920,12 +2944,12 @@ def _rotate_secret_on_all_managers(nodes, path: str, old: str, new: str) -> bool
     failed = {}
     for node in nodes:
         try:
-            current = _run_on_mgmt_node(node, ["cat", path], directory).decode('utf-8')
+            current = _run_on_mgmt_node(node, ["cat", path], directory, image).decode('utf-8')
             rotated, count = utils.replace_secret_token(current, old, new)
             if count:
                 encoded = base64.b64encode(rotated.encode('utf-8')).decode('ascii')
                 _run_on_mgmt_node(
-                    node, ["sh", "-c", f"echo {encoded} | base64 -d > {shlex.quote(path)}"], directory)
+                    node, ["sh", "-c", f"echo {encoded} | base64 -d > {shlex.quote(path)}"], directory, image)
                 changed = True
         except DockerException as e:
             failed[node.mgmt_ip] = str(e)
@@ -2947,6 +2971,7 @@ def _rotate_docker_monitoring_secret(cluster_id, old: str, new: str) -> None:
     """
     cluster_docker = utils.get_docker_client(cluster_id)
     nodes = db_controller.get_mgmt_nodes()
+    image = db_controller.get_cluster_by_id(cluster_id).prefixed_image(constants.SIMPLY_BLOCK_DOCKER_IMAGE)
     for service_name, target, required in (
             (constants.MONITORING_PROMETHEUS_SERVICE, PROMETHEUS_CONFIG_TARGET, True),
             (constants.MONITORING_GRAFANA_SERVICE, GRAFANA_EVENT_DATASOURCE_TARGET, False)):
@@ -2962,7 +2987,7 @@ def _rotate_docker_monitoring_secret(cluster_id, old: str, new: str) -> None:
                 raise MonitoringConfigError(f"Service {service_name} has no bind mount at {target}")
             continue
 
-        if _rotate_secret_on_all_managers(nodes, source, old, new):
+        if _rotate_secret_on_all_managers(nodes, source, old, new, image):
             logger.info(f"Restarting {service_name} to load the rotated secret...")
             service.force_update()
 

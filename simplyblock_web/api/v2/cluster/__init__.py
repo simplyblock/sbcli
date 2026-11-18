@@ -77,6 +77,9 @@ class ClusterParams(BaseModel):
     enable_failure_domain: bool = False
     jc_compression_enabled: bool = True
     lvol_geometry_enabled: bool = True
+    # None (dropped by exclude_none below) inherits the prefix of a cluster
+    # already on this control plane; "" opts the new cluster out.
+    container_image_prefix: Optional[str] = None
     # max_subsys and spdk_vcpu_count are capacity decisions with real
     # consequences if silently defaulted (max_subsys=0 means the product
     # ceiling; spdk_vcpu_count=0 means no cluster-wide core requirement at
