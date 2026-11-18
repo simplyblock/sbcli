@@ -14,8 +14,8 @@ const fs = require('node:fs')
 const path = require('node:path')
 const os = require('node:os')
 const {
-  input, warn, fail, log, existing, existingAll, reserve, waitReady,
-  kubeconfig, release, setOutput, saveState,
+  input, warn, fail, log, existing, existingAll, waitCleared, reserve,
+  waitReady, kubeconfig, release, setOutput, saveState,
 } = require('./reserve.js')
 
 async function main() {
@@ -88,6 +88,14 @@ async function main() {
                  `https://labreservation.simplyblock.ai/api/v1/reservations/${stale.id}`)
           }
         }
+        // And then wait for the cluster to actually come free. The DELETE
+        // above is accepted, not done: the teardown playbook runs in the
+        // background and the service holds the cluster for the whole of it,
+        // so booking straight afterwards books against ourselves. Both k3s
+        // attempts on 2026-11-18 died here, reporting the lab as "held by
+        // raunak@simplyblock.io until ..." with the expiry of the booking
+        // this action had released a quarter of a second earlier.
+        await waitCleared(one, Number(input('ready-timeout') || '900'))
         res = null
       }
       if (res) {

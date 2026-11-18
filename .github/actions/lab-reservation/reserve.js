@@ -75,6 +75,58 @@ async function existingAll(cluster) {
 }
 
 
+// Every reservation of ours the SERVICE still counts as holding *cluster*,
+// which is a wider set than the one above: `ending` holds a cluster exactly as
+// firmly as `active` does. store.State.Live() says so outright -- "a cluster
+// with a live reservation cannot be reserved by anyone else -- including while
+// its teardown is still running, so the next user never arrives before the
+// previous one's key is gone" -- and GET /reservations returns those rows for
+// the same reason.
+//
+// existingAll() must NOT widen to match. It answers "can this run reuse what
+// we already hold", and a reservation being torn down is not something to
+// reuse. This answers the different question of when the cluster is free.
+async function liveAll(cluster) {
+  const { status, body } = await call('GET', '/reservations')
+  if (status !== 200) return []
+  const rows = Array.isArray(body) ? body : (body.reservations || [])
+  return rows.filter((r) =>
+    ['pending', 'active', 'ending'].includes(r.state) &&
+    (!cluster || r.cluster === cluster))
+}
+
+// Wait for a cluster we have just released to actually come free.
+//
+// DELETE answers 202 and runs the teardown playbook in the BACKGROUND
+// (Service.Release claims the reservation, spawns teardown, returns). The
+// reservation sits in `ending` until that playbook has removed our key, and
+// the cluster is held for every second of it. Releasing and booking in the
+// same breath therefore books against ourselves, and the 409 that comes back
+// carries the expiry of the booking we just released -- which reads exactly
+// like a colleague is sitting on the lab.
+async function waitCleared(cluster, timeoutSeconds) {
+  const deadline = Date.now() + timeoutSeconds * 1000
+  let announced = false
+  while (Date.now() < deadline) {
+    const rows = await liveAll(cluster)
+    if (!rows.length) return true
+    if (!announced) {
+      log(`waiting for ${rows.length} reservation(s) on ${cluster || 'that cluster'} ` +
+          `to finish tearing down: ${rows.map((r) => `${r.id} (${r.state})`).join(', ')}`)
+      announced = true
+    }
+    await new Promise((r) => setTimeout(r, 5000))
+  }
+  const rows = await liveAll(cluster)
+  warn('Lab reservation',
+       `${cluster || 'the cluster'} still has ${rows.length} reservation(s) ` +
+       `after ${timeoutSeconds}s of teardown: ` +
+       `${rows.map((r) => `${r.id} (${r.state})`).join(', ')}. A teardown that ` +
+       `keeps failing parks in 'ending' and never moves, which holds the ` +
+       `cluster until the booking expires. The reservation below will answer 409.`)
+  return false
+}
+
 async function reserve({ cluster, kind, duration, clean, bootstrap }) {
   const body = { duration }
   if (cluster) body.cluster = cluster
@@ -174,6 +226,6 @@ const saveState = (name, value) =>
   fs.appendFileSync(process.env.GITHUB_STATE, `${name}=${value}\n`)
 
 module.exports = {
-  BASE, input, warn, fail, log, call, existing, existingAll, reserve,
-  waitReady, kubeconfig, release, setOutput, saveState,
+  BASE, input, warn, fail, log, call, existing, existingAll, liveAll,
+  waitCleared, reserve, waitReady, kubeconfig, release, setOutput, saveState,
 }
