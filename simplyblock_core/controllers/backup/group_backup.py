@@ -25,6 +25,7 @@ from simplyblock_core.controllers.backup import controller as backup_controller
 from simplyblock_core.controllers.backup import manifest as backup_manifest
 from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.models.backup import Backup, GroupBackup
+from simplyblock_core.utils.helpers import single_or_none
 
 logger = utils.get_logger(__name__)
 
@@ -666,7 +667,8 @@ def _retire_members(db, group_backup) -> bool:
             retired = False
             continue
         chain = db.get_backups_by_lvol_id(member.lvol_id)
-        successor = next((b for b in chain if b.prev_backup_id == member.uuid), None)
+        successor = single_or_none(
+            successor for successor in chain if successor.prev_backup_id == member.uuid)
         busy = (member.status in (Backup.STATUS_PENDING, Backup.STATUS_IN_PROGRESS)
                 or any(b.status == Backup.STATUS_MERGING for b in chain))
         if successor is None and not busy:
@@ -741,7 +743,16 @@ def retire_orphaned_member_backups(lvol_ids, db=None):
                 db.get_group_backup_by_id(b.group_backup_id)
             except KeyError:
                 orphans.append(b)
-        by_prev = {b.prev_backup_id: b for b in chain if b.prev_backup_id}
+        by_prev: dict = {}
+        for successor in chain:
+            if not successor.prev_backup_id:
+                continue
+            if successor.prev_backup_id in by_prev:
+                raise ValueError(
+                    f"backup {successor.prev_backup_id} has multiple successors in "
+                    f"volume {lvol_id}'s chain: {by_prev[successor.prev_backup_id].uuid} "
+                    f"and {successor.uuid}")
+            by_prev[successor.prev_backup_id] = successor
         # Oldest first: the base of the chain is the one whose merge unblocks
         # the next, and a leaf is only a leaf once nothing is below it.
         for old in sorted(orphans, key=lambda b: (b.created_at, b.uuid)):
