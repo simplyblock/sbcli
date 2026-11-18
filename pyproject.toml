@@ -82,8 +82,12 @@ build-backend = "setuptools.build_meta"
 # The version lives in simplyblock_core/env_var, which release.yml rewrites and
 # constants.py reads at runtime for `sbctl --version`. _version.py is the single
 # reader; it is import-safe at build time because it uses only the stdlib.
+#
+# `__dist_version__`, not `__version__`, on purpose: setuptools validates this
+# attr as PEP 440, which the raw human-authored version (e.g. a hotfix-on-beta
+# string like `26.4.0-beta6.1`) is not guaranteed to be. See _version.py.
 [tool.setuptools.dynamic]
-version = { attr = "simplyblock_core._version.__version__" }
+version = { attr = "simplyblock_core._version.__dist_version__" }
 
 [tool.setuptools.packages.find]
 include = ["simplyblock_core*", "simplyblock_web*", "simplyblock_cli*"]

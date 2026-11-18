@@ -191,6 +191,7 @@ def process_lvol_delete_finish(cluster, lvol, leader_independent=False):
             f"LVol {lvol.get_id()}: empty bdev stack, retiring the record only")
         lvol_events.lvol_delete(lvol)
         lvol.remove(db.kv_store)
+        db.delete_lvol_stats(lvol)
         return
 
     snode = db.get_storage_node_by_id(lvol.node_id)
@@ -477,6 +478,7 @@ def process_lvol_delete_finish(cluster, lvol, leader_independent=False):
 
     lvol_events.lvol_delete(lvol)
     lvol.remove(db.kv_store)
+    db.delete_lvol_stats(lvol)
 
     # check for full devices
     full_devs_ids = []

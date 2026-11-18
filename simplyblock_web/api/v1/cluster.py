@@ -69,6 +69,8 @@ def add_cluster():
         nvmf_base_port=nvmf_base_port, rpc_base_port=rpc_base_port, snode_api_port=snode_api_port,
         kms_settings=cl_data.get('kms_settings'),
         lvol_geometry_enabled=lvol_geometry_enabled,
+        # Absent inherits the prefix of a cluster already on this control plane.
+        container_image_prefix=cl_data.get('container_image_prefix'),
     ))
 
 

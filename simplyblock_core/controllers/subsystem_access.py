@@ -58,18 +58,26 @@ class Intended:
 
 
 def intended_access(db, cluster_id: str) -> dict:
-    """{subsystem nqn: Intended} for every volume subsystem of the cluster.
-
-    Several volumes can share a subsystem (namespaced subsystems): it allows any
-    host only if none of them names allowed hosts, and a host listed by more
-    than one takes the entry of the volume that sorts first, so every call
-    gives the same answer."""
-    pools: dict = {}
+    """{subsystem nqn: Intended} for every volume subsystem of the cluster,
+    each derived by :func:`intended_for` from the volumes sharing it."""
     by_nqn: dict = {}
-    for lv in sorted(db.get_lvols(cluster_id), key=lambda v: v.get_id()):
-        if not getattr(lv, "nqn", ""):
-            continue
-        it = by_nqn.setdefault(lv.nqn, Intended(lv.nqn, True))
+    for lv in db.get_lvols(cluster_id):
+        if getattr(lv, "nqn", ""):
+            by_nqn.setdefault(lv.nqn, []).append(lv)
+    pools: dict = {}
+    return {nqn: intended_for(db, nqn, lvols, pools) for nqn, lvols in by_nqn.items()}
+
+
+def intended_for(db, nqn: str, lvols, pools: dict | None = None) -> Intended:
+    """The access ``lvols`` intend for the subsystem ``nqn`` they share, or
+    are about to share (a consistency-group move builds its target from this
+    before the namespaces arrive). It allows any host only if none of them
+    names allowed hosts, and a host listed by more than one takes the entry of
+    the volume that sorts first, so every call gives the same answer.
+    ``pools`` caches pool lookups across calls."""
+    pools = {} if pools is None else pools
+    it = Intended(nqn, True)
+    for lv in sorted(lvols, key=lambda v: v.get_id()):
         if not lv.allowed_hosts:
             continue
         it.any_host = False
@@ -82,14 +90,20 @@ def intended_access(db, cluster_id: str) -> dict:
                     pools[lv.pool_uuid] = None
             pool = pools[lv.pool_uuid]
         for entry in lv.allowed_hosts:
-            nqn = entry.get("nqn", "")
-            if not nqn or nqn in it.hosts:
+            host_nqn = entry.get("nqn", "")
+            if not host_nqn or host_nqn in it.hosts:
                 continue
-            it.hosts[nqn] = HostGrant(
-                host_nqn=nqn, lvol_id=lv.get_id(),
+            it.hosts[host_nqn] = HostGrant(
+                host_nqn=host_nqn, lvol_id=lv.get_id(),
                 keys={k: entry[k] for k in KEY_TYPES if entry.get(k)},
                 pool_id=lv.pool_uuid or "", pool_dhchap=bool(pool is not None and pool.dhchap))
-    return by_nqn
+    return it
+
+
+def listed_hosts(subsystem: dict | None) -> set:
+    """The host NQNs a live subsystem (an ``nvmf_get_subsystems`` entry)
+    lists; empty for a subsystem that does not exist."""
+    return {h.get("nqn", "") for h in (subsystem or {}).get("hosts") or [] if h.get("nqn")}
 
 
 def key_scope(subsystem_nqn: str) -> str:

@@ -68,6 +68,7 @@ from simplyblock_core.models.backup_config import UnresolvedBackupConfig
 from simplyblock_core.models.cluster import (
     Cluster,
     DeployConfig,
+    normalize_image_prefix,
 )
 from simplyblock_core.models.events import EventObj
 from simplyblock_core.models.job_schedule import JobSchedule
@@ -625,7 +626,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.nvmf_base_port = nvmf_base_port
     cluster.rpc_base_port = rpc_base_port
     cluster.snode_api_port = snode_api_port
-    cluster.container_image_prefix = container_image_prefix or ""
+    cluster.container_image_prefix = normalize_image_prefix(container_image_prefix)
     cluster.set_kms_settings(kms_settings)
     cluster.backup_local_path = os.path.join(constants.KVD_DB_BACKUP_PATH, cluster.uuid)
     cluster.cluster_vip = cluster_vip or ""
@@ -739,6 +740,24 @@ def _cleanup_nvme(mount_point, nqn_value) -> None:
     logger.info(f"Removed mount point: {mount_point}")
 
 
+def _image_prefix_for_added_cluster(container_image_prefix: str | None, clusters) -> str:
+    """The registry prefix a cluster added to this control plane is stored with.
+
+    ``None`` -- the caller did not say -- inherits the prefix of a cluster
+    already here: they are served by the same management hosts, and a registry
+    those cannot reach is not reachable for the new cluster's images either. A
+    given value is taken as is, ``""`` included, which is how a caller opts the
+    new cluster out.
+    """
+    if container_image_prefix is not None:
+        return normalize_image_prefix(container_image_prefix)
+    for existing in clusters or []:
+        inherited = normalize_image_prefix(existing.container_image_prefix)
+        if inherited:
+            return inherited
+    return ""
+
+
 def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
                 distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity, qpair_count,
                 max_queue_size, inflight_io_threshold, strict_node_anti_affinity, is_single_node, name, cr_name=None,
@@ -760,6 +779,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
                 spdk_proxy_service=constants.K8S_SPDK_PROXY_SERVICE,
                 spdk_proxy_tls_secret=constants.K8S_SPDK_PROXY_TLS_SECRET,
                 node_label_suffix="",
+                container_image_prefix: str | None = None,
 ) -> str:
     """Thin wrapper around _add_cluster_impl() that serializes create calls
     for the same name behind a DbLock.
@@ -798,6 +818,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
         spdk_proxy_service=spdk_proxy_service,
         spdk_proxy_tls_secret=spdk_proxy_tls_secret,
         node_label_suffix=node_label_suffix,
+        container_image_prefix=container_image_prefix,
     )
     if not name:
         return _add_cluster_impl(**kwargs)
@@ -836,6 +857,7 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
                 spdk_proxy_service=constants.K8S_SPDK_PROXY_SERVICE,
                 spdk_proxy_tls_secret=constants.K8S_SPDK_PROXY_TLS_SECRET,
                 node_label_suffix="",
+                container_image_prefix: str | None = None,
 ) -> str:
     _validate_integrity_flags(inline_checksum, atomic_4k)
 
@@ -986,6 +1008,7 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
     cluster.nvmf_base_port = nvmf_base_port
     cluster.rpc_base_port = rpc_base_port
     cluster.snode_api_port = snode_api_port
+    cluster.container_image_prefix = _image_prefix_for_added_cluster(container_image_prefix, clusters)
     cluster.set_kms_settings(kms_settings)
     if backup_config:
         cluster.set_backup_config(backup_config)
@@ -3688,7 +3711,9 @@ def _run_on_mgmt_node(node, command: builtins.list[str], directory: str, image: 
     """Run ``command`` as root on a management node, with ``directory`` mounted.
 
     Host paths of the monitoring stack belong to root, and the image runs as
-    USER simplyblock; see _install_provisioning_on_all_managers.
+    USER simplyblock; see _install_provisioning_on_all_managers. ``image`` is
+    the management image as the cluster pulls it (Cluster.prefixed_image): the
+    node may hold it under no other name, and may reach no other registry.
     """
     node_docker = docker.DockerClient(base_url=f"tcp://{node.docker_ip_port}", version="auto", timeout=60)
     return node_docker.containers.run(

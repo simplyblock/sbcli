@@ -1832,10 +1832,17 @@ _PROMOTE_REFUSALS = {
 
 
 def _connection_strings(volumes: list[LVol], site: str) -> dict:
+    """The connect entries of each promoted volume on ``site``. A volume whose
+    connect is refused, by the volume itself or by a consistency-group
+    subsystem move holding its subsystem, refuses the promote naming it."""
     from simplyblock_core.controllers import lvol_controller
+    from simplyblock_core.exceptions import SubsystemMoveInProgressError
     out = {}
     for lvol in volumes:
-        entries, err = lvol_controller.connect_lvol(lvol.get_id(), site=site)
+        try:
+            entries, err = lvol_controller.connect_lvol(lvol.get_id(), site=site)
+        except SubsystemMoveInProgressError as e:
+            entries, err = False, str(e)
         if entries is False:
             raise SyncPromoteRefusedError(f"volume {lvol.get_id()}: {err}", [lvol.get_id()])
         out[lvol.get_id()] = entries
