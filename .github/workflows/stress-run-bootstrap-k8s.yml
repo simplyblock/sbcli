@@ -236,6 +236,15 @@ jobs:
           duration: ${{ env.LABRES_DURATION }}
           expect-hosts: ""
           disabled: ${{ env.LABRES_DISABLE }}
+          # Releasing a booking we already hold and taking a fresh one is
+          # justified only by the next sentence of this job: it is about to
+          # wipe these hosts anyway, so whatever the booking was protecting
+          # is forfeit regardless. With USE_EXISTING_CLUSTER that sentence
+          # is false -- the job touches no disk and stands up no k3s -- and
+          # the booking it would release is the one a person made by hand,
+          # ticking "Bootstrap k3s" in the console, to put the cluster there
+          # in the first place.
+          on-existing: ${{ inputs.USE_EXISTING_CLUSTER == true && 'reuse' || 'release' }}
         env:
           LABRES_TOKEN: ${{ secrets.LABRES_TOKEN }}
 
