@@ -52,11 +52,11 @@ _FAKES = {
 }
 
 
-def _script() -> str:
+def _script(reserved="0,8") -> str:
     env = Environment(loader=FileSystemLoader(str(TEMPLATE_DIR)), trim_blocks=True, lstrip_blocks=True)
     job = yaml.safe_load(env.get_template("storage_cpu_topology.yaml.j2").render(
         CORE_JOBNAME="snode-spdk-enable-cpu-topology-worker-1", NAMESPACE="simplyblock",
-        HOSTNAME="worker-1", RESERVED_SYSTEM_CPUS="0,8"))
+        HOSTNAME="worker-1", RESERVED_SYSTEM_CPUS=reserved))
     return job["spec"]["template"]["spec"]["containers"][0]["args"][0]
 
 
@@ -100,14 +100,10 @@ class _Host:
         with open(self.path(host_path)) as f:
             return f.read()
 
-    @property
-    def marker(self):
-        return os.path.join(self.root, "var/simplyblock/.cpu_topology_applied")
-
-    def run(self):
+    def run(self, reserved="0,8"):
         # The Job's container is busybox ash, which knows pipefail; dash, which
         # stands in for it here, does not in every version.
-        script = (_script()
+        script = (_script(reserved)
                   .replace("set -euo pipefail", "set -eu")
                   .replace("/host", os.path.join(self.root, "host"))
                   .replace("/var/simplyblock/", os.path.join(self.root, "var/simplyblock") + "/")
@@ -170,7 +166,6 @@ class TestCpuTopologyJob(unittest.TestCase):
         self.assertEqual(_restarts(calls), ["restart " + SNAP_UNIT])
         self.assertFalse(os.path.exists(host.path("/var/lib/kubelet/cpu_manager_state")),
                          "the CPU manager state of the old policy is still there, and the kubelet refuses it")
-        self.assertTrue(os.path.exists(host.marker))
 
     def test_clears_the_reserved_cgroups_the_kubelet_refuses_beside_reserved_cpus(self):
         """Amazon Linux 2023 sets both, and the kubelet does not start with
@@ -202,12 +197,11 @@ class TestCpuTopologyJob(unittest.TestCase):
         self.assertEqual(config["topologyManagerPolicy"], "single-numa-node")
         self.assertEqual(config["cgroupDriver"], "systemd")
         self.assertEqual(_restarts(calls), ["restart kubelet.service"])
-        self.assertTrue(os.path.exists(host.marker))
 
     def test_a_kubelet_that_does_not_come_back_gets_its_configuration_back(self):
         """A configuration the kubelet refuses takes the node out of the
         cluster. The Job puts the old file back, restarts the kubelet with it,
-        and fails, instead of marking the node configured."""
+        and fails."""
         host = self._eks_host(comes_back=False)
         before = host.read(EKS_CONFIG)
 
@@ -216,7 +210,6 @@ class TestCpuTopologyJob(unittest.TestCase):
         self.assertNotEqual(done.returncode, 0)
         self.assertEqual(host.read(EKS_CONFIG), before)
         self.assertEqual(_restarts(calls), ["restart " + SNAP_UNIT] * 2)
-        self.assertFalse(os.path.exists(host.marker))
 
     def test_a_host_with_no_known_kubelet_unit_fails_and_keeps_its_configuration(self):
         host = self._eks_host()
@@ -228,18 +221,37 @@ class TestCpuTopologyJob(unittest.TestCase):
         self.assertNotEqual(done.returncode, 0)
         self.assertEqual(host.read(EKS_CONFIG), before)
         self.assertEqual(_restarts(calls), [])
-        self.assertFalse(os.path.exists(host.marker))
 
     def test_a_configured_node_is_left_alone(self):
+        """Idempotent on the content of the configuration, not on a marker
+        file: a second run finds every setting in place and restarts nothing.
+        The JSON form is read back with jq, since the settings are not at
+        the start of their lines there."""
         host = self._eks_host()
-        open(host.marker, "w").close()
-        before = host.read(EKS_CONFIG)
+        done, _ = host.run()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        configured = host.read(EKS_CONFIG)
 
         done, calls = host.run()
 
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
-        self.assertEqual(host.read(EKS_CONFIG), before)
-        self.assertEqual(calls, [])
+        self.assertIn("nothing to apply", done.stdout)
+        self.assertEqual(host.read(EKS_CONFIG), configured)
+        self.assertEqual(_restarts(calls), ["restart " + SNAP_UNIT], "the first run's restart only")
+
+    def test_a_changed_reserved_set_is_applied_again(self):
+        """reservedSystemCPUs is the operator's choice and may change on the
+        StorageCluster. A marker file would have left the kubelet on the old
+        set; the content check sees the difference and applies the new one."""
+        host = self._eks_host()
+        done, _ = host.run(reserved="0,8")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+
+        done, calls = host.run(reserved="0,1")
+
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(json.loads(host.read(EKS_CONFIG))["reservedSystemCPUs"], "0,1")
+        self.assertEqual(_restarts(calls), ["restart " + SNAP_UNIT] * 2)
 
 
 if __name__ == "__main__":
