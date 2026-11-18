@@ -18,6 +18,14 @@ import unittest
 from simplyblock_core import utils as core_utils
 
 
+def _read_count(path):
+    """The integer a record file holds, or None when there is no file."""
+    if not os.path.exists(path):
+        return None
+    with open(path) as f:
+        return int(f.read())
+
+
 class TestUserHugepagesBaseline(unittest.TestCase):
 
     def setUp(self):
@@ -28,7 +36,7 @@ class TestUserHugepagesBaseline(unittest.TestCase):
         out = {}
         for name in (f'hugepages_baseline_node{numa}', f'hugepages_sb_node{numa}'):
             path = os.path.join(self.dir, name)
-            out[name] = int(open(path).read()) if os.path.exists(path) else None
+            out[name] = _read_count(path)
         return out
 
     def test_first_sight_takes_the_whole_pool_as_the_users(self):

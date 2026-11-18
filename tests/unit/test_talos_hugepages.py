@@ -33,6 +33,14 @@ MIB = 1024 * 1024
 GIB = 1024 * MIB
 
 
+def _read_count(path):
+    """The integer a record file holds, or None when there is no file."""
+    if not os.path.exists(path):
+        return None
+    with open(path) as f:
+        return int(f.read())
+
+
 def _env():
     return Environment(loader=PackageLoader('simplyblock_web', 'templates'), trim_blocks=True, lstrip_blocks=True)
 
@@ -350,7 +358,7 @@ class _TalosHandlerCase(unittest.TestCase):
         out = []
         for name in (f'hugepages_baseline_node{numa}', f'hugepages_sb_node{numa}'):
             path = os.path.join(self.state_dir, name)
-            out.append(int(open(path).read()) if os.path.exists(path) else None)
+            out.append(_read_count(path))
         return tuple(out)
 
     def _provisioned(self, user_pages, total_pages, numa=0):

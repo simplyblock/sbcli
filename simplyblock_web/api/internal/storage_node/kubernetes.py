@@ -1077,16 +1077,16 @@ def _provision_talos_hugepages(required_mib, node_name, namespace, values):
         err = _wait_for_talos_pool(pool)
         if err:
             return err
-        kubelet_short = True  # the kubelet booted before this pool existed
     _save_talos_pool(pool)
 
-    if kubelet_short:
-        logger.info("Restarting the kubelet on Talos node '%s' so it advertises the huge-page pool", node_name)
-        err = _run_talos_job("kubelet", node_name, namespace, job_values)
-        if err:
-            return err
-        return _wait_for_kubelet_hugepages(k8s_core_v1, node_name, required_mib)
-    return None
+    # Either the pool was just grown, so the kubelet booted before it existed,
+    # or the pool was there and only the kubelet's capacity was short: the
+    # kubelet restarts in both cases.
+    logger.info("Restarting the kubelet on Talos node '%s' so it advertises the huge-page pool", node_name)
+    err = _run_talos_job("kubelet", node_name, namespace, job_values)
+    if err:
+        return err
+    return _wait_for_kubelet_hugepages(k8s_core_v1, node_name, required_mib)
 
 
 class SPDKParams(BaseModel):
