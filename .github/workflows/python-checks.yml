@@ -15,7 +15,7 @@ permissions:
 jobs:
   clipy-test:
     name: Ensure cli.py is up to date
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # 26.04 runners have no Python 3.9 build for setup-python
 
     steps:
     - uses: actions/checkout@v7
@@ -42,7 +42,7 @@ jobs:
 
   lint:
     name: Linter
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # 26.04 runners have no Python 3.9 build for setup-python
 
     steps:
     - uses: actions/checkout@v7
@@ -62,7 +62,7 @@ jobs:
 
   types:
     name: Type checker
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # 26.04 runners have no Python 3.9 build for setup-python
 
     steps:
     - uses: actions/checkout@v7
