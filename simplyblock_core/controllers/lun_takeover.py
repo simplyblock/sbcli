@@ -711,15 +711,13 @@ def unfence_node(device_id, node_id) -> bool:
     if dev.serving_node() == node_id:
         logger.error("Unfence of %s on %s refused: it is the serving node", node_id, device_id)
         return False
-    try:
-        if not array.plugin_for_cluster(cluster).unfence(
-                multi_attach.array_lun_ref(dev), multi_attach.array_host_ref(node)):
-            logger.error("Unfence of %s on LUN %s not acknowledged", node_id, dev.lun_wwn)
-            return False
-    except Exception as e:                                  # noqa: BLE001
-        logger.error("Unfence of %s on LUN %s failed: %s", node_id, dev.lun_wwn, e)
-        return False
 
+    # The record first, the array second. The attachment reconcile
+    # (array_controller.reconcile_lun_attachments, health check) detaches
+    # every host the record still lists as fenced: attaching first left a
+    # window in which it detached the LUN again (2026-11-19 FTT1 bed, kill of
+    # an owner's SPDK). Once the record is clear the reconcile attaches the
+    # node itself, so a failed array call below is retried there.
     def _mut(n):
         d = _device_on_owner(n, device_id)
         if d is None or node_id not in d.fenced_node_ids:
@@ -729,4 +727,12 @@ def unfence_node(device_id, node_id) -> bool:
 
     db.atomic_update(owner, _mut)
     _event(owner.cluster_id, dev, f"Node {node_id} unfenced from LUN {dev.lun_wwn} of device {device_id}")
+    try:
+        if not array.plugin_for_cluster(cluster).unfence(
+                multi_attach.array_lun_ref(dev), multi_attach.array_host_ref(node)):
+            logger.warning("Unfence of %s on LUN %s not acknowledged by the array; the "
+                           "attachment reconcile presents it", node_id, dev.lun_wwn)
+    except Exception as e:                                  # noqa: BLE001
+        logger.warning("Array unfence of %s on LUN %s failed (%s); the attachment "
+                       "reconcile presents it", node_id, dev.lun_wwn, e)
     return True

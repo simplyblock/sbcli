@@ -844,3 +844,28 @@ class TestReintegrateFencedNode(_TakeoverCase):
             self.assertEqual(lun_takeover.reintegrate_fenced_node(a), [DEV_ID])
         self.assertTrue(a.spdk.ops("bdev_alceml_delete"))
         self.assertEqual(self.dev(db).fenced_node_ids, [])
+
+
+class TestUnfenceOrder(_TakeoverCase):
+    """The fence record is cleared before the array call: the attachment
+    reconcile detaches any host the record still lists as fenced."""
+
+    def test_record_cleared_before_array_attach(self):
+        db, _ = _bed()
+        self.assertEqual(self.run_takeover(db), lun_takeover.TAKEN_OVER)
+        seen = []
+        orig = FakeArrayPlugin.unfence
+
+        def _unfence(plugin, lun, host):
+            seen.append(list(self.dev(db).fenced_node_ids))
+            return orig(plugin, lun, host)
+        with patch.object(FakeArrayPlugin, "unfence", _unfence):
+            self.assertTrue(lun_takeover.unfence_node(DEV_ID, "node-a"))
+        self.assertEqual(seen, [[]])
+
+    def test_array_failure_keeps_record_cleared(self):
+        db, _ = _bed()
+        self.assertEqual(self.run_takeover(db), lun_takeover.TAKEN_OVER)
+        with patch.object(FakeArrayPlugin, "unfence", side_effect=RuntimeError("api")):
+            self.assertTrue(lun_takeover.unfence_node(DEV_ID, "node-a"))
+        self.assertEqual(self.dev(db).fenced_node_ids, [])

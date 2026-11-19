@@ -567,6 +567,11 @@ def device_repair(device_id, force=False):
             "Device %s was removed by operator request; not repairing",
             device_id)
         return False
+    if multi_attach.not_servable_here(device, device.node_id):
+        logger.info("Device %s: its LUN is served by node %s (owner fenced: %s); "
+                    "the owner does not repair it", device_id, device.serving_node(),
+                    multi_attach.fenced_from(device, device.node_id))
+        return False
 
     if device.status != NVMeDevice.STATUS_ONLINE and device.retries_exhausted and not force:
         logger.debug("Device %s repair budget exhausted; not retrying", device_id)
@@ -715,6 +720,11 @@ def device_repair_due(device):
     if device.admin_removed:
         # The operator removed this device on purpose. Never resurrect it --
         # not on any attempt, and not under force.
+        return False
+    if multi_attach.not_servable_here(device, device.node_id):
+        # Multi-attach: another node serves the LUN (or the owner is fenced
+        # from it). Repair rebuilds the stack on the owner, which must not
+        # hold one; the serving node's stack is the takeover's business.
         return False
     schedule = constants.DEVICE_REPAIR_BACKOFF_SEC
     if device.repair_attempts >= len(schedule):
