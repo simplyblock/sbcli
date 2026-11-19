@@ -67,12 +67,40 @@ def _lookup_storage_pool(pool_id: UUID, cluster: Cluster) -> PoolModel:
 StoragePool = Annotated[PoolModel, Depends(_lookup_storage_pool)]
 
 
+def _volume_by_ns_uuid(volume_id: str, pool_id: str) -> LVol | None:
+    """The volume of *pool_id* that a migration or fail-back made out of
+    *volume_id*: its record has a new id, its namespace keeps the old one
+    (``LVol.ns_uuid``).
+
+    A Kubernetes PV names its volume for life, so after a migration the CSI
+    still asks for the original id. Bed bf28 (2026-11-19): every migrated
+    volume answered 404 in both clusters, the CSI's reconnect loop could not
+    restore the paths a node crash had taken, and vol-1 ran on 1 of 6 paths.
+    Deleted copies are skipped; of several live ones the online one wins, then
+    the newest."""
+    candidates = [lv for lv in _db.get_lvols_by_pool_id(pool_id)
+                  if getattr(lv, "ns_uuid", "") == volume_id
+                  and not getattr(lv, "deleted", False)
+                  and lv.status != LVol.STATUS_IN_DELETION]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda lv: (lv.status == LVol.STATUS_ONLINE, str(lv.create_dt or "")),
+                    reverse=True)
+    return candidates[0]
+
+
 def _lookup_volume(volume_id: UUID, pool: StoragePool) -> LVol:
     try:
         volume = _db.get_lvol_by_id(str(volume_id))
     except KeyError as e:
-        raise HTTPException(404, str(e))
+        volume = _volume_by_ns_uuid(str(volume_id), pool.get_id())
+        if volume is None:
+            raise HTTPException(404, str(e))
+        return volume
     if volume.pool_uuid != pool.get_id():
+        moved = _volume_by_ns_uuid(str(volume_id), pool.get_id())
+        if moved is not None:
+            return moved
         raise HTTPException(404, f'LVol {volume_id} not found')
     return volume
 
