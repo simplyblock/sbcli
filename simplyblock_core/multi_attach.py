@@ -212,8 +212,8 @@ def fenced_from(device, node_id) -> bool:
 def not_servable_here(device, node_id) -> bool:
     """``node_id`` must not build a stack for ``device``: another node serves
     its LUN, or ``node_id`` is fenced from it (the takeover after its failure
-    did not complete; an operator unfences it -- lun_takeover.unfence_node --
-    once its host is known to hold no queued writes)."""
+    did not complete, or it has not been reintegrated yet --
+    lun_takeover.reintegrate_fenced_node / unfence_node)."""
     return served_elsewhere(device, node_id) or fenced_from(device, node_id)
 
 

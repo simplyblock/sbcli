@@ -790,3 +790,57 @@ class TestRetireStaleLocalStack(unittest.TestCase):
         a, _dev, retired = self._setup(with_stack=False)
         self.assertEqual(retired, [])
         self.assertFalse(a.spdk.ops("detach"))
+
+
+class TestReintegrateFencedNode(_TakeoverCase):
+    """A node a takeover fenced becomes a standby again (unfenced at the array)
+    once it is ONLINE, holds no stack of the LUN, and its host shows no disk of
+    the LUN; otherwise it stays fenced."""
+
+    def _taken_over(self):
+        db, _ = _bed()
+        self.assertEqual(self.run_takeover(db), lun_takeover.TAKEN_OVER)
+        a = db.get_storage_node_by_id("node-a")
+        a.status = StorageNode.STATUS_ONLINE
+        a.agent.lun_info.return_value = ([], None)
+        return db, a
+
+    def test_unfenced_when_host_shows_no_lun(self):
+        db, a = self._taken_over()
+        self.assertEqual(lun_takeover.reintegrate_fenced_node(a), [DEV_ID])
+        self.assertEqual(FakeArrayPlugin.calls[-1], ("unfence", WWN, "host-node-a"))
+        self.assertEqual(self.dev(db).fenced_node_ids, [])
+        self.assertEqual(self.dev(db).serving_node(), "node-b")
+
+    def test_stays_fenced_while_host_shows_lun(self):
+        db, a = self._taken_over()
+        a.agent.lun_info.return_value = ([_lun_entry()], None)
+        self.assertEqual(lun_takeover.reintegrate_fenced_node(a), [])
+        self.assertEqual(self.dev(db).fenced_node_ids, ["node-a"])
+
+    def test_stays_fenced_when_inventory_fails(self):
+        db, a = self._taken_over()
+        a.agent.lun_info.return_value = (None, "boom")
+        self.assertEqual(lun_takeover.reintegrate_fenced_node(a), [])
+        self.assertEqual(self.dev(db).fenced_node_ids, ["node-a"])
+
+    def test_stays_fenced_while_serving_node_is_down(self):
+        db, a = self._taken_over()
+        db.get_storage_node_by_id("node-b").status = StorageNode.STATUS_UNREACHABLE
+        self.assertEqual(lun_takeover.reintegrate_fenced_node(a), [])
+        self.assertEqual(self.dev(db).fenced_node_ids, ["node-a"])
+
+    def test_not_while_node_is_not_online(self):
+        db, a = self._taken_over()
+        a.status = StorageNode.STATUS_UNREACHABLE
+        self.assertEqual(lun_takeover.reintegrate_fenced_node(a), [])
+
+    def test_stale_stack_is_retired_first(self):
+        db, a = self._taken_over()
+        dev = self.dev(db)
+        a.spdk.bdevs[dev.alceml_bdev] = {"name": dev.alceml_bdev}
+        a.spdk.bdevs[f"{dev.alceml_bdev}_PT"] = {"name": f"{dev.alceml_bdev}_PT"}
+        with patch("simplyblock_core.db_controller.DBController", return_value=db):
+            self.assertEqual(lun_takeover.reintegrate_fenced_node(a), [DEV_ID])
+        self.assertTrue(a.spdk.ops("bdev_alceml_delete"))
+        self.assertEqual(self.dev(db).fenced_node_ids, [])

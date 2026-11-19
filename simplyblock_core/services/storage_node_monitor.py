@@ -2914,6 +2914,7 @@ def check_node(snode):
         _unreachable_since.pop(snode.get_id(), None)
     if snode.status == StorageNode.STATUS_ONLINE:
         storage_network.publish_ports(snode, at_most_every=PORT_PUBLISH_INTERVAL_SEC)
+        _reintegrate_fenced_luns(snode)
 
     # Self-heal a node stranded in IN_SHUTDOWN. A completed shutdown flips the
     # node to OFFLINE; if it is still IN_SHUTDOWN well past the grace window the
@@ -3217,6 +3218,30 @@ def _retire_taken_over_luns(snode):
         lun_takeover.retire_stale_local_stack(snode)
     except Exception as e:                                  # noqa: BLE001
         logger.error("Retiring taken-over LUN stacks on %s failed: %s", snode.get_id(), e)
+
+
+_reintegrate_last: dict = {}
+REINTEGRATE_INTERVAL_SEC = 30
+
+
+def _reintegrate_fenced_luns(snode):
+    """Multi-attach clusters (only): an ONLINE node a takeover fenced from a
+    LUN becomes a standby of it again (lun_takeover.reintegrate_fenced_node),
+    checked at most every REINTEGRATE_INTERVAL_SEC per node."""
+    node_id = snode.get_id()
+    if not any(multi_attach.fenced_from(d, node_id)
+               for n in db.get_storage_nodes_by_cluster_id(snode.cluster_id)
+               for d in n.nvme_devices or []):
+        return
+    now = time.monotonic()
+    if now - _reintegrate_last.get(node_id, 0) < REINTEGRATE_INTERVAL_SEC:
+        return
+    _reintegrate_last[node_id] = now
+    try:
+        from simplyblock_core.controllers import lun_takeover
+        lun_takeover.reintegrate_fenced_node(snode)
+    except Exception as e:                                  # noqa: BLE001
+        logger.error("Reintegrating fenced LUNs of %s failed: %s", node_id, e)
 
 
 def readmit_devices_after_node_online(node_id):

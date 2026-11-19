@@ -621,13 +621,84 @@ def retire_stale_local_stack(node) -> list:
     return retired
 
 
+def reintegrate_fenced_node(node) -> list:
+    """Make a node that is back ONLINE a standby again for every LUN a
+    takeover fenced it from: unfence it at the array (re-present the LUN).
+
+    Only when nothing it held can still reach the LUN late:
+
+    * the LUN is served by another ONLINE node (the takeover completed; a
+      fenced node of a takeover still holding is never unfenced);
+    * the node holds no alceml or PT bdev of the device (its stale stack was
+      retired, or a restart never built it);
+    * the node's host shows no disk carrying the LUN (``lun_info`` empty): the
+      fence removed every path, so no host-side queue (multipath
+      ``queue_if_no_path`` included) holds writes for it. A host that still
+      shows the LUN keeps the fence until an operator calls
+      :func:`unfence_node`.
+
+    Returns the ids of the devices unfenced; best-effort, idempotent."""
+    db = DBController()
+    node_id = node.get_id()
+    if node.status != StorageNode.STATUS_ONLINE:
+        return []
+    nodes = db.get_storage_nodes_by_cluster_id(node.cluster_id)
+    by_id = {n.get_id(): n for n in nodes}
+    todo = [dev for owner in nodes for dev in owner.nvme_devices or []
+            if multi_attach.fenced_from(dev, node_id)]
+    if not todo:
+        return []
+    try:
+        rpc = node.rpc_client(timeout=10, retry=1)
+    except Exception as e:                                  # noqa: BLE001
+        logger.info("LUN reintegrate: no RPC client for %s: %s", node_id, e)
+        return []
+    done = []
+    for dev in todo:
+        serving = by_id.get(dev.serving_node())
+        if serving is None or serving.get_id() == node_id or serving.status != StorageNode.STATUS_ONLINE:
+            continue
+        try:
+            stale = bool(rpc.bdev_get(dev.alceml_bdev)) or bool(rpc.bdev_get(f"{dev.alceml_bdev}_PT"))
+        except Exception:                                   # noqa: BLE001
+            stale = False
+        if stale:
+            retire_stale_local_stack(node)
+            try:
+                stale = bool(rpc.bdev_get(dev.alceml_bdev)) or bool(rpc.bdev_get(f"{dev.alceml_bdev}_PT"))
+            except Exception:                               # noqa: BLE001
+                stale = False
+            if stale:
+                logger.info("LUN reintegrate: %s still holds a stack of %s; stays fenced",
+                            node_id, dev.get_id())
+                continue
+        try:
+            result, err = node.client(timeout=15).lun_info(dev.lun_wwn)
+        except Exception as e:                              # noqa: BLE001
+            logger.info("LUN reintegrate: agent of %s not reached: %s", node_id, e)
+            continue
+        if err or not isinstance(result, list):
+            logger.info("LUN reintegrate: LUN inventory of %s unavailable (%s)", node_id, err)
+            continue
+        if result:
+            logger.warning("LUN reintegrate: host of %s still shows LUN %s (%s); it stays fenced "
+                           "until an operator unfences it", node_id, dev.lun_wwn,
+                           [e.get("device_path") for e in result if isinstance(e, dict)])
+            continue
+        if unfence_node(dev.get_id(), node_id):
+            logger.info("LUN reintegrate: %s is a standby of LUN %s again", node_id, dev.lun_wwn)
+            done.append(dev.get_id())
+    return done
+
+
 # ------------------------------------------------------------- operator
 
 def unfence_node(device_id, node_id) -> bool:
     """Give ``node_id`` access to the LUN of ``device_id`` again and drop it
-    from ``fenced_node_ids``. Never called automatically: only once the
-    node's host is known to hold no queued writes for the LUN (its multipath
-    queues drained or the host rebooted). Returns True on success."""
+    from ``fenced_node_ids``. Called by :func:`reintegrate_fenced_node` once
+    the node's host shows no disk of the LUN, else by an operator once the
+    host is known to hold no queued writes for it (its multipath queues
+    drained or the host rebooted). Returns True on success."""
     db = DBController()
     try:
         dev = db.get_storage_device_by_id(device_id)
