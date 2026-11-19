@@ -48,12 +48,26 @@ COPY requirements.txt requirements.txt
 # setuptools stays in the image (setup.py install below needs it); 84.1.0 fixes
 # GHSA-xmj3-9gf7-h52w.
 RUN pip3 install --upgrade pip 'setuptools>=84.1.0'
-RUN yum remove python-urllib3 -y
+# --noautoremove is load-bearing. UBI ships iproute and dmidecode as
+# dependencies of subscription-manager, so the `dnf install` above finds them
+# "already installed" and does not mark them as explicitly requested. Removing
+# python-urllib3 takes subscription-manager with it, and without the flag dnf
+# then auto-removes its now-unused dependencies -- leaving an image with no
+# `ip` (the node agent reports no network interfaces, add-node fails) and no
+# `dmidecode` (empty system id).
+RUN dnf remove -y --noautoremove python-urllib3
 RUN pip3 install -r requirements.txt
 
 RUN dnf upgrade -y
 
 RUN dnf clean all
+
+# Fail the build when a tool the node agent shells out to is missing, whatever
+# the reason: a later layer removing a package is silent otherwise, and the
+# agent turns a missing binary into an empty result rather than an error.
+RUN for tool in ip dmidecode lsblk nvme modprobe lspci sgdisk ping sudo hostname; do \
+        command -v "$tool" >/dev/null || { echo "missing required tool: $tool" >&2; exit 1; }; \
+    done
 
 RUN useradd -ms /bin/bash simplyblock
 RUN echo "simplyblock  ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
