@@ -322,7 +322,21 @@ class TestGroupColocationRoutes:
         resp = client.post(f'{BASE}/members/plan', json={"lvol_id": factories.VOLUME_ID})
         assert resp.status_code == 200
         assert resp.json() == {"steps": ["migrate", "join"], "target_node_id": "N1",
-                               "migrate_lvol_ids": ["v", "sib"], "target_nqn": ""}
+                               "migrate_lvol_ids": ["v", "sib"], "target_nqn": "",
+                               "colocation": None}
+
+    def test_the_join_plan_carries_the_colocation_outcome(self, client, db, cluster, monkeypatch):
+        import simplyblock_web.api.v2.cluster.consistency_group as route
+        from simplyblock_core.controllers import cg_colocation
+        db.get_consistency_group_by_id.return_value = factories.make_consistency_group()
+        db.get_lvol_by_id.return_value = factories.make_volume()
+        plan = cg_colocation.JoinPlan(steps=["join", "colocate"], target_nqn="A", colocation={
+            "target_nqn": "", "target_is_new": True, "moving_lvol_ids": ["a1", "v"], "refusal": ""})
+        monkeypatch.setattr(route.cg_colocation, "late_join_plan", lambda g, v: plan)
+        resp = client.post(f'{BASE}/members/plan', json={"lvol_id": factories.VOLUME_ID})
+        assert resp.status_code == 200
+        assert resp.json()["colocation"] == {"target_nqn": "", "target_is_new": True,
+                                             "moving_lvol_ids": ["a1", "v"], "refusal": ""}
 
     def test_a_join_that_can_never_succeed_is_409(self, client, db, cluster, monkeypatch):
         import simplyblock_web.api.v2.cluster.consistency_group as route
@@ -365,6 +379,146 @@ class TestGroupColocationRoutes:
         resp = client.post(f'{BASE}/migration', json={"target_node_id": "N2"})
         assert resp.status_code == 409
         mc.create_group_migration.assert_called_once_with(factories.VOLUME_ID, "N2", host_nqn=None)
+
+
+_MOVE_RECORD = {"id": "M1", "request_id": "r1", "target_nqn": "nqn.t", "target_is_new": True,
+    "namespaces_at": "source", "deadline": 0, "status": "reserved",
+    "node_ids": ["N1"],
+    "volumes": [{"lvol_id": "a1", "source_nqn": "nqn.a", "source_nsid": 1,
+                 "ns_uuid": "u1", "nguid": "g1", "bdev": "LVS/a1", "target_nsid": 0}]}
+
+
+class TestSubsystemMoveRoutes:
+    """The subsystem-move resource (design-cg-live-subsystem-flip.md §9)."""
+
+    @staticmethod
+    def _route(db, monkeypatch, **fns):
+        import simplyblock_web.api.v2.cluster.consistency_group as route
+        db.get_consistency_group_by_id.return_value = factories.make_consistency_group()
+        for name, fn in fns.items():
+            monkeypatch.setattr(route.cg_subsystem_move, name, fn)
+        return route
+
+    def test_create_returns_the_move(self, client, db, cluster, monkeypatch):
+        self._route(db, monkeypatch, create_subsystem_move=lambda g, lid, rid, **kw: dict(_MOVE_RECORD))
+        resp = client.post(f'{BASE}/subsystem-moves', json={"lvol_id": "a1", "request_id": "r1"})
+        assert resp.status_code == 200
+        assert resp.json() == {"id": "M1", "request_id": "r1", "target_nqn": "nqn.t",
+                               "target_is_new": True, "namespaces_at": "source", "deadline": 0,
+                               "status": "reserved", "purpose": "join",
+                               "volumes": [{"lvol_id": "a1", "source_nqn": "nqn.a", "source_nsid": 1,
+                                            "ns_uuid": "u1", "nguid": "g1", "target_nsid": 0}]}
+
+    def test_create_at_the_subsystem_limit_is_409_naming_node_and_limit(self, client, db, cluster,
+                                                                        monkeypatch):
+        from simplyblock_core.controllers import cg_colocation
+
+        def refuse(g, lid, rid, **kw):
+            raise cg_colocation.SubsystemLimitReached("N1", 500)
+        self._route(db, monkeypatch, create_subsystem_move=refuse)
+        resp = client.post(f'{BASE}/subsystem-moves', json={"lvol_id": "a1", "request_id": "r1"})
+        assert resp.status_code == 409
+        assert resp.json()["detail"]["reason"] == "SubsystemLimitReached"
+        assert (resp.json()["detail"]["node_id"], resp.json()["detail"]["limit"]) == ("N1", 500)
+
+    def test_create_while_another_move_is_active_is_409(self, client, db, cluster, monkeypatch):
+        from simplyblock_core.controllers import cg_subsystem_move
+
+        def refuse(g, lid, rid, **kw):
+            raise cg_subsystem_move.MoveConflictError("move M0 already active")
+        self._route(db, monkeypatch, create_subsystem_move=refuse)
+        resp = client.post(f'{BASE}/subsystem-moves', json={"lvol_id": "a1", "request_id": "r1"})
+        assert resp.status_code == 409
+        assert resp.json()["detail"]["reason"] == "MoveConflict"
+
+    def test_create_is_a_join_unless_the_request_says_leave(self, client, db, cluster, monkeypatch):
+        """Regression/feature: 2026-11-03-cg-relabel-move"""
+        seen = []
+
+        def create(g, lid, rid, purpose="join"):
+            seen.append(purpose)
+            return dict(_MOVE_RECORD, purpose=purpose)
+        self._route(db, monkeypatch, create_subsystem_move=create)
+        resp = client.post(f'{BASE}/subsystem-moves', json={"lvol_id": "a1", "request_id": "r1"})
+        assert resp.status_code == 200 and resp.json()["purpose"] == "join"
+        resp = client.post(f'{BASE}/subsystem-moves',
+                           json={"lvol_id": "a1", "request_id": "r2", "purpose": "leave"})
+        assert resp.status_code == 200 and resp.json()["purpose"] == "leave"
+        assert seen == ["join", "leave"]
+
+    def test_create_with_an_unknown_purpose_is_rejected(self, client, db, cluster, monkeypatch):
+        """Regression/feature: 2026-11-03-cg-relabel-move"""
+        self._route(db, monkeypatch)
+        resp = client.post(f'{BASE}/subsystem-moves',
+                           json={"lvol_id": "a1", "request_id": "r1", "purpose": "swap"})
+        assert resp.status_code == 422
+
+    def test_a_request_without_a_request_id_is_rejected(self, client, db, cluster, monkeypatch):
+        self._route(db, monkeypatch)
+        resp = client.post(f'{BASE}/subsystem-moves', json={"lvol_id": "a1"})
+        assert resp.status_code == 422
+
+    def test_prepare_returns_the_target_connect_entries(self, client, db, cluster, monkeypatch):
+        seen = {}
+
+        def prepare(g, mid, host_nqn=None):
+            seen["args"] = (mid, host_nqn)
+            return dict(_MOVE_RECORD), [{"nqn": "nqn.t", "ip": "10.0.0.1"}]
+        self._route(db, monkeypatch, prepare_subsystem_move=prepare)
+        resp = client.post(f'{BASE}/subsystem-moves/M1/prepare', json={"host_nqn": "nqn.host"})
+        assert resp.status_code == 200
+        assert resp.json()["connect"] == [{"nqn": "nqn.t", "ip": "10.0.0.1"}]
+        assert resp.json()["move"]["id"] == "M1"
+        assert seen["args"] == ("M1", "nqn.host")
+
+    def test_a_move_past_its_deadline_is_409(self, client, db, cluster, monkeypatch):
+        from simplyblock_core.controllers import cg_subsystem_move
+
+        def late(g, mid, deadline):
+            raise cg_subsystem_move.DeadlinePassedError("deadline passed")
+        self._route(db, monkeypatch, move_subsystem_move=late)
+        resp = client.post(f'{BASE}/subsystem-moves/M1/move', json={"deadline": 1})
+        assert resp.status_code == 409
+        assert resp.json()["detail"]["reason"] == "DeadlinePassed"
+
+    def test_a_failed_move_is_409_naming_where_the_namespaces_are(self, client, db, cluster,
+                                                                  monkeypatch):
+        from simplyblock_core.controllers import cg_subsystem_move
+
+        def fail(g, mid, deadline):
+            raise cg_subsystem_move.MoveFailedError("add failed", "source")
+        self._route(db, monkeypatch, move_subsystem_move=fail)
+        resp = client.post(f'{BASE}/subsystem-moves/M1/move', json={"deadline": 2000000000})
+        assert resp.status_code == 409
+        assert resp.json()["detail"] == {"reason": "MoveFailed", "message": "add failed",
+                                         "namespaces_at": "source"}
+
+    def test_commit_and_rollback_are_204(self, client, db, cluster, monkeypatch):
+        calls = []
+        self._route(db, monkeypatch,
+                    commit_subsystem_move=lambda g, mid: calls.append(("commit", mid)),
+                    rollback_subsystem_move=lambda g, mid: calls.append(("rollback", mid)))
+        assert client.post(f'{BASE}/subsystem-moves/M1/commit').status_code == 204
+        assert client.post(f'{BASE}/subsystem-moves/M1/rollback').status_code == 204
+        assert calls == [("commit", "M1"), ("rollback", "M1")]
+
+    def test_a_step_overlapping_another_step_is_409(self, client, db, cluster, monkeypatch):
+        from simplyblock_core.controllers import cg_subsystem_move
+
+        def busy(g, mid, **kw):
+            raise cg_subsystem_move.MoveConflictError("another step of subsystem move M1 is running")
+        self._route(db, monkeypatch, prepare_subsystem_move=busy, rollback_subsystem_move=busy)
+        for step in ("prepare", "rollback"):
+            resp = client.post(f'{BASE}/subsystem-moves/M1/{step}')
+            assert resp.status_code == 409, step
+            assert resp.json()["detail"]["reason"] == "MoveConflict"
+
+    def test_an_unknown_move_is_404(self, client, db, cluster, monkeypatch):
+        def missing(g, mid):
+            raise KeyError(mid)
+        self._route(db, monkeypatch, get_subsystem_move=missing, commit_subsystem_move=missing)
+        assert client.get(f'{BASE}/subsystem-moves/nope').status_code == 404
+        assert client.post(f'{BASE}/subsystem-moves/nope/commit').status_code == 404
 
 
 class TestTakeGeneration:

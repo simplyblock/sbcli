@@ -12,6 +12,32 @@ from simplyblock_core.models.base_model import BaseModel, default_factory
 _KMS_SETTINGS_ADAPTER: TypeAdapter[Any] = TypeAdapter(KMSSettings)
 
 
+def normalize_image_prefix(prefix: str | None) -> str:
+    """The registry/proxy ``prefix`` in the one form it is stored and compared in.
+
+    No surrounding whitespace and no trailing ``/``; ``""`` for none. Everything
+    that takes a prefix from outside (the CLI, the API, a cluster record) goes
+    through here, so the shell and compose side never sees another spelling.
+    """
+    return (prefix or "").strip().rstrip("/")
+
+
+def prefix_image(prefix: str | None, image: str) -> str:
+    """``image`` behind the registry/proxy ``prefix``.
+
+    The prefix is a path such as ``registry-1.docker.io``, joined
+    with exactly one ``/`` whether or not it carries a trailing slash. An empty
+    prefix leaves the image as named. Idempotent: an image already carrying the
+    prefix -- e.g. one read back from a storage node record written by an
+    earlier call -- is returned unchanged, so callers can apply it to any image
+    without tracking where it came from.
+    """
+    prefix = normalize_image_prefix(prefix)
+    if not prefix or not image or image.startswith(f"{prefix}/"):
+        return image
+    return f"{prefix}/{image}"
+
+
 class HashicorpVaultSettings(BaseModel):
     """Superseded by ``Cluster.kms_settings`` (a validated ``KMSSettings``
     union, see ``simplyblock_core.kms``). Kept only so a record written before
@@ -486,6 +512,10 @@ class Cluster(BaseModel):
             raise ValueError(f"Cluster {self.get_id()} has no backup configuration")
 
         return self._resolve_backup_config(self.backup_config)
+
+    def prefixed_image(self, image: str) -> str:
+        """``image`` as this cluster pulls it, behind ``container_image_prefix``."""
+        return prefix_image(self.container_image_prefix, image)
 
     def set_backup_config(self, config: Mapping[str, Any]) -> None:
         """Validate a raw backup configuration and store it on this record.
