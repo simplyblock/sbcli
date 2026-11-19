@@ -59,6 +59,25 @@ def test_bed_bf26_a_host_only_on_the_side_that_goes_is_stranded(guard):
     assert H1 in why and "discarding clone C" in why
 
 
+def test_bed_bf28_one_machine_under_two_host_nqns_is_not_stranded(guard):
+    # Source paths carry the simplyblock host NQN, the early-prepared target
+    # paths the kernel default: the same client, never stranded.
+    sb = "nqn.2014-08.io.simplyblock:uuid:5892b49a-bc39-41b2-a38a-8daae13a9d0d"
+    kernel = "nqn.2014-08.org.nvmexpress:uuid:ec2d55d6-1c18-ced7-92ee-34f409cb58ce"
+    db = _DB(_node("S1", [sb]), _node("S2", [sb]), _node("T1", [kernel]), _node("T2", [kernel]))
+    # the cutover freeze: the source paths go inaccessible, the target ones stay
+    assert guard.stranded_hosts(NQN, ["S1", "S2"], ["T1", "T2"], db=db) == set()
+    # a discarded target clone: the target paths go, the source ones stay
+    assert guard.removal_blocked(NQN, ["T1", "T2"], ["S1", "S2"], "x", db=db) is None
+
+
+def test_more_unmatched_hosts_going_than_staying_are_stranded(guard):
+    # Two clients on the side that goes, one other name on the side that stays:
+    # at least one machine loses its last path; both candidates are named.
+    db = _DB(_node("T1", [H1, H2]), _node("S1", ["nqn.host:other"]))
+    assert guard.stranded_hosts(NQN, ["T1"], ["S1"], db=db) == {H1, H2}
+
+
 def test_nodes_that_are_down_or_lack_the_subsystem_serve_no_host(guard):
     db = _DB(_node("T1", [H1]),
              _node("S1", [H1], status=StorageNode.STATUS_OFFLINE),
