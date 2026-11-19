@@ -48,14 +48,15 @@ COPY requirements.txt requirements.txt
 # setuptools stays in the image (setup.py install below needs it); 84.1.0 fixes
 # GHSA-xmj3-9gf7-h52w.
 RUN pip3 install --upgrade pip 'setuptools>=84.1.0'
-# --noautoremove is load-bearing. UBI ships iproute and dmidecode as
-# dependencies of subscription-manager, so the `dnf install` above finds them
-# "already installed" and does not mark them as explicitly requested. Removing
-# python-urllib3 takes subscription-manager with it, and without the flag dnf
-# then auto-removes its now-unused dependencies -- leaving an image with no
-# `ip` (the node agent reports no network interfaces, add-node fails) and no
-# `dmidecode` (empty system id).
-RUN dnf remove -y --noautoremove python-urllib3
+# UBI ships iproute and dmidecode as dependencies of subscription-manager, so
+# the `dnf install` above finds them "already installed" and does not mark
+# them as explicitly requested. Removing python-urllib3 takes
+# subscription-manager with it, and dnf would then autoremove its now-unused
+# dependencies along with it -- leaving an image with no `ip` (the node agent
+# reports no network interfaces, add-node fails) and no `dmidecode` (empty
+# system id). Mark them explicitly requested first so autoremove skips them.
+RUN dnf mark install -y dmidecode iproute
+RUN dnf remove -y python-urllib3
 RUN pip3 install -r requirements.txt
 
 RUN dnf upgrade -y
