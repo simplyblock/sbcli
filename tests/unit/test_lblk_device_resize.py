@@ -494,3 +494,36 @@ class TestRescanBlockDevice(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestStatsSourceAfterTakeover(unittest.TestCase):
+    """Capacity and I/O stats of a taken-over LUN come from the node whose
+    alceml serves it; read on the owner they were missing, and the cluster
+    capacity lost one device per takeover."""
+
+    def setUp(self):
+        from simplyblock_core.services import capacity_and_stats_collector as col
+        self.col = col
+        self.owner = _node([])
+        self.owner_rpc = MagicMock()
+        self.host = _node([])
+        self.host.get_id.return_value = "node-2"
+        self.host_rpc = MagicMock()
+        self.host.rpc_client.return_value = self.host_rpc
+        self.nodes = {"node-1": self.owner, "node-2": self.host}
+        self.dev = _aio_dev("dev-1")
+
+    def test_owner_serves(self):
+        self.assertEqual(self.col.device_stats_source(self.dev, self.owner, self.owner_rpc, self.nodes),
+                         (self.owner_rpc, "aio_dev-1"))
+
+    def test_taken_over_reads_the_serving_node(self):
+        self.dev.multi_attach, self.dev.serving_node_id = True, "node-2"
+        self.dev.node_paths = {"node-2": {"path": "/dev/x", "bdev": "aio_on_2"}}
+        self.assertEqual(self.col.device_stats_source(self.dev, self.owner, self.owner_rpc, self.nodes),
+                         (self.host_rpc, "aio_on_2"))
+
+    def test_serving_node_offline_is_skipped(self):
+        self.dev.multi_attach, self.dev.serving_node_id = True, "node-2"
+        self.host.status = StorageNode.STATUS_OFFLINE
+        self.assertIsNone(self.col.device_stats_source(self.dev, self.owner, self.owner_rpc, self.nodes))

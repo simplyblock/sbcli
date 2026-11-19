@@ -1,7 +1,7 @@
 import statistics
 import time
 
-from simplyblock_core import constants, db_controller, utils
+from simplyblock_core import constants, db_controller, multi_attach, utils
 from simplyblock_core.controllers import device_events
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.stats import (
@@ -364,6 +364,22 @@ def add_cluster_stats(cl, records):
 
 
 
+def device_stats_source(device, owner, owner_rpc, nodes_by_id):
+    """``(rpc_client, base_bdev)`` to read the capacity and I/O stats of
+    ``device`` from: its owner, or for a multi-attach device whose LUN
+    another node took over (lun_takeover), the serving node, where its
+    alceml runs now, with the base bdev the takeover recorded there. None
+    while that node is not online."""
+    if not multi_attach.served_elsewhere(device, owner.get_id()):
+        return owner_rpc, device.nvme_bdev
+    host = nodes_by_id.get(device.serving_node())
+    if host is None or host.status != StorageNode.STATUS_ONLINE:
+        return None
+    path = (device.node_paths or {}).get(host.get_id()) or {}
+    base = path.get("bdev") or utils.aio_bdev_name_for_serial(device.serial_number)
+    return host.rpc_client(timeout=5, retry=2), base
+
+
 # get DB controller
 db = db_controller.DBController()
 
@@ -384,6 +400,7 @@ def main():
                 logger.error(f"Cluster has no storage nodes: {cl.get_id()}")
 
             all_lvols =  db.get_mini_lvols()
+            nodes_by_id = {n.get_id(): n for n in snodes}
             node_records = []
             cluster_device_records = []
             for node in snodes:
@@ -403,13 +420,19 @@ def main():
                     if device.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY, NVMeDevice.STATUS_CANNOT_ALLOCATE]:
                         logger.info(f"Device is skipped: {device.get_id()} status: {device.status}")
                         continue
+                    source = device_stats_source(device, node, rpc_client, nodes_by_id)
+                    if source is None:
+                        logger.info(f"Device is skipped: {device.get_id()} its serving node "
+                                    f"{device.serving_node()} is not online")
+                        continue
+                    dev_rpc, base_bdev = source
                     try:
-                        capacity_dict = rpc_client.alceml_get_capacity(device.alceml_name)
+                        capacity_dict = dev_rpc.alceml_get_capacity(device.alceml_name)
                     except Exception as e:
                         logger.error(e)
                         continue
                     try:
-                        ret = rpc_client.get_lvol_stats(device.nvme_bdev)
+                        ret = dev_rpc.get_lvol_stats(base_bdev)
                     except RPCException as e:
                         logger.error("Failed to get iostat for device %s: %s", device.get_id(), e)
                         continue
