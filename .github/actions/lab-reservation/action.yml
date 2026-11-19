@@ -5,9 +5,12 @@ inputs:
   cluster:
     description: >-
       One or more cluster names, space- or comma-separated, spelled as the
-      reservations console spells them. A lane's hosts are often several
-      clusters: the docker lab is baremetal plus host_210 plus a client
-      each. Give this or `kind`, never both.
+      reservations console spells them. A lane's hosts may span several
+      clusters, but check the console before naming more than one: the
+      docker lab's management node and clients used to be single-host
+      groups and are part of `baremetal` now, and naming a group the
+      inventory has dropped fails the whole reservation with HTTP 400.
+      Give this or `kind`, never both.
     required: false
     default: ""
   kind:

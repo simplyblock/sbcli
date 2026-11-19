@@ -98,7 +98,11 @@ env:
   # every one of these workflows already has a long input list; an
   # env is overridable per run from the UI's re-run dialog and keeps
   # the dispatch form readable.
-  LABRES_CLUSTER: baremetal host_165 host_166 host_210
+  # 165, 166 and 210 were separate single-host groups while they lived in
+  # other labs. They are part of `baremetal` now, which hands back all
+  # seven hosts, so naming them again asks for groups the inventory no
+  # longer has and the whole reservation fails 400 invalid_request.
+  LABRES_CLUSTER: baremetal
   LABRES_DURATION: "24h"
   # Set to "true" to run without booking the lab, for the case where
   # the reservation service itself is what is broken.
