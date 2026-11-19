@@ -78,6 +78,7 @@ def task_runner(task):
             raise TaskDefer(waiting)
 
         mig.require_recovery_progress(task, mig.cluster_unavailable_state(task.cluster_id))
+        mig.defer_while_unhealthy(task)
 
     rpc_client = snode.rpc_client(timeout=5, retry=2)
 

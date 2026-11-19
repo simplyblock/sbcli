@@ -75,6 +75,8 @@ def add_cluster():
         ftt=ftt,
         kms_settings=cl_data.get('kms_settings'),
         lvol_geometry_enabled=lvol_geometry_enabled,
+        # Absent inherits the prefix of a cluster already on this control plane.
+        container_image_prefix=cl_data.get('container_image_prefix'),
     ))
 
 

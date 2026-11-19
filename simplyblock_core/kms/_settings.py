@@ -14,7 +14,7 @@ fails with pydantic's own clear discriminator error rather than a hand-rolled
 """
 from typing import Annotated, Literal, Union
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_serializer
 from pydantic.networks import AnyUrl, UrlConstraints
 
 
@@ -29,6 +29,12 @@ class VaultKMSSettings(BaseModel):
     transit_mount: str = "simplyblock/transit"
     kv_mount: str = "simplyblock/kv"
     cert_role: str = "simplyblock-webappapi"
+
+    #: Same convention as BackupLocation._serialize_endpoint: the field owns
+    #: its own JSON-safety, so plain model_dump() is enough here too.
+    @field_serializer("base_url")
+    def _serialize_base_url(self, base_url: AnyUrl) -> str:
+        return str(base_url)
 
 
 class KMIPKMSSettings(BaseModel):

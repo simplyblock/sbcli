@@ -366,6 +366,31 @@ def get_next_cluster_status(cluster_id):
     return _next_cluster_verdict(cluster_id).status
 
 
+#: The status changes a node going down can cause, by current status.
+_NODE_LOSS_TRANSITIONS = {
+    Cluster.STATUS_ACTIVE: (Cluster.STATUS_DEGRADED, Cluster.STATUS_SUSPENDED),
+    Cluster.STATUS_DEGRADED: (Cluster.STATUS_SUSPENDED,),
+}
+
+
+def apply_node_loss_status(cluster_id):
+    """Record a node loss in the cluster status now, for callers outside
+    the monitor that take a node down themselves (shutdown_storage_node).
+
+    Only the downgrades in _NODE_LOSS_TRANSITIONS are applied, through the
+    same _set_cluster_status the monitor writes them with. Everything else --
+    recovery, re-activation of a suspended cluster, the rebalancing flags --
+    stays with update_cluster_status in the monitor: a CLI shutdown must not
+    start a cluster activation or wait on one."""
+    cluster = db.get_cluster_by_id(cluster_id)
+    allowed = _NODE_LOSS_TRANSITIONS.get(cluster.status)
+    if not allowed:
+        return
+    next_status = get_next_cluster_status(cluster_id)
+    if next_status in allowed:
+        _set_cluster_status(cluster, next_status)
+
+
 def _cluster_status_verdicts(cluster_id):
     """``(status, status_without_removal)`` for the cluster (SyncVerdict)."""
     verdict = _next_cluster_verdict(cluster_id)
@@ -1339,13 +1364,20 @@ def _delete_old_tasks(tasks: list[JobSchedule]):
             task.remove(db.kv_store)
 
 
-def _delete_old_logs(events: list[EventObj], cluster_id: str):
-    now_in_seconds = int(time.time())
-    for event in events:
-        if event.cluster_uuid != cluster_id:
-            continue
-        if now_in_seconds - int(event.date/1000) > constants.TASKS_RETENTION_PERIOD_SEC:
-            event.remove(db.kv_store)
+def _delete_old_logs(cluster_id: str):
+    """Drop the cluster's events older than the retention period.
+
+    Event keys are ``<cluster_uuid>/<date ms>/<uuid>``, so the expired events
+    of one cluster are one contiguous key range and a single range clear
+    removes them, however many there are. This used to read the whole events
+    table (every cluster) and clear one key per event: the first sweep after
+    an upgrade from a release that never pruned events deleted months of
+    them while the cluster status went unrefreshed (2026-10-19, 7 min).
+    The date is a 13-digit millisecond count, so key order is date order."""
+    cutoff_ms = (int(time.time()) - constants.TASKS_RETENTION_PERIOD_SEC) * 1000
+    begin = EventObj().get_db_id(f"{cluster_id}/").encode()
+    end = EventObj().get_db_id(f"{cluster_id}/{cutoff_ms}").encode()
+    db.kv_store.clear_range(begin, end)
 
 
 def _maybe_enable_shared_placement(cluster, cluster_id, current_cluster_status):
@@ -1613,8 +1645,8 @@ def _update_cluster_status_impl(cluster_id):
     current_cluster_status = cluster.status
     logger.info("cluster_status: %s", current_cluster_status)
 
-    # Retention housekeeping happens in _run_periodic_housekeeping (main
-    # loop, every few minutes), NOT here. It used to run on every pass: the
+    # Retention housekeeping happens in _run_periodic_housekeeping (its own
+    # thread, every few minutes), NOT here. It used to run on every pass: the
     # event sweep is an unbounded full read of the events table, and at 12k
     # entities it alone pushed a pass past the callers' 3s re-arm period --
     # the capture described in update_cluster_status. On an hours-old
@@ -1757,6 +1789,10 @@ def _ana_failover_once(node) -> bool:
 #: lvstore key -> monotonic time of the last takeover attempt (rate limit).
 _leaderless_takeover_tried: dict[tuple, float] = {}
 LEADERLESS_TAKEOVER_INTERVAL_SEC = 30
+#: lvstore key -> monotonic time the restart-time precheck last ran (it asks
+#: the node agent; the monitor cycles every few seconds).
+_leaderless_precheck_tried: dict[tuple, float] = {}
+LEADERLESS_PRECHECK_INTERVAL_SEC = 10
 
 
 def _member_lvstores(snode):
@@ -1794,9 +1830,22 @@ def _take_over_leaderless_lvstores(snode):
     makes a node leader only after every other member is proven non-leader or
     SPDK-dead, twice, LEADERSHIP_SAFETY_WINDOW_SEC apart. Replication itself
     still never grants leadership; this is the node-offline handling of the
-    control plane. Not done:
-      * while a restart task of the node is RUNNING (the restart flow owns the
-        lvstore's leadership and port blocks during its phases);
+    control plane.
+
+    A CRASHED member is restarted automatically, so it is OFFLINE only for
+    seconds and its restart task exists from then on -- and an active restart
+    task blocked every grant (_leadership_moving_tasks_active). bf24
+    2026-11-14 (also bf21, bf23): the target primary of LVS_22 crashed, its
+    restart started 12 s later, and the lvstore had no leader until the
+    restarted node took it back ~110 s after the crash; replication into it
+    sat suspended all along. The restart owns the leadership only once its
+    handoff can run, i.e. once the node's SPDK runs again: until then
+    (restart_before_lvstore_handoff: SPDK confirmed down by the node agent,
+    no restart phase for the lvstore) the takeover runs during the restart
+    too, and the restart's handoff later treats the new leader as the acting
+    leader it quiesces and demotes. Not done:
+      * for an lvstore whose restart handoff can have begun (the node's SPDK
+        runs, cannot be confirmed down, or a phase is recorded);
       * on sync-replication clusters (sites; the passive triplet must stay
         leaderless) and on two-node arbitrated clusters (the arbiter owns
         leadership there);
@@ -1807,9 +1856,8 @@ def _take_over_leaderless_lvstores(snode):
     if storage_node_ops._cluster_two_node_arbitrated(snode.cluster_id, db=db):
         return
     try:
-        task_id = tasks_controller.get_active_node_restart_task(snode.cluster_id, snode.get_id())
-        if task_id and db.get_task_by_id(task_id).status == JobSchedule.STATUS_RUNNING:
-            return
+        restarting = bool(tasks_controller.get_active_node_restart_task(
+            snode.cluster_id, snode.get_id()))
     except Exception as e:                                  # noqa: BLE001
         logger.debug("Restart-task lookup for %s failed: %s", snode.get_id(), e)
         return
@@ -1820,19 +1868,30 @@ def _take_over_leaderless_lvstores(snode):
         now = time.monotonic()
         if now - _leaderless_takeover_tried.get(key, -1e9) < LEADERLESS_TAKEOVER_INTERVAL_SEC:
             continue
+        kwargs = {}
+        if restarting:
+            if now - _leaderless_precheck_tried.get(key, -1e9) < LEADERLESS_PRECHECK_INTERVAL_SEC:
+                continue
+            _leaderless_precheck_tried[key] = now
+            ok, why = storage_node_ops.restart_before_lvstore_handoff(snode.get_id(), lvs_name)
+            if not ok:
+                logger.debug("No leader takeover for %s: %s", lvs_name, why)
+                continue
+            kwargs["pre_handoff_restart_of"] = snode.get_id()
         _leaderless_takeover_tried[key] = now
         try:
-            leader, _ = storage_node_ops.find_leader_with_failover(members, lvs_name)
+            leader, _ = storage_node_ops.find_leader_with_failover(members, lvs_name, **kwargs)
         except Exception as e:                              # noqa: BLE001
-            logger.error("Leader takeover for %s (member %s offline) failed: %s",
-                         lvs_name, snode.get_id(), e)
+            logger.error("Leader takeover for %s (member %s %s) failed: %s",
+                         lvs_name, snode.get_id(), snode.status, e)
             continue
         if leader is None:
-            logger.warning("%s has no leader while member %s is offline; no member "
-                           "could be proven safe to lead yet", lvs_name, snode.get_id())
+            logger.warning("%s has no leader while member %s is %s; no member "
+                           "could be proven safe to lead yet", lvs_name, snode.get_id(),
+                           snode.status)
         else:
-            logger.info("%s is led by %s while member %s is offline",
-                        lvs_name, leader.get_id(), snode.get_id())
+            logger.info("%s is led by %s while member %s is %s",
+                        lvs_name, leader.get_id(), snode.get_id(), snode.status)
 
 
 #: Device states that are lost with their node (set unavailable).
@@ -2900,6 +2959,19 @@ def check_node(snode):
         logger.info(f"Node status is: {snode.status}, skipping")
         return False
 
+    # A crashed node is restarted automatically: it is OFFLINE for seconds and
+    # IN_RESTART after that, and the restart task makes this monitor skip the
+    # node altogether (both below). Its lvstores without client IO still need
+    # a leader while its SPDK is down; _take_over_leaderless_lvstores runs
+    # only for those whose restart handoff cannot have begun.
+    if snode.status in (StorageNode.STATUS_OFFLINE, StorageNode.STATUS_RESTARTING):
+        try:
+            if tasks_controller.get_active_node_restart_task(snode.cluster_id, snode.get_id()):
+                _take_over_leaderless_lvstores(snode)
+        except Exception as e:                              # noqa: BLE001
+            logger.error("Leaderless takeover for restarting node %s failed: %s",
+                         snode.get_id(), e)
+
     if snode.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_UNREACHABLE,
                             StorageNode.STATUS_SCHEDULABLE, StorageNode.STATUS_DOWN,
                             StorageNode.STATUS_OFFLINE]:
@@ -3192,18 +3264,18 @@ def readmit_devices_after_node_online(node_id):
         logger.error(f"Device re-admit after node clear to ONLINE failed: {e}")
 
 
-#: Retention housekeeping cadence. The scans are unbounded full-table reads
-#: (events especially), so they run from the MAIN loop on a period, never
-#: inside the per-status-change recompute path.
+#: Retention housekeeping cadence. Housekeeping runs on its own thread
+#: (_housekeeping_loop), never in the main loop or the per-status-change
+#: recompute path: however long a sweep takes, it must not delay the cluster
+#: status refresh.
 HOUSEKEEPING_INTERVAL_SEC = 300
 _housekeeping_last_run: dict = {}
 
 
 def _run_periodic_housekeeping(cluster_id):
     """Delete expired tasks and events for one cluster, at most once per
-    HOUSEKEEPING_INTERVAL_SEC. Runs in the main loop thread; a slow sweep
-    here delays only the next main-loop tick, never a node's liveness
-    monitoring."""
+    HOUSEKEEPING_INTERVAL_SEC. Runs on the housekeeping thread; a slow sweep
+    here delays only the next sweep."""
     now = time.time()
     last = _housekeeping_last_run.get(cluster_id, 0)
     if now - last < HOUSEKEEPING_INTERVAL_SEC:
@@ -3211,9 +3283,32 @@ def _run_periodic_housekeeping(cluster_id):
     _housekeeping_last_run[cluster_id] = now
     try:
         _delete_old_tasks(db.get_job_tasks(cluster_id))
-        _delete_old_logs(db.get_events(), cluster_id)
+        _delete_old_logs(cluster_id)
     except Exception as e:
         logger.error(f"Retention housekeeping failed for {cluster_id}: {e}")
+
+
+def _housekeeping_loop():
+    """Retention housekeeping for every cluster, off the main loop.
+
+    It used to run in the main loop between update_cluster_status calls, so
+    a long sweep stopped the cluster status from being refreshed: a node
+    shutdown on 2026-10-19 took 7 minutes to turn the cluster DEGRADED."""
+    while True:
+        try:
+            clusters = db.get_clusters()
+        except Exception as e:
+            logger.error(f"Housekeeping: failed to get clusters: {e}")
+            clusters = []
+        for cluster in clusters:
+            _run_periodic_housekeeping(cluster.get_id())
+        time.sleep(HOUSEKEEPING_INTERVAL_SEC)
+
+
+def _start_housekeeping():
+    """Start _housekeeping_loop. A daemon, like the per-node workers: it must
+    not keep the process alive once main() has failed."""
+    threading.Thread(target=_housekeeping_loop, name="housekeeping", daemon=True).start()
 
 
 def loop_for_node(snode):
@@ -3253,6 +3348,7 @@ def _record_thread_respawn(node_id) -> int:
 def main():
     logger.info("Starting node monitor")
     threads_maps: dict[str, threading.Thread] = {}
+    _start_housekeeping()
 
     while True:
         clusters = db.get_clusters()
@@ -3292,7 +3388,6 @@ def main():
                 # with 100+ identical "Error while updating cluster status"
                 # lines and no reason (incident 2026-10-08 run 62).
                 logger.exception("Error while updating cluster status for %s", cluster_id)
-            _run_periodic_housekeeping(cluster_id)
         time.sleep(constants.NODE_MONITOR_INTERVAL_SEC)
 
 

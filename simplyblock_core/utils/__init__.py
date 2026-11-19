@@ -1,3 +1,4 @@
+import contextlib
 import glob
 import hashlib
 import json
@@ -702,15 +703,20 @@ def calculate_pool_count(alceml_count, number_of_distribs, cpu_count, poller_cou
     '''
     poller_number = poller_count if poller_count else cpu_count
 
-    # Small buffers are sized off the max number of subsystems (max_lvol /
-    # --max-subsys) on the node: a fixed base plus 16 small bufs per
-    # NS-add poll group (128) per subsystem.
-    # Plus IOBUF_SMALL_POOL_EXTRA_BYTES of 8 KiB buffers for replication: its
-    # transfers and landing merges take their buffers from the small pool as
-    # chains of 8 KiB (preallocated, immune to heap fragmentation; a request
-    # waits for a buffer instead of failing with -ENOMEM).
-    small_pool_count = (100000 + max_lvol * 16 * 128
-                        + constants.IOBUF_SMALL_POOL_EXTRA_BYTES // constants.IOBUF_SMALL_BUFSIZE)
+    # Small buffers are sized for the data in flight at the node's saturation
+    # point (see the hugepage budget in constants), not off max_lvol: a fixed
+    # data reserve, blobstore merge/CoW pieces, and IOBUF_SMALL_POOL_EXTRA_BYTES
+    # of 8 KiB buffers for replication (its transfers and landing merges take
+    # chains of 8 KiB from the small pool). Plus the buffers that sit in
+    # per-thread caches and are not available to other threads: the NVMe-oF
+    # poll-group cache (one poll group per core) and the bdev/accel caches
+    # (threads estimated as BDEV_IO_POOL_THREADS_PER_CORE per core + 8).
+    threads = constants.BDEV_IO_POOL_THREADS_PER_CORE * max(cpu_count, 1) + 8
+    small_pool_count = (constants.IOBUF_SMALL_DATA_COUNT
+                        + constants.IOBUF_SMALL_MERGE_COW_COUNT
+                        + constants.IOBUF_SMALL_POOL_EXTRA_BYTES // constants.IOBUF_SMALL_BUFSIZE
+                        + constants.NVMF_BUF_CACHE_SIZE * (max(cpu_count, 1) + 1)
+                        + (constants.BDEV_IOBUF_SMALL_CACHE_SIZE + constants.ACCEL_SMALL_CACHE_SIZE) * threads)
     # Large buffers are not used in the data path: the NVMe-oF transport's
     # io_unit_size is 8 KiB (small buffers only), no exported bdev supports
     # zcopy, and every bdev caller supplies aligned buffers, so the bdev layer
@@ -732,21 +738,75 @@ def calculate_pool_count(alceml_count, number_of_distribs, cpu_count, poller_cou
     return int(small_pool_count), int(large_pool_count)
 
 
+def calculate_bdev_io_pool_size(spdk_cpu_mask):
+    """bdev_io_pool_size for a node with the given SPDK core mask.
+
+    Room for every thread's bdev_io cache (threads estimated as
+    BDEV_IO_POOL_THREADS_PER_CORE per core plus a few app threads) plus
+    BDEV_IO_POOL_SIZE (the SPDK default, sized for saturation -- see
+    constants), raised only if the thread caches would otherwise take more
+    than half of it.
+    """
+    try:
+        cores = int(str(spdk_cpu_mask), 16).bit_count() if spdk_cpu_mask else 0
+    except ValueError:
+        cores = 0
+    return _bdev_io_pool_size_for_cores(cores)
+
+
+def _bdev_io_pool_size_for_cores(cores):
+    threads = constants.BDEV_IO_POOL_THREADS_PER_CORE * max(int(cores or 0), 1) + 8
+    return int(max(constants.BDEV_IO_POOL_SIZE, 2 * constants.BDEV_IO_CACHE_SIZE * (threads + 1)))
+
+
 def calculate_minimum_hp_memory(small_pool_count, large_pool_count, lvol_count, max_prov, cpu_count):
-    pool_consumption = (small_pool_count * 8 + large_pool_count * 128) / 1024
-    memory_consumption = (4 * cpu_count + 1.1 * pool_consumption + 22 * lvol_count) * (
-            1024 * 1024) + constants.EXTRA_HUGE_PAGE_MEMORY
-    # The computed pool + EXTRA_HUGE_PAGE_MEMORY figure is the reservation; it
-    # is not doubled. The historical 2.0x safety factor reserved ~twice the
-    # memory SPDK actually needs -- on a two-instances-per-socket host that was
-    # the difference between fitting a node and starving it -- so it is gone.
-    # If a workload is ever shown to need headroom, reintroduce it as a small,
-    # measured factor (peak_used / computed), not a blanket 2x.
-    return int(memory_consumption)
+    """Hugepage memory SPDK needs on a node: its own budget
+    (_hp_memory_for_node), but at least that of the reference node
+    (HP_REFERENCE_CORES / HP_REFERENCE_SUBSYSTEMS), so all usual node sizes
+    get one figure. max_prov is not used here (callers apply it as a floor).
+    """
+    ref_small, ref_large = calculate_pool_count(0, 0, constants.HP_REFERENCE_CORES,
+                                                constants.HP_REFERENCE_CORES,
+                                                constants.HP_REFERENCE_SUBSYSTEMS)
+    return max(_hp_memory_for_node(small_pool_count, large_pool_count, lvol_count, cpu_count),
+               _hp_memory_for_node(ref_small, ref_large, constants.HP_REFERENCE_SUBSYSTEMS,
+                                   constants.HP_REFERENCE_CORES))
+
+
+def _hp_memory_for_node(small_pool_count, large_pool_count, lvol_count, cpu_count):
+    """Hugepage memory SPDK needs on a node: the explicit sum of its consumers
+    (see the hugepage budget in constants), times HP_OVERHEAD_FACTOR, plus
+    HP_RESERVE_BYTES.
+
+    lvol_count is the node's max subsystems (each with CLIENT_QPAIR_COUNT IO
+    qpairs + 1 admin qpair from its host); cpu_count its SPDK cores.
+    """
+    cpu_count = max(int(cpu_count or 0), 1)
+    lvol_count = max(int(lvol_count or 0), 0)
+    pools = (small_pool_count * constants.IOBUF_SMALL_BUFSIZE
+             + large_pool_count * constants.IOBUF_LARGE_BUFSIZE)
+    bdev_io = _bdev_io_pool_size_for_cores(cpu_count) * constants.BDEV_IO_SIZE_ESTIMATE
+    peer_qpairs = constants.HP_PEER_QPAIRS_PER_CORE * cpu_count
+    qpairs_in = lvol_count * (constants.CLIENT_QPAIR_COUNT + 1) + peer_qpairs
+    qpairs = (qpairs_in * constants.HP_NVMF_QPAIR_BYTES
+              + peer_qpairs * constants.HP_NVME_INITIATOR_QPAIR_BYTES)
+    threads = constants.HP_THREAD_BYTES_BASE + constants.HP_THREAD_BYTES_PER_CORE * cpu_count
+    total = (pools + bdev_io + constants.HP_DISTRIB_DATA_BUF_BYTES + constants.HP_MD_JOURNAL_BYTES
+             + qpairs + constants.HP_BLOBSTORE_BYTES + threads)
+    return int(total * constants.HP_OVERHEAD_FACTOR) + constants.HP_RESERVE_BYTES
+
+
+def sys_memory_for_capacity(raw_capacity_bytes) -> int:
+    """System (non-hugepage) memory of the SPDK container for a node with this
+    much raw device capacity: SYS_MEMORY_BASE_BYTES + SYS_MEMORY_PER_TIB_BYTES
+    per TiB. Also the container's hard memory limit."""
+    capacity = max(int(raw_capacity_bytes or 0), 0)
+    return int(constants.SYS_MEMORY_BASE_BYTES
+               + capacity * constants.SYS_MEMORY_PER_TIB_BYTES // (1024 ** 4))
 
 
 def calculate_minimum_sys_memory(ssd_list):
-    minimum_sys_memory = 2147483648 + get_total_capacity_of_nvme_devices(ssd_list)
+    minimum_sys_memory = sys_memory_for_capacity(get_total_capacity_of_nvme_devices(ssd_list))
 
     logger.debug(f"Minimum system memory is {humanbytes(minimum_sys_memory)}")
     return int(minimum_sys_memory)
@@ -2802,41 +2862,78 @@ def lblk_device_serials(lblk_devices) -> set[str]:
     return {e["serial"] for e in (lblk_devices or []) if e.get("serial")}
 
 
-# Sys-memory sizing intent (see generate_automated_deployment_config):
-# "RAM 4GB min. Plus 0.2% of the storage." The nvme path nominally adds the
-# FULL device capacity but in practice always measures 0 — capacity is read
-# via `nvme list` AFTER the devices were unbound from the kernel driver. The
-# lblk path knows the real sizes, so it applies the documented 0.2% factor
-# (2026-08-05 AWS run: summing full capacity demanded 102 GiB sys memory for
-# 2x50G EBS volumes on 32 GiB hosts and failed every `sn configure --lblk`).
-SYS_MEMORY_STORAGE_FACTOR = 0.002
-
-
 def node_config_min_sys_memory(node) -> int:
-    """Minimum system memory for a node-config entry: 2 GiB + 0.2% of total
-    device capacity. lblk entries carry their sizes; nvme goes through
-    nvme-cli."""
+    """Minimum system memory for a node-config entry: sys_memory_for_capacity
+    of its total device capacity. lblk entries carry their sizes; nvme entries
+    carry ssd_capacity, measured by generate_configs before it unbound the
+    devices, since nvme-cli no longer sees them afterwards. An entry written
+    before that field existed goes through nvme-cli."""
     lblk = node.get("lblk_devices") or []
     if lblk:
         capacity = sum(int(e.get("size") or 0) for e in lblk)
-        total = 2147483648 + int(capacity * SYS_MEMORY_STORAGE_FACTOR)
-        logger.debug(f"Minimum system memory is {humanbytes(total)}")
-        return int(total)
-    return calculate_minimum_sys_memory(node.get("ssd_pcis") or [])
+    elif node.get("ssd_capacity"):
+        capacity = int(node["ssd_capacity"])
+    else:
+        return calculate_minimum_sys_memory(node.get("ssd_pcis") or [])
+    total = sys_memory_for_capacity(capacity)
+    logger.debug(f"Minimum system memory is {humanbytes(total)}")
+    return int(total)
 
 
 def get_total_capacity_of_nvme_devices(pci_lst):
-    json_string = get_nvme_list_verbose()
-    data = json.loads(json_string)
+    """Raw capacity of the kernel-visible NVMe devices among pci_lst, from
+    `nvme list -v`: summed over all of them, each PCI address once. The
+    namespace is listed under the controller or, in newer nvme-cli, under the
+    subsystem. Devices already bound to SPDK are not visible (0)."""
+    try:
+        data = json.loads(get_nvme_list_verbose())
+    except (ValueError, TypeError):
+        logger.warning("Cannot read the NVMe device list; capacity unknown")
+        return 0
+    wanted = set(pci_lst or [])
+    seen: set = set()
     total_capacity = 0
-    for device_entry in data.get('Devices', []):
-        for subsystem in device_entry.get('Subsystems', []):
-            for controller in subsystem.get('Controllers', []):
+    for device_entry in data.get('Devices', []) or []:
+        for subsystem in device_entry.get('Subsystems', []) or []:
+            for controller in subsystem.get('Controllers', []) or []:
                 address = controller.get("Address")
-                if len(controller.get("Namespaces")) > 0 and address in pci_lst:
-                    total_capacity = controller.get("Namespaces")[0].get("PhysicalSize")
+                if address not in wanted or address in seen:
+                    continue
+                namespaces = controller.get("Namespaces") or subsystem.get("Namespaces") or []
+                if namespaces:
+                    seen.add(address)
+                    total_capacity += int(namespaces[0].get("PhysicalSize") or 0)
 
     return int(total_capacity)
+
+
+def wait_for_nvme_capacities(pcis, timeout=30, interval=1) -> dict:
+    """Raw capacity of each kernel-visible NVMe controller in pcis, waiting
+    for their namespaces under one shared deadline. A controller just bound to
+    nvme (detect_nvmes takes back devices a previous deployment left on
+    vfio/uio) is listed before the kernel's asynchronous scan has found its
+    namespaces, and reads 0 until then. A controller whose namespace did not
+    appear within timeout seconds maps to 0."""
+    deadline = time.monotonic() + timeout
+    capacities = {pci: 0 for pci in pcis}
+    while True:
+        for pci in [p for p, c in capacities.items() if not c]:
+            capacities[pci] = get_total_capacity_of_nvme_devices([pci])
+        if all(capacities.values()) or time.monotonic() >= deadline:
+            return capacities
+        time.sleep(interval)
+
+
+def nvme_capacity_from_node_info(nvme_devices, pci_lst) -> int:
+    """Raw capacity of the devices among pci_lst in a node agent's info
+    `nvme_devices` (address, size), each address once."""
+    wanted = set(pci_lst or [])
+    sizes = {}
+    for dev in nvme_devices or []:
+        address = dev.get("address") if isinstance(dev, dict) else None
+        if address in wanted:
+            sizes[address] = max(int(dev.get("size") or 0), 0)
+    return sum(sizes.values())
 
 
 def vcpu_requirement_met(total_cores, vcpu_count):
@@ -3126,6 +3223,10 @@ def regenerate_config(new_config, old_config, force=False):
         elif number_of_distribs_cores > 12:
             number_of_distribs = 12
         old_config["nodes"][i]["number_of_distribs"] = number_of_distribs
+        # ssd_capacity was measured for one device set; an edited set drops it
+        # rather than carry a figure for devices the node no longer has.
+        if set(old_config["nodes"][i]["ssd_pcis"]) != set(new_config["nodes"][i]["ssd_pcis"]):
+            old_config["nodes"][i].pop("ssd_capacity", None)
         old_config["nodes"][i]["ssd_pcis"] = new_config["nodes"][i]["ssd_pcis"]
         if new_config["nodes"][i].get("lblk_devices") is not None:
             old_config["nodes"][i]["lblk_devices"] = new_config["nodes"][i]["lblk_devices"]
@@ -3270,6 +3371,19 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
         else:
             system_info.setdefault(numa, {"cores": [], "nics": [], "nvmes": []})["nics"].append(nic)
 
+    if not lblk_mode:
+        # nvme-cli sees a device only while the kernel driver holds it, so
+        # every capacity is read before the first unbind. A node whose
+        # capacity misses a controller would get an SPDK memory limit too low
+        # for its devices, so an unmeasured controller fails configure.
+        capacities = wait_for_nvme_capacities([val["pci_address"] for val in nvmes.values()])
+        unmeasured = sorted(pci for pci, capacity in capacities.items() if not capacity)
+        if unmeasured:
+            logger.error(f"No namespace of the NVMe devices {unmeasured} appeared; their capacity is unknown")
+            return False, False
+        for val in nvmes.values():
+            val["capacity"] = capacities[val["pci_address"]]
+
     for nvme, val in nvmes.items():
         pci = val["pci_address"]
         numa = int(val["numa_node"])
@@ -3378,6 +3492,9 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
                     node_info["ssd_pcis"].append(nvmes[nvme_name]["pci_address"])
                 for nvme_name in nvme_per_core_group[idx]:
                     node_info["ssd_pcis"].append(nvmes[nvme_name]["pci_address"])
+                node_info["ssd_capacity"] = sum(
+                    nvmes[nvme_name]["capacity"]
+                    for nvme_name in list(nvme_neg1_list) + list(nvme_per_core_group[idx]))
             number_of_alcemls = node_config_device_count(node_info)
             node_info["number_of_alcemls"] = number_of_alcemls
             small_pool_count, large_pool_count = calculate_pool_count(number_of_alcemls, 2 * number_of_distribs,
@@ -3476,17 +3593,28 @@ def format_device_with_4k(pci_device):
 _HUGEPAGES_BASELINE_DIR = "/var/run/simplyblock"
 
 
-def _get_user_hugepages_baseline(node, current_hugepages):
+def _hugepages_state_dir(state_dir: str | None) -> str:
+    """The directory the huge-page records live in: the caller's, or the
+    module's default read when called, not when the helpers were defined, so a
+    test that patches ``_HUGEPAGES_BASELINE_DIR`` reaches them."""
+    return state_dir if state_dir is not None else _HUGEPAGES_BASELINE_DIR
+
+
+def _get_user_hugepages_baseline(node, current_hugepages, state_dir: str | None = None):
     """Return the per-NUMA user hugepage baseline, persisted across calls within a boot.
 
     On first call for a given NUMA node (no baseline file), the current allocatable
     hugepage count is the user's reservation — simplyblock hasn't touched it yet.
-    That value is written to /var/run/simplyblock/hugepages_baseline_node{N}.
-    On subsequent calls the file is read directly; /var/run/simplyblock is cleared on
-    reboot (host tmpfs / Docker/K8s hostPath volume) so the baseline is always
-    fresh after a reboot.
+    That value is written to {state_dir}/hugepages_baseline_node{N}.
+    On subsequent calls the file is read directly. With the default directory,
+    /var/run/simplyblock is cleared on reboot (host tmpfs / Docker/K8s hostPath
+    volume) so the baseline is always fresh after a reboot -- right where a reboot
+    zeroes the pool. A host whose pool survives a reboot (Talos re-applies its
+    machine config) keeps its files in a directory that survives too, or the
+    next boot would count simplyblock's own pages as the user's.
     """
-    baseline_file = os.path.join(_HUGEPAGES_BASELINE_DIR, f"hugepages_baseline_node{node}")
+    state_dir = _hugepages_state_dir(state_dir)
+    baseline_file = os.path.join(state_dir, f"hugepages_baseline_node{node}")
 
     if os.path.exists(baseline_file):
         try:
@@ -3499,7 +3627,7 @@ def _get_user_hugepages_baseline(node, current_hugepages):
 
     # First call this boot — current value is the pre-simplyblock baseline.
     try:
-        os.makedirs(_HUGEPAGES_BASELINE_DIR, exist_ok=True)
+        os.makedirs(state_dir, exist_ok=True)
         with open(baseline_file, "w") as f:
             f.write(str(current_hugepages))
         logger.info(f"Node {node}: saved hugepage baseline: {current_hugepages} -> {baseline_file}")
@@ -3509,9 +3637,10 @@ def _get_user_hugepages_baseline(node, current_hugepages):
     return current_hugepages
 
 
-def _get_sb_hugepages_allocation(node):
+def _get_sb_hugepages_allocation(node, state_dir: str | None = None):
     """Return the simplyblock hugepage allocation stored from the previous deploy, or None."""
-    sb_file = os.path.join(_HUGEPAGES_BASELINE_DIR, f"hugepages_sb_node{node}")
+    state_dir = _hugepages_state_dir(state_dir)
+    sb_file = os.path.join(state_dir, f"hugepages_sb_node{node}")
     if os.path.exists(sb_file):
         try:
             with open(sb_file) as f:
@@ -3523,22 +3652,27 @@ def _get_sb_hugepages_allocation(node):
     return None
 
 
-def _save_sb_hugepages_allocation(node, hugepages_needed) -> bool:
-    sb_file = os.path.join(_HUGEPAGES_BASELINE_DIR, f"hugepages_sb_node{node}")
+def save_sb_hugepages_allocation(node, hugepages_total, state_dir: str | None = None) -> bool:
+    """Record the pool total simplyblock last set on NUMA ``node`` (the user's
+    pages plus its own), which is what the next call of
+    user_hugepages_baseline measures the user's later changes against."""
+    state_dir = _hugepages_state_dir(state_dir)
+    sb_file = os.path.join(state_dir, f"hugepages_sb_node{node}")
     try:
-        os.makedirs(_HUGEPAGES_BASELINE_DIR, exist_ok=True)
+        os.makedirs(state_dir, exist_ok=True)
         with open(sb_file, "w") as f:
-            f.write(str(hugepages_needed))
+            f.write(str(hugepages_total))
         return True
     except Exception as e:
         logger.warning(f"Node {node}: could not save sb allocation to {sb_file}: {e}")
         return False
 
 
-def _save_user_hugepages_baseline(node, baseline):
-    baseline_file = os.path.join(_HUGEPAGES_BASELINE_DIR, f"hugepages_baseline_node{node}")
+def _save_user_hugepages_baseline(node, baseline, state_dir: str | None = None):
+    state_dir = _hugepages_state_dir(state_dir)
+    baseline_file = os.path.join(state_dir, f"hugepages_baseline_node{node}")
     try:
-        os.makedirs(_HUGEPAGES_BASELINE_DIR, exist_ok=True)
+        os.makedirs(state_dir, exist_ok=True)
         with open(baseline_file, "w") as f:
             f.write(str(baseline))
         logger.debug(f"Node {node}: saved updated hugepage baseline: {baseline} -> {baseline_file}")
@@ -3546,64 +3680,178 @@ def _save_user_hugepages_baseline(node, baseline):
         logger.warning(f"Node {node}: could not save hugepage baseline to {baseline_file}: {e}")
 
 
+def _nr_hugepages_path(node, page_size_kb=2048):
+    return f"/sys/devices/system/node/node{node}/hugepages/hugepages-{page_size_kb}kB/nr_hugepages"
+
+
+def _read_nr_hugepages(node, page_size_kb=2048) -> int:
+    with open(_nr_hugepages_path(node, page_size_kb), "r") as f:
+        return int(f.read().strip())
+
+
+def _write_nr_hugepages(node, hugepages, page_size_kb=2048) -> None:
+    cmd = f"echo {int(hugepages)} | sudo tee {_nr_hugepages_path(node, page_size_kb)}"
+    subprocess.run(cmd, shell=True, check=True)
+
+
+class HugePagesNotReleasedError(Exception):
+    """The huge pages simplyblock set on this host could not all be given back."""
+
+
+def release_hugepages() -> dict[int, int]:
+    """Give back the huge pages simplyblock added on this host and remove its
+    records of them: the inverse of set_hugepages_if_needed, for a host whose
+    last storage node has left.
+
+    Nothing else ever did either: the pages stayed allocated and the records
+    stayed in /var/run/simplyblock until the next reboot. The baseline in them
+    is captured once and only grows, because a count below simplyblock's last
+    total is read as a reset, not as the host lowering its own reservation. A
+    host that reserved pages when the first deployment came and none later
+    kept the old baseline under every deployment after it (2026-11-13: 5922
+    pages recorded on hosts that had reserved none for four days, so a
+    deployment needing 3584 asked for 9728, on 19.7 GiB of RAM). Removing the
+    records with the last storage node makes each deployment capture the
+    baseline again, as a reboot does.
+
+    Per NUMA node with a record of an allocation, the count goes back to the
+    recorded baseline, plus whatever was added on top of simplyblock's total
+    since, which is the host's by the rule set_hugepages_if_needed applies. It
+    is never raised. The records of a NUMA node are removed only once its
+    count is down: pages still in use stay, and so do the records that say
+    whose they are.
+
+    Returns the count now set per NUMA node released. Raises
+    HugePagesNotReleasedError naming the NUMA nodes that kept pages or records.
+    """
+    recorded = set()
+    for name in os.listdir(_HUGEPAGES_BASELINE_DIR) if os.path.isdir(_HUGEPAGES_BASELINE_DIR) else []:
+        match = re.fullmatch(r"hugepages_(?:sb|baseline)_node(\d+)", name)
+        if match:
+            recorded.add(int(match.group(1)))
+
+    released: dict[int, int] = {}
+    kept: list[str] = []
+    for node in sorted(recorded):
+        baseline_file = os.path.join(_HUGEPAGES_BASELINE_DIR, f"hugepages_baseline_node{node}")
+        sb_file = os.path.join(_HUGEPAGES_BASELINE_DIR, f"hugepages_sb_node{node}")
+        prev_sb = _get_sb_hugepages_allocation(node)
+        try:
+            current = _read_nr_hugepages(node)
+            if prev_sb is None:
+                # A baseline alone: captured, and nothing ever allocated on it.
+                target = current
+            else:
+                with open(baseline_file) as f:
+                    baseline = max(int(f.read().strip()), 0)
+                target = min(baseline + max(current - prev_sb, 0), current)
+            if current != target:
+                _write_nr_hugepages(node, target)
+                current = _read_nr_hugepages(node)
+            if current > target:
+                kept.append(f"NUMA {node}: {current - target} huge page(s) still in use")
+                continue
+            for record in (sb_file, baseline_file):
+                # A record that is not there is a record already removed.
+                with contextlib.suppress(FileNotFoundError):
+                    os.remove(record)
+            released[node] = current
+            logger.info(f"Node {node}: huge pages released, {current} left to the host")
+        except (OSError, ValueError, subprocess.CalledProcessError) as e:
+            kept.append(f"NUMA {node}: {e}")
+    if kept:
+        raise HugePagesNotReleasedError("; ".join(kept))
+    return released
+
+
+def user_hugepages_baseline(node, current_hugepages, state_dir: str | None = None):
+    """The 2 MiB pages on NUMA ``node`` that are the user's, not simplyblock's,
+    given the ``current_hugepages`` the host carries right now: what the host
+    had the first time simplyblock saw it, plus whatever the user added on top
+    of the total simplyblock last set (see save_sb_hugepages_allocation).
+    Never negative. The state lives in ``state_dir``, one file per NUMA node
+    for the baseline and one for the last total, and is updated here when the
+    user's share grows.
+
+    This is the one place the arithmetic lives: the sysfs writer below and the
+    Talos machine-config patch both add simplyblock's pages on top of what it
+    returns, so a host shared with another huge-page consumer keeps that
+    consumer's pages in either case."""
+    state_dir = _hugepages_state_dir(state_dir)
+    user_baseline = _get_user_hugepages_baseline(node, current_hugepages, state_dir)
+    prev_sb = _get_sb_hugepages_allocation(node, state_dir)
+
+    if prev_sb is not None:
+        # prev_sb is the adjusted total last written to the kernel, so the
+        # delta from that value captures manual user changes since the last
+        # deploy (rounding overhead is not mistaken for user additions).
+        user_delta = current_hugepages - prev_sb
+        if user_delta > 0:
+            # nr_hugepages grew beyond what we last set — the user added
+            # hugepages. Absorb it into the baseline so it persists across
+            # every future restart, not just the next one.
+            current_user = user_baseline + user_delta
+            _save_user_hugepages_baseline(node, current_user, state_dir)
+            logger.info(f"Node {node}: user hugepage baseline updated {user_baseline} -> {current_user} (delta={user_delta:+d})")
+        else:
+            # user_delta <= 0: nr_hugepages is at or BELOW what we last
+            # wrote. This is almost always a reset (a reboot zeroes the
+            # runtime allocation while the persisted prev_sb survives), NOT
+            # a deliberate user removal. Treating it as a removal drove the
+            # user baseline negative and produced a negative nr_hugepages
+            # write that failed with "Invalid argument", looping forever
+            # (observed 2026-07-07: baseline 0 -> -7168 -> -14336 -> ...).
+            # Keep the established user baseline and simply re-apply.
+            current_user = user_baseline
+            if user_delta < 0:
+                logger.info(f"Node {node}: nr_hugepages ({current_hugepages}) below last-set ({prev_sb}); "
+                            f"treating as reset, keeping user baseline {user_baseline}")
+    else:
+        # First deploy: use the captured pre-deploy baseline
+        current_user = user_baseline
+
+    # Never a negative value: the baseline is clamped to >= 0.
+    return max(current_user, 0)
+
+
 def set_hugepages_if_needed(node, hugepages_needed, page_size_kb=2048):
     """Set hugepages for a specific NUMA node, adjusting up or down based on previous allocation."""
-    hugepage_path = f"/sys/devices/system/node/node{node}/hugepages/hugepages-{page_size_kb}kB/nr_hugepages"
+    hugepage_path = _nr_hugepages_path(node, page_size_kb)
 
     try:
         with open(hugepage_path, "r") as f:
             current_hugepages = int(f.read().strip())
 
-        user_baseline = _get_user_hugepages_baseline(node, current_hugepages)
-        prev_sb = _get_sb_hugepages_allocation(node)
+        current_user = user_hugepages_baseline(node, current_hugepages)
 
-        if prev_sb is not None:
-            # prev_sb is the adjusted total last written to the kernel, so the
-            # delta from that value captures manual user changes since the last
-            # deploy (rounding overhead is not mistaken for user additions).
-            user_delta = current_hugepages - prev_sb
-            if user_delta > 0:
-                # nr_hugepages grew beyond what we last set — the user added
-                # hugepages. Absorb it into the baseline so it persists across
-                # every future restart, not just the next one.
-                current_user = user_baseline + user_delta
-                _save_user_hugepages_baseline(node, current_user)
-                logger.info(f"Node {node}: user hugepage baseline updated {user_baseline} -> {current_user} (delta={user_delta:+d})")
-            else:
-                # user_delta <= 0: nr_hugepages is at or BELOW what we last
-                # wrote. This is almost always a reset (a reboot zeroes the
-                # runtime allocation while the persisted prev_sb survives), NOT
-                # a deliberate user removal. Treating it as a removal drove the
-                # user baseline negative and produced a negative nr_hugepages
-                # write that failed with "Invalid argument", looping forever
-                # (observed 2026-07-07: baseline 0 -> -7168 -> -14336 -> ...).
-                # Keep the established user baseline and simply re-apply.
-                current_user = user_baseline
-                if user_delta < 0:
-                    logger.info(f"Node {node}: nr_hugepages ({current_hugepages}) below last-set ({prev_sb}); "
-                                f"treating as reset, keeping user baseline {user_baseline}")
-        else:
-            # First deploy: use the captured pre-deploy baseline
-            current_user = user_baseline
-
-        # Never write a negative or below-requirement value: the user baseline
-        # is clamped to >= 0, and the final total can never drop below what
-        # simplyblock itself needs.
-        current_user = max(current_user, 0)
+        # The final total can never drop below what simplyblock itself needs.
         required = adjust_hugepages(current_user + hugepages_needed)
         required = max(required, hugepages_needed)
         logger.debug(f"Node {node}: setting to {required} (user={current_user} + simplyblock={hugepages_needed})")
 
         if current_hugepages != required:
-            cmd = f"echo {required} | sudo tee /sys/devices/system/node/node{node}/hugepages/hugepages-2048kB/nr_hugepages"
-            subprocess.run(cmd, shell=True, check=True)
+            _write_nr_hugepages(node, required)
             logger.debug(f"Node {node}: hugepages updated to {required}.")
+            # The kernel allocates what it can and reports no error. A short
+            # pool leaves the storage pod Pending on huge pages or on memory,
+            # with nothing saying why, so the two numbers that explain it are
+            # logged here.
+            allocated = _read_nr_hugepages(node, page_size_kb)
+            if allocated < required:
+                cause = "The host has too little free or unfragmented memory on this NUMA node."
+                if current_user > 0:
+                    cause = (f"If the host reserved fewer than {current_user} itself, the record in "
+                             f"{_HUGEPAGES_BASELINE_DIR}/hugepages_baseline_node{node} is left over from an "
+                             f"earlier deployment: write the host's own count there and apply again.")
+                logger.error(
+                    f"Node {node}: asked for {required} huge pages ({current_user} recorded as the host's own "
+                    f"+ {hugepages_needed} for simplyblock) and the kernel allocated {allocated}. {cause}")
         else:
             logger.debug(f"Node {node}: already has {current_hugepages} hugepages == required {required}, no change needed.")
 
         # Store the adjusted total (what was actually written to the kernel) so
         # the next deploy computes user_delta = current - prev_total correctly.
-        if not _save_sb_hugepages_allocation(node, required):
+        if not save_sb_hugepages_allocation(node, required):
             logger.error(f"Node {node}: failed to persist hugepage allocation — delta tracking will be incorrect on next restart")
 
     except FileNotFoundError:

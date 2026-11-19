@@ -114,7 +114,9 @@ def test_prune_consults_the_schedule_before_the_flat_count():
     import inspect
 
     from simplyblock_core.services import snapshot_replication as sr
-    src = inspect.getsource(sr._prune_internal_snapshots)
+    # the selection lives in _retention_plan, which merge_backlog shares
+    assert "_retention_plan(" in inspect.getsource(sr._prune_internal_snapshots)
+    src = inspect.getsource(sr._retention_plan)
     assert "_retention_schedule_for" in src
     assert "select_retained" in src
     # the newest `keep` stay protected even under a schedule

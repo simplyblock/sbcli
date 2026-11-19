@@ -26,6 +26,7 @@ from datetime import datetime
 from typing import Any, NoReturn
 
 from simplyblock_core import constants, db_controller, utils, xfer_timing
+from simplyblock_core.controllers import ns_host_guard
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol, LVolReplication
 from simplyblock_core.models.snapshot import SnapShot
@@ -280,6 +281,10 @@ def _record_cutover_done(task):
 
     _restore_source_throttle(task)
     _stop_source_replication(task)
+    # After the stop: a transfer of the source still draining checks the
+    # volume after its spare create and deletes the spare itself once the
+    # volume no longer replicates; the one created before is gone here.
+    _discard_cadence_spare(params.get("lvol_id"))
     _delete_direct_rounds(task)
     _prune_endgame_snapshots(task)
     _delete_source_if_requested(task)
@@ -349,6 +354,21 @@ def _delete_source_if_requested(task):
     try:
         from simplyblock_core.controllers import lvol_controller
         src_lvol = db.get_lvol_by_id(src_lvol_id)
+        # A host still connected only to the source would lose its block
+        # device with it; its CSI connects the target within seconds.
+        deadline = time.time() + constants.REPL_NS_HOST_RECONNECT_WAIT_SEC
+        while True:
+            blocked = ns_host_guard.removal_blocked(
+                getattr(src_lvol, "nqn", ""), ns_host_guard.volume_node_ids(src_lvol),
+                _target_node_ids(task.function_params),
+                f"deleting migrated-away source {src_lvol_id}")
+            if not blocked or time.time() >= deadline:
+                break
+            time.sleep(5)
+        if blocked:
+            logger.error(f"{blocked}; the source volume is kept and must be "
+                         f"deleted once the host runs on the target")
+            return
         logger.info(f"Cutover committed with --delete-source: deleting "
                     f"source volume {src_lvol_id}")
         lvol_controller.delete_lvol(src_lvol)
@@ -855,6 +875,17 @@ def task_runner(task: JobSchedule, tasks):
         task = _rebase_on_last_round(task)
         params = task.function_params
 
+    # Every host on the source must also be connected to the target before
+    # the freeze: the flip leaves the source paths inaccessible, and a host
+    # without a target controller would have no usable path (its CSI connects
+    # the target within seconds of the clone's export).
+    blocked = ns_host_guard.removal_blocked(
+        lvol.nqn, ns_host_guard.volume_node_ids(lvol), _target_node_ids(params),
+        f"cutover freeze of {lvol_id}")
+    if blocked:
+        _record(task, last_error=blocked)
+        raise TaskDefer(blocked)
+
     # Marks the freeze as running: a plan cancel or a policy detach leaves a
     # freezing cutover alone (tasks_controller.cutover_is_freezing). Written
     # BEFORE the fence, and through the cancellation probe: a task canceled
@@ -1339,18 +1370,88 @@ def _take_round(task, lvol):
     if not params.get("direct_rounds"):
         _, err, task = _take_shrink_snapshot(task, lvol)
         return err, task
-    _, err, task = _take_shrink_snapshot(task, lvol, direct=True)
+    new_snap, err, task = _take_shrink_snapshot(task, lvol, direct=True)
     if err:
         return err, task
     # direct_rounds_used outlives the endgame's params: whatever ends this
     # attempt, its round snapshots must not be left unreplicated
-    task = _record(task, direct_submits=0, direct_xfer_node="", direct_rounds_used=True)
+    ids = list(task.function_params.get("direct_round_ids") or [])
+    if new_snap and new_snap not in ids:
+        ids.append(new_snap)
+    task = _record(task, direct_submits=0, direct_xfer_node="", direct_rounds_used=True,
+                   direct_round_ids=ids)
     err, task = _submit_direct_round(task, lvol)
     if err:
         # the snapshot exists; the next pass sends it (_direct_round_done)
         logger.warning("cutover for lvol %s: round %s not sent yet: %s", lvol.get_id(),
                        task.function_params.get("shrink_round"), err)
+    task = _drop_superseded_rounds(task, lvol, new_snap)
     return None, task
+
+
+def _drop_superseded_rounds(task, lvol, in_flight=None):
+    """Delete this endgame's direct-round snapshots that nothing needs any
+    more; returns the task.
+
+    A direct round arrives in the cutover clone and the next round is a delta
+    against it, so only two round snapshots are of use: the last one that
+    arrived (the next round's base, and the final step's if this is the last
+    round) and the one in flight. Every older one only pins what was written
+    since it was taken, on the source. Held until the cutover, they filled
+    bed bf24 (2026-11-14): endgames that did not converge took 10-13 rounds
+    each, 30 s apart, five volumes in parallel. Under random overwrites every
+    round touches nearly every cluster, so each held round pinned about the
+    whole 10 GiB volume. The source cluster went from 36% to 88% in 15 minutes
+    (17 -> 63 snapshots), three devices filled up and client writes failed
+    with EIO.
+
+    Deleting one merges it into its successor, which has arrived already and
+    is not transferring (the round in flight is the successor's successor).
+    The copy in flight reads only its own clusters, so the merge does not
+    change what it sends. A delete that is refused now is tried again after
+    the next round. Whatever is left over goes with the rest after the
+    cutover (_delete_direct_rounds), or replicates the ordinary way if the
+    endgame gives up (_requeue_direct_rounds).
+    """
+    params = task.function_params or {}
+    ids = list(params.get("direct_round_ids") or [])
+    keep = {params.get("direct_done_snap"), params.get("shrink_snap_id"), in_flight}
+    superseded = [i for i in ids if i and i not in keep]
+    if not superseded:
+        return task
+    base = _clone_base_source(lvol, params)
+    if base is not None:
+        keep.add(base.get_id())
+        superseded = [i for i in superseded if i not in keep]
+        if not superseded:
+            return task
+    from simplyblock_core.controllers import snapshot_controller
+    dropped = []
+    for snap_id in superseded:
+        try:
+            snap = db.get_snapshot_by_id(snap_id)
+        except KeyError:
+            dropped.append(snap_id)                       # gone already
+            continue
+        if snap.status == SnapShot.STATUS_IN_DELETION:
+            dropped.append(snap_id)
+            continue
+        try:
+            ok = snapshot_controller.delete(snap_id)
+        except Exception as e:                            # noqa: BLE001
+            ok = False
+            logger.warning("cutover for lvol %s: superseded round snapshot %s not deleted: %s",
+                           lvol.get_id(), snap_id, e)
+        if ok:
+            dropped.append(snap_id)
+    if not dropped:
+        return task
+    logger.info("cutover for lvol %s: deleted %d superseded round snapshot(s) (%s); "
+                "keeping %s", lvol.get_id(), len(dropped), ", ".join(dropped),
+                ", ".join(sorted(k for k in keep if k)))
+    xfer_timing.stamp("direct_rounds_dropped", lvol=lvol.get_id(), n=len(dropped),
+                      round=params.get("shrink_round"))
+    return _record(task, direct_round_ids=[i for i in ids if i not in dropped])
 
 
 def _submit_direct_round(task, lvol):
@@ -1463,7 +1564,10 @@ def _direct_round_done(task, lvol):
             return False, task
         state = str(st.get("transfer_state"))
         if state == "Done":
-            return True, _record(task, direct_done_snap=snap_id)
+            landed_before = params.get("direct_done_snap")
+            task = _record(task, direct_done_snap=snap_id)
+            _drop_landed_round(lvol, landed_before, snap_id)
+            return True, task
         if state == "In progress":
             return False, task
     if int(params.get("direct_submits") or 0) >= constants.REPL_CUTOVER_DIRECT_ROUND_SUBMITS:
@@ -1496,21 +1600,56 @@ def _direct_round_snapshots(lvol_id):
             and s.status == SnapShot.STATUS_ONLINE]
 
 
+def _drop_landed_round(lvol, landed_before, landed_now):
+    """Delete the round that landed before *landed_now*: once a round is in the
+    clone, the one before it serves nothing. The next round's delta base is
+    *landed_now* (_direct_round_base), and the delete swap-merges the older
+    round INTO it -- below that base, so no later round's delta changes, and
+    the surviving snapshot keeps its blob. The first round's base is the
+    clone's base copy (not a round) and is never deleted here.
+
+    bf23 (2026-11-11): rounds were kept until the endgame ended; an endgame
+    runs up to REPL_CUTOVER_MAX_SHRINK_ROUNDS of them, every one pinning what
+    the volume rewrote since the round before, and attempts that failed while
+    the target cluster had a node down stacked theirs on top: cluster A held
+    ~50 round snapshots, chains 8-10 deep, and went read-only (all devices
+    cannot_allocate) under heavy rewrite load."""
+    if not landed_before or landed_before == landed_now:
+        return
+    try:
+        snap = db.get_snapshot_by_id(landed_before)
+    except KeyError:
+        return
+    if not (snap.snap_name or "").startswith(DIRECT_ROUND_PREFIX) \
+            or snap.target_replicated_snap_uuid \
+            or snap.status != SnapShot.STATUS_ONLINE:
+        return
+    from simplyblock_core.controllers import snapshot_controller
+    try:
+        if snapshot_controller.delete(landed_before):
+            logger.info("cutover for lvol %s: round snapshot %s superseded by %s; deleted",
+                        lvol.get_id(), landed_before, landed_now)
+    except Exception as e:                                # noqa: BLE001
+        # best effort: the endgame's end deletes whatever is left
+        logger.warning("cutover for lvol %s: could not delete superseded round "
+                       "snapshot %s: %s", lvol.get_id(), landed_before, e)
+
+
 def _requeue_direct_rounds(task):
     """An endgame that ends without a cutover leaves its direct rounds'
-    snapshots on the source, sent only into the clone it discards. They
-    replicate the ordinary way (the chain-ancestor rule orders them); left
-    alone they would sit unreplicated and close the backlog gate for good."""
-    from simplyblock_core.controllers import tasks_controller
-    if not (task.function_params or {}).get("direct_rounds_used"):
-        return
-    for s in _direct_round_snapshots(task.function_params.get("lvol_id")):
-        try:
-            tasks_controller.add_snapshot_replication_task(s.cluster_id, s.lvol.node_id, s.get_id())
-        except Exception as e:                            # noqa: BLE001
-            logger.error("Could not queue the replication of round snapshot %s: %s",
-                         s.get_id(), e)
-    drop_params(task, "direct_rounds_used")
+    snapshots on the source, sent only into the clone it discards. They are
+    deleted, not replicated: each delete swap-merges a round into its
+    successor, the newest into the live volume, so their data stays in the
+    volume and the next ordinary cadence snapshot carries it, as a delta
+    against the last snapshot that did replicate (the clone's base copy).
+
+    Until bf23 they were each queued for ordinary replication. A failed
+    attempt so left up to REPL_CUTOVER_MAX_SHRINK_ROUNDS snapshots that had to
+    replicate one by one before the next endgame, and every further failed
+    attempt (a target node down) stacked another set on top: the source
+    cluster filled up and went read-only (2026-11-11, R3). Deleted, they
+    neither pin space nor close the backlog gate."""
+    _delete_direct_rounds(task)
 
 
 def _delete_direct_rounds(task):
@@ -1526,6 +1665,17 @@ def _delete_direct_rounds(task):
     drop_params(task, "direct_rounds_used")
 
 
+def _discard_cadence_spare(lvol_id):
+    """Delete the cadence spare landing volume of *lvol_id* (replication_spare)."""
+    if not lvol_id:
+        return
+    try:
+        from simplyblock_core import replication_spare
+        replication_spare.discard(lvol_id)
+    except Exception as e:                                # noqa: BLE001
+        logger.warning("Could not discard the cadence spare of %s: %s", lvol_id, e)
+
+
 def _discard_spare_landing(task):
     """Delete the landing volume pre-staged for a round that will not run.
 
@@ -1539,13 +1689,7 @@ def _discard_spare_landing(task):
     # The cadence spare of the volume (replication_spare) is idle too once the
     # rounds are over: the volume cuts over or gives up, either way no cadence
     # snapshot of it lands here again.
-    lvol_id = (task.function_params or {}).get("lvol_id")
-    if lvol_id:
-        try:
-            from simplyblock_core import replication_spare
-            replication_spare.discard(lvol_id)
-        except Exception as e:                                # noqa: BLE001
-            logger.warning("Could not discard the cadence spare of %s: %s", lvol_id, e)
+    _discard_cadence_spare((task.function_params or {}).get("lvol_id"))
     try:
         # The caller's copy may predate the rounds _shrink_step just ran.
         name = (db.get_task_by_id(task.uuid).function_params or {}).get(
@@ -1829,7 +1973,7 @@ def _final_delta_estimate(params):
 _ENDGAME_ROUND_PARAMS = ("shrink_snap_id", "shrink_round", "shrink_round_times",
                          "shrink_started_at", "shrink_round_done_at",
                          "direct_rounds", "direct_xfer_node", "direct_submits",
-                         "direct_done_snap")
+                         "direct_done_snap", "direct_round_ids")
 
 
 def _abandon_endgame(task, lvol, reason) -> NoReturn:
@@ -1966,8 +2110,34 @@ def _abandon_prepared_cutover(task):
     return task
 
 
-def _delete_cutover_clone(clone_id):
-    """Start deleting the clone; True once it is gone, False while it is not."""
+def _target_node_ids(params):
+    """The nodes exporting the prepared cutover clone, if there is one."""
+    clone_id = (params or {}).get("tgt_lvol_id")
+    if not clone_id:
+        return []
+    try:
+        return ns_host_guard.volume_node_ids(db.get_lvol_by_id(clone_id))
+    except KeyError:
+        return []
+
+
+def _source_node_ids(lvol_id):
+    try:
+        return ns_host_guard.volume_node_ids(db.get_lvol_by_id(lvol_id))
+    except KeyError:
+        return []
+
+
+class CloneRemovalBlocked(Exception):
+    """A host reaches the volume only through the clone's namespace."""
+
+
+def _delete_cutover_clone(clone_id, src_lvol_id=None):
+    """Start deleting the clone; True once it is gone, False while it is not.
+
+    Raises CloneRemovalBlocked while a host is connected to the clone's
+    namespace and to none of the source's (ns_host_guard): deleting it would
+    take that host's block device away for good (bed bf26 2026-11-17)."""
     from simplyblock_core.controllers import lvol_controller
     try:
         clone = db.get_lvol_by_id(clone_id)
@@ -1976,6 +2146,12 @@ def _delete_cutover_clone(clone_id):
     if clone.status == LVol.STATUS_DELETED:
         return True
     if clone.status != LVol.STATUS_IN_DELETION:
+        blocked = ns_host_guard.removal_blocked(
+            clone.nqn, ns_host_guard.volume_node_ids(clone),
+            _source_node_ids(src_lvol_id) if src_lvol_id else [],
+            f"discarding cutover clone {clone_id}")
+        if blocked:
+            raise CloneRemovalBlocked(blocked)
         lvol_controller.delete_lvol(clone)
     return False
 
@@ -1998,7 +2174,13 @@ def _discard_failed_cutover(task):
             raise TaskDefer("waiting for SPDK to end the failed final step "
                             "before discarding its clone")
         try:
-            gone = _delete_cutover_clone(clone_id)
+            gone = _delete_cutover_clone(clone_id, params.get("lvol_id"))
+        except CloneRemovalBlocked as e:
+            # Not counted against the discard deadline: the host is the one
+            # that has to come back, and the source keeps serving meanwhile.
+            logger.warning(str(e))
+            _record(task, last_error=str(e))
+            raise TaskDefer(str(e))
         except Exception as e:                          # noqa: BLE001
             gone = False
             task = _record(task, last_error=(
@@ -2156,9 +2338,14 @@ def _cleanup_unfinished_cutover(task):
     if not clone_id:
         return
     try:
-        _delete_cutover_clone(clone_id)
+        _delete_cutover_clone(clone_id, params.get("lvol_id"))
         logger.info("cutover task %s ended without a cutover; deleting its "
                     "clone %s", task.uuid, clone_id)
+    except CloneRemovalBlocked as e:
+        # Left exported rather than taking a host's device away; the clone is
+        # an orphan from here on and is reported loudly.
+        logger.error("cutover task %s ended without a cutover; its clone %s is "
+                     "kept: %s", task.uuid, clone_id, e)
     except Exception as e:                              # noqa: BLE001
         logger.error("cutover task %s ended without a cutover and its clone %s "
                      "could not be deleted: %s", task.uuid, clone_id, e)

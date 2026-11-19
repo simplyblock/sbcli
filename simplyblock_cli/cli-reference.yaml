@@ -26,6 +26,14 @@ commands:
             type: bool
             default: false
             action: store_true
+          - name: "--container-image-prefix"
+            help: "Registry/proxy prefix for the images pulled on this host, e.g. `registry-1.docker.io`."
+            description: >
+              Put in front of the SNodeAPI and SPDK images this command pulls. Use the same
+              value the cluster is created with (`cluster create --container-image-prefix`);
+              the host joins no cluster here, so it cannot read it from one.
+            dest: container_image_prefix
+            type: str
       - name: configure
         help: "Prepare a configuration file to be used when adding the storage node."
         description: >
@@ -876,10 +884,10 @@ commands:
             type: int
             default: 89
           - name: "--cap-crit"
-            help: "The capacity critical level in percent. Default: `99`."
+            help: "The capacity critical level in percent. Default: `98`."
             dest: cap_crit
             type: int
-            default: 99
+            default: 98
           - name: "--prov-cap-warn"
             help: "The capacity warning level in percent. Default: `250`."
             dest: prov_cap_warn
@@ -1166,6 +1174,16 @@ commands:
             dest: snode_api_port
             type: int
             default: 50001
+          - name: "--container-image-prefix"
+            help: "Registry/proxy prefix for every container image the cluster pulls, e.g. `registry-1.docker.io`."
+            description: >
+              Stored on the cluster and put in front of the images it deploys: the swarm
+              and monitoring stack services, the SNodeAPI, SPDK and SPDK-proxy images on
+              storage node add and restart, and the images used by `cluster update`. Empty
+              pulls images as named. The control-plane images of a Kubernetes deployment
+              come from its Helm chart and are not affected.
+            dest: container_image_prefix
+            type: str
           - name: "--max-subsys"
             help: "Max number of nvmf subsystems per storage node. Cluster-wide; a node adopts it on its next restart."
             description: >
@@ -1229,10 +1247,10 @@ commands:
             type: int
             default: 89
           - name: "--cap-crit"
-            help: "The capacity critical level in percent. Default: `99`."
+            help: "The capacity critical level in percent. Default: `98`."
             dest: cap_crit
             type: int
-            default: 99
+            default: 98
           - name: "--prov-cap-warn"
             help: "The capacity warning level in percent. Default: `250`."
             dest: prov_cap_warn
@@ -1448,6 +1466,15 @@ commands:
             dest: snode_api_port
             type: int
             default: 50001
+          - name: "--container-image-prefix"
+            help: "Registry/proxy prefix for the images this cluster pulls. Default: the prefix of the existing cluster."
+            description: >
+              Stored on the new cluster and put in front of the images it deploys, as
+              `cluster create --container-image-prefix` does. Left out, the new cluster
+              inherits the prefix of a cluster already on this control plane; pass an
+              empty value to pull this cluster's images as named.
+            dest: container_image_prefix
+            type: str
           - name: "--max-subsys"
             help: "Max number of nvmf subsystems per storage node. Cluster-wide; a node adopts it on its next restart."
             description: >

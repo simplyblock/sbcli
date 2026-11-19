@@ -569,7 +569,7 @@ class RPCClient:
             "io_unit_size": 8192,
             "max_aq_depth": 128,
             "num_shared_buffers": shared_bufs,
-            "buf_cache_size": 512,
+            "buf_cache_size": constants.NVMF_BUF_CACHE_SIZE,
             "dif_insert_or_strip": False,
             "ack_timeout": 2000,
         }

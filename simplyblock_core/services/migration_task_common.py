@@ -39,6 +39,19 @@ MIGRATION_WAIT_UNAVAILABLE_KEY = "wait_unavailable_before_retry"
 # a node that just came back is still settling its lvstore.
 NODE_SETTLE_SEC = 60
 
+# Members (``node:<id>`` / ``dev:<id>``) whose health check failed when the
+# migration started, recorded with the start (start_migration).
+MIGRATION_UNHEALTHY_KEY = "migration_unhealthy"
+# Set once a migration's errors were retried to confirm them; only then are they
+# taken as final (cluster held DEGRADED by Cluster.migration_ft_impact).
+MIGRATION_ERROR_CONFIRMED_KEY = "migration_error_confirmed"
+# When the start gate first saw failing health checks (defer_while_unhealthy).
+MIGRATION_WAIT_UNHEALTHY_KEY = "wait_unhealthy_since"
+# How long a migration start waits for failing health checks to recover. Bounded:
+# a health check that stays false for an unrelated reason must not hold
+# rebalancing back forever; the error confirmation below still covers that case.
+UNHEALTHY_START_WAIT_SEC = 300
+
 
 def migration_started(task):
     """Whether this task has already issued its data-plane migration.
@@ -282,6 +295,63 @@ def cluster_unavailable_state(cluster_id):
     return sorted(unavailable)
 
 
+def cluster_unhealthy_state(cluster_id):
+    """Online nodes and online devices whose health check is failing, as
+    stable ids (``node:<id>`` / ``dev:<id>``).
+
+    Status alone does not show a network partition of the data ports: on
+    2026-11-16 (striped-volume bed, sb-striped-b6r) a 60 s partition left the
+    node ONLINE, and its device went unavailable and back ONLINE 20 s before
+    the partition ended. The rebalance that the device's return started ran
+    into the partition and ended with error 520 on four distribs, every node
+    and device online, so the errors were taken as final and the cluster stayed
+    DEGRADED. The health checks of the node and the device were still failing
+    while it ran. Members that are not ONLINE are cluster_unavailable_state's.
+    """
+    unhealthy = []
+    for node in db.get_storage_nodes_by_cluster_id(cluster_id):
+        if node.status != StorageNode.STATUS_ONLINE:
+            continue
+        if node.health_check is False:
+            unhealthy.append(f"node:{node.get_id()}")
+        for dev in node.nvme_devices:
+            if dev.status == NVMeDevice.STATUS_ONLINE and dev.health_check is False:
+                unhealthy.append(f"dev:{dev.get_id()}")
+    return sorted(unhealthy)
+
+
+def defer_while_unhealthy(task):
+    """Hold a not-yet-started migration while health checks of online nodes or
+    devices fail, for at most UNHEALTHY_START_WAIT_SEC (no retry consumed).
+
+    A failing health check on an ONLINE member is typically a partition or a
+    peer connection still being repaired; a migration started then loses pages
+    to it (see cluster_unhealthy_state).
+    """
+    if migration_started(task):
+        return
+    unhealthy = cluster_unhealthy_state(task.cluster_id)
+    since = task.function_params.get(MIGRATION_WAIT_UNHEALTHY_KEY)
+    if not unhealthy:
+        if since:
+            drop_params(task, MIGRATION_WAIT_UNHEALTHY_KEY)
+        return
+    now = datetime.now(UTC)
+    if not since:
+        checkpoint(task, **{MIGRATION_WAIT_UNHEALTHY_KEY: now.isoformat()})
+        raise TaskDefer(f"health checks failing on {unhealthy}, waiting before starting migration")
+    try:
+        waited = (now - datetime.fromisoformat(since)).total_seconds()
+    except Exception as e:
+        logger.warning("Unparsable %s stamp %r (%s); not waiting", MIGRATION_WAIT_UNHEALTHY_KEY, since, e)
+        return
+    if waited < UNHEALTHY_START_WAIT_SEC:
+        raise TaskDefer(f"health checks failing on {unhealthy} for {int(waited)}s, "
+                        f"waiting before starting migration")
+    logger.warning("Starting migration task %s although health checks still fail on %s "
+                   "after %ds", task.uuid, unhealthy, int(waited))
+
+
 def require_recovery_progress(task, unavailable):
     """Hold a migration back while the cluster is degraded, releasing it only
     when something actually recovers.
@@ -339,7 +409,9 @@ def start_migration(task, start, **params):
         raise TaskRetry("Failed to start device migration task, retry later")
 
     return checkpoint(task, migration={"name": task.function_params["distr_name"]},
-                      migration_started=datetime.now(UTC).isoformat(), **params)
+                      migration_started=datetime.now(UTC).isoformat(),
+                      **{MIGRATION_UNHEALTHY_KEY: cluster_unhealthy_state(task.cluster_id)},
+                      **params)
 
 
 def _ft_impact_key(task):
@@ -416,6 +488,20 @@ def report_migration_status(task, res, allow_all_errors=False, allowed_error_cod
             # network outage ended 3 s before the migration did; its errors and the pages it counted
             # without full fault tolerance were the outage's). The retry runs with everything online.
             raise TaskRetry(f"mig error: {error_code}, a node came back during the migration, retrying")
+        unhealthy_at_start = task.function_params.get(MIGRATION_UNHEALTHY_KEY) or []
+        recovered = set(unhealthy_at_start) - set(cluster_unhealthy_state(task.cluster_id))
+        if recovered:
+            # Health checks that failed at the start passed again during the migration: a partition
+            # (or peer connection repair) ended while it ran, and its errors may be that outage's.
+            raise TaskRetry(f"mig error: {error_code}, health of {sorted(recovered)} recovered "
+                            f"during the migration, retrying")
+        if not task.function_params.get(MIGRATION_ERROR_CONFIRMED_KEY):
+            # Nothing visible changed, but an outage need not change any status (2026-11-16: a
+            # data-port partition left every node and device online). Run the migration once more
+            # before its errors are taken as final and the cluster is held degraded.
+            checkpoint(task, **{MIGRATION_ERROR_CONFIRMED_KEY: error_code})
+            raise TaskRetry(f"mig error: {error_code}, all nodes online, retrying once to "
+                            f"confirm the errors are not transient")
         # Every node and device is online, so a retry would hit the same errors.
         # The migration is done; whether the cluster may be ACTIVE depends on
         # whether the pages it could not place are fault tolerant as they are.

@@ -16,6 +16,7 @@ from simplyblock_core.controllers import (
     device_events,
     health_controller,
     port_release_budget,
+    replica_chain,
     storage_events,
     tasks_controller,
 )
@@ -641,6 +642,17 @@ def check_node(snode):
                 lvstore_check = False
 
         health_check_status = is_node_online and node_devices_check and node_remote_devices_check and lvstore_check
+
+        # Snapshot-tree changes this node missed while it could not be reached
+        # or did not hold the bdev yet (replica_chain). Its SPDK answers again,
+        # and one that never reloaded its lvstores still has the tree it had
+        # then: tell it now, so it does not act on that tree once it leads (bf23
+        # 2026-11-12, LVS_16). One prefix read when it owes nothing.
+        try:
+            replica_chain.replay_pending(snode, db=db)
+        except Exception as e:  # noqa: BLE001 - never fails the health check
+            logger.error("Replay of owed snapshot-tree changes on %s failed: %s",
+                         snode.get_id(), e)
     # Report true/false only for ONLINE/DOWN; UNREACHABLE/SUSPENDED ran the
     # self-heal pass above but their health stays "not applicable" (None).
     # No sleep here: loop_for_node() owns the polling cadence (30s healthy /

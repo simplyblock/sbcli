@@ -58,6 +58,7 @@ def task_runner(task):
     if not mig.migration_started(task):
         if not _all_devices_online_or_written_off(task.cluster_id):
             raise TaskRetry("Some devs are offline, retrying")
+        mig.defer_while_unhealthy(task)
 
         try:
             db.get_storage_device_by_id(task.device_id)
