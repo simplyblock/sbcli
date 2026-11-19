@@ -385,6 +385,22 @@ def _export_on_standby(db, cluster, standby, dev, path, deadline) -> dict:
         if not info:
             raise TakeoverError(f"base bdev {base} not found on {sid} after create")
         size = int(info.get("block_size", 0)) * int(info.get("num_blocks", 0))
+        if size < int(dev.size or 0) and ("base", base) not in created:
+            # A base bdev this node kept from before a LUN growth
+            # (device_controller.grow_cluster_devices) still has the old size:
+            # re-read the block device before giving up.
+            # The host's kernel may not have seen the growth either (the
+            # node was out while it ran).
+            try:
+                standby.client(timeout=_remaining(deadline, 30), retry=1).rescan_block_device(path)
+            except Exception as e:                          # noqa: BLE001
+                logger.warning("LUN takeover: block rescan of %s on %s failed: %s", path, sid, e)
+            try:
+                utils.rescan_lblk_bdev(rpc, base, utils.lblk_io_engine_for({"path": path}))
+                info = rpc.bdev_get(base) or info
+                size = int(info.get("block_size", 0)) * int(info.get("num_blocks", 0))
+            except Exception as e:                          # noqa: BLE001
+                logger.warning("LUN takeover: rescan of %s on %s failed: %s", base, sid, e)
         if size < int(dev.size or 0):
             raise TakeoverError(f"base bdev {base} on {sid} is {size} bytes, the device {dev.size}")
 

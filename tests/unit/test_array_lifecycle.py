@@ -583,7 +583,31 @@ class TestGrowth(_Case):
         with self.assertRaisesRegex(ValueError, "array"):
             array_controller.grow_luns(CID, 2)
 
+    def _prechecked(self, errors=None):
+        """Patch the pre-array check of grow_cluster_devices."""
+        db = MagicMock()
+        db.get_cluster_by_id.return_value = MagicMock(device_mode=device_controller.constants.DEVICE_MODE_LBLK)
+        for target, attr, kw in ((device_controller, "DBController", {"return_value": db}),
+                                 (device_controller, "_growth_devices", {"return_value": []}),
+                                 (device_controller, "_resizable_errors", {"return_value": errors or {}})):
+            p = patch.object(target, attr, **kw)
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_a_device_that_cannot_grow_leaves_the_array_alone(self):
+        # Checked before the array is touched: LUNs grown at the array with
+        # the cluster refusing would be grown again by a re-run.
+        self._prechecked({"d1": "Storage node must be online, current status: offline"})
+        with patch.object(array_controller, "grow_luns") as grow_luns,              patch.object(device_controller, "_grow_cluster_devices") as inner:
+            out = device_controller.grow_cluster_devices(CID, lun_factor=2)
+        grow_luns.assert_not_called()
+        inner.assert_not_called()
+        self.assertFalse(out["grown"])
+        self.assertIn("no LUN was grown", out["reason"])
+        self.assertEqual(out["luns"], {})
+
     def test_a_failed_lun_grows_nothing(self):
+        self._prechecked()
         # Growth is uniform (PR #1572): a LUN that did not grow at the array
         # would cap the factor at 1, so nothing on the cluster is grown.
         with patch.object(array_controller, "grow_luns",
@@ -595,6 +619,7 @@ class TestGrowth(_Case):
         self.assertEqual(out["luns"], {})
 
     def test_grown_luns_then_uniform_growth(self):
+        self._prechecked()
         luns = {"d1": {"lun_id": "vol-1", "old_size": 1, "new_size": 2}}
         with patch.object(array_controller, "grow_luns", return_value={"luns": luns, "errors": {}}),              patch.object(device_controller, "_grow_cluster_devices",
                           return_value={"grown": True, "factor": 2.0, "devices": [], "errors": {},

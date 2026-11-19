@@ -16,7 +16,7 @@ import copy
 import unittest
 from unittest.mock import MagicMock, patch
 
-from simplyblock_core import array, constants, multi_attach, storage_node_ops
+from simplyblock_core import array, constants, multi_attach, storage_node_ops, utils
 from simplyblock_core.array.fake import FakeArrayPlugin
 from simplyblock_core.controllers import device_controller, lun_takeover
 from simplyblock_core.models.cluster import Cluster
@@ -869,3 +869,39 @@ class TestUnfenceOrder(_TakeoverCase):
         with patch.object(FakeArrayPlugin, "unfence", side_effect=RuntimeError("api")):
             self.assertTrue(lun_takeover.unfence_node(DEV_ID, "node-a"))
         self.assertEqual(self.dev(db).fenced_node_ids, [])
+
+
+class TestTakeoverAfterGrowth(_TakeoverCase):
+    """A node that kept the base bdev over a LUN from before a growth
+    (device_controller.grow_cluster_devices) still has it at the old size;
+    the takeover re-reads the block device instead of failing."""
+
+    def _grown_bed(self):
+        db, dev = _bed()
+        dev.size = 2 * SIZE
+        for nid in ("node-b", "node-c", "node-d"):
+            db.nodes[nid].agent.lun_info.return_value = ([_lun_entry(size=2 * SIZE)], None)
+        b = db.nodes["node-b"]
+        base = utils.aio_bdev_name_for_serial(dev.serial_number)
+        b.spdk.bdevs[base] = {"name": base, "block_size": 4096, "num_blocks": SIZE // 4096}
+        return db, b, base
+
+    def test_stale_base_bdev_is_rescanned(self):
+        db, b, base = self._grown_bed()
+
+        def _rescan(name):
+            b.spdk.calls.append(("bdev_aio_rescan", (name,), {}))
+            b.spdk.bdevs[name]["num_blocks"] = 2 * SIZE // 4096
+            return True
+        b.spdk.bdev_aio_rescan = _rescan
+        self.assertEqual(self.run_takeover(db), lun_takeover.TAKEN_OVER)
+        self.assertEqual(b.spdk.ops("bdev_aio_rescan"), [("bdev_aio_rescan", (base,), {})])
+        b.agent.rescan_block_device.assert_called_once_with(BY_ID)
+        self.assertEqual(b.spdk.ops("bdev_aio_create"), [])
+        self.assertEqual(self.dev(db).serving_node(), "node-b")
+
+    def test_base_bdev_still_small_after_rescan_fails_on_that_node(self):
+        db, b, base = self._grown_bed()
+        b.spdk.bdev_aio_rescan = lambda name: True
+        self.assertNotEqual(self.run_takeover(db), lun_takeover.TAKEN_OVER)
+        self.assertEqual(b.spdk.ops("bdev_alceml_create"), [])

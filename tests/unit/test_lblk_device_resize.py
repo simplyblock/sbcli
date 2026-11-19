@@ -317,6 +317,52 @@ class TestGrowClusterDevices(unittest.TestCase):
         h.set_unavail.assert_not_called()
 
 
+class TestGrowAfterTakeover(unittest.TestCase):
+    """A multi-attach LUN another node took over is grown where its alceml
+    runs: the serving node, over the base bdev and path the takeover
+    recorded. The owner (back as a standby) is not touched."""
+
+    def _harness(self, host_status=StorageNode.STATUS_ONLINE):
+        h = _GrowHarness([150, 150])
+        moved = h.devs[1]
+        moved.multi_attach = True
+        moved.serving_node_id = "node-2"
+        moved.node_paths = {"node-2": {"path": "/dev/disk/by-id/lun-on-2", "bdev": "aio_on_2"}}
+        host = _node([], status=host_status)
+        host.get_id.return_value = "node-2"
+        host.rpc = MagicMock()
+        host.rpc_client.return_value = host.rpc
+        host.agent = MagicMock()
+        host.agent.rescan_block_device.return_value = ({"size": 150 * _GIB}, None)
+        host.client.return_value = host.agent
+        h.db.get_storage_node_by_id.side_effect = lambda nid: host if nid == "node-2" else h.node
+        return h, moved, host
+
+    def test_grown_on_the_serving_node(self):
+        h, moved, host = self._harness()
+        with patch.object(device_controller.utils, "lblk_io_engine_of_device",
+                          return_value=constants.LBLK_IO_ENGINE_AIO):
+            res = h.grow()
+        self.assertTrue(res["grown"], res)
+        self.assertEqual(h.sizes(), [150, 150])
+        host.agent.rescan_block_device.assert_called_once_with("/dev/disk/by-id/lun-on-2")
+        host.rpc.alceml_bdev_backend_resize_begin.assert_called_once_with(
+            "alceml_dev-1", request_timeout=device_controller.RESIZE_RPC_TIMEOUT_SEC)
+        host.rpc.bdev_aio_rescan.assert_called_once_with("aio_on_2")
+        owner_calls = [c for c in h.rpc.mock_calls if "alceml_dev-1" in str(c) or "aio_dev-1" in str(c)]
+        self.assertEqual(owner_calls, [])
+        self.assertNotIn(moved.by_id_path, [c.args[0] for c in h.client.rescan_block_device.call_args_list])
+
+    def test_serving_node_offline_grows_nothing(self):
+        h, _, host = self._harness(host_status=StorageNode.STATUS_OFFLINE)
+        res = h.grow()
+        self.assertFalse(res["grown"])
+        self.assertIn("served by node node-2", res["errors"]["dev-1"])
+        self.assertEqual(h.sizes(), [100, 100])
+        host.rpc.alceml_bdev_backend_resize_begin.assert_not_called()
+        h.rpc.alceml_bdev_backend_resize_begin.assert_not_called()
+
+
 class TestUnusedCapacity(unittest.TestCase):
     """The capacity statistics leave out the part of a block device beyond
     the device size: alceml spans the whole block device."""
