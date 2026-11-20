@@ -3456,8 +3456,16 @@ def user_hugepages_baseline(node, current_hugepages, state_dir: str | None = Non
     return max(current_user, 0)
 
 
-def set_hugepages_if_needed(node, hugepages_needed, page_size_kb=2048):
-    """Set hugepages for a specific NUMA node, adjusting up or down based on previous allocation."""
+def set_hugepages_if_needed(node, hugepages_needed, page_size_kb=2048, claimed_by_others=None):
+    """Set hugepages for a specific NUMA node, adjusting up or down based on previous allocation.
+
+    ``claimed_by_others`` is the 2 MiB pages other workloads are known to use,
+    where something accounts for them: on Kubernetes, the hugepages-2Mi the
+    node's pods request (a pod can use no more). The host's own share is then
+    at most that many pages, and a pool that already holds them beside
+    simplyblock's is left as it is -- grown only by the shortfall, never
+    shrunk. Without it the whole pool the host carried before simplyblock is
+    the host's, and simplyblock's pages go on top."""
     hugepage_path = _nr_hugepages_path(node, page_size_kb)
 
     try:
@@ -3465,10 +3473,15 @@ def set_hugepages_if_needed(node, hugepages_needed, page_size_kb=2048):
             current_hugepages = int(f.read().strip())
 
         current_user = user_hugepages_baseline(node, current_hugepages)
+        if claimed_by_others is not None:
+            current_user = min(current_user, claimed_by_others)
 
-        # The final total can never drop below what simplyblock itself needs.
-        required = adjust_hugepages(current_user + hugepages_needed)
-        required = max(required, hugepages_needed)
+        if claimed_by_others is not None and current_hugepages >= current_user + hugepages_needed:
+            required = current_hugepages
+        else:
+            # The final total can never drop below what simplyblock itself needs.
+            required = adjust_hugepages(current_user + hugepages_needed)
+            required = max(required, hugepages_needed)
         logger.debug(f"Node {node}: setting to {required} (user={current_user} + simplyblock={hugepages_needed})")
 
         if current_hugepages != required:

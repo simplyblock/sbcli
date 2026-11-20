@@ -749,6 +749,54 @@ def _hugepages_per_numa(nodes):
     return {numa: mem // 2000000 for numa, mem in per_numa_bytes.items()}
 
 
+_STORAGE_POD_LABEL = ("role", "simplyblock-storage-node")
+
+
+def _pod_hugepages_mib(pod):
+    """The hugepages-2Mi a pod requests, in MiB, the way the scheduler counts
+    it: the larger of its containers' sum and its largest init container."""
+    def requested(container):
+        resources = container.resources
+        if resources is None:
+            return 0
+        # Kubernetes requires a huge-page request to equal its limit, and
+        # defaults the request to the limit when only the limit is given.
+        quantity = (resources.requests or {}).get('hugepages-2Mi') or (resources.limits or {}).get('hugepages-2Mi')
+        return _quantity_to_mib(quantity)
+
+    spec = pod.spec
+    containers = sum(requested(c) for c in spec.containers or [])
+    init = max((requested(c) for c in spec.init_containers or []), default=0)
+    return max(containers, init)
+
+
+def _hugepages_claimed_by_other_pods(node_name):
+    """The 2 MiB pages the pods on ``node_name`` request, simplyblock's own
+    storage pods left out, or None when Kubernetes cannot say.
+
+    The kubelet sets every container's hugetlb limit to its request, so no pod
+    uses more than this: whatever else the host's pool holds is unused, and
+    simplyblock may count on it. The storage pods are left out because their
+    pages are the ones apply_config is sizing. A pod that has finished holds
+    nothing."""
+    if not node_name:
+        return None
+    try:
+        pods = core_utils.get_k8s_core_client().list_pod_for_all_namespaces(
+            field_selector=f"spec.nodeName={node_name}").items
+    except Exception as e:
+        logger.warning("Cannot list the pods on '%s' (%s): the huge pages the host carries are kept as its own",
+                       node_name, e)
+        return None
+    key, value = _STORAGE_POD_LABEL
+    mib = sum(_pod_hugepages_mib(pod) for pod in pods
+              if (pod.status is None or pod.status.phase not in ("Succeeded", "Failed"))
+              and (pod.metadata.labels or {}).get(key) != value)
+    pages = -(-mib // 2)  # ceil
+    logger.info("Pods on '%s' other than simplyblock's request %d huge pages", node_name, pages)
+    return pages
+
+
 def _talos_sysfs_patch(pages_per_numa):
     """The strategic-merge machine-config patch that reserves the pages.
 
@@ -1703,8 +1751,9 @@ def apply_config():
         return utils.get_response(False, "Config validation is incorrect")
 
     # Set Huge page memory
+    claimed = _hugepages_claimed_by_other_pods(os.environ.get("HOSTNAME", ""))
     for numa, num_pages in _hugepages_per_numa(nodes).items():
-        core_utils.set_hugepages_if_needed(numa, num_pages)
+        core_utils.set_hugepages_if_needed(numa, num_pages, claimed_by_others=claimed)
 
     return utils.get_response(True)
 
