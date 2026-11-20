@@ -650,12 +650,27 @@ def run_discovery(config_name: str, timeout: int) -> str:
 # ── step 2: edit the draft ───────────────────────────────────────────────
 
 
-#: Registries the CRD's ImageSpec pattern admits. Anything else is refused by
-#: the apiserver with a message naming the regex rather than the value, so this
-#: is checked here where the offending variable can be named.
+#: Mirrors ImageReference in the operator's atlas-lib/crdtypes/image.go, the
+#: kubebuilder pattern every image field in the CRDs is held to. The two must
+#: move together: this exists only so a bad reference is named here, where the
+#: offending variable can be printed, rather than coming back from the
+#: apiserver as a regex with no value attached.
+#:
+#: It used to be an allowlist of three registries. Operator 41e55d6b
+#: ("fix(api): accept image references from any registry", #751, 2026-10-23)
+#: dropped that and took any registry host, but this copy was not updated, so
+#: the harness went on refusing documents the apiserver would have accepted --
+#: every image on registry.simplyblock.ai, which is where ultra has been
+#: published since 2026-10-28. A mirror that outlives the rule it mirrors
+#: fails runs the product would have passed, so it has to name its source.
 _IMAGE_RE = re.compile(
-    r"^(quay\.io/simplyblock-io|docker\.io/simplyblock|public\.ecr\.aws/simply-block)"
-    r"/[a-z0-9][a-z0-9._-]*:[a-zA-Z0-9][a-zA-Z0-9._-]*(@sha256:[a-f0-9]{64})?$")
+    r"^($|(([a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?"
+    r"(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)*"
+    r"|\[[a-fA-F0-9:]+\])(:[0-9]+)?/)?"
+    r"[a-z0-9]+((\.|_|__|-+)[a-z0-9]+)*"
+    r"(/[a-z0-9]+((\.|_|__|-+)[a-z0-9]+)*)*"
+    r"(:[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}(@sha256:[a-f0-9]{64})?"
+    r"|@sha256:[a-f0-9]{64}))$")
 
 
 def shape_images(spec: dict) -> None:
@@ -691,12 +706,12 @@ def shape_images(spec: dict) -> None:
     bad = [f"{k}={v}" for k, v in named.items() if not _IMAGE_RE.match(v)]
     if bad:
         raise RuntimeError(
-            "these images name a registry the CRD does not admit, so the "
-            "document would be refused: " + ", ".join(bad) + ".\n"
-            "    It takes quay.io/simplyblock-io, docker.io/simplyblock or "
-            "public.ecr.aws/simply-block, each with an explicit tag -- a bare "
-            "repository like simplyblock/spdk:main-latest is rejected, so the "
-            "registry has to be written out.")
+            "these are not well-formed image references, so the document "
+            "would be refused: " + ", ".join(bad) + ".\n"
+            "    Any registry is accepted. What is required is a lowercase "
+            "repository path and a tag, a @sha256 digest, or both -- "
+            "registry.simplyblock.ai/ultra:main-61ff864a is fine, an "
+            "untagged simplyblock/spdk is not.")
 
     images = spec.setdefault("images", {})
     for slot, ref in named.items():
