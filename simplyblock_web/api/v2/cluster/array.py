@@ -1,9 +1,10 @@
 """The storage array of a multi-attach cluster (array LUN mode, phase 4).
 
 simplyblock creates, presents, grows, fences and deletes the cluster's LUNs
-through the array plugin registered here. Credentials go to the KMS
-(cluster/<id>/array/<array id>) and are never returned; everything else is
-kept on the cluster record. See simplyblock_core.controllers.array_controller.
+through the array plugin registered here. Credentials are wrapped by
+the cluster's KMS (or stay in an external Vault KV / KMIP secret the request
+references) and are never returned; everything else is kept on the cluster
+record. See simplyblock_core.controllers.array_controller.
 """
 
 from typing import Annotated, Any
@@ -23,8 +24,13 @@ class ArrayParams(BaseModel):
     plugin: Annotated[str, Field(min_length=1, description="Plugin name (entry point in simplyblock.array_plugins), e.g. aws-ebs")]
     endpoint: str = ""
     options: dict[str, Any] = Field(default_factory=dict)
-    # Stored in the KMS only; masked in every representation of this model.
+    # Wrapped by the cluster's KMS, never stored in the clear; masked in every
+    # representation of this model.
     credentials: dict[str, SecretStr] = Field(default_factory=dict)
+    credential_ref: Annotated[dict[str, Any], Field(description=(
+        "Instead of credentials: a secret kept outside simplyblock, "
+        '{"kind": "vault-kv", "mount": ..., "path": ..., "version": ...} or '
+        '{"kind": "kmip-secret", "uid": ..., "field": ...}'))] = Field(default_factory=dict)
     lun_size: Annotated[util.Size, Field(description="Size of the LUN created for each added node; 0 = none")] = 0
 
 
@@ -35,6 +41,7 @@ class ArrayDTO(BaseModel):
     options: dict[str, Any]
     lun_size: int
     has_credentials: bool
+    credential_ref: dict[str, Any] = Field(default_factory=dict)
     capabilities: dict[str, Any] | None = None
 
 
@@ -46,7 +53,8 @@ def register(cluster: Cluster, parameters: ArrayParams) -> ArrayDTO:
     try:
         view = array_controller.register_array(
             cluster.get_id(), parameters.plugin, parameters.endpoint, parameters.options,
-            parameters.credentials, parameters.lun_size)
+            parameters.credentials, parameters.lun_size,
+            credential_ref=parameters.credential_ref or None)
     except ValueError as e:
         raise HTTPException(422, str(e))
     return ArrayDTO(**view)

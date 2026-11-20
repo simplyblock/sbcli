@@ -879,9 +879,17 @@ class CLIWrapperBase:
                 raise ValueError("--credentials-file must hold a JSON object of strings")
             # Wrapped at the boundary; unwrapped only by the KMS and the plugin.
             credentials = {str(k): SecretStr(v) for k, v in raw.items()}
+        credential_ref = None
+        if getattr(args, "credential_ref", None):
+            try:
+                credential_ref = json.loads(args.credential_ref)
+            except json.JSONDecodeError as e:
+                raise ValueError(f"--credential-ref is not valid JSON: {e}")
+            if not isinstance(credential_ref, dict):
+                raise ValueError("--credential-ref must be a JSON object")
         view = array_controller.register_array(
             args.cluster_id, args.plugin, args.endpoint or "", options, credentials,
-            int(args.lun_size or 0))
+            int(args.lun_size or 0), credential_ref=credential_ref)
         return _format_result([view], json=getattr(args, "json", False))
 
     def cluster__get_array(self, sub_command, args):

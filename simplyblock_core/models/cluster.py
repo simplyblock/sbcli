@@ -236,8 +236,8 @@ class Cluster(BaseModel):
     # simplyblock.array_plugins, see simplyblock_core.array). Empty = no
     # plugin: a takeover is refused (never reopen a LUN unfenced). The array
     # is registered through controllers/array_controller (POST
-    # /clusters/{id}/arrays); its credentials live in the KMS at
-    # cluster/<id>/array/<array_id>, never here.
+    # /clusters/{id}/arrays). Its credentials are never kept here, only a
+    # reference to them (array_credential_ref).
     array_plugin: str = ""
     array_endpoint: str = ""
     array_options: dict = default_factory(dict)
@@ -245,6 +245,13 @@ class Cluster(BaseModel):
     # registered) and whether credentials were stored for it in the KMS.
     array_id: str = ""
     array_has_credentials: bool = False
+    # Where the array's credentials are (simplyblock_core.credentials): a
+    # "managed" reference (wrapped by the cluster's credentials key in its
+    # KMS, bound to array id + endpoint), or an external "vault-kv" /
+    # "kmip-secret" secret. {} with array_has_credentials = an array
+    # registered before references existed: its secret is in the KMS at
+    # cluster/<id>/array/<array_id>.
+    array_credential_ref: dict = default_factory(dict)
     # Size in bytes of the LUN created for each node added to the cluster
     # while an array is registered; 0 = node adds create no LUN (the LUNs are
     # presented by the operator, as in phase 2/3).

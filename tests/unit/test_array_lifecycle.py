@@ -56,14 +56,33 @@ class FakeKV:
 
 
 class FakeKMS:
-    """A KMS holding secrets in memory (as plaintext, like the stores)."""
+    """A KMS holding secrets in memory (as plaintext, like the stores), and
+    wrapping credentials by hex-encoding them (the real envelope format)."""
     store: ClassVar[dict] = {}
+    keks: ClassVar[set] = set()
 
     def __enter__(self):
         return self
 
     def __exit__(self, *a):
         return None
+
+    def ensure_key_encryption_key(self, name):
+        FakeKMS.keks.add(name)
+
+    def _wrap_bytes(self, kek_name, plaintext):
+        return f"fake:{kek_name}:" + plaintext.hex()
+
+    def _unwrap_bytes(self, kek_name, wrapped):
+        prefix = f"fake:{kek_name}:"
+        if not wrapped.startswith(prefix):
+            raise KMSException("wrong key")
+        return bytes.fromhex(wrapped[len(prefix):])
+
+    from simplyblock_core.kms._base import KMS as _KMS
+    wrap_secret = _KMS.wrap_secret
+    unwrap_secret = _KMS.unwrap_secret
+    del _KMS
 
     def put_secret(self, path, data):
         from simplyblock_core.kms._base import secret_plaintext
@@ -107,6 +126,8 @@ def _cluster(plugin=PLUGIN, multi=True, lun_size=0):
     cl.array_plugin = plugin
     cl.array_lun_size = lun_size
     cl.status = Cluster.STATUS_ACTIVE
+    # No external KMS in these tests: the local one, explicitly allowed.
+    cl.allow_local_kms_credentials = True
     return cl
 
 
@@ -144,12 +165,14 @@ class _Case(unittest.TestCase):
     def setUp(self):
         FakeArrayPlugin.reset()
         FakeKMS.store = {}
+        FakeKMS.keks = set()
         array.register_plugin(PLUGIN, FakeArrayPlugin)
         self.addCleanup(array.unregister_plugin, PLUGIN)
         for target, attr, kw in (
                 (array_controller, "_event", {}),
                 (array_controller, "_sleep", {}),
-                ("simplyblock_core.kms.create_kms_connection", None, {"side_effect": lambda c: FakeKMS()}),
+                ("simplyblock_core.kms.create_kms_connection", None,
+                 {"side_effect": lambda c, **k: FakeKMS()}),
                 ("simplyblock_core.models.lock.DbLock", None, {"side_effect": lambda *a, **k: nullcontext()})):
             p = patch(target, **kw) if attr is None else patch.object(target, attr, **kw)
             p.start()
@@ -317,7 +340,7 @@ class TestPluginInterface(_Case):
 
 class TestRegistration(_Case):
 
-    def test_register_stores_credentials_in_kms_only(self):
+    def test_register_keeps_only_wrapped_credentials(self):
         db = self.use_db(FakeDB(_cluster(plugin=""), []))
         view = array_controller.register_array(
             CID, PLUGIN, "https://array", {"az": "z"}, {"password": "pw"}, lun_size=GIB)
@@ -326,8 +349,14 @@ class TestRegistration(_Case):
         self.assertEqual((cl.array_plugin, cl.array_endpoint, cl.array_options, cl.array_lun_size),
                          (PLUGIN, "https://array", {"az": "z"}, GIB))
         self.assertTrue(cl.array_has_credentials)
-        self.assertEqual(FakeKMS.store[array_secret_path(CID, cl.array_id)], {"password": "pw"})
+        ref = cl.array_credential_ref
+        self.assertEqual((ref["kind"], ref["backend"], ref["kek_name"]),
+                         ("managed", "local", f"credentials-{CID}"))
+        self.assertEqual(FakeKMS.store, {})          # nothing at the old KMS path
         self.assertNotIn("pw", json.dumps(cl.to_dict(unwrap_secrets=True), default=str))
+        self.assertEqual(view["credential_ref"], {"kind": "managed", "backend": "local"})
+        # Read back through the reference, bound to array id + endpoint.
+        self.assertEqual(array.array_credentials(cl)["password"].get_secret_value(), "pw")
         self.assertNotIn("credentials", view)
         self.assertNotIn("pw", json.dumps(view))
         self.assertEqual(view["capabilities"]["max_attachments"], 16)
@@ -342,7 +371,68 @@ class TestRegistration(_Case):
         array_controller.register_array(CID, PLUGIN)
         self.assertEqual(db.cluster.array_id, aid)
         self.assertFalse(db.cluster.array_has_credentials)
+        self.assertEqual(db.cluster.array_credential_ref, {})
         self.assertEqual(FakeKMS.store, {})
+
+    def test_reregister_removes_a_legacy_kms_secret(self):
+        cl = _cluster()
+        cl.array_id, cl.array_has_credentials = "arr-1", True
+        FakeKMS.store[array_secret_path(CID, "arr-1")] = {"password": "old"}
+        db = self.use_db(FakeDB(cl, []))
+        array_controller.register_array(CID, PLUGIN, credentials={"password": "new"})
+        self.assertEqual(FakeKMS.store, {})
+        self.assertEqual(db.cluster.array_credential_ref["kind"], "managed")
+        self.assertEqual(array.array_credentials(db.cluster)["password"].get_secret_value(), "new")
+
+    def test_local_kms_needs_the_opt_in(self):
+        cl = _cluster(plugin="")
+        cl.allow_local_kms_credentials = False
+        db = self.use_db(FakeDB(cl, []))
+        with self.assertRaisesRegex(ValueError, "allow_local_kms_credentials"):
+            array_controller.register_array(CID, PLUGIN, credentials={"password": "pw"})
+        self.assertEqual((db.cluster.array_plugin, db.cluster.array_credential_ref), ("", {}))
+        # Without credentials (an instance role) nothing is stored: allowed.
+        array_controller.register_array(CID, PLUGIN)
+        self.assertEqual(db.cluster.array_plugin, PLUGIN)
+
+    def test_endpoint_rewrite_does_not_release_the_credentials(self):
+        db = self.use_db(FakeDB(_cluster(plugin=""), []))
+        array_controller.register_array(CID, PLUGIN, "https://array.example",
+                                        credentials={"password": "pw"})
+        db.cluster.array_endpoint = "https://attacker.example"
+        with self.assertRaisesRegex(array.ArrayError, "different context"):
+            array.array_credentials(db.cluster)
+
+    def test_external_vault_reference(self):
+        from simplyblock_core.kms import HCPClient
+        vault = MagicMock(spec=HCPClient)
+        vault.__enter__.return_value = vault
+        vault.read_kv_secret.return_value = {"password": SecretStr("ext")}
+        db = self.use_db(FakeDB(_cluster(plugin=""), []))
+        ref = {"kind": "vault-kv", "mount": "secret", "path": "arrays/a1"}
+        with patch("simplyblock_core.kms.create_kms_connection", side_effect=lambda c, **k: vault):
+            view = array_controller.register_array(CID, PLUGIN, credential_ref=ref)
+            self.assertEqual(FakeArrayPlugin.connected[-1][1]["password"].get_secret_value(), "ext")
+            self.assertEqual(array.array_credentials(db.cluster)["password"].get_secret_value(), "ext")
+        self.assertEqual(db.cluster.array_credential_ref["path"], "arrays/a1")
+        self.assertEqual(view["credential_ref"]["kind"], "vault-kv")
+        vault.read_kv_secret.assert_called_with("secret", "arrays/a1", None)
+
+    def test_reference_refusals(self):
+        db = self.use_db(FakeDB(_cluster(plugin=""), []))
+        with self.assertRaisesRegex(ValueError, "not both"):
+            array_controller.register_array(CID, PLUGIN, credentials={"p": "x"},
+                                            credential_ref={"kind": "vault-kv", "mount": "m", "path": "p"})
+        with self.assertRaisesRegex(ValueError, "external secret"):
+            array_controller.register_array(CID, PLUGIN, credential_ref={
+                "kind": "managed", "backend": "local", "kek_name": "k", "wrapped": "w"})
+        with self.assertRaisesRegex(ValueError, "not a valid reference"):
+            array_controller.register_array(CID, PLUGIN, credential_ref={"kind": "nope"})
+        # A Vault reference on a cluster whose KMS is not Vault.
+        with self.assertRaisesRegex(ValueError, "could not be read"):
+            array_controller.register_array(CID, PLUGIN, credential_ref={
+                "kind": "vault-kv", "mount": "m", "path": "p"})
+        self.assertEqual(db.cluster.array_plugin, "")
 
     def test_refusals_save_nothing(self):
         db = self.use_db(FakeDB(_cluster(plugin="", multi=False), []))
@@ -415,6 +505,37 @@ class TestProvisioning(_Case):
             cl, self._api(appear_after=0), info, {"socket": 0}, [entry])
         self.assertEqual(entry2["array_lun_id"], lun["id"])
         self.assertEqual(len(FakeArrayPlugin.luns), 1)
+
+    def test_san_initiators_reach_the_array_and_the_host_scans(self):
+        cl = _cluster(lun_size=GIB)
+        api = self._api(appear_after=2)
+        api.scan_new_luns.return_value = ({"scanned": ["/sys/class/scsi_host/host0/scan"]}, None)
+        info = {"hostname": "worker-2", "system_id": "sys",
+                "san_initiators": {"iscsi_iqn": "iqn.2026-01.io.sb:w2", "fc_wwpns": ["2100"],
+                                   "unknown": "dropped"}}
+        _, host = array_controller.provision_node_lun(cl, api, info, {"socket": 1}, [])
+        inits = FakeArrayPlugin.hosts[host]["initiators"]
+        self.assertEqual((inits["iscsi_iqn"], inits["fc_wwpns"]), ("iqn.2026-01.io.sb:w2", ["2100"]))
+        self.assertNotIn("unknown", inits)
+        # One scan per inventory poll until the LUN showed up.
+        self.assertEqual(api.scan_new_luns.call_count, api.get_blockdevices.call_count)
+        self.assertGreaterEqual(api.scan_new_luns.call_count, 3)
+
+    def test_agent_without_scan_endpoint_still_provisions(self):
+        api = self._api()
+        api.scan_new_luns.side_effect = RuntimeError("404")
+        entry, _ = array_controller.provision_node_lun(
+            _cluster(lun_size=GIB), api, {"hostname": "w"}, {"socket": 0}, [])
+        self.assertTrue(entry["array_lun_id"])
+
+    def test_existing_node_initiators_come_from_its_agent(self):
+        n = _node("a")
+        n.agent.info.return_value = ({"san_initiators": {"nvme_hostnqn": "nqn.h:a"}}, None)
+        plugin = self.plugin(_cluster())
+        db = FakeDB(_cluster(), [n])
+        host = array_controller.ensure_node_host(plugin, n, db)
+        self.assertEqual(FakeArrayPlugin.hosts[host]["initiators"]["nvme_hostnqn"], "nqn.h:a")
+        self.assertEqual(n.array_host_id, host)
 
     def test_lun_that_never_appears_fails(self):
         cl = _cluster(lun_size=GIB)
@@ -676,6 +797,7 @@ class TestReleaseAndDelete(_Case):
 
     def test_delete_cluster_deletes_only_its_luns_and_secret(self):
         cl = _cluster()
+        self.use_db(FakeDB(cl, []))
         cl.array_id, cl.array_has_credentials = "arr", True
         FakeKMS.store[array_secret_path(CID, "arr")] = {"k": "v"}
         p = self.plugin(cl)
@@ -686,8 +808,20 @@ class TestReleaseAndDelete(_Case):
         self.assertEqual(sorted(FakeArrayPlugin.luns), ["lun-foreign"])
         self.assertEqual(FakeKMS.store, {})
 
+    def test_delete_cluster_uses_recorded_luns_when_listing_is_unsupported(self):
+        cl = _cluster()
+        a = _node("a")
+        self.use_db(FakeDB(cl, [a]))
+        p = self.plugin(cl)
+        lun = p.create_lun("a", GIB, {})
+        _lun_device(a, lun["id"], lun["wwn"])
+        with patch.object(FakeArrayPlugin, "list_luns", side_effect=NotImplementedError):
+            array_controller.delete_cluster_luns(cl)
+        self.assertEqual(FakeArrayPlugin.luns, {})
+
     def test_delete_cluster_failure(self):
         cl = _cluster()
+        self.use_db(FakeDB(cl, []))
         p = self.plugin(cl)
         p.create_lun("a", GIB, {})
         FakeArrayPlugin.fail.add("delete_lun")
@@ -1008,7 +1142,7 @@ class TestCli(unittest.TestCase):
             json.dump({"aws_access_key_id": "AK", "aws_secret_access_key": "SK"}, f)
         self.addCleanup(os.unlink, f.name)
         args = MagicMock(cluster_id=CID, plugin="aws-ebs", endpoint="", options='{"az": "z"}',
-                         credentials_file=f.name, lun_size=GIB, json=True)
+                         credentials_file=f.name, credential_ref=None, lun_size=GIB, json=True)
         with patch.object(array_controller, "register_array", return_value={"id": "arr"}) as reg:
             CLIWrapperBase.cluster__set_array(MagicMock(), "set-array", args)
         a = reg.call_args.args

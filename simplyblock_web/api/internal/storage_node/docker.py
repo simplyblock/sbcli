@@ -697,6 +697,22 @@ def rescan_block_device(body: _RescanBlockDeviceParams):
         return utils.get_response(None, str(e))
 
 
+@api.post('/scan_new_luns', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'object',
+        'properties': {'scanned': {'type': 'array', 'items': {'type': 'string'}}},
+    })}}},
+})
+def scan_new_luns():
+    """Look for LUNs / namespaces a storage array newly presented to this
+    host (SCSI host scan, NVMe namespace rescan). Existing devices are not
+    touched."""
+    try:
+        return utils.get_response(node_utils.scan_for_new_luns())
+    except OSError as e:
+        return utils.get_response(None, str(e))
+
+
 class _DeviceSmartQuery(BaseModel):
     device_path: str
 
@@ -788,6 +804,9 @@ def get_info():
         "network_interface": core_utils.get_nics_data(),
 
         "cloud_instance": node_info["cloud_info"],
+        # SAN initiators (IQN, FC WWPNs, NVMe host NQN, SDC GUID): how a storage
+        # array knows this host (simplyblock_core.array.san).
+        "san_initiators": node_utils.get_san_initiators(),
 
         "lsblk": get_node_lsblk(),
         "nodes_config": get_nodes_config(),

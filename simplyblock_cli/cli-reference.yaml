@@ -1596,7 +1596,8 @@ commands:
         usage: >
           simplyblock creates, multi-attaches, grows, fences and deletes the LUNs of a multi-attach cluster through
           the array plugin registered here. The plugin is loaded and connected with the credentials before anything
-          is saved. The credentials are stored in the cluster's KMS, never in the cluster record. With --lun-size,
+          is saved. The credentials are wrapped by the cluster's KMS (or stay in an external Vault KV / KMIP secret named
+          by --credential-ref), never stored in the clear. With --lun-size,
           every node added afterwards gets a LUN of that size created and attached on the array.
         arguments:
           - name: "cluster_id"
@@ -1623,6 +1624,12 @@ commands:
               A JSON file with the array credentials as an object of strings (for aws-ebs: aws_access_key_id,
               aws_secret_access_key; omit to use the instance role).
             dest: credentials_file
+            type: str
+          - name: "--credential-ref"
+            help: >
+              Instead of --credentials-file: a secret kept outside simplyblock, as JSON, e.g.
+              `{"kind": "vault-kv", "mount": "secret", "path": "arrays/pure01"}` or `{"kind": "kmip-secret", "uid": "42"}`.
+            dest: credential_ref
             type: str
           - name: "--lun-size"
             help: "Size of the LUN created for each node added to the cluster, e.g. `1T`. Default: none."

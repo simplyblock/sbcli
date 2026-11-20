@@ -11,8 +11,8 @@ attach / detach / resize / get / delete / list and fence / unfence) and a
 registry that loads a vendor plugin by name from the entry-point group
 ``simplyblock.array_plugins``. The array's credentials live in the KMS at
 ``cluster/<cluster id>/array/<array id>``; the Cluster record keeps the plugin
-name, endpoint and options only. Built-in plugin: ``aws-ebs``
-(:mod:`.aws_ebs`). Registration and the LUN lifecycle are in
+name, endpoint and options only. Built-in plugins: ``aws-ebs``
+(:mod:`.aws_ebs`) and the SAN arrays (:mod:`.san`). Registration and the LUN lifecycle are in
 :mod:`simplyblock_core.controllers.array_controller`.
 
 Plugins are found only through the entry-point group or an explicit
@@ -40,6 +40,18 @@ ENTRY_POINT_GROUP = "simplyblock.array_plugins"
 #: pyproject.toml).
 BUILTIN_PLUGINS = {
     "aws-ebs": "simplyblock_core.array.aws_ebs:AwsEbsPlugin",
+    # SAN arrays: the storage_arrays adapters (simplyblock_core.array.san).
+    "pure-flasharray": "simplyblock_core.array.san:PureFlashArrayPlugin",
+    "netapp-ontap": "simplyblock_core.array.san:NetAppOntapPlugin",
+    "dell-powerstore": "simplyblock_core.array.san:DellPowerStorePlugin",
+    "dell-powermax": "simplyblock_core.array.san:DellPowerMaxPlugin",
+    "dell-powerflex": "simplyblock_core.array.san:DellPowerFlexPlugin",
+    "hpe-wsapi": "simplyblock_core.array.san:HpeWsapiPlugin",
+    "hpe-nimble": "simplyblock_core.array.san:HpeNimblePlugin",
+    "ibm-flashsystem": "simplyblock_core.array.san:IbmFlashSystemPlugin",
+    "hitachi-vsp": "simplyblock_core.array.san:HitachiVspPlugin",
+    "huawei-dorado": "simplyblock_core.array.san:HuaweiDoradoPlugin",
+    "infinidat-infinibox": "simplyblock_core.array.san:InfinidatInfiniBoxPlugin",
 }
 
 
@@ -269,10 +281,39 @@ def load_plugin(name: str, endpoint: str = "", options: dict | None = None,
     return plugin
 
 
+def credential_context(array_id: str, endpoint: str) -> str:
+    """What an array's credentials are bound to: the array id and the
+    scheme/host/port of its endpoint. A credential wrapped for one array is
+    refused for another endpoint, so rewriting the endpoint in the database
+    cannot send it elsewhere."""
+    from urllib.parse import urlsplit
+    ep = (endpoint or "").strip()
+    parts = urlsplit(ep)
+    if parts.scheme and parts.hostname:
+        port = parts.port or (443 if parts.scheme == "https" else 80)
+        ep = f"{parts.scheme}://{parts.hostname.lower()}:{port}"
+    return f"array/{array_id}/{ep}"
+
+
+def credential_ref_view(cluster) -> dict:
+    """The cluster's array credential reference without anything secret:
+    the kind, and for an external secret where it lives."""
+    ref = dict(getattr(cluster, "array_credential_ref", None) or {})
+    if not ref:
+        return {}
+    if ref.get("kind") == "managed":
+        return {"kind": "managed", "backend": ref.get("backend", "")}
+    return {k: v for k, v in ref.items() if k in ("kind", "mount", "path", "version", "uid", "field")}
+
+
 def array_credentials(cluster) -> dict:
-    """The credentials of the cluster's array from the KMS (``SecretStr``
-    values), or ``{}`` when the array was registered without any (e.g. the
-    EBS plugin on the instance role) or no array is registered.
+    """The credentials of the cluster's array (``SecretStr`` values), or
+    ``{}`` when the array was registered without any (e.g. the EBS plugin on
+    the instance role) or no array is registered.
+
+    Read through ``Cluster.array_credential_ref`` (wrapped by the cluster's
+    KMS, or an external Vault KV / KMIP secret); arrays registered before
+    references existed are read from their KMS path.
 
     Raises:
         ArrayError: a secret is recorded but cannot be read.
@@ -280,6 +321,16 @@ def array_credentials(cluster) -> dict:
     array_id = getattr(cluster, "array_id", "") or ""
     if not array_id or getattr(cluster, "array_has_credentials", False) is not True:
         return {}
+    ref = getattr(cluster, "array_credential_ref", None) or {}
+    if ref:
+        from simplyblock_core import credentials as creds_mod
+        try:
+            resolved = creds_mod.CredentialProvider(cluster, ttl_s=0).resolve(
+                ref, credential_context(array_id, getattr(cluster, "array_endpoint", "") or ""))
+        except creds_mod.CredentialError as e:
+            raise ArrayError(f"array credentials could not be read: {e}") from e
+        return {name: resolved.get(name) for name in resolved.field_names
+                if name != creds_mod.CONTEXT_FIELD}
     from simplyblock_core import kms
     try:
         with kms.create_kms_connection(cluster) as conn:
@@ -319,7 +370,8 @@ def _config_key(cluster) -> tuple:
             getattr(cluster, "array_endpoint", "") or "",
             json.dumps(getattr(cluster, "array_options", None) or {}, sort_keys=True, default=str),
             getattr(cluster, "array_id", "") or "",
-            getattr(cluster, "array_has_credentials", False) is True)
+            getattr(cluster, "array_has_credentials", False) is True,
+            json.dumps(getattr(cluster, "array_credential_ref", None) or {}, sort_keys=True))
 
 
 def cached_plugin_for_cluster(cluster, max_age: float | None = None) -> ArrayPlugin:

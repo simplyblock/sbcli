@@ -325,8 +325,9 @@ def served_by_online_node(owner, nodes_by_id) -> list:
 
 
 def normalize_wwn(value) -> str:
+    # lsblk reports a SCSI WWN as 0x<hex>, arrays as naa.<hex>; the same id.
     v = (value or "").strip().lower()
-    return v.removeprefix("0x")
+    return v.removeprefix("0x").removeprefix("naa.")
 
 
 def lun_keys(device) -> set:

@@ -583,6 +583,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--endpoint', help='The array\'s management endpoint (for aws-ebs: an EC2 endpoint URL override, usually empty).', type=str, default='', dest='endpoint')
         subcommand.add_argument('--options', help='Plugin options as a JSON object, e.g. `{"az": "us-east-1a", "iops": 6000}`.', type=str, dest='options')
         subcommand.add_argument('--credentials-file', help='A JSON file with the array credentials as an object of strings (for aws-ebs: aws_access_key_id, aws_secret_access_key; omit to use the instance role).', type=str, dest='credentials_file')
+        subcommand.add_argument('--credential-ref', help='Instead of --credentials-file: a secret kept outside simplyblock, as JSON, e.g. `{"kind": "vault-kv", "mount": "secret", "path": "arrays/pure01"}` or `{"kind": "kmip-secret", "uid": "42"}`.', type=str, dest='credential_ref')
         subcommand.add_argument('--lun-size', help='Size of the LUN created for each node added to the cluster, e.g. `1T`. Default: none.', type=size_type(), default='0', dest='lun_size')
 
     def init_cluster__get_array(self, subparser):

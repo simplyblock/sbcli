@@ -51,7 +51,6 @@ from simplyblock_core.kms import (
     KMIPKMSSettings,
     KMSException,
     VaultKMSSettings,
-    create_kms_connection,
 )
 
 if TYPE_CHECKING:
@@ -158,7 +157,7 @@ class CredentialProvider:
         *,
         ttl_s: float = 300.0,
         clock: Callable[[], float] = time.monotonic,
-        kms_factory: Callable[..., KMS] = create_kms_connection,
+        kms_factory: Callable[..., KMS] | None = None,
     ):
         self._cluster = cluster
         self._ttl_s = ttl_s
@@ -182,8 +181,14 @@ class CredentialProvider:
         settings = self._cluster.get_kms_settings()
         if isinstance(settings, VaultKMSSettings):
             cert_role = settings.credentials_cert_role
+        factory = self._kms_factory
+        if factory is None:
+            # Looked up per call, not bound at import: the KMS connection is
+            # replaced in tests and by callers that patch the package.
+            from simplyblock_core import kms as kms_pkg
+            factory = kms_pkg.create_kms_connection
         try:
-            return self._kms_factory(self._cluster, cert_role=cert_role)
+            return factory(self._cluster, cert_role=cert_role)
         except KMSException as e:
             raise CredentialError(f"Cannot connect to the KMS: {e.message}") from e
 

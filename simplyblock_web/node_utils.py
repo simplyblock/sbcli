@@ -453,8 +453,80 @@ def simplyblock_data_signature(device_name: str) -> bool | None:
 
 
 def _normalize_wwn(value: str) -> str:
+    # lsblk reports a SCSI WWN as 0x<hex>, arrays as naa.<hex>; the same id.
     v = (value or "").strip().lower()
-    return v.removeprefix("0x")
+    return v.removeprefix("0x").removeprefix("naa.")
+
+
+def _host_file(path: str) -> str:
+    """Contents of a host configuration file: the host's /etc as mounted into
+    the Kubernetes agent (/host/etc) first, then the local one (Docker agent
+    on the host)."""
+    for candidate in (f"/host{path}", path):
+        text = _read_sysfs(candidate)
+        if text:
+            return text
+    return ""
+
+
+def get_san_initiators() -> dict:
+    """The host's SAN initiator identities, for registering it on a storage
+    array: ``iscsi_iqn`` (/etc/iscsi/initiatorname.iscsi), ``fc_wwpns`` (FC
+    HBA ports from /sys/class/fc_host), ``nvme_hostnqn`` (/etc/nvme/hostnqn)
+    and ``sdc_guid`` (PowerFlex SDC). Missing ones are left out. Read-only."""
+    out: dict = {}
+    for line in _host_file("/etc/iscsi/initiatorname.iscsi").splitlines():
+        line = line.strip()
+        if line.startswith("InitiatorName=") and not line.startswith("#"):
+            out["iscsi_iqn"] = line.split("=", 1)[1].strip()
+            break
+    wwpns = []
+    base = "/sys/class/fc_host"
+    if os.path.isdir(base):
+        for host in sorted(os.listdir(base)):
+            name = _read_sysfs(f"{base}/{host}/port_name").lower()
+            if re.fullmatch(r"0x[0-9a-f]{16}", name) and int(name, 16):
+                wwpns.append(name.removeprefix("0x"))
+    if wwpns:
+        out["fc_wwpns"] = wwpns
+    nqn = _host_file("/etc/nvme/hostnqn").strip()
+    if nqn:
+        out["nvme_hostnqn"] = nqn
+    guid = ""
+    for drv_cfg in ("/opt/emc/scaleio/sdc/bin/drv_cfg", "/host/opt/emc/scaleio/sdc/bin/drv_cfg"):
+        if os.path.exists(drv_cfg):
+            guid, _, _ = shell_utils.run_command(f"{drv_cfg} --query_guid")
+            break
+    match = re.search(r"\b([0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12})\b",
+                      guid or "")
+    if match:
+        out["sdc_guid"] = match.group(1)
+    return out
+
+
+def scan_for_new_luns() -> dict:
+    """Make the kernel look for LUNs / namespaces newly presented to this host
+    by a storage array: every SCSI host (FC HBAs and iSCSI sessions alike) is
+    scanned (``- - -`` = all channels, targets, LUNs) and every NVMe
+    controller rescans its namespaces. Existing devices are not touched.
+
+    The host must already have its SAN paths: iSCSI sessions logged in, FC
+    zoning done, NVMe-oF controllers connected. Returns ``{"scanned": [...]}``."""
+    import glob as _glob
+    scanned: list[str] = []
+    for path in sorted(_glob.glob("/sys/class/scsi_host/host*/scan")):
+        try:
+            _write_sysfs(path, "- - -")
+            scanned.append(path)
+        except OSError as e:
+            logger.warning("SCSI host scan %s failed: %s", path, e)
+    for path in sorted(_glob.glob("/sys/class/nvme/nvme*/rescan_controller")):
+        try:
+            _write_sysfs(path, "1")
+            scanned.append(path)
+        except OSError as e:
+            logger.warning("NVMe rescan %s failed: %s", path, e)
+    return {"scanned": scanned}
 
 
 def find_lun_devices(wwn: str) -> list[dict]:

@@ -121,6 +121,7 @@ def array_view(cluster, capabilities=None) -> dict:
         "options": dict(cluster.array_options or {}),
         "lun_size": int(cluster.array_lun_size or 0),
         "has_credentials": bool(cluster.array_has_credentials),
+        "credential_ref": array.credential_ref_view(cluster),
     }
     if capabilities is not None:
         out["capabilities"] = capabilities
@@ -128,21 +129,33 @@ def array_view(cluster, capabilities=None) -> dict:
 
 
 def register_array(cluster_id, plugin, endpoint="", options=None, credentials=None,
-                   lun_size=0) -> dict:
+                   lun_size=0, credential_ref=None) -> dict:
     """Register (or re-register, e.g. to rotate credentials) the storage
     array of a multi-attach cluster.
 
-    The plugin is loaded and connected with the given credentials and its
-    capabilities read before anything is saved. Credentials (a flat dict of
-    strings / SecretStr) are stored in the KMS; the Cluster record keeps the
-    plugin name, endpoint, options and LUN size. Returns the array view
-    (``array_view``) with the plugin's capabilities.
+    The plugin is loaded and connected with the credentials and its
+    capabilities read before anything is saved. The Cluster record keeps the
+    plugin name, endpoint, options, LUN size and a credential reference
+    (``Cluster.array_credential_ref``), never a credential:
+
+    * ``credentials`` (a flat dict of strings / SecretStr) are wrapped by the
+      cluster's credentials key in its KMS (Vault Transit or KMIP; the local
+      KMS only with ``allow_local_kms_credentials``), bound to the array id
+      and endpoint, and only the wrapped form is kept;
+    * ``credential_ref`` names a secret kept outside simplyblock instead
+      (``{"kind": "vault-kv", "mount", "path"[, "version"]}`` or
+      ``{"kind": "kmip-secret", "uid"[, "field"]}``): simplyblock reads it
+      when it connects and never stores it.
+
+    Returns the array view (``array_view``) with the plugin's capabilities.
 
     Raises:
-        ValueError: not a multi-attach cluster, the plugin cannot be loaded
-            or connected, its capabilities do not fit the cluster, or LUNs
-            created through another plugin exist.
+        ValueError: not a multi-attach cluster, both or a bad credential
+            source, the credentials cannot be stored or read, the plugin
+            cannot be loaded or connected, its capabilities do not fit the
+            cluster, or LUNs created through another plugin exist.
     """
+    from simplyblock_core import credentials as creds_mod
     from simplyblock_core import kms
     db = _db()
     cluster = db.get_cluster_by_id(cluster_id)
@@ -153,12 +166,32 @@ def register_array(cluster_id, plugin, endpoint="", options=None, credentials=No
     if int(lun_size or 0) < 0:
         raise ValueError("lun_size must not be negative")
     creds = _wrap_credentials(credentials)
+    if creds and credential_ref:
+        raise ValueError("give the credentials or a reference to them, not both")
     opts = dict(options or {})
     nodes = db.get_storage_nodes_by_cluster_id(cluster_id)
     if (cluster.array_plugin and cluster.array_plugin != plugin
             and _managed_devices(nodes)):
         raise ValueError(
             f"LUNs created through plugin {cluster.array_plugin!r} exist; the plugin cannot change")
+    array_id = cluster.array_id or str(uuid_mod.uuid4())
+    context = array.credential_context(array_id, endpoint or "")
+    ref: dict = {}
+    if credential_ref:
+        try:
+            parsed = creds_mod.CREDENTIAL_REF_ADAPTER.validate_python(dict(credential_ref))
+        except Exception as e:                          # noqa: BLE001 - pydantic
+            raise ValueError(f"credential_ref is not a valid reference: {e}") from None
+        if isinstance(parsed, creds_mod.ManagedCredentialRef):
+            raise ValueError("credential_ref names an external secret (vault-kv or kmip-secret); "
+                             "give the credentials themselves to have them stored")
+        ref = parsed.model_dump()
+        try:
+            resolved = creds_mod.CredentialProvider(cluster, ttl_s=0).resolve(parsed, context)
+        except creds_mod.CredentialError as e:
+            raise ValueError(f"the referenced credentials could not be read: {e}") from None
+        creds = {name: resolved.get(name) for name in resolved.field_names
+                 if name != creds_mod.CONTEXT_FIELD}
     try:
         inst = array.load_plugin(plugin, endpoint, opts, credentials=creds, cluster_id=cluster_id)
         caps = dict(inst.capabilities() or {})
@@ -172,32 +205,32 @@ def register_array(cluster_id, plugin, endpoint="", options=None, credentials=No
     if max_att and max_att < needed:
         raise ValueError(f"the array presents a LUN to at most {max_att} hosts; the cluster needs {needed}")
 
-    array_id = cluster.array_id or str(uuid_mod.uuid4())
-    path = kms.array_secret_path(cluster_id, array_id)
-    with kms.create_kms_connection(cluster) as conn:
-        if creds:
-            conn.put_secret(path, creds)
-        elif cluster.array_has_credentials:
-            conn.delete_secret(path)
+    if creds and not ref:
+        try:
+            ref = creds_mod.CredentialProvider(cluster).store(creds, context).model_dump()
+        except creds_mod.CredentialError as e:
+            raise ValueError(f"the array credentials could not be stored: {e}") from None
+    # A secret an earlier registration kept at the KMS path (before
+    # credential references) is removed once the new registration is saved.
+    legacy_secret = bool(cluster.array_has_credentials) and not cluster.array_credential_ref
 
     def mutate(fresh):
         fresh.array_id = array_id
         fresh.array_plugin = plugin
         fresh.array_endpoint = endpoint or ""
         fresh.array_options = opts
-        fresh.array_has_credentials = bool(creds)
+        fresh.array_credential_ref = ref
+        fresh.array_has_credentials = bool(ref)
         fresh.array_lun_size = int(lun_size or 0)
 
-    try:
-        db.atomic_update(cluster, mutate)
-    except Exception:
-        if creds and not cluster.array_has_credentials:
-            try:
-                with kms.create_kms_connection(cluster) as conn:
-                    conn.delete_secret(path)
-            except Exception:                           # noqa: BLE001
-                logger.exception("could not remove the array secret after a failed registration")
-        raise
+    db.atomic_update(cluster, mutate)
+    if legacy_secret:
+        try:
+            with kms.create_kms_connection(cluster) as conn:
+                conn.delete_secret(kms.array_secret_path(cluster_id, array_id))
+        except Exception:                               # noqa: BLE001
+            logger.exception("could not remove the array's earlier KMS secret")
+    array.forget_plugin(cluster_id)
     cluster = db.get_cluster_by_id(cluster_id)
     logger.info("Cluster %s: array %s registered (plugin %s, endpoint %s)",
                 cluster_id, array_id, plugin, endpoint or "-")
@@ -231,7 +264,9 @@ def delete_array(cluster_id, array_id, force=False) -> None:
     if managed and not force:
         raise ValueError(f"{len(managed)} LUN(s) created through the array exist; "
                          "takeovers would lose their fence")
-    if cluster.array_id and cluster.array_has_credentials:
+    # A credential reference needs no cleanup: a managed one exists only in
+    # the record, an external one belongs to whoever created it.
+    if cluster.array_id and cluster.array_has_credentials and not cluster.array_credential_ref:
         with kms.create_kms_connection(cluster) as conn:
             conn.delete_secret(kms.array_secret_path(cluster_id, cluster.array_id))
 
@@ -240,6 +275,7 @@ def delete_array(cluster_id, array_id, force=False) -> None:
         fresh.array_plugin = ""
         fresh.array_endpoint = ""
         fresh.array_options = {}
+        fresh.array_credential_ref = {}
         fresh.array_has_credentials = False
         fresh.array_lun_size = 0
 
@@ -249,11 +285,23 @@ def delete_array(cluster_id, array_id, force=False) -> None:
 
 # ------------------------------------------------------------------- hosts
 
-def host_initiators(hostname="", cloud_instance=None, system_id="", ip="") -> dict:
-    """What identifies a host on an array: its hostname, system id, IP and,
-    on AWS, the EC2 instance id (reported by the node agent from the
-    instance metadata service when its cloud probe runs)."""
+#: SAN initiator keys the node agent reports (``san_initiators`` of its
+#: /info; node_utils.get_san_initiators) and SAN plugins read.
+SAN_INITIATOR_KEYS = ("iscsi_iqn", "fc_wwpns", "nvme_hostnqn", "sdc_guid")
+
+
+def host_initiators(hostname="", cloud_instance=None, system_id="", ip="",
+                    san_initiators=None) -> dict:
+    """What identifies a host on an array: its hostname, system id, IP, its
+    SAN initiators (iSCSI IQN, FC WWPNs, NVMe host NQN, PowerFlex SDC GUID,
+    as its agent reports them) and, on AWS, the EC2 instance id (reported by
+    the node agent from the instance metadata service when its cloud probe
+    runs)."""
     out = {"hostname": hostname}
+    for key in SAN_INITIATOR_KEYS:
+        value = (san_initiators or {}).get(key)
+        if value:
+            out[key] = value
     if ip:
         out["ip"] = ip
     if system_id:
@@ -264,10 +312,21 @@ def host_initiators(hostname="", cloud_instance=None, system_id="", ip="") -> di
     return out
 
 
+def _agent_san_initiators(node) -> dict:
+    """The SAN initiators the node's agent reports now ({} when it cannot be
+    asked, or is older than the report)."""
+    try:
+        info, _ = node.client(timeout=15, retry=1).info()
+    except Exception as e:                              # noqa: BLE001
+        logger.warning("Node %s: SAN initiators not read from its agent: %s", node.get_id(), e)
+        return {}
+    return dict((info or {}).get("san_initiators") or {})
+
+
 def _node_initiators(node) -> dict:
     cloud = {"cloud": getattr(node, "cloud_name", ""), "id": getattr(node, "cloud_instance_id", "")}
     return host_initiators(multi_attach.array_host(node), cloud, getattr(node, "system_uuid", ""),
-                           getattr(node, "mgmt_ip", "") or "")
+                           getattr(node, "mgmt_ip", "") or "", _agent_san_initiators(node))
 
 
 def ensure_node_host(plugin, node, db=None) -> str:
@@ -324,7 +383,8 @@ def provision_node_lun(cluster, snode_api, node_info, node_config, lblk_configur
     try:
         plugin = array.plugin_for_cluster(cluster)
         host_id = plugin.ensure_host(hostname, host_initiators(
-            hostname, node_info.get("cloud_instance"), node_info.get("system_id", ""), node_ip))
+            hostname, node_info.get("cloud_instance"), node_info.get("system_id", ""), node_ip,
+            node_info.get("san_initiators")))
         existing = next((e for e in lblk_configured or [] if e.get("array_lun_id")), None)
         if existing:
             lun = {"id": existing["array_lun_id"], "wwn": existing.get("lun_wwn", "")}
@@ -342,6 +402,7 @@ def provision_node_lun(cluster, snode_api, node_info, node_config, lblk_configur
 
     deadline = time.monotonic() + timeout
     while True:
+        _scan_new_luns(snode_api)
         inventory, err = snode_api.get_blockdevices()
         found = _find_in_inventory(inventory, lun["wwn"])
         if found:
@@ -386,12 +447,26 @@ def add_lun_to_config(lblk_configured, entry) -> list:
 
 # ------------------------------------------------------------- attachments
 
+def _scan_new_luns(snode_api) -> None:
+    """Have the host look for a LUN just presented to it. A SAN host sees a
+    new LUN only after a SCSI / NVMe rescan (an EBS attachment shows up by
+    itself, so a failure, or an agent without the endpoint, is not fatal:
+    the caller keeps polling)."""
+    try:
+        _, err = snode_api.scan_new_luns()
+        if err:
+            logger.debug("scan_new_luns: %s", err)
+    except Exception as e:                              # noqa: BLE001
+        logger.debug("scan_new_luns: %s", e)
+
+
 def _lun_path_on(node, dev, timeout):
     """The path of the device's LUN on ``node`` from its agent, or ""."""
     owner_path = (dev.node_paths or {}).get(dev.node_id, {}).get("path", "")
     deadline = time.monotonic() + timeout
     while True:
         try:
+            _scan_new_luns(node.client(timeout=15, retry=1))
             entries, _ = node.client(timeout=15, retry=1).lun_info(dev.lun_wwn)
         except Exception as e:                          # noqa: BLE001
             logger.warning("lun_info on %s: %s", node.get_id(), e)
@@ -711,12 +786,26 @@ def delete_cluster_luns(cluster, force=False) -> None:
     if not array_configured(cluster):
         return
     errors = []
+    # The LUNs recorded on the cluster's devices, plus whatever the plugin
+    # lists (SAN plugins cannot list: their recorded LUNs are deleted).
+    recorded = [d.array_lun_id for _, d in
+                _managed_devices(_db().get_storage_nodes_by_cluster_id(cluster.get_id()))]
+    luns: list = []
     try:
         plugin = array.plugin_for_cluster(cluster)
-        luns = plugin.list_luns()
     except Exception as e:                              # noqa: BLE001
-        plugin, luns = None, []
+        plugin = None
         errors.append(f"array: {e}")
+    if plugin is not None:
+        try:
+            luns = list(plugin.list_luns())
+        except NotImplementedError:
+            logger.info("Cluster %s: the array plugin cannot list LUNs; deleting the %d recorded",
+                        cluster.get_id(), len(recorded))
+        except Exception as e:                          # noqa: BLE001
+            errors.append(f"array: {e}")
+        listed = {lun["id"] for lun in luns}
+        luns += [{"id": lun_id} for lun_id in dict.fromkeys(recorded) if lun_id not in listed]
     for lun in luns:
         try:
             plugin.delete_lun(lun["id"])                # type: ignore[union-attr]
@@ -727,7 +816,7 @@ def delete_cluster_luns(cluster, force=False) -> None:
         raise ValueError(f"array LUNs of the cluster could not be deleted: {'; '.join(errors)}")
     if errors:
         logger.error("Cluster %s deleted with array LUNs left behind: %s", cluster.get_id(), errors)
-    if cluster.array_id and cluster.array_has_credentials:
+    if cluster.array_id and cluster.array_has_credentials and not cluster.array_credential_ref:
         from simplyblock_core import kms
         try:
             with kms.create_kms_connection(cluster) as conn:

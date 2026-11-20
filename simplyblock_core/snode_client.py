@@ -263,6 +263,11 @@ class SNodeClient:
         Returns ``(result, error)``."""
         return self._request("POST", "lun_info", {"wwn": wwn})
 
+    def scan_new_luns(self):
+        """Have the host look for LUNs newly presented by a storage array.
+        Returns ``(result, error)``."""
+        return self._request("POST", "scan_new_luns")
+
     def rescan_block_device(self, device_path):
         """Re-read the size of a grown whole-disk block device (lblk).
 

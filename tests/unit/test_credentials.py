@@ -48,6 +48,10 @@ class FakeKMS(KMS):
         if name not in self.keks:
             self.create_key_encryption_key(name)
 
+    def put_secret(self, path, data): ...
+    def get_secret(self, path): ...
+    def delete_secret(self, path): ...
+
     def _wrap_bytes(self, kek_name, plaintext):
         if kek_name not in self.keks:
             raise KMSException("no such KEK")
