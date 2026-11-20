@@ -146,3 +146,25 @@ def test_the_freeze_waits_for_every_source_host_on_the_target(monkeypatch):
     src = inspect.getsource(runner)
     i = src.index("cutover freeze of")
     assert i < src.index("freeze_started_at=time.time()")
+
+
+def test_bed_bf29_the_source_delete_finds_the_target_by_nqn_after_the_clone_is_gone(monkeypatch):
+    # After the cutover the clone named in tgt_lvol_id no longer exists; the
+    # volume runs on the other cluster under a new record with the same NQN.
+    src = SimpleNamespace(get_id=lambda: "SRC", nqn=NQN, node_id="S1", nodes=["S2"],
+                          status="online")
+    live = SimpleNamespace(get_id=lambda: "NEW", nqn=NQN, node_id="T1", nodes=["T2", "T3"],
+                           status="online")
+    other = SimpleNamespace(get_id=lambda: "X", nqn="nqn.other", node_id="T9", nodes=[],
+                            status="online")
+    going = SimpleNamespace(get_id=lambda: "OLD", nqn=NQN, node_id="T7", nodes=[],
+                            status="in_deletion")
+    vols = {"A": [src], "B": [live, other, going]}
+
+    def get_lvol_by_id(i):
+        raise KeyError(i)
+    monkeypatch.setattr(runner, "db", SimpleNamespace(
+        get_lvol_by_id=get_lvol_by_id,
+        get_clusters=lambda: [SimpleNamespace(get_id=lambda: "A"), SimpleNamespace(get_id=lambda: "B")],
+        get_lvols=lambda cid: vols[cid]))
+    assert runner._live_target_node_ids(src, {"tgt_lvol_id": "GONE"}) == ["T1", "T2", "T3"]
