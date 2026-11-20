@@ -56,7 +56,7 @@ def register(cluster: Cluster, parameters: ArrayParams) -> ArrayDTO:
             parameters.credentials, parameters.lun_size,
             credential_ref=parameters.credential_ref or None)
     except ValueError as e:
-        raise HTTPException(422, str(e))
+        raise HTTPException(400, str(e))
     return ArrayDTO(**view)
 
 

@@ -1131,7 +1131,10 @@ class TestApi(unittest.TestCase):
             dele.side_effect = ValueError("LUNs exist")
             self.assertEqual(c.delete(f"/clusters/{cid}/arrays/arr").status_code, 409)
             reg.side_effect = ValueError("bad plugin")
-            self.assertEqual(c.post(f"/clusters/{cid}/arrays/", json={"plugin": "x"}).status_code, 422)
+            r = c.post(f"/clusters/{cid}/arrays/", json={"plugin": "x"})
+            # A refusal is 400 with the reason as a string; 422 is the
+            # request-validation answer generated clients parse as a list.
+            self.assertEqual((r.status_code, r.json()["detail"]), (400, "bad plugin"))
 
 
 class TestCli(unittest.TestCase):
