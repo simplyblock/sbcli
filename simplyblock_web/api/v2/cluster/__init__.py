@@ -436,7 +436,8 @@ class DeviceGrowthDTO(BaseModel):
 
 @instance_api.post('/grow-devices', name='clusters:grow_devices', response_model=DeviceGrowthDTO)
 def grow_devices(cluster: Cluster,
-                 lun_factor: Annotated[float | None, Query(gt=1)] = None) -> DeviceGrowthDTO:
+                 lun_factor: Annotated[float | None, Query(gt=1)] = None,
+                 lun_size: Annotated[int | None, Query(gt=0)] = None) -> DeviceGrowthDTO:
     """Grow all lblk data devices of the cluster online by the same factor.
 
     Every block device is rescanned (for example, after its LUN was grown on
@@ -446,10 +447,21 @@ def grow_devices(cluster: Cluster,
     (`grown` false, `reason`). Device weights and data placement never change.
     A block device smaller than its device is refused, listed in `shrunk`
     and `errors`, and raises the device_shrunk alert.
+
+    On a cluster whose array plugin creates its LUNs, every LUN is grown at
+    the array first: by `lun_factor`, or to `lun_size` bytes (a LUN already
+    that large is left alone, so the call can be repeated after a failure;
+    nodes added later get LUNs of that size).
     """
     if cluster.device_mode != constants.DEVICE_MODE_LBLK:
         raise HTTPException(409, 'Online device growth needs a cluster in lblk device mode')
-    extra = {"lun_factor": lun_factor} if lun_factor is not None else {}
+    if lun_factor is not None and lun_size is not None:
+        raise HTTPException(400, 'Give lun_factor or lun_size, not both')
+    extra: dict = {}
+    if lun_factor is not None:
+        extra["lun_factor"] = lun_factor
+    if lun_size is not None:
+        extra["lun_size"] = lun_size
     try:
         result = device_controller.grow_cluster_devices(cluster.get_id(), **extra)
     except ValueError as e:

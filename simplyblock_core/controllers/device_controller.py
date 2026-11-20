@@ -2388,7 +2388,7 @@ def _device_report(dev, old_size):
             "placement_size": dev.weight_size()}
 
 
-def grow_cluster_devices(cluster_id, lun_factor=None):
+def grow_cluster_devices(cluster_id, lun_factor=None, lun_size=None):
     """Grow every data device of an lblk cluster by the same factor (see
     _grow_cluster_devices).
 
@@ -2398,8 +2398,12 @@ def grow_cluster_devices(cluster_id, lun_factor=None):
     (array_controller.grow_luns). If any LUN fails, nothing is grown on the
     cluster; the uniform growth below would refuse anyway, since growth takes
     the smallest factor of all block devices. The result then also carries
-    ``luns``."""
-    if lun_factor is None:
+    ``luns``.
+
+    ``lun_size`` instead of ``lun_factor``: grow every LUN to that many bytes
+    (a LUN already that large is left alone, so a failed growth is simply
+    repeated) and make it the LUN size of nodes added later."""
+    if lun_factor is None and lun_size is None:
         return _grow_cluster_devices(cluster_id)
     from simplyblock_core.controllers import array_controller
     # Check before the array is touched: a refusal after the LUNs grew would
@@ -2415,7 +2419,7 @@ def grow_cluster_devices(cluster_id, lun_factor=None):
                                     "the array")
             result["luns"] = {}
             return result
-    lun_report = array_controller.grow_luns(cluster_id, lun_factor)
+    lun_report = array_controller.grow_luns(cluster_id, lun_factor, size=lun_size)
     if lun_report["errors"]:
         result = _growth_result(False, 1.0, [], dict(lun_report["errors"]),
                                 "Not every LUN could be grown at the array; nothing was grown "

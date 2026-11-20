@@ -706,6 +706,55 @@ class TestGrowth(_Case):
         self.assertEqual(FakeArrayPlugin.luns[lun["id"]]["size"], 15 * GIB)
         self.assertEqual(b.agent.rescan_block_device.call_count, 2)
 
+    def test_grow_to_a_size_is_idempotent(self):
+        a, b = _node("a"), _node("b")
+        db = self.use_db(FakeDB(_cluster(lun_size=10 * GIB), [a, b]))
+        p = self.plugin(db.cluster)
+        la, lb = p.create_lun("a", 10 * GIB, {}), p.create_lun("b", 12 * GIB, {})
+        da, db_ = _lun_device(a, la["id"], la["wwn"]), _lun_device(b, lb["id"], lb["wwn"])
+        a.agent.rescan_block_device.return_value = ({"size": 15 * GIB}, None)
+        b.agent.rescan_block_device.return_value = ({"size": 15 * GIB}, None)
+        out = array_controller.grow_luns(CID, size=15 * GIB)
+        self.assertEqual(out["errors"], {})
+        self.assertEqual((FakeArrayPlugin.luns[la["id"]]["size"], FakeArrayPlugin.luns[lb["id"]]["size"]),
+                         (15 * GIB, 15 * GIB))
+        self.assertEqual(out["luns"][db_.get_id()]["old_size"], 12 * GIB)
+        # Nodes added later get LUNs of the new size.
+        self.assertEqual(db.cluster.array_lun_size, 15 * GIB)
+        # Repeated (after a failure elsewhere): nothing is resized again.
+        FakeArrayPlugin.calls.clear()
+        out = array_controller.grow_luns(CID, size=15 * GIB)
+        self.assertEqual(out["errors"], {})
+        self.assertFalse([c for c in FakeArrayPlugin.calls if c[0] == "resize"])
+        self.assertEqual(FakeArrayPlugin.luns[la["id"]]["size"], 15 * GIB)
+        self.assertEqual(da.get_id() in out["luns"], True)
+
+    def test_a_failed_growth_to_a_size_keeps_the_lun_size(self):
+        a = _node("a")
+        db = self.use_db(FakeDB(_cluster(lun_size=10 * GIB), [a]))
+        p = self.plugin(db.cluster)
+        lun = p.create_lun("a", 10 * GIB, {})
+        _lun_device(a, lun["id"], lun["wwn"])
+        a.agent.rescan_block_device.return_value = ({"size": 10 * GIB}, None)
+        out = array_controller.grow_luns(CID, size=15 * GIB, visible_timeout=0)
+        self.assertTrue(out["errors"])
+        self.assertEqual(db.cluster.array_lun_size, 10 * GIB)
+
+    def test_factor_or_size(self):
+        self.use_db(FakeDB(_cluster(), [_node("a")]))
+        for kw in ({}, {"factor": 2, "size": GIB}, {"size": 0}, {"size": "x"}):
+            with self.subTest(kw=kw), self.assertRaises(ValueError):
+                array_controller.grow_luns(CID, **kw)
+
+    def test_grow_devices_passes_the_size(self):
+        self._prechecked()
+        with patch.object(array_controller, "grow_luns", return_value={"luns": {}, "errors": {}}) as grow_luns,                 patch.object(device_controller, "_grow_cluster_devices",
+                             return_value={"grown": False, "factor": 1.0, "devices": [], "errors": {},
+                                           "reason": "", "shrunk": []}):
+            out = device_controller.grow_cluster_devices(CID, lun_size=6 << 40)
+        grow_luns.assert_called_once_with(CID, None, size=6 << 40)
+        self.assertEqual(out["errors"], {})
+
     def test_refusals_and_errors(self):
         a = _node("a")
         db = self.use_db(FakeDB(_cluster(), [a]))

@@ -757,24 +757,41 @@ def reconcile_after_role_change(cluster_id) -> dict:
 
 # ------------------------------------------------------------------ growth
 
-def grow_luns(cluster_id, factor, visible_timeout=LUN_GROW_VISIBLE_TIMEOUT_SEC) -> dict:
-    """Grow every array-created LUN of the cluster by ``factor`` (> 1) at the
-    array, then wait until every ONLINE node the LUN is presented to sees the
-    new size (agent rescan; dm-multipath maps are resized too).
+def grow_luns(cluster_id, factor=None, visible_timeout=LUN_GROW_VISIBLE_TIMEOUT_SEC, size=None) -> dict:
+    """Grow every array-created data LUN of the cluster at the array, then
+    wait until every ONLINE node the LUN is presented to sees the new size
+    (agent rescan; dm-multipath maps are resized too).
+
+    Either by ``factor`` (> 1, relative to each LUN's size now), or to
+    ``size`` bytes: a LUN already that large is left alone, so a growth to a
+    size can be repeated after a failure without growing any LUN twice, and
+    the cluster's LUN size for nodes added later (``Cluster.array_lun_size``)
+    becomes ``size`` once every LUN has it.
 
     Returns ``{"luns": {device_id: {"lun_id", "old_size", "new_size"}},
     "errors": {device_id: msg}}``. The device growth itself (alceml, weights)
     is the regular grow-devices path that follows.
 
     Raises:
-        ValueError: not an array cluster, or a bad factor.
+        ValueError: not an array cluster, a bad factor or size, or both or
+            neither given.
     """
-    try:
-        factor = float(factor)
-    except (TypeError, ValueError) as e:
-        raise ValueError("the growth factor must be a number") from e
-    if not math.isfinite(factor) or factor <= 1.0:
-        raise ValueError("the growth factor must be greater than 1")
+    if (factor is None) == (size is None):
+        raise ValueError("give a growth factor or a LUN size, not both")
+    if size is not None:
+        try:
+            size = int(size)
+        except (TypeError, ValueError) as e:
+            raise ValueError("the LUN size must be a number of bytes") from e
+        if size <= 0:
+            raise ValueError("the LUN size must be positive")
+    else:
+        try:
+            factor = float(factor)
+        except (TypeError, ValueError) as e:
+            raise ValueError("the growth factor must be a number") from e
+        if not math.isfinite(factor) or factor <= 1.0:
+            raise ValueError("the growth factor must be greater than 1")
     db = _db()
     cluster = db.get_cluster_by_id(cluster_id)
     if not array_configured(cluster):
@@ -792,8 +809,9 @@ def grow_luns(cluster_id, factor, visible_timeout=LUN_GROW_VISIBLE_TIMEOUT_SEC) 
         did = dev.get_id()
         try:
             old = int(plugin.get(dev.array_lun_id).get("size") or 0) or int(dev.size)
-            target = math.ceil(old * factor)
-            plugin.resize(dev.array_lun_id, target)
+            target = max(old, size) if size is not None else math.ceil(old * factor)
+            if target > old:
+                plugin.resize(dev.array_lun_id, target)
             new = int(plugin.get(dev.array_lun_id).get("size") or target)
             out["luns"][did] = {"lun_id": dev.array_lun_id, "old_size": old, "new_size": new}
         except Exception as e:                          # noqa: BLE001
@@ -802,6 +820,10 @@ def grow_luns(cluster_id, factor, visible_timeout=LUN_GROW_VISIBLE_TIMEOUT_SEC) 
         err = _wait_visible(dev, nodes_by_id, new, visible_timeout)
         if err:
             out["errors"][did] = err
+    if size is not None and not out["errors"] and size > int(cluster.array_lun_size or 0):
+        def _set(fresh):
+            fresh.array_lun_size = max(int(fresh.array_lun_size or 0), size)
+        db.atomic_update(cluster, _set)
     return out
 
 

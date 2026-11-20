@@ -1612,6 +1612,14 @@ commands:
               this factor (greater than 1, e.g. 1.5) at the array and wait until every node sees the new size.
             dest: lun_factor
             type: str
+          - name: "--lun-size"
+            help: >
+              Multi-attach cluster with a registered array only, instead of --lun-factor: first grow every LUN the
+              array plugin created to this size (e.g. `6T`); a LUN already that large is left alone, so the command
+              can be repeated after a failure. Nodes added later get LUNs of this size.
+            dest: lun_size
+            type: size
+            default: "0"
       - name: set-array
         help: "Registers the storage array of a multi-attach cluster (or updates it, e.g. to rotate credentials)."
         usage: >

@@ -847,7 +847,13 @@ class CLIWrapperBase:
             except ValueError:
                 print(f"--lun-factor must be a number, not {lun_factor!r}")
                 return False
-        extra = {"lun_factor": lun_factor} if lun_factor is not None else {}
+        extra: dict = {"lun_factor": lun_factor} if lun_factor is not None else {}
+        lun_size = int(getattr(args, 'lun_size', 0) or 0)
+        if lun_size:
+            if lun_factor is not None:
+                print("Give --lun-factor or --lun-size, not both")
+                return False
+            extra = {"lun_size": lun_size}
         try:
             result = device_controller.grow_cluster_devices(args.cluster_id, **extra)
         except ValueError as e:

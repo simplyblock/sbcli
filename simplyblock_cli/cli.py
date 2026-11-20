@@ -578,6 +578,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand = self.add_sub_command(subparser, 'grow-devices', 'Grows all Linux block devices (lblk) of the cluster online by the same factor.')
         subcommand.add_argument('cluster_id', help='The cluster id.', type=str).completer = self._completer_get_cluster_list
         subcommand.add_argument('--lun-factor', help='Multi-attach cluster with a registered array only: first grow every LUN the array plugin created by this factor (greater than 1, e.g. 1.5) at the array and wait until every node sees the new size.', type=str, dest='lun_factor')
+        subcommand.add_argument('--lun-size', help='Multi-attach cluster with a registered array only, instead of --lun-factor: first grow every LUN the array plugin created to this size (e.g. `6T`); a LUN already that large is left alone, so the command can be repeated after a failure. Nodes added later get LUNs of this size.', type=size_type(), default='0', dest='lun_size')
 
     def init_cluster__set_array(self, subparser):
         subcommand = self.add_sub_command(subparser, 'set-array', 'Registers the storage array of a multi-attach cluster (or updates it, e.g. to rotate credentials).')
