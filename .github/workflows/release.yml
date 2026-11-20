@@ -74,8 +74,17 @@ jobs:
           version: ${{ github.event.release.tag_name }}
           spdk_tag: ${{ needs.get_spdk_hash.outputs.short_sha }}
 
+      # python setup.py sdist needs setuptools importable on the runner;
+      # that was previously installed explicitly by the step this cherry-pick
+      # removed (pip install setuptools wheel twine build tox), and the
+      # runner's system Python no longer bundles it either (Python 3.12+
+      # dropped distutils, and ubuntu-latest's system python3 has no
+      # setuptools preinstalled). uv build runs the build through the
+      # setuptools.build_meta backend already declared in pyproject.toml,
+      # fetching setuptools into an isolated build env instead of relying on
+      # one being present on the runner.
       - name: Build package
-        run: python setup.py sdist
+        run: uv build --sdist
 
       - name: Publish package to pypi
         uses: pypa/gh-action-pypi-publish@release/v1
