@@ -46,6 +46,15 @@ class _ObjectStoreBase(TestClusterBase):
     STORE = "s3-fn"
     REGION = "us-east-1"
 
+    #: The service-ca bundle the OpenShift TLS provider mounts into every
+    #: gateway pod. Mirrors `certificateAuthorityConfigMap` in the operator's
+    #: objectstore/objectstore_build.go, which projects it alongside the
+    #: serving-cert Secret; the two must move together. It is rendered only by
+    #: the operator chart's controlplane-cabundle.yaml, which is itself gated
+    #: on `tls.enabled AND tls.provider == openshift` -- so its presence is
+    #: the one honest answer to which provider this deployment can serve.
+    CA_BUNDLE_CM = "simplyblock-certificate-authority"
+
     #: Provisioning a bucket makes a PVC, an lvol, an NFSExport and a mount
     #: on every gateway node, and on a cluster whose MDS guest has not booted
     #: yet the MDS boot dominates. Dev's own E-05 exists to measure exactly
@@ -268,24 +277,60 @@ class _ObjectStoreBase(TestClusterBase):
         return name if self.k8s_utils.get_resource_json(
             "secret", name, namespace or self.ns) else None
 
+    def resolve_tls_provider(self, namespace=None):
+        """Pick the ObjectStore's tlsProvider from the chart, not the distro.
+
+        Being on OpenShift does not mean the OpenShift provider will work. The
+        provider decides what the gateway pod MOUNTS: with ``OpenShift`` the
+        operator projects the service-ca bundle ConfigMap
+        (:attr:`CA_BUNDLE_CM`) into the pod's ``tls`` volume, and the operator
+        chart renders that ConfigMap only under ``tls.provider=openshift``. Our
+        lanes install the chart on its defaults -- ``tls.enabled: true`` with
+        ``tls.provider: cert-manager`` -- so on an OpenShift lab the two
+        disagreed and every gateway pod hung:
+
+            MountVolume.SetUp failed for volume "tls" :
+            configmap "simplyblock-certificate-authority" not found
+
+        A missing ConfigMap keeps the pod in ContainerCreating rather than
+        failing it, so nothing crashes and nothing logs. The Deployment simply
+        never goes Available, the ObjectStore lands in Degraded with
+        ``DeploymentNotAvailable``, and the case reports a retry budget running
+        out -- naming neither TLS nor a ConfigMap. That cost run 44690388182
+        all 18 cases, 0 passed, on a cluster that was Online throughout.
+
+        So ask for the ConfigMap. Its presence is exactly the condition the
+        gateway's mount needs, which is a narrower and more honest question
+        than ``detect_openshift()``: it is also right on an OpenShift cluster
+        whose chart was installed with cert-manager, and on a plain Kubernetes
+        cluster that somehow has the bundle.
+        """
+        ns = namespace or self.ns
+        if self.k8s_utils.get_resource_json("configmap", self.CA_BUNDLE_CM, ns):
+            self.logger.info(
+                "[tls] %s is present; using the OpenShift provider",
+                self.CA_BUNDLE_CM)
+            return "OpenShift"
+        self.logger.info(
+            "[tls] no %s in %s, so the chart was not installed with "
+            "tls.provider=openshift; using cert-manager", self.CA_BUNDLE_CM, ns)
+        return "cert-manager"
+
     def make_objectstore(self, name=None, replicas=1, tls_provider=None,
                          secret_name="s3-root-credentials", sc_name=None,
                          namespace=None, extra_spec="", wait=True,
                          capacity=None, secret_refs=None):
         """Create an ObjectStore and, by default, wait for it to serve.
 
-        *tls_provider* defaults to what the cluster can actually honour:
-        ``OpenShift`` relies on the service-ca-operator, which a plain
-        Kubernetes cluster has nobody to run, and ``cert-manager`` needs a
-        ClusterIssuer that may not exist. Choosing it from the cluster rather
-        than from a constant keeps the same case runnable on both labs.
+        *tls_provider* defaults to what this deployment can actually honour.
+        See :meth:`resolve_tls_provider` for why that is not the same question
+        as which distribution we are on.
         """
         name = name or self.STORE
         ns = namespace or self.ns
         sc_name = sc_name or self.SC_NAME
         if tls_provider is None:
-            tls_provider = "OpenShift" if self.k8s_utils.detect_openshift() \
-                else "cert-manager"
+            tls_provider = self.resolve_tls_provider(ns)
         self.k8s_utils.apply_yaml(
             "apiVersion: storage.simplyblock.io/v1alpha2\n"
             "kind: ObjectStore\n"

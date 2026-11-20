@@ -185,8 +185,12 @@ class S3GatewayTLSK8s(_ObjectStoreBase):
         self.make_storage_class()
         self.make_credentials()
 
-        openshift = self.k8s_utils.detect_openshift()
-        provider = "OpenShift" if openshift else "cert-manager"
+        # Resolved from the chart's CA bundle, not from detect_openshift():
+        # being on OpenShift does not mean the chart was installed with
+        # tls.provider=openshift, and asserting the wrong half of this branch
+        # is how the case would pass for the wrong reason. See
+        # ObjectStoreTestBase.resolve_tls_provider.
+        provider = self.resolve_tls_provider()
         self.logger.info("[TC-S3-00x] cluster selects tlsProvider=%s", provider)
         self.make_objectstore(tls_provider=provider)
 
