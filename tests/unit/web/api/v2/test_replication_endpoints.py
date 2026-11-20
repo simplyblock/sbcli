@@ -1,8 +1,14 @@
 """Unit tests for /api/v2/clusters/{id}/replication endpoints."""
 
+from typing import ClassVar
+
+from pydantic import SecretStr
+
 from simplyblock_core.controllers.replication_policy_controller import (
+    PeerConnection,
     ReplicationConfigError,
 )
+from simplyblock_core.peer.client import PeerUnreachableError
 from simplyblock_core.utils.nvme import NvmeConnectEntry
 from tests.unit.web.api.v2 import _factories as factories
 from tests.unit.web.api.v2._factories import (
@@ -67,7 +73,7 @@ class TestCreateTarget:
             f'/clusters/{CLUSTER_ID}/replication/targets/{REPLICATION_TARGET_ID}/')
         args, kwargs = replication_policy_controller.add_target.call_args
         assert args == (CLUSTER_ID, 'site-b', TARGET_CLUSTER_ID)
-        assert kwargs == {'target_pool': TARGET_POOL_ID, 'timeout_sec': 600}
+        assert kwargs == {'target_pool': TARGET_POOL_ID, 'timeout_sec': 600, 'peer': None}
 
     def test_identifier_response_format(self, client, db, cluster, replication_target,
                                         replication_policy_controller):
@@ -111,6 +117,85 @@ class TestCreateTarget:
         })
 
         assert response.status_code == 404
+
+
+class TestCreatePeerTarget:
+
+    BODY: ClassVar[dict] = {
+        'target_name': 'site-b',
+        'target_cluster_id': TARGET_CLUSTER_ID,
+        'peer_endpoint': 'https://cp-b.example:8443',
+        'peer_secret': 'peer-plaintext',
+        'peer_ca_cert': '-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----\n',
+    }
+
+    def test_passes_the_peer_connection_to_the_controller(self, client, db, cluster,
+                                                         replication_target,
+                                                         replication_policy_controller):
+        replication_policy_controller.add_target.return_value =             f'{CLUSTER_ID}/{REPLICATION_TARGET_ID}'
+
+        response = client.post(TARGETS_URL, json=self.BODY)
+
+        assert response.status_code == 201
+        peer = replication_policy_controller.add_target.call_args.kwargs['peer']
+        assert isinstance(peer, PeerConnection)
+        assert peer.endpoint == 'https://cp-b.example:8443'
+        assert peer.secret.get_secret_value() == 'peer-plaintext'
+        assert peer.ca_cert == self.BODY['peer_ca_cert']
+
+    def test_detail_shows_the_endpoint_and_never_the_secret(self, client, db, cluster,
+                                                           replication_target,
+                                                           replication_policy_controller):
+        replication_target.peer_endpoint = 'https://cp-b.example:8443'
+        replication_target.peer_secret = SecretStr('peer-plaintext')
+        replication_policy_controller.list_targets.return_value = [replication_target]
+
+        response = client.get(TARGETS_URL)
+
+        (body,) = response.json()
+        assert body['peer_endpoint'] == 'https://cp-b.example:8443'
+        assert 'peer-plaintext' not in response.text
+
+    def test_a_local_target_has_no_peer_endpoint(self, client, db, cluster, replication_target,
+                                                 replication_policy_controller):
+        replication_policy_controller.list_targets.return_value = [replication_target]
+
+        (body,) = client.get(TARGETS_URL).json()
+
+        assert body['peer_endpoint'] is None
+
+    def test_an_endpoint_without_a_secret_is_rejected(self, client, db, cluster,
+                                                      replication_policy_controller):
+        body = {k: v for k, v in self.BODY.items() if k != 'peer_secret'}
+
+        response = client.post(TARGETS_URL, json=body)
+
+        assert response.status_code == 422
+        replication_policy_controller.add_target.assert_not_called()
+
+    def test_a_secret_without_an_endpoint_is_rejected(self, client, db, cluster,
+                                                      replication_policy_controller):
+        body = {k: v for k, v in self.BODY.items() if k != 'peer_endpoint'}
+
+        response = client.post(TARGETS_URL, json=body)
+
+        assert response.status_code == 422
+        replication_policy_controller.add_target.assert_not_called()
+
+    def test_a_non_http_endpoint_is_rejected(self, client, db, cluster,
+                                             replication_policy_controller):
+        response = client.post(TARGETS_URL, json={**self.BODY, 'peer_endpoint': 'ftp://cp-b'})
+
+        assert response.status_code == 422
+
+    def test_an_unreachable_peer_maps_to_502(self, client, db, cluster,
+                                             replication_policy_controller):
+        replication_policy_controller.add_target.side_effect = PeerUnreachableError('refused')
+
+        response = client.post(TARGETS_URL, json=self.BODY)
+
+        assert response.status_code == 502
+        assert 'peer-plaintext' not in response.text
 
 
 class TestTargetInstance:
