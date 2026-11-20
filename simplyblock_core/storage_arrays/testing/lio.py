@@ -223,7 +223,8 @@ class ConfigfsLio:
     """The kernel's iSCSI target through rtslib. One target, one portal group,
     one ACL per initiator; volumes are sparse files on loop devices."""
 
-    def __init__(self, target_iqn: str, data_dir: str, portal: tuple[str, int] = ("0.0.0.0", 3260)):
+    def __init__(self, target_iqn: str, data_dir: str,
+                 portal: tuple[str, int] | list[tuple[str, int]] = ("0.0.0.0", 3260)):
         # rtslib keeps its saved configuration here, and refuses to start on a
         # host where no target ever ran and the directory is missing.
         os.makedirs("/etc/rtslib-fb-target", exist_ok=True)
@@ -240,7 +241,10 @@ class ConfigfsLio:
         for name, value in (("authentication", "0"), ("generate_node_acls", "0"),
                             ("demo_mode_write_protect", "0"), ("demo_mode_discovery", "1")):
             self.tpg.set_attribute(name, value)
-        rts.NetworkPortal(self.tpg, portal[0], portal[1])
+        # Several portals give every host several paths to every LUN: the
+        # multipath case of FC and iSCSI arrays.
+        for ip, port in (portal if isinstance(portal, list) else [portal]):
+            rts.NetworkPortal(self.tpg, ip, port)
         self.tpg.enable = True
 
     def _remove_previous(self, fabric, target_iqn: str) -> None:

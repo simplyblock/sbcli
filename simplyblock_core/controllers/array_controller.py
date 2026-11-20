@@ -354,14 +354,20 @@ def lun_name(hostname, socket) -> str:
 
 
 def _find_in_inventory(inventory, wwn):
+    """The host's device of LUN ``wwn``: its multipath map where the LUN is
+    reached over several paths (FC, iSCSI with several sessions), else its
+    disk."""
     want = multi_attach.normalize_wwn(wwn)
-    for d in inventory or []:
-        if d.get("type", "disk") != "disk":
-            continue
-        if want in (multi_attach.normalize_wwn(d.get("wwn", "")),
-                    multi_attach.normalize_wwn(d.get("serial", ""))):
-            return d
-    return None
+    matches = [d for d in inventory or []
+               if d.get("type", "disk") in ("disk", "mpath")
+               and want in (multi_attach.normalize_wwn(d.get("wwn", "")),
+                            multi_attach.normalize_wwn(d.get("serial", "")))]
+    maps = [d for d in matches if d.get("type") == "mpath"]
+    if maps:
+        return maps[0]
+    # A path of a map whose map is not listed (an older agent): never alone.
+    singles = [d for d in matches if not d.get("multipath_map")]
+    return singles[0] if singles else None
 
 
 def provision_node_lun(cluster, snode_api, node_info, node_config, lblk_configured,
@@ -420,6 +426,8 @@ def provision_node_lun(cluster, snode_api, node_info, node_config, lblk_configur
         "numa": int(found.get("numa_node", -1)),
         "model": found.get("model", ""),
         "type": "disk",
+        # A multipath map's kernel name (dm-N) makes it a bdev_uring device.
+        "kname": found.get("kname", found["name"]),
         "lun_wwn": lun["wwn"],
         "array_lun_id": lun["id"],
     }

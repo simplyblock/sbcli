@@ -420,8 +420,70 @@ def get_block_devices_info() -> list[dict]:
                 "physical_block_size": physical_bs,
                 "start_bytes": _partition_start_bytes(name, part_name),
             })
+    devices += _multipath_maps(data, devices, persistent)
     logger.debug("function:get_block_devices_info end")
     return devices
+
+
+def _multipath_maps(lsblk: dict, devices: list[dict], persistent: dict) -> list[dict]:
+    """The dm-multipath maps of the host, one entry each.
+
+    A SCSI LUN reached over several paths (FC, or iSCSI with several
+    sessions) appears once per path as an sd disk, and once as the map that
+    multipathd builds over those paths; lsblk lists the map as a child of
+    every path. The map is what is used: it survives the loss of a path. It
+    is reported with the identity of its paths (lsblk gives a map neither a
+    SERIAL nor a WWN), so a LUN is found under the same serial and WWN with
+    and without multipathing. Its paths stay in the inventory, each marked
+    with its ``multipath_map`` and held by it, so that nothing takes a path
+    on its own. The map is opened as /dev/mapper/<name>; its kernel name
+    (dm-N) is what makes the control plane serve it through bdev_uring."""
+    by_name = {d["name"]: d for d in devices if d.get("type") == "disk"}
+    maps: dict[str, dict] = {}
+    for dev in lsblk.get("blockdevices", []):
+        if dev.get("type") != "disk":
+            continue
+        for child in dev.get("children") or []:
+            if child.get("type") != "mpath":
+                continue
+            entry = maps.setdefault(child["name"], {"child": child, "paths": []})
+            entry["paths"].append(dev["name"])
+    out = []
+    for map_name, m in sorted(maps.items()):
+        child, paths = m["child"], m["paths"]
+        kname = child.get("kname") or map_name
+        first = by_name.get(paths[0], {})
+        for path in paths:
+            if path in by_name:
+                by_name[path]["multipath_map"] = map_name
+        links = persistent.get(kname, []) or persistent.get(map_name, [])
+        # The stable, host-independent link first: dm-uuid-mpath-<wwid>.
+        links = sorted(links, key=lambda link: (0 if "/dm-uuid-mpath-" in link else 1, link))
+        out.append({
+            "name": map_name,
+            "kname": kname,
+            "device_path": f"/dev/mapper/{map_name}",
+            "type": "mpath",
+            "size": int(child.get("size") or first.get("size") or 0),
+            "serial": first.get("serial", ""),
+            "serial_synthetic": bool(first.get("serial_synthetic")),
+            "wwn": first.get("wwn", ""),
+            "model": first.get("model", ""),
+            "vendor": first.get("vendor", ""),
+            "rota": bool(first.get("rota")),
+            "ro": bool(child.get("ro")),
+            "has_partitions": any(c.get("type") == "part" for c in child.get("children") or []),
+            "mounted_in_subtree": _subtree_mounted(child),
+            "holders": _disk_holders(kname),
+            "is_root_disk": False,
+            "by_id_path": links[0] if links else "",
+            "by_id_paths": links,
+            "numa_node": first.get("numa_node", -1),
+            "logical_block_size": _logical_block_size(kname),
+            "physical_block_size": _physical_block_size(kname),
+            "paths": sorted(paths),
+        })
+    return out
 
 
 SB_GPT_PARTITION_TYPECODE = "6527994e-2c5a-4eec-9613-8f5944074e8b"
@@ -544,11 +606,14 @@ def find_lun_devices(wwn: str) -> list[dict]:
     if not want:
         return []
     found = []
-    for dev in get_block_devices_info():
-        if dev.get("type") != "disk":
-            continue
-        if want not in (_normalize_wwn(dev.get("wwn", "")), _normalize_wwn(dev.get("serial", ""))):
-            continue
+    devices = get_block_devices_info()
+    matched = [d for d in devices
+               if d.get("type") in ("disk", "mpath")
+               and want in (_normalize_wwn(d.get("wwn", "")), _normalize_wwn(d.get("serial", "")))]
+    # Several paths of one LUN under a multipath map: the map, not the paths.
+    if any(d.get("type") == "mpath" for d in matched):
+        matched = [d for d in matched if d.get("type") == "mpath"]
+    for dev in matched:
         found.append({
             "name": dev["name"],
             "device_path": dev["device_path"],
@@ -556,7 +621,11 @@ def find_lun_devices(wwn: str) -> list[dict]:
             "by_id_paths": dev.get("by_id_paths", []),
             "size": dev.get("size", 0),
             "ro": dev.get("ro", False),
-            "has_alceml_signature": simplyblock_data_signature(dev["name"]),
+            "type": dev.get("type", "disk"),
+            "kname": dev.get("kname", dev["name"]),
+            # /dev/<name> of a map is /dev/mapper/<name>; /dev/<kname> is dm-N.
+            "has_alceml_signature": simplyblock_data_signature(
+                dev.get("kname") or dev["name"] if dev.get("type") == "mpath" else dev["name"]),
         })
     return found
 

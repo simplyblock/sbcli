@@ -1686,7 +1686,8 @@ def resolve_lblk_entries(configured_entries, host_devices, *, name_fallback=True
     hard reset of a node fenced from its LUN, the LUN's name nvme2n1 was the
     node's journal volume, which the restart took up as a data device."""
     by_path = _index_by_selector(host_devices)
-    by_serial = {d["serial"]: d for d in host_devices}
+    # A path of a multipath map shares the map's serial; the map is the device.
+    by_serial = {d["serial"]: d for d in host_devices if not d.get("multipath_map")}
     by_name = {d["name"]: d for d in host_devices}
     by_partuuid = {d["partuuid"].lower(): d for d in host_devices
                    if d.get("partuuid")}

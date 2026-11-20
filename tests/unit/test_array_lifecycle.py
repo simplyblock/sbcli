@@ -537,6 +537,27 @@ class TestProvisioning(_Case):
         self.assertEqual(FakeArrayPlugin.hosts[host]["initiators"]["nvme_hostnqn"], "nqn.h:a")
         self.assertEqual(n.array_host_id, host)
 
+    def test_a_lun_behind_a_multipath_map_is_the_map(self):
+        cl = _cluster(lun_size=GIB)
+        api = MagicMock()
+
+        def inv():
+            lun = next(iter(FakeArrayPlugin.luns.values()), None)
+            if lun is None:
+                return [], None
+            path = {"type": "disk", "serial": lun["wwn"], "wwn": "", "size": GIB,
+                    "multipath_map": "mpatha", "holders": ["dm-3"]}
+            return [dict(path, name="sdb", by_id_path="/dev/disk/by-id/wwn-sdb"),
+                    dict(path, name="sdc", by_id_path="/dev/disk/by-id/wwn-sdc"),
+                    {"type": "mpath", "name": "mpatha", "kname": "dm-3", "serial": lun["wwn"],
+                     "wwn": "", "size": GIB, "paths": ["sdb", "sdc"], "numa_node": 0,
+                     "by_id_path": "/dev/disk/by-id/dm-uuid-mpath-3" + lun["wwn"]}], None
+        api.get_blockdevices.side_effect = inv
+        api.scan_new_luns.return_value = ({}, None)
+        entry, _ = array_controller.provision_node_lun(cl, api, {"hostname": "w"}, {"socket": 0}, [])
+        self.assertEqual((entry["name"], entry["kname"]), ("mpatha", "dm-3"))
+        self.assertTrue(entry["by_id"].startswith("/dev/disk/by-id/dm-uuid-mpath-"))
+
     def test_lun_that_never_appears_fails(self):
         cl = _cluster(lun_size=GIB)
         with self.assertRaisesRegex(array_controller.ArrayLifecycleError, "did not appear"):
