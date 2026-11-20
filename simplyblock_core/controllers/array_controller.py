@@ -16,7 +16,10 @@ multi-attach cluster itself, through the cluster's array plugin
   - node add: ``provision_node_lun`` creates the node's LUN
     (``Cluster.array_lun_size``), registers the host, attaches the LUN and
     waits for it in the node agent's block-device inventory; the add then
-    continues as a regular lblk add with that device.
+    continues as a regular lblk add with that device. With the journal on
+    the array (``Cluster.array_journal`` "lun") it first creates the node's
+    journal LUN the same way, with the journal options (its pool), and
+    presents it to that node only.
   - LVS roles: ``reconcile_lun_attachments`` presents every owner's LUN to
     its secondary and tertiary (and the node serving it), records the path
     there in ``node_paths``, and detaches it from a node that lost its role
@@ -49,6 +52,16 @@ LUN_PATH_TIMEOUT_SEC = 30
 LUN_GROW_VISIBLE_TIMEOUT_SEC = 180
 POLL_SEC = 3
 
+#: Cluster.array_journal: the journal on a local disk or partition of the
+#: node's host, or on a LUN of its own on the array.
+JOURNAL_LOCAL = "local"
+JOURNAL_LUN = "lun"
+JOURNAL_PLACEMENTS = (JOURNAL_LOCAL, JOURNAL_LUN)
+#: A journal LUN of no given size: this share of the data LUN, at least
+#: JOURNAL_LUN_MIN_BYTES, rounded up to whole GiB.
+JOURNAL_LUN_PERCENT = 3
+JOURNAL_LUN_MIN_BYTES = 2 << 30
+
 _STATUS_REMOVED = "removed"
 _STATUS_ONLINE = "online"
 
@@ -75,6 +88,21 @@ def provisions_luns(cluster) -> bool:
     """Node adds create the node's LUN (an array is configured and a LUN
     size set)."""
     return array_configured(cluster) and int(getattr(cluster, "array_lun_size", 0) or 0) > 0
+
+
+def journal_on_lun(cluster) -> bool:
+    """Node adds also create the node's journal LUN (``Cluster.array_journal``
+    "lun" on a cluster that creates the nodes' LUNs)."""
+    return provisions_luns(cluster) and (getattr(cluster, "array_journal", "") or JOURNAL_LOCAL) == JOURNAL_LUN
+
+
+def journal_lun_size(cluster) -> int:
+    """Size in bytes of a node's journal LUN."""
+    size = int(getattr(cluster, "array_journal_lun_size", 0) or 0)
+    if size:
+        return size
+    size = max(JOURNAL_LUN_MIN_BYTES, math.ceil(int(cluster.array_lun_size or 0) * JOURNAL_LUN_PERCENT / 100))
+    return math.ceil(size / (1 << 30)) << 30
 
 
 def _event(cluster_id, message, error=False):
@@ -120,6 +148,11 @@ def array_view(cluster, capabilities=None) -> dict:
         "endpoint": cluster.array_endpoint,
         "options": dict(cluster.array_options or {}),
         "lun_size": int(cluster.array_lun_size or 0),
+        "journal": getattr(cluster, "array_journal", "") or JOURNAL_LOCAL,
+        "journal_lun_size": (journal_lun_size(cluster)
+                             if (getattr(cluster, "array_journal", "") or JOURNAL_LOCAL) == JOURNAL_LUN
+                             and int(cluster.array_lun_size or 0) else 0),
+        "journal_options": dict(getattr(cluster, "array_journal_options", None) or {}),
         "has_credentials": bool(cluster.array_has_credentials),
         "credential_ref": array.credential_ref_view(cluster),
     }
@@ -129,7 +162,8 @@ def array_view(cluster, capabilities=None) -> dict:
 
 
 def register_array(cluster_id, plugin, endpoint="", options=None, credentials=None,
-                   lun_size=0, credential_ref=None) -> dict:
+                   lun_size=0, credential_ref=None, journal=JOURNAL_LOCAL, journal_lun_size=0,
+                   journal_options=None) -> dict:
     """Register (or re-register, e.g. to rotate credentials) the storage
     array of a multi-attach cluster.
 
@@ -147,10 +181,18 @@ def register_array(cluster_id, plugin, endpoint="", options=None, credentials=No
       ``{"kind": "kmip-secret", "uid"[, "field"]}``): simplyblock reads it
       when it connects and never stores it.
 
+    ``journal`` places each node's journal: ``"local"`` on a disk or
+    partition of its host, ``"lun"`` on a LUN of its own that node adds
+    create (needs ``lun_size``) with ``journal_options`` updating
+    ``options`` (e.g. ``{"pool": "fast-pool"}``) and ``journal_lun_size``
+    bytes (0 = 3% of ``lun_size``, at least 2 GiB). A change applies to
+    nodes added afterwards.
+
     Returns the array view (``array_view``) with the plugin's capabilities.
 
     Raises:
-        ValueError: not a multi-attach cluster, both or a bad credential
+        ValueError: not a multi-attach cluster, a bad journal placement,
+            both or a bad credential
             source, the credentials cannot be stored or read, the plugin
             cannot be loaded or connected, its capabilities do not fit the
             cluster, or LUNs created through another plugin exist.
@@ -165,6 +207,17 @@ def register_array(cluster_id, plugin, endpoint="", options=None, credentials=No
         raise ValueError("an array needs a plugin")
     if int(lun_size or 0) < 0:
         raise ValueError("lun_size must not be negative")
+    journal = (journal or JOURNAL_LOCAL).lower()
+    if journal not in JOURNAL_PLACEMENTS:
+        raise ValueError(f"journal must be one of {', '.join(JOURNAL_PLACEMENTS)}, not {journal!r}")
+    if int(journal_lun_size or 0) < 0:
+        raise ValueError("journal_lun_size must not be negative")
+    journal_opts = dict(journal_options or {})
+    if journal == JOURNAL_LUN and not int(lun_size or 0):
+        raise ValueError("a journal LUN is created at node add next to the node's data LUN; "
+                         "it needs lun_size")
+    if journal != JOURNAL_LUN and (journal_opts or int(journal_lun_size or 0)):
+        raise ValueError("journal_options and journal_lun_size apply to the journal placement 'lun' only")
     creds = _wrap_credentials(credentials)
     if creds and credential_ref:
         raise ValueError("give the credentials or a reference to them, not both")
@@ -199,6 +252,16 @@ def register_array(cluster_id, plugin, endpoint="", options=None, credentials=No
         raise ValueError(str(e)) from e
     except Exception as e:                              # noqa: BLE001 - a vendor plugin
         raise ValueError(f"array plugin {plugin!r} failed: {e}") from e
+    if journal_opts:
+        # The journal LUNs' options are checked by the plugin, as the
+        # array's are, before anything is saved.
+        try:
+            array.load_plugin(plugin, endpoint, dict(opts, **journal_opts), credentials=creds,
+                              cluster_id=cluster_id)
+        except array.ArrayError as e:
+            raise ValueError(f"journal options: {e}") from e
+        except Exception as e:                          # noqa: BLE001 - a vendor plugin
+            raise ValueError(f"journal options: array plugin {plugin!r} failed: {e}") from e
     max_att = int(caps.get("max_attachments") or 0)
     # Owner, secondary, tertiary: FTT + 1 hosts per LUN.
     needed = int(getattr(cluster, "max_fault_tolerance", 1) or 1) + 1
@@ -222,6 +285,9 @@ def register_array(cluster_id, plugin, endpoint="", options=None, credentials=No
         fresh.array_credential_ref = ref
         fresh.array_has_credentials = bool(ref)
         fresh.array_lun_size = int(lun_size or 0)
+        fresh.array_journal = journal
+        fresh.array_journal_lun_size = int(journal_lun_size or 0)
+        fresh.array_journal_options = journal_opts
 
     db.atomic_update(cluster, mutate)
     if legacy_secret:
@@ -260,7 +326,9 @@ def delete_array(cluster_id, array_id, force=False) -> None:
     cluster = db.get_cluster_by_id(cluster_id)
     if not cluster.array_plugin or (cluster.array_id or "") != (array_id or ""):
         raise KeyError(f"array {array_id} not found")
-    managed = _managed_devices(db.get_storage_nodes_by_cluster_id(cluster_id))
+    nodes = db.get_storage_nodes_by_cluster_id(cluster_id)
+    managed = [d.array_lun_id for _, d in _managed_devices(nodes)]
+    managed += [n.array_journal_lun_id for n in nodes if getattr(n, "array_journal_lun_id", "")]
     if managed and not force:
         raise ValueError(f"{len(managed)} LUN(s) created through the array exist; "
                          "takeovers would lose their fence")
@@ -278,6 +346,9 @@ def delete_array(cluster_id, array_id, force=False) -> None:
         fresh.array_credential_ref = {}
         fresh.array_has_credentials = False
         fresh.array_lun_size = 0
+        fresh.array_journal = JOURNAL_LOCAL
+        fresh.array_journal_lun_size = 0
+        fresh.array_journal_options = {}
 
     db.atomic_update(cluster, mutate)
     logger.info("Cluster %s: array %s removed", cluster_id, array_id)
@@ -349,8 +420,8 @@ def ensure_node_host(plugin, node, db=None) -> str:
 
 # ---------------------------------------------------------------- node add
 
-def lun_name(hostname, socket) -> str:
-    return f"simplyblock-{hostname}-s{socket if socket is not None else 0}"
+def lun_name(hostname, socket, journal=False) -> str:
+    return f"simplyblock-{hostname}-s{socket if socket is not None else 0}" + ("-journal" if journal else "")
 
 
 def _find_in_inventory(inventory, wwn):
@@ -371,15 +442,20 @@ def _find_in_inventory(inventory, wwn):
 
 
 def provision_node_lun(cluster, snode_api, node_info, node_config, lblk_configured,
-                       timeout=LUN_APPEAR_TIMEOUT_SEC, node_ip=""):
+                       timeout=LUN_APPEAR_TIMEOUT_SEC, node_ip="", journal=False):
     """Create (or find) the LUN of the node being added, present it to the
     node's host and wait until the host sees it.
+
+    With ``journal`` it is the node's journal LUN (``journal_on_lun``):
+    created with ``Cluster.array_journal_options`` updating the array's
+    options and ``journal_lun_size`` bytes, and its entry flagged as the
+    journal. It is presented to this node only, ever.
 
     Returns ``(entry, host_id)``: ``entry`` is an lblk config entry for the
     LUN (identified by its serial; carries ``lun_wwn`` and ``array_lun_id``)
     to add to the node's ``lblk_devices``, ``host_id`` the host's id on the
-    array. A configured entry that already carries an ``array_lun_id`` (a
-    retried add) is reused.
+    array. A configured entry of the same kind (data or journal) that already
+    carries an ``array_lun_id`` (a retried add) is reused.
 
     Raises:
         ArrayLifecycleError: any step failed.
@@ -387,24 +463,30 @@ def provision_node_lun(cluster, snode_api, node_info, node_config, lblk_configur
     hostname = node_info.get("hostname", "")
     socket = node_config.get("socket")
     try:
-        plugin = array.plugin_for_cluster(cluster)
+        plugin = array.plugin_for_cluster(
+            cluster, dict(getattr(cluster, "array_journal_options", None) or {}) if journal else None)
         host_id = plugin.ensure_host(hostname, host_initiators(
             hostname, node_info.get("cloud_instance"), node_info.get("system_id", ""), node_ip,
             node_info.get("san_initiators")))
-        existing = next((e for e in lblk_configured or [] if e.get("array_lun_id")), None)
+        existing = next((e for e in lblk_configured or []
+                         if e.get("array_lun_id") and bool(e.get("journal")) == bool(journal)), None)
         if existing:
             lun = {"id": existing["array_lun_id"], "wwn": existing.get("lun_wwn", "")}
         else:
-            lun = plugin.create_lun(lun_name(hostname, socket), int(cluster.array_lun_size),
-                                    {"simplyblock-host": hostname,
-                                     "simplyblock-socket": str(socket if socket is not None else 0)})
+            tags = {"simplyblock-host": hostname,
+                    "simplyblock-socket": str(socket if socket is not None else 0)}
+            if journal:
+                tags["simplyblock-role"] = "journal"
+            lun = plugin.create_lun(lun_name(hostname, socket, journal),
+                                    journal_lun_size(cluster) if journal else int(cluster.array_lun_size),
+                                    tags)
         plugin.attach(lun["id"], host_id)
     except array.ArrayError as e:
         raise ArrayLifecycleError(f"array: {e}") from e
     except Exception as e:                              # noqa: BLE001 - a vendor plugin
         raise ArrayLifecycleError(f"array plugin failed: {e}") from e
-    logger.info("Node %s socket %s: LUN %s (%s) attached as host %s",
-                hostname, socket, lun["id"], lun["wwn"], host_id)
+    logger.info("Node %s socket %s: %sLUN %s (%s) attached as host %s",
+                hostname, socket, "journal " if journal else "", lun["id"], lun["wwn"], host_id)
 
     deadline = time.monotonic() + timeout
     while True:
@@ -431,7 +513,15 @@ def provision_node_lun(cluster, snode_api, node_info, node_config, lblk_configur
         "lun_wwn": lun["wwn"],
         "array_lun_id": lun["id"],
     }
+    if journal:
+        entry["journal"] = True
     return entry, host_id
+
+
+def journal_lun_id(lblk_entries) -> str:
+    """The array id of the journal LUN among a node's lblk entries ("")."""
+    return next((e["array_lun_id"] for e in lblk_entries or []
+                 if e.get("journal") and e.get("array_lun_id")), "")
 
 
 def add_lun_to_config(lblk_configured, entry) -> list:
@@ -759,9 +849,11 @@ def release_node_luns(node) -> None:
         node_host = getattr(node, "array_host_id", "") or ""
         for owner, dev in _managed_devices(nodes):
             if owner.get_id() == node.get_id():
-                work.append((dev, None))
+                work.append((dev.array_lun_id, None))
             elif node_host and dev.serving_node() != node.get_id():
-                work.append((dev, node_host))
+                work.append((dev.array_lun_id, node_host))
+        if getattr(node, "array_journal_lun_id", ""):
+            work.append((node.array_journal_lun_id, None))
         if not work:
             return
         plugin = array.plugin_for_cluster(cluster)
@@ -770,14 +862,14 @@ def release_node_luns(node) -> None:
         _event(node.cluster_id, f"LUNs of node {node.get_id()} not released at the array: {e}", error=True)
         return
     errors = []
-    for dev, host in work:
+    for lun_id, host in work:
         try:
-            hosts = [host] if host else list(plugin.get(dev.array_lun_id).get("hosts") or [])
+            hosts = [host] if host else list(plugin.get(lun_id).get("hosts") or [])
             for h in hosts:
                 # The node is gone; its host may not cooperate.
-                plugin.detach(dev.array_lun_id, h, force=True)
+                plugin.detach(lun_id, h, force=True)
         except Exception as e:                          # noqa: BLE001
-            errors.append(f"{dev.array_lun_id}: {e}")
+            errors.append(f"{lun_id}: {e}")
     if errors:
         logger.error("LUNs of node %s not fully released: %s", node.get_id(), errors)
         _event(node.cluster_id, f"LUNs of node {node.get_id()} not fully released: {errors}", error=True)
@@ -796,8 +888,9 @@ def delete_cluster_luns(cluster, force=False) -> None:
     errors = []
     # The LUNs recorded on the cluster's devices, plus whatever the plugin
     # lists (SAN plugins cannot list: their recorded LUNs are deleted).
-    recorded = [d.array_lun_id for _, d in
-                _managed_devices(_db().get_storage_nodes_by_cluster_id(cluster.get_id()))]
+    nodes = _db().get_storage_nodes_by_cluster_id(cluster.get_id())
+    recorded = [d.array_lun_id for _, d in _managed_devices(nodes)]
+    recorded += [n.array_journal_lun_id for n in nodes if getattr(n, "array_journal_lun_id", "")]
     luns: list = []
     try:
         plugin = array.plugin_for_cluster(cluster)

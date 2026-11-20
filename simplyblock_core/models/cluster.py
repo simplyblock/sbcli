@@ -262,6 +262,20 @@ class Cluster(BaseModel):
     # while an array is registered; 0 = node adds create no LUN (the LUNs are
     # presented by the operator, as in phase 2/3).
     array_lun_size: int = 0
+    # Where each node's journal is kept when the array plugin creates the
+    # nodes' LUNs (array_lun_size > 0):
+    # - "local": a disk or partition of the node's host, named at sn configure
+    #   (--lblk-journal-only); never shared.
+    # - "lun": a LUN of its own the plugin creates at node add, next to the
+    #   data LUN, presented to that node only (never multi-attached). It is
+    #   created with array_options updated by array_journal_options (e.g.
+    #   {"pool": "fast-pool"}: a pool of higher performance or priority) and
+    #   array_journal_lun_size bytes (0 = 3% of array_lun_size, at least
+    #   2 GiB). The node's host then needs no local device
+    #   (sn configure --lblk-array-only).
+    array_journal: str = "local"
+    array_journal_lun_size: int = 0
+    array_journal_options: dict = default_factory(dict)
     tls: bool = False
     tls_config: dict = default_factory(dict)
     is_re_balancing: bool = False

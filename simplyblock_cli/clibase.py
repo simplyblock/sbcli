@@ -279,8 +279,16 @@ class CLIWrapperBase:
             if lblk_journal_device:
                 self.parser.error("--lblk-journal-only and --lblk-journal-device exclude each other")
             if not (blk_names or blk_serials):
-                self.parser.error("--lblk-journal-only needs the journal disk named with "
+                self.parser.error("--lblk-journal-only needs the journal disk or partition named with "
                                   "--blk-names or --blk-serials")
+        lblk_array_only = getattr(args, 'lblk_array_only', False)
+        if lblk_array_only:
+            if not lblk:
+                self.parser.error("--lblk-array-only requires --lblk")
+            if lblk_journal_only or lblk_journal_device or blk_names or blk_names_exclude or blk_serials:
+                self.parser.error("--lblk-array-only selects no local device: not with --blk-names, "
+                                  "--blk-names-exclude, --blk-serials, --lblk-journal-only or "
+                                  "--lblk-journal-device")
         lblk_selection = None
         if use_lblk:
             if not lblk:
@@ -295,6 +303,7 @@ class CLIWrapperBase:
                 "serials": [str(x) for x in blk_serials.split(',')] if blk_serials else None,
                 "journal_device": bool(lblk_journal_device),
                 "journal_only": bool(lblk_journal_only),
+                "array_only": bool(lblk_array_only),
             }
         # The core split is decided by the cluster's vcpu-count when the node
         # is added or restarted; here the default heuristic lays out a usable
@@ -887,9 +896,20 @@ class CLIWrapperBase:
                 raise ValueError(f"--credential-ref is not valid JSON: {e}")
             if not isinstance(credential_ref, dict):
                 raise ValueError("--credential-ref must be a JSON object")
+        journal_options = None
+        if getattr(args, "journal_options", None):
+            try:
+                journal_options = json.loads(args.journal_options)
+            except json.JSONDecodeError as e:
+                raise ValueError(f"--journal-options is not valid JSON: {e}")
+            if not isinstance(journal_options, dict):
+                raise ValueError("--journal-options must be a JSON object")
         view = array_controller.register_array(
             args.cluster_id, args.plugin, args.endpoint or "", options, credentials,
-            int(args.lun_size or 0), credential_ref=credential_ref)
+            int(args.lun_size or 0), credential_ref=credential_ref,
+            journal=getattr(args, "journal", None) or "local",
+            journal_lun_size=int(getattr(args, "journal_lun_size", 0) or 0),
+            journal_options=journal_options)
         return _format_result([view], json=getattr(args, "json", False))
 
     def cluster__get_array(self, sub_command, args):

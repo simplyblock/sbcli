@@ -238,6 +238,10 @@ class StorageNode(BaseNodeObject):
     # node's host (ArrayPlugin.ensure_host; the EC2 instance id on EBS). ""
     # = not known; the fence then names the host by its hostname.
     array_host_id: str = ""
+    # Cluster.array_journal "lun": the array's id of this node's journal LUN
+    # ("" = its journal is local). Released with the node, deleted with the
+    # cluster, like its data LUN.
+    array_journal_lun_id: str = ""
     # Sync-replication site of the node (operator-supplied at add-node).
     # Mandatory on a cluster with sync_replication, empty everywhere else.
     site: str = ""

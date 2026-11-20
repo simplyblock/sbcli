@@ -116,8 +116,13 @@ commands:
             type: str
             default: ""
           - name: "--lblk-journal-only"
-            help: "With --lblk on a multi-attach cluster whose array plugin creates each node's data LUN at add-node: the one selected whole disk is the node's journal and nothing else. It is never partitioned, and the node has no local data device; its data device is the array LUN. Needs exactly one disk, named with --blk-names or --blk-serials."
+            help: "With --lblk on a multi-attach cluster whose array plugin creates each node's data LUN at add-node and keeps its journal locally: the one selected disk or partition is the node's journal and nothing else. It is used whole (a disk is never partitioned), and the node has no local data device; its data device is the array LUN. Needs exactly one disk or partition, named with --blk-names or --blk-serials."
             dest: lblk_journal_only
+            type: bool
+            action: store_true
+          - name: "--lblk-array-only"
+            help: "With --lblk on a multi-attach cluster whose array plugin creates each node's LUNs at add-node and keeps its journal on a LUN: the node uses no local device. Its journal LUN and data LUN are created on the array when the node is added. Not with --blk-names, --blk-names-exclude, --blk-serials, --lblk-journal-only or --lblk-journal-device."
+            dest: lblk_array_only
             type: bool
             action: store_true
           - name: "--lblk-journal-device"
@@ -1614,7 +1619,10 @@ commands:
           the array plugin registered here. The plugin is loaded and connected with the credentials before anything
           is saved. The credentials are wrapped by the cluster's KMS (or stay in an external Vault KV / KMIP secret named
           by --credential-ref), never stored in the clear. With --lun-size,
-          every node added afterwards gets a LUN of that size created and attached on the array.
+          every node added afterwards gets a LUN of that size created and attached on the array. Its journal is
+          kept on a local disk or partition of its host (--journal local, the default: configure the host with
+          --lblk-journal-only) or on a LUN of its own created next to it (--journal lun: configure the host with
+          --lblk-array-only), for example in a pool of higher performance named by --journal-options.
         arguments:
           - name: "cluster_id"
             help: "The cluster id."
@@ -1652,6 +1660,27 @@ commands:
             dest: lun_size
             type: size
             default: "0"
+          - name: "--journal"
+            help: >
+              Where each node's journal is kept: `local` (a disk or partition of its host) or `lun` (a LUN of its own,
+              created on the array next to the node's data LUN; needs --lun-size). Default: `local`.
+            dest: journal
+            type: str
+            default: "local"
+            choices:
+              - "local"
+              - "lun"
+          - name: "--journal-lun-size"
+            help: "With --journal lun: size of each node's journal LUN, e.g. `64G`. Default: 3% of --lun-size, at least 2 GiB."
+            dest: journal_lun_size
+            type: size
+            default: "0"
+          - name: "--journal-options"
+            help: >
+              With --journal lun: plugin options for the journal LUNs as a JSON object, applied over --options, e.g.
+              `{"pool": "fast-pool"}` to create them in a pool of higher performance or priority.
+            dest: journal_options
+            type: str
       - name: get-array
         help: "Shows the storage array registered for a multi-attach cluster (without its credentials)."
         arguments:

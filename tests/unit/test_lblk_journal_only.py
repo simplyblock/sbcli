@@ -24,16 +24,16 @@ class TestJournalOnlyLayout(unittest.TestCase):
         self.assertNotIn("journal", entries["sdb"])
 
     def test_two_disks_refused(self):
-        with self.assertRaisesRegex(ValueError, "exactly one disk"):
+        with self.assertRaisesRegex(ValueError, "exactly one disk or partition"):
             utils.lblk_journal_only_layout({"sdb": _disk(), "sdc": _disk("sdc")}, socket=1)
 
     def test_no_disk_refused(self):
-        with self.assertRaisesRegex(ValueError, "exactly one disk"):
+        with self.assertRaisesRegex(ValueError, "exactly one disk or partition"):
             utils.lblk_journal_only_layout({})
 
-    def test_partition_refused(self):
-        with self.assertRaisesRegex(ValueError, "whole disk"):
-            utils.lblk_journal_only_layout({"sdb1": _disk("sdb1", type="part")})
+    def test_partition_is_a_journal_too(self):
+        out = utils.lblk_journal_only_layout({"sdb1": _disk("sdb1", type="part")})
+        self.assertTrue(out["sdb1"]["journal"])
 
 
 class TestConfigureArgs(unittest.TestCase):

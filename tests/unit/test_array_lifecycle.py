@@ -1166,7 +1166,8 @@ class TestCli(unittest.TestCase):
             json.dump({"aws_access_key_id": "AK", "aws_secret_access_key": "SK"}, f)
         self.addCleanup(os.unlink, f.name)
         args = MagicMock(cluster_id=CID, plugin="aws-ebs", endpoint="", options='{"az": "z"}',
-                         credentials_file=f.name, credential_ref=None, lun_size=GIB, json=True)
+                         credentials_file=f.name, credential_ref=None, lun_size=GIB, journal="local",
+                         journal_lun_size=0, journal_options=None, json=True)
         with patch.object(array_controller, "register_array", return_value={"id": "arr"}) as reg:
             CLIWrapperBase.cluster__set_array(MagicMock(), "set-array", args)
         a = reg.call_args.args

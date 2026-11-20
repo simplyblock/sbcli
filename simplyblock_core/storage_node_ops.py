@@ -4402,8 +4402,15 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
             minimum_sys_memory = int(utils.parse_size(spdk_sys_mem))
         else:
             minimum_sys_memory = int(node_config.get("sys_memory") or 0)
-            if node_config.get("lblk_devices"):
-                minimum_sys_memory = max(minimum_sys_memory, utils.node_config_min_sys_memory(node_config))
+            if node_config.get("lblk_devices") or node_config.get("lblk_array_only"):
+                # The LUNs the array plugin creates below count as well.
+                lun_capacity = 0
+                if array_controller.provisions_luns(cluster):
+                    lun_capacity = int(cluster.array_lun_size or 0)
+                    if array_controller.journal_on_lun(cluster):
+                        lun_capacity += array_controller.journal_lun_size(cluster)
+                minimum_sys_memory = max(minimum_sys_memory,
+                                         utils.node_config_min_sys_memory(node_config, lun_capacity))
             else:
                 ssd_pcis = node_config.get("ssd_pcis") or []
                 capacity = utils.nvme_capacity_from_node_info(node_info.get("nvme_devices"), ssd_pcis)
@@ -4456,18 +4463,34 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
 
         lblk_mode = cluster.device_mode == constants.DEVICE_MODE_LBLK
         # Multi-attach cluster with a registered array and a LUN size: the
-        # node's data LUN is created and presented here (the host's own
-        # config names the journal device only), then added like any
-        # configured lblk device. No-op on every other cluster.
+        # node's data LUN is created and presented here, then added like any
+        # configured lblk device. Its journal is either a local disk or
+        # partition the host's own config names (array journal "local"), or
+        # a journal LUN created here first (array journal "lun"; the host
+        # config names no device). No-op on every other cluster.
         array_host_id = ""
         if lblk_mode and array_controller.provisions_luns(cluster):
-            if not lblk_configured:
+            journal_lun = array_controller.journal_on_lun(cluster)
+            local = [e.get("name") for e in lblk_configured if not e.get("array_lun_id")]
+            if journal_lun and local:
                 logger.error(
-                    "This cluster creates each node's LUN on its array, but the node "
-                    "config carries no 'lblk_devices' for the journal; run "
-                    "'sn configure --lblk <journal device>' first.")
+                    "This cluster keeps each node's journal on a LUN of its array, but the "
+                    f"node config names local devices {local}; run "
+                    "'sn configure --lblk --lblk-array-only' first.")
+                return False
+            if not journal_lun and not local:
+                logger.error(
+                    "This cluster keeps each node's journal on a local disk or partition, but "
+                    "the node config names none; run 'sn configure --lblk --lblk-journal-only "
+                    "--blk-names <journal disk or partition>' first, or register the array "
+                    "with the journal on a LUN.")
                 return False
             try:
+                if journal_lun:
+                    journal_entry, array_host_id = array_controller.provision_node_lun(
+                        cluster, snode_api, node_info, node_config, lblk_configured,
+                        node_ip=node_addr.split(":")[0], journal=True)
+                    lblk_configured = array_controller.add_lun_to_config(lblk_configured, journal_entry)
                 lun_entry, array_host_id = array_controller.provision_node_lun(
                     cluster, snode_api, node_info, node_config, lblk_configured,
                     node_ip=node_addr.split(":")[0])
@@ -4909,6 +4932,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         # so restart can re-resolve devices without the host config file.
         snode.lblk_devices = lblk_configured if lblk_mode else []
         snode.array_host_id = array_host_id
+        snode.array_journal_lun_id = array_controller.journal_lun_id(lblk_configured) if lblk_mode else ""
         snode.hostname = hostname
         snode.k8s_node_name = node_info['hostname']
         snode.host_nqn = subsystem_nqn

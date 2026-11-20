@@ -7,7 +7,7 @@ references) and are never returned; everything else is kept on the cluster
 record. See simplyblock_core.controllers.array_controller.
 """
 
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel, Field, SecretStr
@@ -32,6 +32,14 @@ class ArrayParams(BaseModel):
         '{"kind": "vault-kv", "mount": ..., "path": ..., "version": ...} or '
         '{"kind": "kmip-secret", "uid": ..., "field": ...}'))] = Field(default_factory=dict)
     lun_size: Annotated[util.Size, Field(description="Size of the LUN created for each added node; 0 = none")] = 0
+    journal: Annotated[Literal["local", "lun"], Field(description=(
+        "Where each node's journal is kept: local (a disk or partition of its host) or lun "
+        "(a LUN of its own, created next to its data LUN; needs lun_size)"))] = "local"
+    journal_lun_size: Annotated[util.Size, Field(description=(
+        "journal lun: size of each node's journal LUN; 0 = 3% of lun_size, at least 2 GiB"))] = 0
+    journal_options: Annotated[dict[str, Any], Field(description=(
+        'journal lun: plugin options for the journal LUNs, applied over options, e.g. {"pool": "fast-pool"}'
+    ))] = Field(default_factory=dict)
 
 
 class ArrayDTO(BaseModel):
@@ -40,6 +48,9 @@ class ArrayDTO(BaseModel):
     endpoint: str
     options: dict[str, Any]
     lun_size: int
+    journal: str = "local"
+    journal_lun_size: int = 0
+    journal_options: dict[str, Any] = Field(default_factory=dict)
     has_credentials: bool
     credential_ref: dict[str, Any] = Field(default_factory=dict)
     capabilities: dict[str, Any] | None = None
@@ -54,7 +65,8 @@ def register(cluster: Cluster, parameters: ArrayParams) -> ArrayDTO:
         view = array_controller.register_array(
             cluster.get_id(), parameters.plugin, parameters.endpoint, parameters.options,
             parameters.credentials, parameters.lun_size,
-            credential_ref=parameters.credential_ref or None)
+            credential_ref=parameters.credential_ref or None, journal=parameters.journal,
+            journal_lun_size=parameters.journal_lun_size, journal_options=parameters.journal_options or None)
     except ValueError as e:
         raise HTTPException(400, str(e))
     return ArrayDTO(**view)

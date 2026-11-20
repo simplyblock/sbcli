@@ -339,10 +339,11 @@ def array_credentials(cluster) -> dict:
         raise ArrayError(f"array credentials could not be read from the KMS: {e}") from e
 
 
-def plugin_for_cluster(cluster) -> ArrayPlugin:
+def plugin_for_cluster(cluster, extra_options: dict | None = None) -> ArrayPlugin:
     """The connected array plugin a cluster is configured with
     (``Cluster.array_plugin`` / ``array_endpoint`` / ``array_options``,
-    credentials from the KMS).
+    credentials from the KMS). ``extra_options`` update the options for this
+    instance (the journal LUNs' ``Cluster.array_journal_options``).
 
     Raises:
         ArrayNotConfigured: the cluster names no plugin.
@@ -354,7 +355,7 @@ def plugin_for_cluster(cluster) -> ArrayPlugin:
     return load_plugin(
         name,
         getattr(cluster, "array_endpoint", "") or "",
-        getattr(cluster, "array_options", None) or {},
+        dict(getattr(cluster, "array_options", None) or {}, **(extra_options or {})),
         credentials=array_credentials(cluster),
         cluster_id=cluster.get_id(),
     )
