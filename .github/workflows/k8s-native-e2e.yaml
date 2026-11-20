@@ -1640,8 +1640,12 @@ jobs:
             github.event.inputs.use_existing_cluster != 'true' &&
             (github.event.inputs.cluster_environment == 'aws-openshift' ||
              github.event.inputs.cluster_environment == 'openshift-local' ||
-             github.event.inputs.cluster_environment == 'openshift-baremetal')
+             github.event.inputs.cluster_environment == 'openshift-baremetal' ||
+             github.event.inputs.cluster_environment == 'k3s-baremetal')
           }}
+        env:
+          CLUSTER_ENV: ${{ github.event.inputs.cluster_environment || 'local' }}
+          SSH_USER: ${{ github.event.inputs.ssh_user || 'root' }}
         run: |
           set -uo pipefail
           # A run that ends badly can leave an NVMe bound to no driver at all
@@ -1660,6 +1664,14 @@ jobs:
           # the equivalent for docker nodes and there was no k8s counterpart,
           # so the state persisted across every subsequent run.
           #
+          # k3s-baremetal needs this MORE than the openshift lanes, not less:
+          # its hosts are the docker lane's own machines, so they arrive
+          # straight off a docker run with SPDK's vfio-pci bindings still on
+          # every NVMe. Run 44712987736 died here -- "8 device(s) across 4
+          # worker(s), none usable: 8 declined by size range: it is 0B" --
+          # purely because this step was gated to the openshift lanes and
+          # skipped.
+          #
           # Two states are reclaimed: bound to nothing, and bound to
           # vfio-pci. The second is SPDK's, and taking it from a LIVE node
           # would be the destructive version of this fix -- so the whole
@@ -1677,28 +1689,70 @@ jobs:
             echo "::warning::storage-node pods are running; leaving every device alone"
             exit 0
           fi
-          for node in $(kubectl get nodes -l node-role.kubernetes.io/worker \
-                          -o jsonpath='{.items[*].metadata.name}'); do
-            out="$(oc debug node/"${node}" --quiet -- chroot /host sh -c '
-              n=0
-              for d in /sys/bus/pci/devices/*/; do
-                [ "$(cat "$d/class" 2>/dev/null)" = "0x010802" ] || continue
-                p=$(basename "$d")
-                drv=$(basename "$(readlink "$d/driver" 2>/dev/null)" 2>/dev/null)
-                [ "$drv" = "nvme" ] && continue
-                [ -n "$drv" ] && echo "$p" > "/sys/bus/pci/drivers/$drv/unbind" 2>/dev/null
-                echo "" > "$d/driver_override" 2>/dev/null
-                if echo "$p" > /sys/bus/pci/drivers/nvme/bind 2>/dev/null; then
-                  echo "  reclaimed $p (was ${drv:-NONE})"
-                  n=$((n+1))
-                else
-                  echo "  FAILED $p (was ${drv:-NONE})"
-                fi
-              done
-              [ "$n" = 0 ] && echo "  nothing to rebind"
-              exit 0' 2>/dev/null)" || out="  (debug pod failed on ${node})"
+
+          # The payload, authored once. Both lanes run the identical shell on
+          # the host; only the way in differs -- `oc debug` on OpenShift, whose
+          # nodes refuse ssh outright, and plain ssh on k3s-baremetal, which
+          # has no `oc` and whose hosts are the ones we ssh to all day.
+          REBIND_SH='
+            n=0
+            for d in /sys/bus/pci/devices/*/; do
+              [ "$(cat "$d/class" 2>/dev/null)" = "0x010802" ] || continue
+              p=$(basename "$d")
+              drv=$(basename "$(readlink "$d/driver" 2>/dev/null)" 2>/dev/null)
+              [ "$drv" = "nvme" ] && continue
+              [ -n "$drv" ] && echo "$p" > "/sys/bus/pci/drivers/$drv/unbind" 2>/dev/null
+              echo "" > "$d/driver_override" 2>/dev/null
+              if echo "$p" > /sys/bus/pci/drivers/nvme/bind 2>/dev/null; then
+                echo "  reclaimed $p (was ${drv:-NONE})"
+                n=$((n+1))
+              else
+                echo "  FAILED $p (was ${drv:-NONE})"
+              fi
+            done
+            [ "$n" = 0 ] && echo "  nothing to rebind"
+            exit 0'
+
+          REPORT_SH='
+            for d in /sys/bus/pci/devices/*/; do
+              [ "$(cat "$d/class" 2>/dev/null)" = "0x010802" ] || continue
+              drv=$(basename "$(readlink "$d/driver" 2>/dev/null)" 2>/dev/null)
+              printf "%s=%s " "$(basename "$d")" "${drv:-NONE}"
+            done
+            echo'
+
+          # WORKER_NODES is resolved once upstream and is the only correct
+          # list on k3s-baremetal, whose agent nodes carry no `worker` role
+          # label for the selector this step used to use to find them.
+          IFS=',' read -ra REBIND_NODES <<< "${WORKER_NODES}"
+
+          node_ip() {
+            kubectl get node "$1" \
+              -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null
+          }
+
+          on_node() {
+            local node="$1" script="$2" ip
+            if [ "${CLUSTER_ENV}" = "k3s-baremetal" ]; then
+              ip="$(node_ip "${node}")"
+              if [ -z "${ip}" ]; then
+                echo "  (no InternalIP for ${node})"
+                return 0
+              fi
+              timeout 120 ${SB_SSH} \
+                -o ConnectTimeout=15 -o StrictHostKeyChecking=no \
+                -o UserKnownHostsFile=/dev/null \
+                "${SSH_USER}@${ip}" "sh -s" <<< "${script}" 2>/dev/null \
+                || echo "  (ssh failed on ${node} / ${ip})"
+            else
+              oc debug node/"${node}" --quiet -- chroot /host sh -c "${script}" 2>/dev/null \
+                || echo "  (debug pod failed on ${node})"
+            fi
+          }
+
+          for node in "${REBIND_NODES[@]}"; do
             echo "${node}:"
-            echo "${out}"
+            on_node "${node}" "${REBIND_SH}"
           done
 
           # Not fatal on its own. Discovery is what decides whether the lab
@@ -1706,16 +1760,9 @@ jobs:
           # per-device verdicts if it does not -- a clearer failure than this
           # step guessing.
           echo "=== NVMe driver binding after rebind ==="
-          for node in $(kubectl get nodes -l node-role.kubernetes.io/worker \
-                          -o jsonpath='{.items[*].metadata.name}'); do
+          for node in "${REBIND_NODES[@]}"; do
             printf '  %s: ' "${node}"
-            oc debug node/"${node}" --quiet -- chroot /host sh -c '
-              for d in /sys/bus/pci/devices/*/; do
-                [ "$(cat "$d/class" 2>/dev/null)" = "0x010802" ] || continue
-                drv=$(basename "$(readlink "$d/driver" 2>/dev/null)" 2>/dev/null)
-                printf "%s=%s " "$(basename "$d")" "${drv:-NONE}"
-              done
-              echo' 2>/dev/null || echo "(unreadable)"
+            on_node "${node}" "${REPORT_SH}"
           done
 
       - name: Apply operator custom resources
