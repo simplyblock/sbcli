@@ -106,6 +106,11 @@ class StandbyUnreachable(TakeoverError):
 #: the standby counts as gone (the poll interval is 50 ms, each call times out
 #: after 1 s).
 ACTIVATION_CONNECTION_ERRORS = 2
+#: Bound of one standby candidate's LUN inventory query (no retries).
+STANDBY_PROBE_TIMEOUT_SEC = 3.0
+#: How long a candidate that reads the LUN waits for an earlier candidate
+#: (candidate order) whose probe has not answered yet.
+STANDBY_ORDER_GRACE_SEC = 0.5
 
 
 def _local_lock(device_id) -> threading.Lock:
@@ -490,7 +495,8 @@ def _record_fenced(db, owner, device_id, node_id):
 # --------------------------------------------------------- 2 + 3. standby
 
 def _choose_standby(owner, dev, failed_node_id, nodes_by_id, deadline, exclude=()):
-    reasons = []
+    reasons: list = []
+    eligible: list = []
     for nid in multi_attach.standby_candidates(owner, failed_node_id):
         node = nodes_by_id.get(nid)
         if node is None or nid in exclude:
@@ -504,14 +510,61 @@ def _choose_standby(owner, dev, failed_node_id, nodes_by_id, deadline, exclude=(
         if _transport(node) is None:
             reasons.append(f"{nid}: no active fabric")
             continue
-        path, why = _probe(node, dev, deadline)
-        if path:
-            logger.info("LUN %s: standby %s reads it at %s", dev.lun_wwn, nid, path)
-            return node, path, ""
-        reasons.append(f"{nid}: {why}")
-        if time.monotonic() > deadline:
-            reasons.append("deadline passed")
+        eligible.append((nid, node))
+    if not eligible:
+        return None, None, "; ".join(reasons) or "no standby candidate"
+    # Every candidate is probed at once, each call bounded and without
+    # retries; the first in candidate order that reads the LUN wins. One
+    # after the other, a candidate that had just lost its network held the
+    # choice until the takeover deadline (2026-11-20 FTT2 bed, network cuts
+    # of two nodes: the LUN went unavailable and the cluster suspended).
+    pool = ThreadPoolExecutor(max_workers=len(eligible), thread_name_prefix=f"probe-{dev.get_id()[:8]}")
+    probes = [(nid, node, pool.submit(_probe, node, dev, deadline)) for nid, node in eligible]
+    pool.shutdown(wait=False)
+    # The wait is bounded too (a probe that ignores its client timeout must
+    # not hold the choice). Candidate order wins, but a candidate that already
+    # reads the LUN is not kept waiting more than STANDBY_ORDER_GRACE_SEC for
+    # an earlier one that does not answer.
+    now = time.monotonic()
+    probes_done_by = min(deadline, now + STANDBY_PROBE_TIMEOUT_SEC + 0.5)
+    first_ready_at = None
+    while True:
+        now = time.monotonic()
+        best = None
+        pending_before = False
+        for nid, node, fut in probes:
+            if not fut.done():
+                pending_before = True
+                continue
+            try:
+                path, _why = fut.result()
+            except Exception:                               # noqa: BLE001
+                path = None
+            if path:
+                best = (nid, node, path)
+                break
+        if best and not pending_before:
             break
+        if best and first_ready_at is None:
+            first_ready_at = now
+        if best and now - first_ready_at >= STANDBY_ORDER_GRACE_SEC:
+            break
+        if now >= probes_done_by or all(f.done() for _n, _o, f in probes):
+            break
+        time.sleep(0.02)
+    if best:
+        nid, node, path = best
+        logger.info("LUN %s: standby %s reads it at %s", dev.lun_wwn, nid, path)
+        return node, path, ""
+    for nid, _node, fut in probes:
+        if not fut.done():
+            reasons.append(f"{nid}: probe did not answer within {STANDBY_PROBE_TIMEOUT_SEC:.0f}s")
+            continue
+        try:
+            _path, why = fut.result()
+        except Exception as e:                              # noqa: BLE001
+            why = f"agent query failed: {e}"
+        reasons.append(f"{nid}: {why}")
     return None, None, "; ".join(reasons) or "no standby candidate"
 
 
@@ -526,7 +579,8 @@ def _reachable(node) -> bool:
 
 def _probe(node, dev, deadline):
     try:
-        result, err = node.client(timeout=_remaining(deadline, 15)).lun_info(dev.lun_wwn)
+        result, err = node.client(timeout=min(_remaining(deadline, 15), STANDBY_PROBE_TIMEOUT_SEC),
+                                  retry=0, connect_retry=0).lun_info(dev.lun_wwn)
     except Exception as e:                                  # noqa: BLE001
         return None, f"agent query failed: {e}"
     if err:

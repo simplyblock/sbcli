@@ -1134,6 +1134,28 @@ class TestFenceByReservation(_TakeoverCase):
         self._wait_background_fence()
         self.assertEqual(FakeArrayPlugin.calls, [("fence", WWN, "host-node-a")])
 
+    def test_a_hanging_candidate_does_not_hold_the_choice(self):
+        # 2026-11-20 FTT2 bed, network cuts of two nodes: the first candidate's
+        # agent did not answer, the choice waited until the 90 s deadline.
+        db, _ = self._bed()
+        b, c = db.nodes["node-b"], db.nodes["node-c"]
+        gate = threading.Event()
+        b.agent.lun_info.side_effect = lambda *_a, **_k: (gate.wait(10), (None, "gone"))[1]
+        self._roles(c, {"role": "active", "state": "active", "epoch": 3})
+        t0 = time.monotonic()
+        with patch.object(lun_takeover, "STANDBY_PROBE_TIMEOUT_SEC", 3.0):
+            out = self.run_takeover(db, deadline_sec=4.0)
+        gate.set()
+        self.assertEqual(out, lun_takeover.TAKEN_OVER)
+        self.assertEqual(self.dev(db).serving_node(), "node-c")
+        self.assertLess(time.monotonic() - t0, 2.0)
+
+    def test_candidate_order_wins_when_several_answer(self):
+        db, _ = self._bed()
+        db.nodes["node-b"].spdk.alceml_get_role = lambda name: {"role": "active", "state": "active"}
+        self.assertEqual(self.run_takeover(db), lun_takeover.TAKEN_OVER)
+        self.assertEqual(self.dev(db).serving_node(), "node-b")
+
     def test_no_standby_left_fails(self):
         db, _ = self._bed()
         def dies(spdk):
