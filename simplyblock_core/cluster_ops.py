@@ -4680,7 +4680,18 @@ def set_(cl_id, attr, value) -> bool:
                 cluster.write_to_db()
                 return True
     else:
-        value = cluster.get_attrs_map()[attr]['type'](value)
+        attr_type = cluster.get_attrs_map()[attr]['type']
+        if attr_type is bool and isinstance(value, str):
+            # bool("false") is True; parse the CLI's string form explicitly.
+            lowered = value.strip().lower()
+            if lowered in ("1", "true", "yes", "on"):
+                value = True
+            elif lowered in ("0", "false", "no", "off"):
+                value = False
+            else:
+                raise ValueError(f"Not a boolean value for {attr}: {value!r}")
+        else:
+            value = attr_type(value)
         logger.info(f"Setting {attr} to {value}")
         if attr == "two_node_arbitration":
             set_two_node_arbitration(cl_id, value)

@@ -1,3 +1,5 @@
+import base64
+import binascii
 import json
 from typing import TYPE_CHECKING
 
@@ -79,3 +81,20 @@ class LocalKMS(KMS):
 
     def delete_secret(self, path: str) -> None:
         self._kv_store.clear(self._secret_key(path))
+
+    # There is no KEK here: the "wrapped" form is only encoded, not encrypted,
+    # so a secret wrapped by LocalKMS is effectively plaintext in FoundationDB.
+    # Credential storage gates this behind an explicit per-cluster opt-in
+    # (see simplyblock_core.credentials).
+    _LOCAL_PREFIX = "local:"
+
+    def _wrap_bytes(self, kek_name: str, plaintext: bytes) -> str:
+        return self._LOCAL_PREFIX + base64.b64encode(plaintext).decode()
+
+    def _unwrap_bytes(self, kek_name: str, wrapped: str) -> bytes:
+        if not wrapped.startswith(self._LOCAL_PREFIX):
+            raise KMSException("Wrapped secret was not produced by the local KMS")
+        try:
+            return base64.b64decode(wrapped[len(self._LOCAL_PREFIX):], validate=True)
+        except binascii.Error as e:
+            raise KMSException("Wrapped secret is not valid") from e

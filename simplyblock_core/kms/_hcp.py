@@ -170,3 +170,55 @@ class HCPClient(KMS):
             return
         except hvac.exceptions.VaultError as e:
             raise KMSException("Request failed") from e
+
+    def ensure_key_encryption_key(self, name: str) -> None:
+        try:
+            self.client.secrets.transit.read_key(name=name, mount_point=self.transit_mount)
+            return
+        except hvac.exceptions.InvalidPath:
+            pass
+        except hvac.exceptions.VaultError as e:
+            raise KMSException("Request failed") from e
+        self.create_key_encryption_key(name)
+
+    def _wrap_bytes(self, kek_name: str, plaintext: bytes) -> str:
+        try:
+            return self.client.secrets.transit.encrypt_data(
+                name=kek_name, plaintext=base64.b64encode(plaintext).decode(),
+                mount_point=self.transit_mount,
+            )['data']['ciphertext']
+        except hvac.exceptions.VaultError as e:
+            raise KMSException("Request failed") from e
+
+    def _unwrap_bytes(self, kek_name: str, wrapped: str) -> bytes:
+        try:
+            plaintext_b64 = self.client.secrets.transit.decrypt_data(
+                name=kek_name, ciphertext=wrapped, mount_point=self.transit_mount,
+            )['data']['plaintext']
+        except hvac.exceptions.VaultError as e:
+            raise KMSException("Request failed") from e
+        return base64.b64decode(plaintext_b64)
+
+    def read_kv_secret(
+        self, mount: str, path: str, version: int | None = None,
+    ) -> dict[str, SecretStr]:
+        """Read a customer-managed KV v2 secret as named string fields.
+
+        Errors name the path and field names, never values.
+        """
+        try:
+            data = self.client.secrets.kv.v2.read_secret_version(
+                path=path, mount_point=mount, version=version,
+                raise_on_deleted_version=True,
+            )['data']['data']
+        except hvac.exceptions.InvalidPath as e:
+            raise KMSException(f"No secret at {mount}/{path}") from e
+        except hvac.exceptions.VaultError as e:
+            raise KMSException("Request failed") from e
+        if not isinstance(data, dict) or not data:
+            raise KMSException(f"Secret at {mount}/{path} is empty")
+        bad = sorted(name for name, value in data.items() if not isinstance(value, str))
+        if bad:
+            raise KMSException(
+                f"Secret at {mount}/{path} has non-string fields: {', '.join(bad)}")
+        return {name: SecretStr(value) for name, value in data.items()}

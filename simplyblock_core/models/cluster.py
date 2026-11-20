@@ -463,6 +463,12 @@ class Cluster(BaseModel):
     # migration for every create/update. Empty dict = no external KMS (LocalKMS).
     kms_settings: dict = default_factory(dict)
     hashicorp_vault_settings: HashicorpVaultSettings | None = None
+    # Explicit opt-in to keep credentials for external systems (storage
+    # arrays, ...) with no external KMS configured. LocalKMS only encodes, so
+    # such credentials would sit effectively in plaintext in FoundationDB;
+    # without this flag simplyblock_core.credentials refuses to store or read
+    # them unless a Vault or KMIP backend is configured.
+    allow_local_kms_credentials: bool = False
 
     # Single-node-expansion resumability cursor. Empty dict means no expansion
     # is in flight. Populated/advanced/cleared via the helpers in

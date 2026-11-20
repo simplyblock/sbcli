@@ -3,6 +3,7 @@ from pathlib import Path
 
 from kmip.core import enums
 from kmip.pie import exceptions as kmip_exceptions
+from kmip.pie import objects as kmip_objects
 from kmip.pie.client import ProxyKmipClient
 from pydantic import SecretStr
 
@@ -133,9 +134,12 @@ class KMIPClient(KMS):
         kv_store.clear(self._kek_key(name))
 
     def _encrypt(self, kek_uid: str, plaintext_hex: SecretStr) -> dict:
+        return self._encrypt_bytes(kek_uid, bytes.fromhex(plaintext_hex.get_secret_value()))
+
+    def _encrypt_bytes(self, kek_uid: str, plaintext: bytes) -> dict:
         try:
             ciphertext, iv_counter_nonce = self.client.encrypt(
-                bytes.fromhex(plaintext_hex.get_secret_value()),
+                plaintext,
                 uid=kek_uid,
                 cryptographic_parameters=dict(_CRYPTOGRAPHIC_PARAMETERS),
             )
@@ -147,6 +151,9 @@ class KMIPClient(KMS):
         }
 
     def _decrypt(self, kek_uid: str, wrapped: dict) -> SecretStr:
+        return SecretStr(self._decrypt_bytes(kek_uid, wrapped).hex())
+
+    def _decrypt_bytes(self, kek_uid: str, wrapped: dict) -> bytes:
         try:
             plaintext = self.client.decrypt(
                 bytes.fromhex(wrapped["ciphertext"]),
@@ -156,7 +163,7 @@ class KMIPClient(KMS):
             )
         except _KMIP_ERRORS as e:
             raise KMSException("Request failed") from e
-        return SecretStr(plaintext.hex())
+        return plaintext
 
     def create_data_encryption_keys(self, path: str, kek_name: str) -> None:
         self.import_data_encryption_keys(
@@ -200,3 +207,38 @@ class KMIPClient(KMS):
 
     def delete_secret(self, path: str) -> None:
         raise KMSException(self._NO_SECRETS)
+
+    def ensure_key_encryption_key(self, name: str) -> None:
+        # create_key_encryption_key always mints a new appliance key and
+        # repoints the name at it, which would orphan everything already
+        # wrapped under the old one.
+        if self._kv_store().get(self._kek_key(name)):
+            return
+        self.create_key_encryption_key(name)
+
+    def _wrap_bytes(self, kek_name: str, plaintext: bytes) -> str:
+        return json.dumps(self._encrypt_bytes(self._kek_uid(kek_name), plaintext))
+
+    def _unwrap_bytes(self, kek_name: str, wrapped: str) -> bytes:
+        try:
+            parsed = json.loads(wrapped)
+            if not isinstance(parsed, dict) or "ciphertext" not in parsed:
+                raise ValueError("not a wrapped KMIP record")
+            return self._decrypt_bytes(self._kek_uid(kek_name), parsed)
+        except ValueError as e:  # bad JSON, or bytes.fromhex on a corrupted record
+            raise KMSException("Wrapped secret is not valid") from e
+
+    def get_secret_data(self, uid: str) -> bytes:
+        """Fetch a customer-managed KMIP ``SecretData`` object's raw value.
+
+        Support for ``SecretData`` varies between appliances (some only manage
+        keys); a server that refuses it surfaces as ``KMSException``.
+        """
+        try:
+            obj = self.client.get(uid)
+        except _KMIP_ERRORS as e:
+            raise KMSException(f"Could not fetch KMIP object {uid}") from e
+        if not isinstance(obj, kmip_objects.SecretData):
+            raise KMSException(
+                f"KMIP object {uid} is a {type(obj).__name__}, not SecretData")
+        return bytes(obj.value)

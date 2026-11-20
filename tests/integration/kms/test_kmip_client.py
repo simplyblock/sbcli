@@ -114,3 +114,69 @@ def test_rekey_moves_keys_to_a_new_kek_and_path(kmip_client):
 
 def test_delete_key_encryption_key_of_an_unknown_name_is_a_no_op(kmip_client):
     kmip_client.delete_key_encryption_key(_unique("kek"))
+
+
+# -- Opaque secrets (credentials for external systems) ----------------------
+
+_CTX = "array/a1/https://pure01.example:443"
+
+
+def test_wrap_secret_round_trip(kmip_client):
+    kek_name = _unique("kek")
+    kmip_client.ensure_key_encryption_key(kek_name)
+    try:
+        wrapped = kmip_client.wrap_secret(
+            kek_name, {"username": SecretStr("u"), "password": SecretStr("p")}, _CTX)
+        fields = kmip_client.unwrap_secret(kek_name, wrapped, _CTX)
+        assert {k: v.get_secret_value() for k, v in fields.items()} == {
+            "username": "u", "password": "p"}
+        with pytest.raises(KMSException, match="different context"):
+            kmip_client.unwrap_secret(kek_name, wrapped, "array/a1/https://evil.example:443")
+    finally:
+        kmip_client.delete_key_encryption_key(kek_name)
+
+
+def test_ensure_key_encryption_key_keeps_existing_key(kmip_client):
+    kek_name = _unique("kek")
+    kmip_client.ensure_key_encryption_key(kek_name)
+    try:
+        wrapped = kmip_client.wrap_secret(kek_name, {"a": SecretStr("b")}, _CTX)
+        kmip_client.ensure_key_encryption_key(kek_name)
+        assert kmip_client.unwrap_secret(kek_name, wrapped, _CTX)["a"].get_secret_value() == "b"
+    finally:
+        kmip_client.delete_key_encryption_key(kek_name)
+
+
+@pytest.fixture()
+def kmip_client_no_fdb(pykmip_server):
+    """SecretData Get never touches FoundationDB."""
+    client = KMIPClient(
+        pykmip_server.server_url,
+        pykmip_server.ca, pykmip_server.certificate, pykmip_server.key,
+    )
+    with client:
+        yield client
+
+
+def test_get_secret_data_returns_customer_secret(kmip_client_no_fdb):
+    from kmip.core import enums
+    from kmip.pie import objects
+
+    value = b'{"username": "u", "password": "p"}'
+    uid = kmip_client_no_fdb.client.register(
+        objects.SecretData(value, enums.SecretDataType.PASSWORD))
+    try:
+        assert kmip_client_no_fdb.get_secret_data(uid) == value
+    finally:
+        kmip_client_no_fdb.client.destroy(uid)
+
+
+def test_get_secret_data_refuses_a_key_object(kmip_client_no_fdb):
+    from kmip.core import enums
+
+    uid = kmip_client_no_fdb.client.create(enums.CryptographicAlgorithm.AES, 256)
+    try:
+        with pytest.raises(KMSException, match="not SecretData"):
+            kmip_client_no_fdb.get_secret_data(uid)
+    finally:
+        kmip_client_no_fdb.client.destroy(uid)

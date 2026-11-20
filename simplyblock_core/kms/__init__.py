@@ -17,9 +17,12 @@ if TYPE_CHECKING:
 
 __all__ = [
     "KMS",
+    "HCPClient",
+    "KMIPClient",
     "KMIPKMSSettings",
     "KMSException",
     "KMSSettings",
+    "LocalKMS",
     "VaultKMSSettings",
     "backup_dek_path",
     "backup_kek_name",
@@ -55,7 +58,12 @@ def backup_kek_name(backup_id: str) -> str:
     return f"backup-{backup_id}"
 
 
-def create_kms_connection(cluster: "Cluster") -> KMS:
+def create_kms_connection(cluster: "Cluster", *, cert_role: str | None = None) -> KMS:
+    """Open the cluster's KMS backend.
+
+    ``cert_role`` overrides the configured Vault cert-auth role; the other
+    backends ignore it.
+    """
     kms_settings = cluster.get_kms_settings()
     if kms_settings is None:
         return LocalKMS(cluster)
@@ -81,7 +89,7 @@ def create_kms_connection(cluster: "Cluster") -> KMS:
             settings.tls_key,
             transit_mount=kms_settings.transit_mount,
             kv_mount=kms_settings.kv_mount,
-            cert_role=kms_settings.cert_role,
+            cert_role=cert_role or kms_settings.cert_role,
         )
 
     return KMIPClient(
