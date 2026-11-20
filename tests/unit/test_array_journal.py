@@ -96,6 +96,24 @@ class TestRegistration(_Case):
         self.assertEqual((db.cluster.array_journal, db.cluster.array_journal_options), ("local", {}))
 
 
+class TestLocalKeyStoreOptIn(_Case):
+    """The opt-in to the local key store travels with the registration, so an
+    operator-managed cluster never needs the CLI for it."""
+
+    def test_opt_in_with_the_registration(self):
+        db = self.use_db(FakeDB(_cluster(plugin=""), []))
+        db.cluster.allow_local_kms_credentials = False
+        with self.assertRaisesRegex(ValueError, "could not be stored"):
+            array_controller.register_array(CID, PLUGIN, credentials={"p": "x"})
+        self.assertFalse(db.cluster.allow_local_kms_credentials)
+        array_controller.register_array(CID, PLUGIN, credentials={"p": "x"}, allow_local_kms_credentials=True)
+        self.assertTrue(db.cluster.allow_local_kms_credentials)
+        self.assertEqual(db.cluster.array_credential_ref["kind"], "managed")
+        # Omitted: unchanged.
+        array_controller.register_array(CID, PLUGIN, credentials={"p": "y"})
+        self.assertTrue(db.cluster.allow_local_kms_credentials)
+
+
 class TestSize(unittest.TestCase):
 
     def test_default_is_3_percent_at_least_2_gib_whole_gib(self):

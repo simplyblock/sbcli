@@ -163,7 +163,7 @@ def array_view(cluster, capabilities=None) -> dict:
 
 def register_array(cluster_id, plugin, endpoint="", options=None, credentials=None,
                    lun_size=0, credential_ref=None, journal=JOURNAL_LOCAL, journal_lun_size=0,
-                   journal_options=None) -> dict:
+                   journal_options=None, allow_local_kms_credentials=None) -> dict:
     """Register (or re-register, e.g. to rotate credentials) the storage
     array of a multi-attach cluster.
 
@@ -187,6 +187,12 @@ def register_array(cluster_id, plugin, endpoint="", options=None, credentials=No
     ``options`` (e.g. ``{"pool": "fast-pool"}``) and ``journal_lun_size``
     bytes (0 = 3% of ``lun_size``, at least 2 GiB). A change applies to
     nodes added afterwards.
+
+    ``allow_local_kms_credentials`` (True / False; None leaves it as it is)
+    sets ``Cluster.allow_local_kms_credentials``, the opt-in to keeping the
+    wrapped credentials in the local key store of a cluster without an
+    external KMS (test environments). It is saved only with a registration
+    that succeeds.
 
     Returns the array view (``array_view``) with the plugin's capabilities.
 
@@ -268,6 +274,10 @@ def register_array(cluster_id, plugin, endpoint="", options=None, credentials=No
     if max_att and max_att < needed:
         raise ValueError(f"the array presents a LUN to at most {max_att} hosts; the cluster needs {needed}")
 
+    if allow_local_kms_credentials is not None:
+        # Asked for with the registration, so it applies to this very store;
+        # the record keeps it only if the registration is saved below.
+        cluster.allow_local_kms_credentials = bool(allow_local_kms_credentials)
     if creds and not ref:
         try:
             ref = creds_mod.CredentialProvider(cluster).store(creds, context).model_dump()
@@ -288,6 +298,8 @@ def register_array(cluster_id, plugin, endpoint="", options=None, credentials=No
         fresh.array_journal = journal
         fresh.array_journal_lun_size = int(journal_lun_size or 0)
         fresh.array_journal_options = journal_opts
+        if allow_local_kms_credentials is not None:
+            fresh.allow_local_kms_credentials = bool(allow_local_kms_credentials)
 
     db.atomic_update(cluster, mutate)
     if legacy_secret:

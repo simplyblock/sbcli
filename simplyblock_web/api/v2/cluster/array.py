@@ -32,6 +32,10 @@ class ArrayParams(BaseModel):
         '{"kind": "vault-kv", "mount": ..., "path": ..., "version": ...} or '
         '{"kind": "kmip-secret", "uid": ..., "field": ...}'))] = Field(default_factory=dict)
     lun_size: Annotated[util.Size, Field(description="Size of the LUN created for each added node; 0 = none")] = 0
+    allow_local_kms_credentials: Annotated[bool | None, Field(description=(
+        "Opt in (true) or out (false) of keeping the credentials in the cluster's local key store, "
+        "effectively unencrypted, when it has no external KMS (test environments); omitted, unchanged"
+    ))] = None
     journal: Annotated[Literal["local", "lun"], Field(description=(
         "Where each node's journal is kept: local (a disk or partition of its host) or lun "
         "(a LUN of its own, created next to its data LUN; needs lun_size)"))] = "local"
@@ -66,7 +70,8 @@ def register(cluster: Cluster, parameters: ArrayParams) -> ArrayDTO:
             cluster.get_id(), parameters.plugin, parameters.endpoint, parameters.options,
             parameters.credentials, parameters.lun_size,
             credential_ref=parameters.credential_ref or None, journal=parameters.journal,
-            journal_lun_size=parameters.journal_lun_size, journal_options=parameters.journal_options or None)
+            journal_lun_size=parameters.journal_lun_size, journal_options=parameters.journal_options or None,
+            allow_local_kms_credentials=parameters.allow_local_kms_credentials)
     except ValueError as e:
         raise HTTPException(400, str(e))
     return ArrayDTO(**view)
