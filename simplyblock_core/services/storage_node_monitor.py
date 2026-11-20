@@ -3209,6 +3209,7 @@ def _retire_taken_over_luns(snode):
 
 
 _reintegrate_last: dict = {}
+_reintegrate_threads: dict = {}
 REINTEGRATE_INTERVAL_SEC = 30
 
 
@@ -3224,12 +3225,22 @@ def _reintegrate_fenced_luns(snode):
     now = time.monotonic()
     if now - _reintegrate_last.get(node_id, 0) < REINTEGRATE_INTERVAL_SEC:
         return
+    t = _reintegrate_threads.get(node_id)
+    if t is not None and t.is_alive():
+        return
     _reintegrate_last[node_id] = now
-    try:
-        from simplyblock_core.controllers import lun_takeover
-        lun_takeover.reintegrate_fenced_node(snode)
-    except Exception as e:                                  # noqa: BLE001
-        logger.error("Reintegrating fenced LUNs of %s failed: %s", node_id, e)
+
+    def _run():
+        try:
+            from simplyblock_core.controllers import lun_takeover
+            lun_takeover.reintegrate_fenced_node(snode)
+        except Exception as e:                              # noqa: BLE001
+            logger.error("Reintegrating fenced LUNs of %s failed: %s", node_id, e)
+    # Off the node check: its agent calls on a node that is just lost held
+    # the liveness checks 30 s (2026-11-20 FTT2 bed, hard reset of sn3).
+    t = threading.Thread(target=_run, name=f"reintegrate-{node_id[:8]}", daemon=True)
+    _reintegrate_threads[node_id] = t
+    t.start()
 
 
 def readmit_devices_after_node_online(node_id):

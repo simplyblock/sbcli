@@ -13,6 +13,8 @@
 """
 
 import copy
+import threading
+import time
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -889,6 +891,65 @@ class TestReintegrateFencedNode(_TakeoverCase):
             self.assertEqual(lun_takeover.reintegrate_fenced_node(a), [DEV_ID])
         self.assertTrue(a.spdk.ops("bdev_alceml_delete"))
         self.assertEqual(self.dev(db).fenced_node_ids, [])
+
+
+    def test_stays_fenced_while_its_array_fence_runs(self):
+        # 2026-11-20 resize bed, R3: unfenced while the background detach
+        # ran; the detach then left the node off the LUN for good.
+        db, a = self._taken_over()
+        key = (DEV_ID, "node-a")
+        with lun_takeover._fences_guard:
+            lun_takeover._fences_in_flight.add(key)
+        try:
+            self.assertEqual(lun_takeover.reintegrate_fenced_node(a), [])
+        finally:
+            with lun_takeover._fences_guard:
+                lun_takeover._fences_in_flight.discard(key)
+        self.assertEqual(self.dev(db).fenced_node_ids, ["node-a"])
+        self.assertEqual(lun_takeover.reintegrate_fenced_node(a), [DEV_ID])
+
+    def test_stays_fenced_when_spdk_does_not_answer(self):
+        # A node just lost can still read ONLINE; its dead SPDK proves
+        # nothing about a stale stack.
+        db, a = self._taken_over()
+        a.spdk.bdev_get = MagicMock(side_effect=ConnectionError("refused"))
+        self.assertEqual(lun_takeover.reintegrate_fenced_node(a), [])
+        self.assertEqual(self.dev(db).fenced_node_ids, ["node-a"])
+        a.agent.lun_info.assert_not_called()
+
+
+class TestFenceAttachmentRecord(_TakeoverCase):
+    """An array fence drops the node from array_attached_node_ids, so the
+    attachment reconcile presents the LUN again once it is unfenced."""
+
+    def test_array_fence_forgets_the_attachment(self):
+        db, dev = _bed()
+        dev.array_attached_node_ids = ["node-a", "node-b", "node-c"]
+        self.assertEqual(self.run_takeover(db), lun_takeover.TAKEN_OVER)
+        self.assertEqual(self.dev(db).array_attached_node_ids, ["node-b", "node-c"])
+
+    def test_background_fence_is_in_flight_until_done(self):
+        db, dev = _bed()
+        dev.lun_reservations = True
+        dev.array_attached_node_ids = ["node-a", "node-b"]
+        gate = threading.Event()
+        fence = FakeArrayPlugin.fence
+
+        def slow(plugin, *a):
+            gate.wait(5)
+            return fence(plugin, *a)
+        b = db.nodes["node-b"]
+        b.spdk.alceml_get_role = lambda name: {"role": "active", "state": "active"}
+        with patch.object(FakeArrayPlugin, "fence", slow):
+            self.assertEqual(self.run_takeover(db), lun_takeover.TAKEN_OVER)
+            self.assertTrue(lun_takeover.fence_in_flight(DEV_ID, "node-a"))
+            gate.set()
+            for _ in range(250):
+                if not lun_takeover.fence_in_flight(DEV_ID, "node-a"):
+                    break
+                time.sleep(0.02)
+        self.assertFalse(lun_takeover.fence_in_flight(DEV_ID, "node-a"))
+        self.assertEqual(self.dev(db).array_attached_node_ids, ["node-b"])
 
 
 class TestUnfenceOrder(_TakeoverCase):

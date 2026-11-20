@@ -67,6 +67,10 @@ _TAKEOVER_STATES = (NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_UNAVAILABLE,
                     NVMeDevice.STATUS_READONLY, NVMeDevice.STATUS_CANNOT_ALLOCATE)
 
 _local_locks: dict[str, threading.Lock] = {}
+# (device_id, node_id) of array fences still running after a fence by
+# reservation: the node is not unfenced (reintegrated) meanwhile.
+_fences_in_flight: set = set()
+_fences_guard = threading.Lock()
 _local_locks_guard = threading.Lock()
 
 
@@ -339,6 +343,34 @@ def _fence(cluster, dev, failed):
     if not ok:
         raise TakeoverError(f"array did not acknowledge the fence of {host} on LUN {lun}")
     logger.info("LUN %s: node %s (%s) fenced at the array", lun, failed.get_id(), host)
+    _forget_attachment(dev.get_id(), failed.get_id())
+
+
+def _forget_attachment(device_id, node_id):
+    """The fence detached ``node_id`` from the LUN: drop it from the
+    device's ``array_attached_node_ids`` so the attachment reconcile, which
+    calls the array only for nodes it does not list, presents the LUN to it
+    again once the record no longer fences it. Best-effort."""
+    try:
+        db = DBController()
+        dev = db.get_storage_device_by_id(device_id)
+        owner = db.get_storage_node_by_id(dev.node_id)
+    except Exception as e:                                  # noqa: BLE001
+        logger.warning("LUN fence of %s on %s: attachment record not updated: %s",
+                       node_id, device_id, e)
+        return
+
+    def _mut(n):
+        d = _device_on_owner(n, device_id)
+        if d is None or node_id not in (d.array_attached_node_ids or []):
+            return False
+        d.array_attached_node_ids = [x for x in d.array_attached_node_ids if x != node_id]
+        return True
+    try:
+        db.atomic_update(owner, _mut)
+    except Exception as e:                                  # noqa: BLE001
+        logger.warning("LUN fence of %s on %s: attachment record not updated: %s",
+                       node_id, device_id, e)
 
 
 def _fence_by_reservation(cluster, dev) -> bool:
@@ -351,13 +383,27 @@ def _fence_by_reservation(cluster, dev) -> bool:
 def _fence_in_background(cluster, dev, failed):
     """The array fence after a fence by reservation: off the I/O path, for
     good measure (the reservation already rejects the node's writes)."""
+    key = (dev.get_id(), failed.get_id())
+
     def _run():
         try:
             _fence(cluster, dev, failed)
         except TakeoverError as e:
             logger.warning("LUN %s: array fence of %s after the reservation failed: %s; the "
                            "attachment reconcile detaches it", dev.lun_wwn, failed.get_id(), e)
+        finally:
+            with _fences_guard:
+                _fences_in_flight.discard(key)
+    with _fences_guard:
+        _fences_in_flight.add(key)
     threading.Thread(target=_run, name=f"fence-{dev.get_id()[:8]}", daemon=True).start()
+
+
+def fence_in_flight(device_id, node_id) -> bool:
+    """Whether an array fence of ``node_id`` on the LUN of ``device_id`` is
+    still running in this process."""
+    with _fences_guard:
+        return (device_id, node_id) in _fences_in_flight
 
 
 def _wait_active(rpc, alceml, deadline):
@@ -764,22 +810,31 @@ def reintegrate_fenced_node(node) -> list:
         serving = by_id.get(dev.serving_node())
         if serving is None or serving.get_id() == node_id or serving.status != StorageNode.STATUS_ONLINE:
             continue
-        try:
-            stale = bool(rpc.bdev_get(dev.alceml_bdev)) or bool(rpc.bdev_get(f"{dev.alceml_bdev}_PT"))
-        except Exception:                                   # noqa: BLE001
-            stale = False
+        if fence_in_flight(dev.get_id(), node_id):
+            # Its detach is still running: an unfence now is undone by it
+            # (2026-11-20 resize bed, R3: the node stayed detached for good
+            # while the record listed it as a standby).
+            logger.info("LUN reintegrate: array fence of %s on %s still running; stays fenced",
+                        node_id, dev.lun_wwn)
+            continue
+        stale = _holds_stack(rpc, dev)
+        if stale is None:
+            # SPDK not answering (a node just lost may still read ONLINE):
+            # nothing proves it holds no stack.
+            logger.info("LUN reintegrate: SPDK of %s not answering; stays fenced from %s",
+                        node_id, dev.lun_wwn)
+            continue
         if stale:
             retire_stale_local_stack(node)
-            try:
-                stale = bool(rpc.bdev_get(dev.alceml_bdev)) or bool(rpc.bdev_get(f"{dev.alceml_bdev}_PT"))
-            except Exception:                               # noqa: BLE001
-                stale = False
+            stale = _holds_stack(rpc, dev)
+            if stale is None:
+                stale = True
             if stale:
                 logger.info("LUN reintegrate: %s still holds a stack of %s; stays fenced",
                             node_id, dev.get_id())
                 continue
         try:
-            result, err = node.client(timeout=15).lun_info(dev.lun_wwn)
+            result, err = node.client(timeout=10, retry=0, connect_retry=0).lun_info(dev.lun_wwn)
         except Exception as e:                              # noqa: BLE001
             logger.info("LUN reintegrate: agent of %s not reached: %s", node_id, e)
             continue
@@ -795,6 +850,15 @@ def reintegrate_fenced_node(node) -> list:
             logger.info("LUN reintegrate: %s is a standby of LUN %s again", node_id, dev.lun_wwn)
             done.append(dev.get_id())
     return done
+
+
+def _holds_stack(rpc, dev):
+    """Whether the node holds an alceml or PT bdev of ``dev``; None when its
+    SPDK does not answer."""
+    try:
+        return bool(rpc.bdev_get(dev.alceml_bdev)) or bool(rpc.bdev_get(f"{dev.alceml_bdev}_PT"))
+    except Exception:                                       # noqa: BLE001
+        return None
 
 
 # ------------------------------------------------------------- operator

@@ -10,6 +10,7 @@ from simplyblock_core import (
     constants,
     db_controller,
     distr_controller,
+    multi_attach,
     rpc_client,
     utils,
 )
@@ -399,7 +400,12 @@ def process_device_event(event, logger):
             return
 
 
-        if device_node_obj.get_id() == event_node_obj.get_id():
+        # On multi-attach the home node of a LUN served by another node reads
+        # it remotely like any peer: its error is about that path, not the
+        # LUN (2026-11-20 FTT2 bed: a home node's error_read on the dead
+        # serving node's export, processed after the takeover, marked the
+        # taken-over LUN unavailable cluster-wide and blocked every LVS).
+        if device_node_obj.get_id() == event_node_obj.get_id() and                 not multi_attach.served_elsewhere(device_obj, event_node_obj.get_id()):
             # The device's home node itself reported an IO error against its
             # local device — this is the only path that may count toward the
             # per-device flap budget. The CAUSE_LOCAL_FAILURE opt-in is
