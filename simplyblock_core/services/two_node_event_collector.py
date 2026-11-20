@@ -103,6 +103,17 @@ def _collect(node_id: str, cluster_id: str, stop: threading.Event) -> None:
             logger.warning(f"jc_wait_events failed on {node_id}: {e}; retry in {backoff:.1f}s")
             stop.wait(backoff)
             backoff = min(backoff * 2, BACKOFF_MAX_S)
+        except Exception as e:
+            # A store write (arbitration_events.queue_event) can fail for reasons
+            # that have nothing to do with the RPC transport (FDB unavailable,
+            # a conflict). after_seq is only advanced once the write that
+            # covers it succeeds (see _poll_once), so retrying here with the
+            # same (instance, after_seq) keeps at-least-once delivery instead
+            # of letting the thread die -- the collector would otherwise sit
+            # dead until the next _reconcile tick restarts it from scratch.
+            logger.warning(f"Collector error on {node_id}: {e}; retry in {backoff:.1f}s")
+            stop.wait(backoff)
+            backoff = min(backoff * 2, BACKOFF_MAX_S)
 
     logger.info(f"Stopping two-node event collector on node: {node_id}")
 
