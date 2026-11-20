@@ -10,6 +10,7 @@ adapters stay thin and are tested against one shared contract suite
 """
 from __future__ import annotations
 
+import json
 import re
 from abc import ABC, abstractmethod
 from collections.abc import Mapping as MappingABC
@@ -234,6 +235,40 @@ class OptionDoc:
     default: Any = None
 
 
+_TRUE = frozenset({"true", "yes", "on", "1"})
+_FALSE = frozenset({"false", "no", "off", "0"})
+
+
+def _coerce_option(owner: str, name: str, value: Any, default: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    text = value.strip()
+    if text.startswith("{"):
+        try:
+            return json.loads(text)
+        except ValueError:
+            raise ArrayError(f"{owner} option {name!r} is not valid JSON") from None
+    if isinstance(default, bool):
+        if text.lower() in _TRUE:
+            return True
+        if text.lower() in _FALSE:
+            return False
+        raise ArrayError(f"{owner} option {name!r} must be true or false, got {value!r}")
+    if isinstance(default, int):
+        try:
+            return int(text)
+        except ValueError:
+            raise ArrayError(f"{owner} option {name!r} must be a whole number, got {value!r}") from None
+    if isinstance(default, float):
+        try:
+            return float(text)
+        except ValueError:
+            raise ArrayError(f"{owner} option {name!r} must be a number, got {value!r}") from None
+    if isinstance(default, (list, tuple)):
+        return [item for item in (part.strip() for part in text.replace(",", " ").split()) if item]
+    return value
+
+
 @dataclass
 class AdapterContext:
     """What an adapter is constructed with."""
@@ -299,13 +334,21 @@ class ArrayAdapter(ABC):
         unknown = sorted(set(self.options) - known)
         if unknown:
             raise ArrayError(f"Unknown {self.display_name} options: {', '.join(unknown)}")
+        for o in self.option_docs:
+            if o.name in self.options:
+                self.option(o.name)   # a value that cannot be read fails here, at registration
 
     def option(self, name: str) -> Any:
+        """The option's value, or its default. A string (options set through
+        Kubernetes are strings) is read as the type of the default: a boolean
+        from true/false/yes/no/on/off/1/0, a number, a comma-separated list,
+        and a JSON object where it starts with ``{``."""
+        doc = next((o for o in self.option_docs if o.name == name), None)
         if name in self.options:
-            return self.options[name]
-        for o in self.option_docs:
-            if o.name == name:
-                return o.default
+            return _coerce_option(self.display_name, name, self.options[name],
+                                  doc.default if doc else None)
+        if doc is not None:
+            return doc.default
         raise KeyError(name)
 
     def secret(self, name: str) -> str:

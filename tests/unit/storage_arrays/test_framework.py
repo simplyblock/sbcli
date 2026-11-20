@@ -221,3 +221,46 @@ class TestHttpsMockServer:
     def test_requests_session_is_plain(self):
         # FakeTransport is mounted per session, never globally.
         assert not isinstance(requests.Session().get_adapter("https://x"), FakeTransport)
+
+
+# Options set through Kubernetes arrive as strings. Each is read as the type of
+# its default, so "false" is false rather than a truthy string.
+def test_string_options_are_read_as_the_type_of_their_default():
+    from unittest.mock import MagicMock
+
+    from pydantic import SecretStr
+
+    from simplyblock_core.credentials import Credential
+    from simplyblock_core.storage_arrays.adapters.dell_powermax import (
+        DellPowerMaxAdapter,
+    )
+    from simplyblock_core.storage_arrays.adapters.hitachi_vsp import HitachiVspAdapter
+    from simplyblock_core.storage_arrays.adapters.pure import PureFlashArrayAdapter
+    from simplyblock_core.storage_arrays.base import AdapterContext, ArrayError
+    from simplyblock_core.storage_arrays.testing import make_config
+
+    def adapter(cls, vendor, creds, **options):
+        return cls(AdapterContext(make_config(vendor, "https://a.example", **options),
+                                  Credential({k: SecretStr(v) for k, v in creds.items()}), MagicMock()))
+
+    pure = adapter(PureFlashArrayAdapter, "pure-flasharray", {"api_token": "t"}, eradicate="false")
+    assert pure.option("eradicate") is False
+    assert adapter(PureFlashArrayAdapter, "pure-flasharray", {"api_token": "t"},
+                   eradicate="True").option("eradicate") is True
+    with pytest.raises(ArrayError, match="eradicate"):
+        adapter(PureFlashArrayAdapter, "pure-flasharray", {"api_token": "t"}, eradicate="maybe")
+
+    up = {"username": "u", "password": "p"}
+    vsp = adapter(HitachiVspAdapter, "hitachi-vsp", up, pool_id="1", ports="CL1-A",
+                  host_mode_options="2, 13", job_timeout_s="60", use_lock="0")
+    assert vsp.option("host_mode_options") == ["2", "13"]
+    assert vsp.option("job_timeout_s") == 60
+    assert vsp.option("use_lock") is False
+
+    pmax = adapter(DellPowerMaxAdapter, "dell-powermax", up, symmetrix_id="000197900123",
+                   port_group='{"iscsi": "pg_iscsi", "fc": "pg_fc"}', async_jobs="no")
+    assert pmax.option("port_group") == {"iscsi": "pg_iscsi", "fc": "pg_fc"}
+    assert pmax.option("async_jobs") is False
+    plain = adapter(DellPowerMaxAdapter, "dell-powermax", up, symmetrix_id="000197900123",
+                    port_group="pg_all")
+    assert plain.option("port_group") == "pg_all"
