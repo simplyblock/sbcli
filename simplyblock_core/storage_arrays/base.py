@@ -105,7 +105,9 @@ class Initiator(BaseModel):
         return v.strip()
 
     def normalized(self) -> str:
-        if self.protocol in (Protocol.FC, Protocol.NVME_FC):
+        # NVMe/FC hosts are identified by their host NQN like every NVMe
+        # transport; only SCSI over FC uses WWPNs.
+        if self.protocol == Protocol.FC:
             return normalize_wwpn(self.address)
         if self.protocol == Protocol.ISCSI:
             return self.address.lower()
@@ -146,8 +148,10 @@ class Volume(BaseModel):
     id: str
     name: str
     size_bytes: int
-    #: SCSI identity as the host sees it, ``naa.<hex>`` (lowercase). This is
-    #: what matches the array volume to ``/dev/disk/by-id`` on the host.
+    #: SCSI identity (VPD page 0x83 designator) as the host sees it:
+    #: ``naa.<hex>`` for most arrays, ``eui.<hex>`` where the array presents an
+    #: EUI-64 designator (HPE Nimble). Lowercase. This matches the array volume
+    #: to ``/dev/disk/by-id`` / the multipath WWID on the host.
     wwn: str | None = None
     #: NVMe identity, ``eui.<32 hex>`` (NGUID) where the array exposes one.
     nguid: str | None = None
@@ -217,6 +221,9 @@ class Capabilities:
     max_name_len: int = 63
     #: Whether resize can only grow (true for every supported array today).
     grow_only: bool = True
+    #: Most initiators one host may have; ``None`` = unlimited. PowerFlex SDC
+    #: hosts are exactly one client, so 1 there.
+    max_initiators_per_host: int | None = None
 
 
 @dataclass

@@ -76,7 +76,7 @@ def test_create_get_find(harness, cleanup):
     assert vol.size_bytes == round_size(10 * GIB + 1, caps.size_granularity_bytes,
                                         caps.min_size_bytes)
     assert vol.identifier and vol.identifier == vol.identifier.lower()
-    assert vol.wwn is None or vol.wwn.startswith("naa.")
+    assert vol.wwn is None or vol.wwn.startswith(("naa.", "eui."))
     assert vol.nguid is None or vol.nguid.startswith("eui.")
 
     got = harness.client.get_volume(vol.id)
@@ -177,6 +177,11 @@ def test_existing_host_gets_missing_initiators(harness, cleanup):
     name = f"sbtest-grow-{uuid.uuid4().hex[:6]}"
     host = harness.client.ensure_host(HostSpec(name=name, initiators=a))
     cleanup[1].append(host)
+    limit = harness.client.capabilities.max_initiators_per_host
+    if limit is not None and len(a + b) > limit:
+        with pytest.raises(ArrayError, match="at most"):
+            harness.client.ensure_host(HostSpec(name=name, initiators=a + b))
+        return
     assert harness.client.ensure_host(HostSpec(name=name, initiators=a + b)) == host
     # b's initiators now belong to that host: claiming them elsewhere conflicts
     with pytest.raises(ArrayConflictError):
@@ -194,6 +199,20 @@ def test_wrong_identifier_is_refused(harness, cleanup):
         with pytest.raises(ArrayConflictError, match="does not match"):
             action()
     assert harness.client.get_volume(vol.id) is not None
+
+
+def test_volume_of_another_record_is_refused(harness, cleanup):
+    """A reused array id/WWN must not pass for the recorded volume: the
+    name derived from the recorded UUID pins it."""
+    vol_uuid = _uuid()
+    vol = harness.client.create_volume(vol_uuid, GIB)
+    cleanup[0].append(vol.id)
+    with pytest.raises(ArrayConflictError, match="name does not match"):
+        harness.client.delete_volume(vol.id, vol.identifier, volume_uuid=_uuid())
+    with pytest.raises(ArrayConflictError, match="name does not match"):
+        harness.client.resize_volume(vol.id, 4 * GIB, volume_uuid=_uuid())
+    assert harness.client.delete_volume(vol.id, vol.identifier, volume_uuid=vol_uuid)
+    cleanup[0].remove(vol.id)
 
 
 def test_foreign_volume_is_refused(harness):
@@ -236,14 +255,11 @@ def test_rotated_credential_is_picked_up(harness):
     from pydantic import SecretStr
 
     from simplyblock_core.credentials import Credential
-    old_secret_values = {harness.setup.credential.get(k).get_secret_value()
-                         for k in harness.setup.credential.field_names}
     harness.provider.credential = Credential({k: SecretStr(v) for k, v in new.items()})
-    # A basic-auth adapter keeps the old password in its session until it is
-    # rejected; either way the client must recover with one invalidation.
+    # The client still holds the old credential; the array rejects it, the
+    # client invalidates once, resolves the rotated secret and succeeds.
     harness.client.get_info()
-    assert harness.provider.invalidated <= 1
-    assert old_secret_values  # silence unused
+    assert harness.provider.invalidated == 1
 
 
 def test_server_error_does_not_leak_credentials(harness):
@@ -268,3 +284,19 @@ def test_unsupported_protocol_is_refused_before_calling_the_array(harness):
     with pytest.raises(ArrayError, match="does not support"):
         harness.client.ensure_host(HostSpec(name="sbtest-unsup",
                                             initiators=(Initiator(protocol=p, address=address),)))
+
+
+def test_delete_host_with_mappings_is_refused(harness, cleanup):
+    """Deleting a host must never silently drop a live mapping."""
+    protocol = _protocols(harness)[0]
+    vol = harness.client.create_volume(_uuid(), GIB)
+    cleanup[0].append(vol.id)
+    host = harness.client.ensure_host(_host(harness, protocol, 0))
+    cleanup[1].append(host)
+    harness.client.map_volume(vol.id, host)
+    try:
+        harness.client.delete_host(host)
+    except ArrayConflictError:
+        pass  # refused: the expected outcome on arrays that own host objects
+    # Either way (refused, or a no-op as for PowerFlex SDCs), the mapping survives.
+    assert [m.host_id for m in harness.client.list_mappings(vol.id)] == [host]

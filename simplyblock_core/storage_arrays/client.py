@@ -154,11 +154,20 @@ class ArrayClient:
 
     # -- checks -----------------------------------------------------------------
 
-    def _owned(self, vol: Volume, expected_identifier: str | None, action: str) -> None:
+    def _owned(self, vol: Volume, expected_identifier: str | None, action: str,
+               volume_uuid: str | None = None) -> None:
+        """Refuse to touch a volume simplyblock did not create, or that is not
+        the one it recorded. The name check matters where the array reuses
+        identities: an LDEV number / volume id (and the WWN derived from it)
+        can come back after a delete, the name derived from our UUID cannot."""
         if not vol.name.startswith(MANAGED_PREFIX):
             raise ArrayConflictError(
                 f"Refusing to {action} volume {vol.name!r} on array {self.config.id}: "
                 "not created by simplyblock")
+        if volume_uuid is not None and vol.name != self.volume_name(volume_uuid):
+            raise ArrayConflictError(
+                f"Refusing to {action} volume {vol.name!r} on array {self.config.id}: "
+                f"name does not match recorded volume {volume_uuid}")
         if expected_identifier is not None and vol.identifier.lower() != expected_identifier.lower():
             raise ArrayConflictError(
                 f"Refusing to {action} volume {vol.name!r} on array {self.config.id}: "
@@ -200,7 +209,8 @@ class ArrayClient:
         return self._call("find_volume", lambda a: a.find_volume(name))
 
     def resize_volume(self, volume_id: str, size_bytes: int,
-                      expected_identifier: str | None = None) -> Volume:
+                      expected_identifier: str | None = None,
+                      volume_uuid: str | None = None) -> Volume:
         caps = self.capabilities
         size = round_size(size_bytes, caps.size_granularity_bytes, caps.min_size_bytes)
 
@@ -208,7 +218,7 @@ class ArrayClient:
             vol = a.get_volume(volume_id)
             if vol is None:
                 raise ArrayError(f"Volume {volume_id} not found on array {self.config.id}")
-            self._owned(vol, expected_identifier, "resize")
+            self._owned(vol, expected_identifier, "resize", volume_uuid)
             if size == vol.size_bytes:
                 return vol
             if size < vol.size_bytes and caps.grow_only:
@@ -221,13 +231,17 @@ class ArrayClient:
 
         return self._call("resize_volume", op)
 
-    def delete_volume(self, volume_id: str, expected_identifier: str | None = None) -> bool:
-        """Unmap from every host and delete. Returns False if already gone."""
+    def delete_volume(self, volume_id: str, expected_identifier: str | None = None,
+                      volume_uuid: str | None = None) -> bool:
+        """Unmap from every host and delete. Returns False if already gone.
+
+        Callers should pass both ``expected_identifier`` and ``volume_uuid``
+        from their record; together they pin the exact volume."""
         def op(a: ArrayAdapter) -> bool:
             vol = a.get_volume(volume_id)
             if vol is None:
                 return False
-            self._owned(vol, expected_identifier, "delete")
+            self._owned(vol, expected_identifier, "delete", volume_uuid)
             for m in a.list_mappings(vol.id):
                 a.unmap_volume(vol.id, m.host_id)
             a.delete_volume(vol.id)
@@ -242,6 +256,11 @@ class ArrayClient:
             raise ArrayError(
                 f"{self.adapter_cls.display_name} adapter does not support "
                 + ", ".join(sorted(p.value for p in unsupported)))
+        limit = self.capabilities.max_initiators_per_host
+        if limit is not None and len(spec.initiators) > limit:
+            raise ArrayError(
+                f"{self.adapter_cls.display_name} hosts take at most {limit} initiator(s); "
+                f"got {len(spec.initiators)}")
         if len(spec.name) > self.capabilities.max_name_len:
             raise ArrayError(f"Host name {spec.name!r} exceeds "
                              f"{self.capabilities.max_name_len} characters")
@@ -251,12 +270,13 @@ class ArrayClient:
         self._call("delete_host", lambda a: a.delete_host(host_id))
 
     def map_volume(self, volume_id: str, host_id: str,
-                   expected_identifier: str | None = None) -> Mapping:
+                   expected_identifier: str | None = None,
+                   volume_uuid: str | None = None) -> Mapping:
         def op(a: ArrayAdapter) -> Mapping:
             vol = a.get_volume(volume_id)
             if vol is None:
                 raise ArrayError(f"Volume {volume_id} not found on array {self.config.id}")
-            self._owned(vol, expected_identifier, "map")
+            self._owned(vol, expected_identifier, "map", volume_uuid)
             return a.map_volume(vol.id, host_id)
 
         return self._call("map_volume", op)

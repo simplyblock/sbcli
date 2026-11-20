@@ -20,10 +20,12 @@ same suite against a vendor simulator or a real array (``live`` tier).
 from __future__ import annotations
 
 import base64
+import http.client
 import io
 import json
 import re
 import threading
+import types
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -193,12 +195,25 @@ def _encode(reply: Reply) -> tuple[bytes, dict[str, str]]:
     return json.dumps(reply.body).encode(), headers
 
 
+class _Raw(io.BytesIO):
+    """Body stream that also carries the headers the way urllib3 does, so
+    ``requests`` stores Set-Cookie values in the session's cookie jar exactly
+    as it would for a real response."""
+
+    def __init__(self, content: bytes, headers: dict[str, str]):
+        super().__init__(content)
+        msg = http.client.HTTPMessage()
+        for k, v in headers.items():
+            msg[k] = v
+        self._original_response = types.SimpleNamespace(msg=msg)
+
+
 def _to_response(request, reply: Reply) -> requests.Response:
     content, headers = _encode(reply)
     resp = requests.Response()
     resp.status_code = reply.status
     resp.headers = CaseInsensitiveDict(headers)
-    resp.raw = io.BytesIO(content)
+    resp.raw = _Raw(content, headers)
     resp._content = content
     resp.url = request.url
     resp.request = request

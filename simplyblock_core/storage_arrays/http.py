@@ -56,7 +56,9 @@ class RestSession:
         self.timeout_s = timeout_s
         self.retries = retries
         self.backoff_s = backoff_s
-        self._sleep = sleep
+        #: Used for retry backoff and by adapters that poll async jobs, so
+        #: tests can make all waiting instant.
+        self.sleep = sleep
         self.http = requests.Session()
         self.http.verify = verify
         self.http.headers.update({"Accept": "application/json"})
@@ -125,12 +127,12 @@ class RestSession:
             except requests.RequestException as e:
                 last_exc = e
                 if attempt + 1 < attempts:
-                    self._sleep(self.backoff_s * (attempt + 1))
+                    self.sleep(self.backoff_s * (attempt + 1))
                     continue
                 raise ArrayRequestError(
                     f"{method} {path}: {type(e).__name__}: {_safe(str(e))}") from e
             if resp.status_code in _RETRY_STATUSES and attempt + 1 < attempts:
-                self._sleep(self.backoff_s * (attempt + 1))
+                self.sleep(self.backoff_s * (attempt + 1))
                 continue
             if 200 <= resp.status_code < 300 or resp.status_code in ok_extra:
                 return resp

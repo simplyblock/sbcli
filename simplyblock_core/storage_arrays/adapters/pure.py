@@ -195,6 +195,10 @@ class PureFlashArrayAdapter(ArrayAdapter):
         return spec.name
 
     def delete_host(self, host_id: str) -> None:
+        if self._host(host_id) is None:
+            return
+        if self._items("GET", "/connections", params={"host_names": host_id}, missing_ok=True):
+            raise ArrayConflictError(f"Host {host_id} still has volume connections")
         self._items("DELETE", "/hosts", params={"names": host_id}, missing_ok=True)
 
     def _connections(self, volume_id: str, host_id: str | None = None) -> list[Mapping]:
