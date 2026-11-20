@@ -4718,7 +4718,8 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                 logger.error(f"Failed to list block devices on {node_addr}: {err}")
                 return False
             lblk_resolved, missing = utils.resolve_lblk_entries(
-                lblk_configured, blk_inventory)
+                lblk_configured, blk_inventory,
+                name_fallback=not multi_attach.is_multi_attach(cluster))
             if missing:
                 logger.error(
                     f"Configured block device(s) not found on host: "
@@ -9968,7 +9969,8 @@ def _restart_storage_node_impl(
             logger.error(f"Failed to list block devices: {blk_err}")
             return False
         lblk_resolved, lblk_missing = utils.resolve_lblk_entries(
-            snode.lblk_devices, blk_inventory)
+            snode.lblk_devices, blk_inventory,
+            name_fallback=not multi_attach.is_multi_attach(cluster))
         for entry in lblk_missing:
             logger.warning(f"Configured block device {entry.get('path') or entry.get('name')} "
                            f"(serial {entry.get('serial')}) not found on host")

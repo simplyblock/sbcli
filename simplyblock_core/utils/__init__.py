@@ -1656,7 +1656,7 @@ def _unsafe_live_device_reason(dev):
     return None
 
 
-def resolve_lblk_entries(configured_entries, host_devices):
+def resolve_lblk_entries(configured_entries, host_devices, *, name_fallback=True):
     """Match the node's configured lblk devices against the live host
     inventory, SERIAL-FIRST: kernel names shift across reboots, so the stored
     name is only a fallback for devices without a resolvable serial. Partition
@@ -1677,7 +1677,14 @@ def resolve_lblk_entries(configured_entries, host_devices):
     (mounted, held, or backing the root filesystem) is demoted to `missing`
     rather than returned as resolved — a fallback match by name/partuuid
     must clear the same safety bar `filter_eligible_block_devices` enforces
-    at add-node time, not just "something is attached at that name now"."""
+    at add-node time, not just "something is attached at that name now".
+
+    ``name_fallback=False`` (multi-attach clusters): an entry with a serial is
+    matched by serial or partuuid only. An array LUN keeps its identity; when
+    it is absent the node is fenced from it or it is detached, and its old
+    kernel name may now be another disk of the host: on the FTT1 bed, after a
+    hard reset of a node fenced from its LUN, the LUN's name nvme2n1 was the
+    node's journal volume, which the restart took up as a data device."""
     by_path = _index_by_selector(host_devices)
     by_serial = {d["serial"]: d for d in host_devices}
     by_name = {d["name"]: d for d in host_devices}
@@ -1699,7 +1706,7 @@ def resolve_lblk_entries(configured_entries, host_devices):
             if live is None and entry.get("partuuid"):
                 live = by_partuuid.get(entry["partuuid"].lower())
                 matched_by = "partuuid"
-            if live is None:
+            if live is None and (name_fallback or not entry.get("serial")):
                 live = by_name.get(entry.get("name"))
                 matched_by = "name"
         if live is None:
