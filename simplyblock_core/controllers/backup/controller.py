@@ -8,7 +8,11 @@ from pydantic import HttpUrl, ValidationError
 
 from simplyblock_core.controllers import backup_events, tasks_controller
 from simplyblock_core.controllers.backup import manifest as backup_manifest
-from simplyblock_core.controllers.backup.chain import BackupChain, location_of
+from simplyblock_core.controllers.backup.chain import (
+    BackupChain,
+    SuccessorIndex,
+    location_of,
+)
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.kms import (
@@ -30,7 +34,6 @@ from simplyblock_core.models.backup_config import (
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.utils.helpers import single_or_none
 
 logger = logging.getLogger()
 
@@ -1158,10 +1161,9 @@ def delete_backup(backup_id):
         backup.remove(db_controller.kv_store)
         return
 
-    dependents = [b for b in db_controller.get_backups_by_lvol_id(backup.lvol_id)
-                  if b.prev_backup_id == backup.uuid]
-    if dependents:
-        successor = single_or_none(dependents)
+    successor = SuccessorIndex.of_lvol(
+        db_controller.get_backups_by_lvol_id(backup.lvol_id)).successor_of(backup.uuid)
+    if successor is not None:
         if successor.status != Backup.STATUS_COMPLETED:
             raise PreconditionError(
                 f"backup {backup.uuid} is the predecessor of {successor.uuid}, "

@@ -4,7 +4,7 @@ Core business logic, data models, and background services for the Simplyblock co
 
 ## Package Structure
 
-- `controllers/` — Business logic per resource domain (lvol, snapshot, backup, device, migration, pool, health, tasks, qos). Each `*_events.py` defines event types for its domain.
+- `controllers/` — Business logic per resource domain (lvol, snapshot, backup, device, migration, pool, health, tasks, qos). Each `*_events.py` defines event types for its domain. For the backup domain, `controllers/backup/chain.py` is the canonical home for backup-chain invariants — coherence (`BackupChain`, restore-side) and fork detection (`SuccessorIndex`, delete/retire-side). Check there before hand-rolling a chain walk or a `prev_backup_id` lookup at a new call site.
 - `models/` — Data models inheriting from `BaseModel` (see below), plus the two stdlib-only
   modules that define the keyspaces those records live in: `watches.py` (the version index
   watchers wake on) and `indices.py` (the declared secondary indices). Both are leaves — the

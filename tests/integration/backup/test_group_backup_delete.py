@@ -280,7 +280,7 @@ class TestRetireMembers:
         _rogue_backup(db, "0ae09999-0000-4000-8000-000000000099", base.lvol_id, base.uuid)
         group_backup.delete_group_backup(gb.get_id())
 
-        with pytest.raises(ValueError, match="Multiple values present"):
+        with pytest.raises(PreconditionError, match="multiple successors"):
             group_backup.advance_group_backup_delete(gb.get_id())
 
         assert _status(db, base) == Backup.STATUS_COMPLETED

@@ -324,3 +324,50 @@ class BackupChain:
         data has to win and older backups fill whatever gaps remain.
         """
         return [link.s3_id for link in reversed(self.links)]
+
+
+@dataclass(frozen=True)
+class SuccessorIndex:
+    """Which backup, if any, is a delta against each backup of one lvol.
+
+    The complement of :class:`BackupChain`: that walks backward from a trusted
+    head; this answers the forward question delete and retire need -- "does
+    anything chain against this backup" -- over a whole lvol's backups at once,
+    with no head and no restorability or coherence requirement, since nothing
+    here is being restored.
+
+    A fork -- two backups naming the same ``prev_backup_id`` -- can only reach
+    storage through backup import, which checks each manifest's own ancestry
+    but never checks two manifests, or a manifest against an existing record,
+    against each other. :meth:`of_lvol` is where that defect becomes visible:
+    it refuses to guess which of the two is "the" successor.
+    """
+
+    _by_prev: Mapping[str, Backup]
+
+    @classmethod
+    def of_lvol(cls, backups: Iterable[Backup]) -> "SuccessorIndex":
+        """The successor of every backup among *backups*, which should be
+        every ``Backup`` of one lvol -- a successor outside that population
+        would not be found.
+
+        Raises:
+            PreconditionError: two backups name the same ``prev_backup_id``,
+                i.e. the chain has forked.
+        """
+        by_prev: dict[str, Backup] = {}
+        for backup in backups:
+            if not backup.prev_backup_id:
+                continue
+            if (existing := by_prev.get(backup.prev_backup_id)) is not None:
+                raise PreconditionError(
+                    f"backup {backup.prev_backup_id} has multiple successors: "
+                    f"{existing.uuid} and {backup.uuid}")
+            by_prev[backup.prev_backup_id] = backup
+
+        return cls(by_prev)
+
+    def successor_of(self, backup_id: str) -> Backup | None:
+        """The backup that is a delta against *backup_id*, or ``None`` if
+        nothing in this index chains against it."""
+        return self._by_prev.get(backup_id)

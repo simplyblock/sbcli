@@ -14,7 +14,11 @@ from uuid import UUID
 import pytest
 
 from simplyblock_core import constants
-from simplyblock_core.controllers.backup.chain import BackupChain, location_of
+from simplyblock_core.controllers.backup.chain import (
+    BackupChain,
+    SuccessorIndex,
+    location_of,
+)
 from simplyblock_core.controllers.backup.manifest import (
     BackupManifest,
     FDBKeyDescriptor,
@@ -271,6 +275,42 @@ class TestRequireRestorable:
         with pytest.raises(PreconditionError, match="This snapshot chain"):
             self._chain(constants.BACKUP_MAX_CHAIN_LENGTH + 1).require_restorable(
                 what="This snapshot chain")
+
+
+class TestSuccessorIndex:
+
+    def test_a_backup_with_no_dependent_has_no_successor(self):
+        index = SuccessorIndex.of_lvol(_line_of_records(2))
+        assert index.successor_of(str(_id("b-1"))) is None
+
+    def test_finds_the_backup_naming_it_as_prev(self):
+        line = _line_of_records(3)
+        index = SuccessorIndex.of_lvol(line)
+        successor_of_0 = index.successor_of(str(_id("b-0")))
+        successor_of_1 = index.successor_of(str(_id("b-1")))
+        assert successor_of_0 is not None and successor_of_0.uuid == str(_id("b-1"))
+        assert successor_of_1 is not None and successor_of_1.uuid == str(_id("b-2"))
+
+    def test_order_of_the_population_does_not_matter(self):
+        line = _line_of_records(3)
+        index = SuccessorIndex.of_lvol(list(reversed(line)))
+        successor = index.successor_of(str(_id("b-0")))
+        assert successor is not None and successor.uuid == str(_id("b-1"))
+
+    def test_a_backup_naming_no_predecessor_is_ignored(self):
+        """A full backup's empty prev_backup_id must not collide with another
+        full backup's, as if both were "the successor of nothing"."""
+        a = _record("full-a")
+        b = _record("full-b")
+        index = SuccessorIndex.of_lvol([a, b])
+        assert index.successor_of("") is None
+
+    def test_two_backups_naming_the_same_predecessor_is_a_fork(self):
+        base = _record("base")
+        fork_a = _record("fork-a", prev="base")
+        fork_b = _record("fork-b", prev="base")
+        with pytest.raises(PreconditionError, match="multiple successors"):
+            SuccessorIndex.of_lvol([base, fork_a, fork_b])
 
 
 class TestS3Ids:
