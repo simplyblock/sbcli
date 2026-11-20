@@ -240,7 +240,7 @@ def test_a_forked_predecessor_raises_instead_of_merging_into_one_arbitrarily(db,
     _backup(db, bucket, "completed_fork", prev="base")
     _backup(db, bucket, "uploading_fork", prev="base", status=Backup.STATUS_IN_PROGRESS)
 
-    with pytest.raises(ValueError, match="Multiple values present"):
+    with pytest.raises(PreconditionError, match="multiple successors"):
         backup_controller.delete_backup(base.uuid)
 
     assert _status(db, base) == Backup.STATUS_COMPLETED
@@ -273,7 +273,7 @@ def test_retire_orphaned_member_backups_raises_on_a_forked_chain(db, bucket):
     _backup(db, bucket, "next_a", prev="orphan")
     _backup(db, bucket, "next_b", prev="orphan")
 
-    with pytest.raises(ValueError, match="multiple successors"):
+    with pytest.raises(PreconditionError, match="multiple successors"):
         group_backup.retire_orphaned_member_backups([LVOL], db=db)
 
     assert _status(db, orphan) == Backup.STATUS_COMPLETED
