@@ -37,9 +37,9 @@ ignore:
       type: binary
 
   # socket.getaddrinfo() silently truncates a host/port value containing a
-  # null byte instead of rejecting it (python/cpython#160898). Fixed in
-  # 3.16.0 only; there is no 3.14.x release carrying it, so `only-fixed`
-  # does not filter it out.
+  # null byte instead of rejecting it (python/cpython#160898). Merged to the
+  # 3.14 branch but not yet in a release -- the next scheduled 3.14.x is
+  # 3.14.11 (2026-12-08) per PEP 745, so `only-fixed` does not filter it out.
   # utils.resolve_address() and tasks_runner_node_add's connectivity probe
   # do pass a caller-supplied node address into getaddrinfo/create_connection
   # (storage node add/restart), so this path is reachable -- but only from
@@ -55,8 +55,8 @@ ignore:
   # inverted in 3.14.10, so hashlib.md5() silently succeeds under FIPS mode
   # even when called with usedforsecurity=True (python/cpython#161383). Fixed
   # by PR #161385, merged to the 3.14 branch but not yet in a release -- the
-  # next scheduled 3.14.x is 2027-04-06 per PEP 745, so `only-fixed` does not
-  # filter it out.
+  # next scheduled 3.14.x is 3.14.11 (2026-12-08) per PEP 745, so `only-fixed`
+  # does not filter it out.
   # The control plane never calls hashlib.md5() -- every hash call here uses
   # sha1/sha256 (subsystem_access.py, rpc_client.py, storage_node.py,
   # node_utils.py, utils/__init__.py), none of which this regression touches.
@@ -66,6 +66,60 @@ ignore:
   # are meant to be read together -- this entry says why today's code is
   # safe, that rule is what keeps it that way.
   - vulnerability: CVE-2026-119170
+    package:
+      name: python
+      type: binary
+
+  # imaplib.IMAP4.starttls() leaves the pre-handshake read-ahead buffer
+  # untouched, so plaintext bytes smuggled in the same recv() as the server's
+  # STARTTLS OK are replayed after the TLS handshake as if they arrived over
+  # the protected channel (python/cpython#161761, backport to 3.15 still an
+  # open PR). Fixed in 3.16.0 only; there is no 3.14.x release carrying it.
+  # The control plane never imports imaplib — it speaks JSON-RPC and HTTP,
+  # not IMAP — so nothing in the image reaches the affected code.
+  - vulnerability: CVE-2026-115559
+    package:
+      name: python
+      type: binary
+
+  # tarfile/zipfile/gzip's command-line interface leaves the extraction
+  # directory on sys.path[0], so a crafted archive can shadow a stdlib module
+  # (e.g. traceback.py) and get it executed on the next error during
+  # extraction (python/cpython#161705). Merged to the 3.14 branch but not yet
+  # in a release -- the next scheduled 3.14.x is 3.14.11 (2026-12-08) per
+  # PEP 745, so `only-fixed` does not filter it out.
+  # The control plane never invokes `python -m tarfile`/`zipfile`/`gzip` —
+  # archive handling goes through the tarfile/zipfile APIs directly, which
+  # this CLI-only path doesn't touch.
+  - vulnerability: CVE-2026-115791
+    package:
+      name: python
+      type: binary
+
+  # http.cookiejar.CookieJar deletes a stored cookie on receiving an already-
+  # expired Set-Cookie, using that header's own Domain/Path rather than the
+  # cookie policy — so a server can delete another domain's cookies from a
+  # jar shared across domains (python/cpython#161569). Merged to the 3.14
+  # branch but not yet in a release -- the next scheduled 3.14.x is 3.14.11
+  # (2026-12-08) per PEP 745, so `only-fixed` does not filter it out.
+  # The control plane never imports http.cookiejar directly, and every HTTP
+  # client here is a `requests.Session` scoped to one host: RPCSessionPool
+  # (simplyblock_core/rpc_client.py) keys sessions by (host, port, username,
+  # ...) per storage node, and the Grafana session in cluster_ops.py is
+  # single-host too — no session's cookie jar is ever shared across domains.
+  - vulnerability: CVE-2026-124249
+    package:
+      name: python
+      type: binary
+
+  # ssl.get_server_certificate(addr, ca_certs=...) verifies the certificate
+  # chain but never checks the certificate's identity against the requested
+  # host, so a MITM holding any CA-issued cert can impersonate the target.
+  # Fixed in 3.16.0 only; there is no 3.14.x release carrying it.
+  # The control plane never calls ssl.get_server_certificate() — TLS
+  # connections go through requests/urllib3 (RPCSessionPool) or the standard
+  # SSLContext-based wrapping, neither of which uses this function.
+  - vulnerability: CVE-2026-19552
     package:
       name: python
       type: binary
