@@ -9,6 +9,7 @@ import yaml
 from flask_openapi3 import APIBlueprint
 from jinja2 import Environment, PackageLoader
 from kubernetes.client import ApiException, V1DeleteOptions
+from kubernetes.utils import parse_quantity
 from pydantic import BaseModel, Field
 from tenacity import (
     RetryError,
@@ -752,9 +753,12 @@ def _hugepages_per_numa(nodes):
 _STORAGE_POD_LABEL = ("role", "simplyblock-storage-node")
 
 
-def _pod_hugepages_mib(pod):
-    """The hugepages-2Mi a pod requests, in MiB, the way the scheduler counts
-    it: the larger of its containers' sum and its largest init container."""
+def _pod_hugepages_bytes(pod):
+    """The hugepages-2Mi a pod requests, in bytes, the way the scheduler counts
+    it. Native sidecars (init containers with restartPolicy Always) run from
+    their start to the pod's end, so they add to the app containers and to
+    every init container after them; any other init container claims only
+    while it runs, before the app containers start."""
     def requested(container):
         resources = container.resources
         if resources is None:
@@ -762,12 +766,18 @@ def _pod_hugepages_mib(pod):
         # Kubernetes requires a huge-page request to equal its limit, and
         # defaults the request to the limit when only the limit is given.
         quantity = (resources.requests or {}).get('hugepages-2Mi') or (resources.limits or {}).get('hugepages-2Mi')
-        return _quantity_to_mib(quantity)
+        return parse_quantity(quantity) if quantity else 0
 
     spec = pod.spec
-    containers = sum(requested(c) for c in spec.containers or [])
-    init = max((requested(c) for c in spec.init_containers or []), default=0)
-    return max(containers, init)
+    sidecars = 0
+    init_peak = 0
+    for container in spec.init_containers or []:
+        if container.restart_policy == "Always":
+            sidecars += requested(container)
+            init_peak = max(init_peak, sidecars)
+        else:
+            init_peak = max(init_peak, sidecars + requested(container))
+    return max(sum(requested(c) for c in spec.containers or []) + sidecars, init_peak)
 
 
 def _hugepages_claimed_by_other_pods(node_name):
@@ -781,18 +791,18 @@ def _hugepages_claimed_by_other_pods(node_name):
     nothing."""
     if not node_name:
         return None
+    key, value = _STORAGE_POD_LABEL
     try:
         pods = core_utils.get_k8s_core_client().list_pod_for_all_namespaces(
             field_selector=f"spec.nodeName={node_name}").items
+        claimed = sum(_pod_hugepages_bytes(pod) for pod in pods
+                      if (pod.status is None or pod.status.phase not in ("Succeeded", "Failed"))
+                      and (pod.metadata.labels or {}).get(key) != value)
     except Exception as e:
-        logger.warning("Cannot list the pods on '%s' (%s): the huge pages the host carries are kept as its own",
-                       node_name, e)
+        logger.warning("Cannot count the huge pages the pods on '%s' request (%s): the huge pages the host "
+                       "carries are kept as its own", node_name, e)
         return None
-    key, value = _STORAGE_POD_LABEL
-    mib = sum(_pod_hugepages_mib(pod) for pod in pods
-              if (pod.status is None or pod.status.phase not in ("Succeeded", "Failed"))
-              and (pod.metadata.labels or {}).get(key) != value)
-    pages = -(-mib // 2)  # ceil
+    pages = int(-(-claimed // (2 * 1024 * 1024)))  # ceil
     logger.info("Pods on '%s' other than simplyblock's request %d huge pages", node_name, pages)
     return pages
 

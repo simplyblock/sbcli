@@ -66,18 +66,25 @@ class _Host:
 
     def record_baseline(self, pages):
         """What the init Job writes before it calls apply_config."""
-        with open(os.path.join(self.records, "hugepages_baseline_node0"), "w") as f:
+        self.record("baseline", pages)
+
+    def record(self, kind, pages):
+        with open(os.path.join(self.records, f"hugepages_{kind}_node0"), "w") as f:
             f.write(str(pages))
 
 
-def _pod(name, hugepages=None, phase="Running", labels=None):
+def _container(name, hugepages=None, restart_policy=None):
     requests = {"memory": "256Mi"}
     if hugepages:
         requests["hugepages-2Mi"] = hugepages
+    return V1Container(name=name, restart_policy=restart_policy,
+                       resources=V1ResourceRequirements(requests=requests, limits=dict(requests)))
+
+
+def _pod(name, hugepages=None, phase="Running", labels=None, init_containers=None):
     return V1Pod(
         metadata=V1ObjectMeta(name=name, namespace="simplyblock", labels=labels or {}),
-        spec=V1PodSpec(node_name=WORKER, containers=[
-            V1Container(name="c", resources=V1ResourceRequirements(requests=requests, limits=dict(requests)))]),
+        spec=V1PodSpec(node_name=WORKER, containers=[_container("c", hugepages)], init_containers=init_containers),
         status=V1PodStatus(phase=phase))
 
 
@@ -154,3 +161,46 @@ def test_without_the_kubernetes_accounting_the_host_reservation_is_kept(host):
     _apply_config(error=ApiException(status=403, reason="Forbidden"))
 
     assert host.count() == utils.adjust_hugepages(HOST_RESERVED + 3990)
+
+
+def test_a_claim_above_the_hosts_own_share_is_kept_and_survives_the_release(host):
+    """The host reserved nothing itself, simplyblock grew the pool to 4096
+    earlier, and a pod has since claimed 2000 of it: 4096 does not hold the
+    claim beside simplyblock's 3990, so the pool grows. The claim also becomes
+    the host's share, so giving simplyblock's pages back later leaves it."""
+    host.set_count(4096)
+    host.record_baseline(0)
+    host.record("sb", 4096)
+
+    _apply_config(pods=[_pod("dpdk-app", hugepages="4000Mi")])
+
+    assert host.count() == utils.adjust_hugepages(2000 + 3990)
+    assert utils.release_hugepages() == {0: 2000}
+    assert host.count() == 2000
+
+
+def test_a_decimal_quantity_is_read_like_a_binary_one(host):
+    """4194304k is 4194304000 bytes, exactly 2000 pages of 2 MiB: a valid
+    hugepages-2Mi request, counted like 4000Mi."""
+    _apply_config(pods=[_pod("dpdk-app", hugepages="4194304k")])
+
+    assert host.count() == HOST_RESERVED
+
+
+def test_a_native_sidecar_claims_beside_the_containers_it_runs_with(host):
+    """An init container with restartPolicy Always runs for the pod's whole
+    life: 6000Mi beside the app's 6000Mi is 6000 pages, which with
+    simplyblock's 3990 no longer fit in 7958."""
+    sidecar = _container("proxy", hugepages="6000Mi", restart_policy="Always")
+    _apply_config(pods=[_pod("dpdk-app", hugepages="6000Mi", init_containers=[sidecar])])
+
+    assert host.count() == utils.adjust_hugepages(6000 + 3990)
+
+
+def test_an_init_container_that_ends_claims_only_while_it_runs(host):
+    """A plain init container finishes before the app starts: the pod claims
+    the larger of the two, 3000 pages, which fit beside simplyblock's 3990."""
+    init = _container("setup", hugepages="6000Mi")
+    _apply_config(pods=[_pod("dpdk-app", hugepages="6000Mi", init_containers=[init])])
+
+    assert host.count() == HOST_RESERVED

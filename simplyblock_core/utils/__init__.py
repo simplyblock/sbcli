@@ -3461,11 +3461,13 @@ def set_hugepages_if_needed(node, hugepages_needed, page_size_kb=2048, claimed_b
 
     ``claimed_by_others`` is the 2 MiB pages other workloads are known to use,
     where something accounts for them: on Kubernetes, the hugepages-2Mi the
-    node's pods request (a pod can use no more). The host's own share is then
-    at most that many pages, and a pool that already holds them beside
+    node's pods request (a pod can use no more). The host's share is then
+    exactly that many pages, and a pool that already holds them beside
     simplyblock's is left as it is -- grown only by the shortfall, never
-    shrunk. Without it the whole pool the host carried before simplyblock is
-    the host's, and simplyblock's pages go on top."""
+    shrunk. A claim above the recorded baseline raises the baseline, so
+    release_hugepages leaves those pages to the host. Without it the whole
+    pool the host carried before simplyblock is the host's, and simplyblock's
+    pages go on top."""
     hugepage_path = _nr_hugepages_path(node, page_size_kb)
 
     try:
@@ -3474,7 +3476,11 @@ def set_hugepages_if_needed(node, hugepages_needed, page_size_kb=2048, claimed_b
 
         current_user = user_hugepages_baseline(node, current_hugepages)
         if claimed_by_others is not None:
-            current_user = min(current_user, claimed_by_others)
+            if claimed_by_others > current_user:
+                _save_user_hugepages_baseline(node, claimed_by_others)
+                logger.info(f"Node {node}: user hugepage baseline raised {current_user} -> {claimed_by_others} "
+                            f"to the pages other pods request")
+            current_user = claimed_by_others
 
         if claimed_by_others is not None and current_hugepages >= current_user + hugepages_needed:
             required = current_hugepages
