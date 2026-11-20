@@ -35,6 +35,22 @@ class JobSchedule(BaseModel):
             and t.function_params.get('snapshot_id')
             else []
         )),
+        # Every backup s3_id a non-terminal FN_BACKUP_RESTORE task is reading
+        # (its chain_ids -- see FN_BACKUP_RESTORE below -- are s3_ids, not
+        # backup uuids). db_controller.claim_backup_chain_op reads this before
+        # letting a delete or merge touch a chain, so a restore in flight blocks
+        # them. Self-maintaining: the extractor yields nothing once the task
+        # reaches STATUS_DONE or is canceled, so the entry disappears in the
+        # same transaction as that write -- nothing decrements it by hand, and
+        # nothing can leak it.
+        Index('restore_chain_s3_id', arity=1, extract=lambda t: (
+            [(s3_id,) for s3_id in (t.function_params.get('chain_ids') or [])]
+            if t.function_name == t.FN_BACKUP_RESTORE
+            and isinstance(t.function_params, dict)
+            and t.status != t.STATUS_DONE
+            and not t.canceled
+            else []
+        )),
     )
 
     STATUS_NEW = 'new'
@@ -64,6 +80,11 @@ class JobSchedule(BaseModel):
     FN_BACKUP = "s3_backup"
     FN_BACKUP_RESTORE = "s3_backup_restore"
     FN_BACKUP_MERGE = "s3_backup_merge"
+    # Delete one or more backups of the same volume that nothing chains
+    # against: remove their S3 objects, then their manifests, then their
+    # records -- metadata-before-data on the way in (claim_backup_chain_op
+    # marks them DELETING first), data-before-metadata on the way out.
+    FN_BACKUP_DELETE = "s3_backup_delete"
     # Consistency-group backup commit: watch the member backups of one group
     # generation and publish the group manifest once every member completed,
     # the all-or-nothing barrier.

@@ -147,6 +147,23 @@ def _two_generations(db, bucket):
     return gb, base, leaf, successor
 
 
+def _rogue_backup(db, uuid, lvol_id, prev_backup_id):
+    """A backup outside any group backup that chains against *prev_backup_id*
+    -- for building a chain fork: two backups naming the same predecessor."""
+    b = Backup()
+    b.uuid = uuid
+    b.cluster_id = CLUSTER
+    b.lvol_id = lvol_id
+    b.node_id = NODE
+    b.prev_backup_id = prev_backup_id
+    b.size = 4096
+    b.created_at = 999
+    b.status = Backup.STATUS_COMPLETED
+    b.location = _config().location().model_dump(mode="json")
+    b.write_to_db(db.kv_store)
+    return b
+
+
 def _status(db, backup):
     try:
         return db.get_backup_by_id(backup.get_id()).status
@@ -218,7 +235,9 @@ class TestRetireMembers:
         state = group_backup.advance_group_backup_delete(gb.get_id())
 
         assert state == group_backup.DeleteState.PENDING
-        assert _status(db, leaf) is None
+        # Claimed, not yet actually gone: leaf's own FN_BACKUP_DELETE task
+        # removes it once it confirms the S3 objects are gone.
+        assert _status(db, leaf) == Backup.STATUS_DELETING
         assert _status(db, base) == Backup.STATUS_MERGING
         assert db.get_group_backup_by_id(gb.get_id()).status == GroupBackup.STATUS_DELETING
         assert bucket[GEN_7].state == GroupManifestState.DELETING
@@ -230,6 +249,9 @@ class TestRetireMembers:
         merged = db.get_backup_by_id(base.get_id())
         merged.status = Backup.STATUS_MERGED      # the merge task finished
         merged.write_to_db(db.kv_store)
+        # leaf's own FN_BACKUP_DELETE task finished too: it confirmed the S3
+        # objects were gone and removed the record.
+        db.get_backup_by_id(leaf.get_id()).remove(db.kv_store)
 
         state = group_backup.advance_group_backup_delete(gb.get_id())
 
@@ -247,6 +269,21 @@ class TestRetireMembers:
         assert _status(db, successor) == Backup.STATUS_COMPLETED
         assert db.get_group_backup_by_id(f"{CLUSTER}/{GEN_8}").status == GroupBackup.STATUS_COMPLETED
         assert bucket[GEN_8].state == GroupManifestState.COMMITTED
+
+    def test_a_forked_base_raises_instead_of_picking_a_successor_arbitrarily(self, db, bucket):
+        """Two backups naming the same predecessor is a chain fork that should
+        never occur (snapshot chains are linear and backup creation locks the
+        whole ancestry) -- if one gets into the chain anyway (e.g. a corrupted
+        import), retiring the predecessor must fail loudly, not silently merge
+        it into whichever fork next() happens to see first."""
+        gb, base, leaf, successor = _two_generations(db, bucket)
+        _rogue_backup(db, "0ae09999-0000-4000-8000-000000000099", base.lvol_id, base.uuid)
+        group_backup.delete_group_backup(gb.get_id())
+
+        with pytest.raises(PreconditionError, match="multiple successors"):
+            group_backup.advance_group_backup_delete(gb.get_id())
+
+        assert _status(db, base) == Backup.STATUS_COMPLETED
 
     def test_a_failed_group_backup_has_no_manifest_to_mark(self, db, bucket):
         member = _member(db, GEN_7, 7, 1, status=Backup.STATUS_FAILED)
