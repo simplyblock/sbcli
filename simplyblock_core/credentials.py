@@ -215,8 +215,8 @@ class CredentialProvider:
                 wrapped = kms.wrap_secret(kek_name, secret_fields, context)
         except KMSException as e:
             raise CredentialError(f"Storing credential failed: {e.message}") from e
-        logger.info("Stored managed credential (backend=%s, fields=%s, context=%s)",
-                    backend, sorted(secret_fields), context)
+        logger.info("Stored managed credential (backend=%s, %d fields, context=%s)",
+                    backend, len(secret_fields), context)
         return ManagedCredentialRef(backend=backend, kek_name=kek_name, wrapped=wrapped)
 
     # -- Resolve ------------------------------------------------------------
