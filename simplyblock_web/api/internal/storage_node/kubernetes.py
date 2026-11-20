@@ -9,6 +9,7 @@ import yaml
 from flask_openapi3 import APIBlueprint
 from jinja2 import Environment, PackageLoader
 from kubernetes.client import ApiException, V1DeleteOptions
+from kubernetes.utils import parse_quantity
 from pydantic import BaseModel, Field
 from tenacity import (
     RetryError,
@@ -747,6 +748,63 @@ def _hugepages_per_numa(nodes):
         numa = node_config["socket"]
         per_numa_bytes[numa] = per_numa_bytes.get(numa, 0) + hg_memory + 1000000000
     return {numa: mem // 2000000 for numa, mem in per_numa_bytes.items()}
+
+
+_STORAGE_POD_LABEL = ("role", "simplyblock-storage-node")
+
+
+def _pod_hugepages_bytes(pod):
+    """The hugepages-2Mi a pod requests, in bytes, the way the scheduler counts
+    it. Native sidecars (init containers with restartPolicy Always) run from
+    their start to the pod's end, so they add to the app containers and to
+    every init container after them; any other init container claims only
+    while it runs, before the app containers start."""
+    def requested(container):
+        resources = container.resources
+        if resources is None:
+            return 0
+        # Kubernetes requires a huge-page request to equal its limit, and
+        # defaults the request to the limit when only the limit is given.
+        quantity = (resources.requests or {}).get('hugepages-2Mi') or (resources.limits or {}).get('hugepages-2Mi')
+        return parse_quantity(quantity) if quantity else 0
+
+    spec = pod.spec
+    sidecars = 0
+    init_peak = 0
+    for container in spec.init_containers or []:
+        if container.restart_policy == "Always":
+            sidecars += requested(container)
+            init_peak = max(init_peak, sidecars)
+        else:
+            init_peak = max(init_peak, sidecars + requested(container))
+    return max(sum(requested(c) for c in spec.containers or []) + sidecars, init_peak)
+
+
+def _hugepages_claimed_by_other_pods(node_name):
+    """The 2 MiB pages the pods on ``node_name`` request, simplyblock's own
+    storage pods left out, or None when Kubernetes cannot say.
+
+    The kubelet sets every container's hugetlb limit to its request, so no pod
+    uses more than this: whatever else the host's pool holds is unused, and
+    simplyblock may count on it. The storage pods are left out because their
+    pages are the ones apply_config is sizing. A pod that has finished holds
+    nothing."""
+    if not node_name:
+        return None
+    key, value = _STORAGE_POD_LABEL
+    try:
+        pods = core_utils.get_k8s_core_client().list_pod_for_all_namespaces(
+            field_selector=f"spec.nodeName={node_name}").items
+        claimed = sum(_pod_hugepages_bytes(pod) for pod in pods
+                      if (pod.status is None or pod.status.phase not in ("Succeeded", "Failed"))
+                      and (pod.metadata.labels or {}).get(key) != value)
+    except Exception as e:
+        logger.warning("Cannot count the huge pages the pods on '%s' request (%s): the huge pages the host "
+                       "carries are kept as its own", node_name, e)
+        return None
+    pages = int(-(-claimed // (2 * 1024 * 1024)))  # ceil
+    logger.info("Pods on '%s' other than simplyblock's request %d huge pages", node_name, pages)
+    return pages
 
 
 def _talos_sysfs_patch(pages_per_numa):
@@ -1703,8 +1761,9 @@ def apply_config():
         return utils.get_response(False, "Config validation is incorrect")
 
     # Set Huge page memory
+    claimed = _hugepages_claimed_by_other_pods(os.environ.get("HOSTNAME", ""))
     for numa, num_pages in _hugepages_per_numa(nodes).items():
-        core_utils.set_hugepages_if_needed(numa, num_pages)
+        core_utils.set_hugepages_if_needed(numa, num_pages, claimed_by_others=claimed)
 
     return utils.get_response(True)
 
