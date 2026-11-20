@@ -119,6 +119,20 @@ class FakeIbmFlashSystem(FakeArray):
 
     # -- dispatch -------------------------------------------------------------------
 
+
+    # -- LIO data path (testing.lio) -----------------------------------------
+    def lio_volume_ids(self) -> list[str]:
+        return list(self.vdisks)
+
+    def lio_all_iqns(self) -> list[str]:
+        return sorted({str(i).lower() for h in self.hosts.values() for i in h.get("iscsiname", [])})
+
+    def lio_host_iqns(self, host_id: str) -> list[str]:
+        for name, h in self.hosts.items():
+            if host_id in (name, str(h.get("id", ""))):
+                return [str(i).lower() for i in h.get("iscsiname", [])]
+        return []
+
     @route("POST", _ROOT + "/auth")
     def auth(self, req: Request):
         if (req.headers.get("X-Auth-Username") != self.username

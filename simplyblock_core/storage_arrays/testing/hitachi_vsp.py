@@ -144,6 +144,21 @@ class FakeHitachiVsp(FakeArray):
         self._prefix(sdid)
         return self._token(req)
 
+
+    # -- LIO data path (testing.lio) -----------------------------------------
+    def lio_volume_ids(self) -> list[str]:
+        return [str(i) for i in self.ldevs]
+
+    def lio_all_iqns(self) -> list[str]:
+        return sorted({str(i).lower() for g in self.groups.values() for i in g.get("iscsis", [])})
+
+    def lio_host_iqns(self, host_id: str) -> list[str]:
+        out: list[str] = []
+        for g in self.groups.values():
+            if g["name"] == host_id:
+                out += [str(i).lower() for i in g.get("iscsis", []) if str(i).lower() not in out]
+        return out
+
     @route("POST", _P + "/sessions")
     def post_session(self, req, sdid):
         self._prefix(sdid)

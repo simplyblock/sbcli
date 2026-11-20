@@ -23,6 +23,7 @@ import base64
 import http.client
 import io
 import json
+import logging
 import re
 import threading
 import types
@@ -148,6 +149,17 @@ class FakeArray:
         return Reply(404, {"error": f"fake: no route for {req.method} {req.path}"})
 
 
+# The LIO data path (testing.lio) reads a fake through two accessors, which
+# every vendor fake implements:
+#
+# * ``lio_volume_ids()``: the ids of the live volumes, as the vendor's adapter
+#   reports them in ``Volume.id``;
+# * ``lio_host_iqns(host_id)``: the iSCSI initiator names of the host the
+#   adapter knows as ``host_id`` (the id ``ensure_host`` returned or the name
+#   ``list_mappings`` reports), lower case;
+# * ``lio_all_iqns()``: the iSCSI initiator names of every host, so that a
+#   registered host can log in before anything is mapped to it.
+
 class FakeError(Exception):
     """Raise inside a handler to answer with ``reply``."""
 
@@ -254,10 +266,15 @@ def make_config(vendor: str, endpoint: str, **options: Any) -> ArrayConfig:
 
 
 def serve(fake: FakeArray, host: str = "127.0.0.1", port: int = 8443,
-          certfile: str | None = None, keyfile: str | None = None):
+          certfile: str | None = None, keyfile: str | None = None,
+          after_request: Callable[[], None] | None = None):
     """Serve ``fake`` over HTTPS (a throwaway self-signed certificate is
     generated unless ``certfile``/``keyfile`` are given). Returns the server;
-    call ``serve_forever()`` on it."""
+    call ``serve_forever()`` on it. ``after_request`` runs after every
+    request, before the answer is sent: the LIO data path (``testing.lio``)
+    catches up there, so a mapping the caller was told about is already
+    presented. GETs included: on arrays with asynchronous jobs, a change
+    takes effect while its job is polled."""
     import ssl
     import tempfile
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -273,6 +290,11 @@ def serve(fake: FakeArray, host: str = "127.0.0.1", port: int = 8443,
                 method=self.command, path=parts.path,
                 query=parse_qs(parts.query, keep_blank_values=True),
                 headers=CaseInsensitiveDict(dict(self.headers.items())), body=body))
+            if after_request is not None:
+                try:
+                    after_request()
+                except Exception:  # noqa: BLE001 - the API answer still goes out
+                    logging.getLogger(__name__).exception("after_request failed")
             content, headers = _encode(reply)
             self.send_response(reply.status)
             for k, v in headers.items():

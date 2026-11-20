@@ -123,6 +123,20 @@ class FakeDellPowerStore(FakeArray):
         if req.method != "GET" and req.headers.get("DELL-EMC-TOKEN") != self.sessions[cookie]:
             raise _err(403, "Forbidden: missing or invalid DELL-EMC-TOKEN.", "0xE09040010003")
 
+
+    # -- LIO data path (testing.lio) -----------------------------------------
+    def lio_volume_ids(self) -> list[str]:
+        return list(self.volumes)
+
+    def lio_all_iqns(self) -> list[str]:
+        return sorted({p["port_name"].lower() for h in self.hosts.values() for p in h["host_initiators"] if p["port_type"] == "iSCSI"})
+
+    def lio_host_iqns(self, host_id: str) -> list[str]:
+        for h in self.hosts.values():
+            if host_id in (h["id"], h["name"]):
+                return [p["port_name"].lower() for p in h["host_initiators"] if p["port_type"] == "iSCSI"]
+        return []
+
     @route("GET", API + "/login_session")
     def login_session(self, req):
         if req.basic_auth() != (self.username, self.password):

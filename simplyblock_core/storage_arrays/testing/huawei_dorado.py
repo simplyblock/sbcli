@@ -131,6 +131,21 @@ class FakeHuaweiDorado(FakeArray):
         if dev != self.device_id or req.headers.get("iBaseToken") not in self.tokens:
             raise _fail(UNAUTHORIZED, "The user is not logged in or the session has expired.")
 
+
+    # -- LIO data path (testing.lio) -----------------------------------------
+    def lio_volume_ids(self) -> list[str]:
+        return list(self.luns)
+
+    def lio_all_iqns(self) -> list[str]:
+        return sorted({i["ID"].lower() for i in self.initiators.get("iscsi_initiator", {}).values() if i["PARENTID"]})
+
+    def lio_host_iqns(self, host_id: str) -> list[str]:
+        hid = next((h["ID"] for h in self.hosts.values() if host_id in (h["ID"], h["NAME"])), None)
+        if hid is None:
+            return []
+        return [i["ID"].lower() for i in self.initiators.get("iscsi_initiator", {}).values()
+                if i["PARENTID"] == hid]
+
     @route("POST", r"/deviceManager/rest/xx/sessions")
     def login(self, req):
         body = req.json() or {}

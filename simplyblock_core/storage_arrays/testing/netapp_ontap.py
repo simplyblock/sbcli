@@ -268,6 +268,20 @@ class FakeNetAppOntap(FakeArray):
         href = f"/api/cluster/jobs/{jid}"
         return Reply(202, {"job": {"uuid": jid, "_links": {"self": {"href": href}}}})
 
+
+    # -- LIO data path (testing.lio) -----------------------------------------
+    def lio_volume_ids(self) -> list[str]:
+        return list(self.luns) + list(self.namespaces)
+
+    def lio_all_iqns(self) -> list[str]:
+        return sorted({i["name"].lower() for g in self.igroups.values() for i in g["initiators"] if i["name"].lower().startswith("iqn.")})
+
+    def lio_host_iqns(self, host_id: str) -> list[str]:
+        for g in self.igroups.values():
+            if host_id in (g["uuid"], g["name"]):
+                return [i["name"].lower() for i in g["initiators"] if i["name"].lower().startswith("iqn.")]
+        return []
+
     @route("GET", r"/api/cluster/jobs/" + _U)
     def get_job(self, req, uuid):
         self._auth(req)

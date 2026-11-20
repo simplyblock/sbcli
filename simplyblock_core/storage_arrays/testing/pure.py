@@ -55,6 +55,18 @@ class FakePureFlashArray(FakeArray):
         if req.headers.get("x-auth-token") not in self.sessions:
             raise _err("Authentication failed.", 401)
 
+
+    # -- LIO data path (testing.lio) -----------------------------------------
+    def lio_volume_ids(self) -> list[str]:
+        return [v["id"] for v in self.volumes.values() if not v.get("destroyed")]
+
+    def lio_all_iqns(self) -> list[str]:
+        return sorted({str(i).lower() for h in self.hosts.values() for i in h.get("iqns", [])})
+
+    def lio_host_iqns(self, host_id: str) -> list[str]:
+        host = self.hosts.get(host_id)
+        return [str(i).lower() for i in (host or {}).get("iqns", [])]
+
     @route("GET", "/api/api_version")
     def api_version(self, req):
         return Reply(200, {"version": self.versions})

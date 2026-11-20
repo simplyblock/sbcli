@@ -108,6 +108,17 @@ class FakePowerFlex(FakeArray):
                 return
         raise _err("Unauthorized", 401)
 
+
+    # -- LIO data path (testing.lio) -----------------------------------------
+    def lio_volume_ids(self) -> list[str]:
+        return []   # PowerFlex presents through its SDC, not iSCSI
+
+    def lio_all_iqns(self) -> list[str]:
+        return sorted(set())
+
+    def lio_host_iqns(self, host_id: str) -> list[str]:
+        return []
+
     @route("GET", "/api/version")
     def api_version(self, req):
         self._auth(req, basic_ok=True)

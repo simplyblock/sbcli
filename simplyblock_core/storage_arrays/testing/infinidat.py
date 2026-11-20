@@ -147,6 +147,20 @@ class FakeInfiniBox(FakeArray):
 
     # -- system / pools --------------------------------------------------------------
 
+
+    # -- LIO data path (testing.lio) -----------------------------------------
+    def lio_volume_ids(self) -> list[str]:
+        return [str(i) for i in self.volumes]
+
+    def lio_all_iqns(self) -> list[str]:
+        return sorted({p["address"].lower() for h in self.hosts.values() for p in h["ports"] if p["type"] == "ISCSI"})
+
+    def lio_host_iqns(self, host_id: str) -> list[str]:
+        for h in self.hosts.values():
+            if host_id in (str(h["id"]), h["name"]):
+                return [p["address"].lower() for p in h["ports"] if p["type"] == "ISCSI"]
+        return []
+
     @route("GET", _R + "/system")
     def system(self, req):
         self._auth(req)

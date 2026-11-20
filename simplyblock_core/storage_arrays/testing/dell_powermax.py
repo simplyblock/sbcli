@@ -146,6 +146,18 @@ class FakeDellPowerMax(FakeArray):
     def _public_job(self, job_id: str) -> dict[str, Any]:
         return {k: v for k, v in self.jobs[job_id].items() if not k.startswith("_")}
 
+
+    # -- LIO data path (testing.lio) -----------------------------------------
+    def lio_volume_ids(self) -> list[str]:
+        return list(self.volumes)
+
+    def lio_all_iqns(self) -> list[str]:
+        return sorted({str(i).lower() for h in self.hosts.values() for i in h.get("initiator", []) if str(i).lower().startswith("iqn.")})
+
+    def lio_host_iqns(self, host_id: str) -> list[str]:
+        host = self.hosts.get(host_id) or {}
+        return [str(i).lower() for i in host.get("initiator", []) if str(i).lower().startswith("iqn.")]
+
     @route("GET", _V + r"/system/job/(?P<job_id>\d+)")
     def get_job(self, req, ver, job_id):
         self._check(req, ver)

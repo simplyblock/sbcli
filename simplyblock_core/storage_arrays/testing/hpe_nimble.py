@@ -144,6 +144,19 @@ class FakeHpeNimble(FakeArray):
                                          "text": f"Job {jid} is running",
                                          "arguments": {"job_id": jid}}]})
 
+
+    # -- LIO data path (testing.lio) -----------------------------------------
+    def lio_volume_ids(self) -> list[str]:
+        return list(self.volumes)
+
+    def lio_all_iqns(self) -> list[str]:
+        return sorted({i["iqn"].lower() for i in self.initiators.values() if i.get("iqn")})
+
+    def lio_host_iqns(self, host_id: str) -> list[str]:
+        gids = {g["id"] for g in self.groups.values() if host_id in (g["id"], g["name"])}
+        return [i["iqn"].lower() for i in self.initiators.values()
+                if i["initiator_group_id"] in gids and i.get("iqn")]
+
     @route("GET", "/v1/jobs/" + _ID)
     def get_job(self, req, obj_id):
         self._auth(req)

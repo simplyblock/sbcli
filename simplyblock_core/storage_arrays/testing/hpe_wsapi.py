@@ -90,6 +90,18 @@ class FakeHpeWsapi(FakeArray):
         if req.headers.get("X-HP3PAR-WSAPI-SessionKey") not in self.sessions:
             raise _err(401, 6, "invalid session key")
 
+
+    # -- LIO data path (testing.lio) -----------------------------------------
+    def lio_volume_ids(self) -> list[str]:
+        return list(self.volumes)
+
+    def lio_all_iqns(self) -> list[str]:
+        return sorted({p["name"].lower() for h in self.hosts.values() for p in h.get("iSCSIPaths", [])})
+
+    def lio_host_iqns(self, host_id: str) -> list[str]:
+        host = self.hosts.get(host_id) or {}
+        return [p["name"].lower() for p in host.get("iSCSIPaths", [])]
+
     @route("POST", _A + "/credentials")
     def login(self, req):
         body = req.json() or {}
