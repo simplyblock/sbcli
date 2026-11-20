@@ -711,6 +711,41 @@ REPL_CUTOVER_FREEZE_MAX_ROUND_SEC = (REPL_CUTOVER_FINAL_STEP_LIMIT_SEC
 # released, the volume replicates on its ordinary cadence, and the endgame is
 # retried after this long (the abandon burns one attempt of the task's budget).
 REPL_CUTOVER_ENDGAME_BACKOFF_SEC = 300
+# --- a migration must not fill its source cluster (bed bf29, 2026-11-20) ---
+# Five endgames of one source cluster at once, under sustained overwrite, took
+# a shrink snapshot every 15-30 s each; every one pinned what the client
+# overwrote after it, and their deletions fell behind: 41% -> 99% in 16 min.
+# See simplyblock_core/migration_space.py. These hold back only the
+# migration's own snapshots -- never client IO or client volume creation.
+#
+# Cutover endgames (shrink-round phase) running at once per SOURCE cluster.
+# The others replicate on their ordinary cadence while they wait for a slot.
+REPL_CUTOVER_MAX_ENDGAMES_PER_CLUSTER = 1
+# An endgame takes its next round snapshot only once none of the volume's
+# snapshots is still in deletion -- for at most this long per wait: a deletion
+# that is stuck (no leader, a clone in deletion) must not stall the endgame
+# into its shrink deadline on its own. The free-space check still applies.
+REPL_ENDGAME_DELETION_WAIT_MAX_SEC = 300
+# A migration snapshot needs this many times the bytes written to the volume
+# since its last snapshot free on the source (the snapshot pins them, and the
+# client overwrites about as much again while the round transfers) ...
+REPL_MIGRATION_HEADROOM_FACTOR = 2
+# ... and never less than this share of the cluster (other volumes' writes,
+# and the capacity record being up to a collector interval old).
+REPL_MIGRATION_MIN_FREE_PCT = 5
+# A cluster capacity record older than this is no reading (the collector
+# writes one every DEV_STAT_COLLECTOR_INTERVAL_SEC).
+REPL_MIGRATION_CAPACITY_STALE_SEC = 120
+# Without a usable capacity reading a migration snapshot waits this long, then
+# goes ahead without the check (logged): a broken stats collector must not
+# stop migrations for good.
+REPL_MIGRATION_CAPACITY_UNKNOWN_WAIT_SEC = 120
+# A cutover endgame whose target node is down before its clone exists cannot
+# progress, and holds its volume out of ordinary replication while it waits
+# (bed bf29 R3b: RPO 1280 s). After this long it is given up -- no attempt
+# burned, no back-off -- and the volume replicates on its cadence until the
+# target is back.
+REPL_CUTOVER_TARGET_DOWN_GRACE_SEC = 60
 # --- cutover source throttle ----------------------------------------------
 # A round converges to overhead / (1 - W/T): with the application writing at
 # W and the delta transferring at T, no number of rounds gets under the

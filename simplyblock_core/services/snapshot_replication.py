@@ -656,6 +656,11 @@ def _create_landing_volume(name, snapshot, remote_node, remote_pool_uuid):
         lvol_priority_class=landing_class)
 
 
+# = tasks_runner_replication_final.DIRECT_ROUND_PREFIX; a copy, so this module
+# does not load the cutover runner (a test keeps the two equal).
+_DIRECT_ROUND_PREFIX = "repl_round_"
+
+
 def _endgame_next_snap_name(lvol_id, cluster_id):
     """The name a converging cutover of *lvol_id* gives its NEXT shrink
     snapshot (next_shrink_snap_name), or ""."""
@@ -688,6 +693,16 @@ def _prestage_next_landing(snapshot, remote_lv):
         lvol_id = snapshot.lvol.get_id()
         next_name = _endgame_next_snap_name(lvol_id, snapshot.cluster_id)
         if not next_name:
+            return None
+        # A direct round's snapshot is never replicated: its pages go straight
+        # into the cutover clone, so nothing ever adopts REP_<name>, and the
+        # endgame's discard only knows the name of the round after it. Each
+        # such pre-stage left a full-size internal volume on the target for
+        # good (bed bf29 2026-11-20: REP_repl_round_572cd23c / 1333e5d1 /
+        # 41e70a17 on cluster 225e0e10, staged 03:53 / 04:11 / 07:47 by the
+        # transfer of a cadence snapshot still in flight when the endgame
+        # entered direct mode, never removed).
+        if next_name.startswith(_DIRECT_ROUND_PREFIX):
             return None
         rep_name = f"REP_{next_name}"
         try:
