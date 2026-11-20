@@ -45,6 +45,12 @@ class FakeSpdk:
         self.subsystems = {}
         self.calls = []
         self.fail = set()
+        self.down = False
+
+    def get_version(self):
+        if self.down:
+            raise ConnectionError("Could not reach remote")
+        return {"version": "fake"}
 
     def _rec(self, op, *args, **kwargs):
         self.calls.append((op, args, kwargs))
@@ -375,16 +381,28 @@ class TestTakeover(_TakeoverCase):
 
     def test_rerun_after_partial_export_reuses_it(self):
         db, _ = _bed()
-        b = db.nodes["node-b"]
-        b.spdk.fail.add("nvmf_subsystem_add_ns")
+        standbys = [db.nodes[n] for n in ("node-b", "node-c", "node-d")]
+        for n in standbys:
+            n.spdk.fail.add("nvmf_subsystem_add_ns")
         self.assertEqual(self.run_takeover(db), lun_takeover.FAILED)
-        # Cleanup closed what this attempt opened; nothing recorded.
+        # Cleanup closed what each attempt opened; nothing recorded.
         self.assertEqual(self.dev(db).serving_node(), "node-a")
+        b = standbys[0]
         self.assertNotIn(f"alceml_{DEV_ID}", b.spdk.bdevs)
         self.assertTrue(b.spdk.ops("bdev_alceml_delete"))
-        b.spdk.fail.clear()
+        for n in standbys:
+            n.spdk.fail.clear()
         self.assertEqual(self.run_takeover(db), lun_takeover.TAKEN_OVER)
         self.assertEqual(self.dev(db).serving_node(), "node-b")
+
+    def test_failed_export_moves_to_the_next_standby(self):
+        db, _ = _bed()
+        db.nodes["node-b"].spdk.fail.add("nvmf_subsystem_add_ns")
+        self.assertEqual(self.run_takeover(db), lun_takeover.TAKEN_OVER)
+        self.assertEqual(self.dev(db).serving_node(), "node-c")
+        # node-b was retried once (it answers), then left; its stack closed.
+        self.assertEqual(len(db.nodes["node-b"].spdk.ops("bdev_alceml_create")), 2)
+        self.assertNotIn(f"alceml_{DEV_ID}", db.nodes["node-b"].spdk.bdevs)
 
     def test_standby_is_chosen_while_the_fence_runs(self):
         import threading
@@ -1069,6 +1087,39 @@ class TestFenceByReservation(_TakeoverCase):
         self.assertEqual(len(b.spdk.ops("bdev_alceml_create")), 2)
         self.assertEqual(len(b.spdk.ops("bdev_alceml_delete")), 1)
         self.assertEqual(self.dev(db).serving_node(), "node-b")
+
+    def test_dead_standby_is_left_for_the_next_one(self):
+        # 2026-11-20 FTT2 bed, dual reboot sn2 + hard reset sn3: the standby
+        # chosen was rebooting; the LUN must still be taken over by another.
+        db, _ = self._bed()
+        b, c = db.nodes["node-b"], db.nodes["node-c"]
+
+        def b_dies(name):
+            b.spdk.down = True
+            return {"error": "Could not reach remote"}
+        b.spdk.alceml_get_role = b_dies
+        self._roles(c, {"role": "active", "state": "active", "epoch": 3})
+        with patch.object(constants, "MULTI_ATTACH_ACTIVATION_WAIT_SEC", 0.2):
+            self.assertEqual(self.run_takeover(db), lun_takeover.TAKEN_OVER)
+        self.assertEqual(self.dev(db).serving_node(), "node-c")
+        self.assertIn("node-a", self.dev(db).fenced_node_ids)
+        # The array fence ran (the reservation was not taken on node-b).
+        self.assertIn(("fence", WWN, "host-node-a"), FakeArrayPlugin.calls)
+        # No cleanup calls into the dead standby.
+        self.assertEqual(b.spdk.ops("bdev_alceml_delete"), [])
+
+    def test_no_standby_left_fails(self):
+        db, _ = self._bed()
+        def dies(spdk):
+            def role(name):
+                spdk.down = True
+                return {"error": "gone"}
+            return role
+        for nid in ("node-b", "node-c", "node-d"):
+            db.nodes[nid].spdk.alceml_get_role = dies(db.nodes[nid].spdk)
+        with patch.object(constants, "MULTI_ATTACH_ACTIVATION_WAIT_SEC", 0.2):
+            self.assertEqual(self.run_takeover(db), lun_takeover.FAILED)
+        self.assertEqual(self.dev(db).serving_node(), "node-a")
 
     def test_without_reservations_the_array_fences_first(self):
         db, _ = _bed()

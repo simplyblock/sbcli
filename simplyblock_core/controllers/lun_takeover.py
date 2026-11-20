@@ -251,22 +251,37 @@ def _take_over_locked(db, cluster, device_id, failed_node_id, reason, deadline) 
             logger.error(msg)
             _event(cluster_id, dev, msg, EventObj.LEVEL_CRITICAL)
             return NO_STANDBY
-        _check_deadline(deadline, f"exporting the LUN on {standby.get_id()}")
-
-        # 4. Open-only export on the standby.
-        try:
-            export = _export_on_standby(db, cluster, standby, dev, path, deadline)
-        except TakeoverError as e:
-            if not by_reservation:
-                raise
-            # The reservation was not taken: fence at the array, then once more.
-            logger.warning("LUN takeover of %s: fence by reservation failed (%s); fencing "
-                           "at the array", device_id, e)
-            by_reservation = False
-            _fence(cluster, dev, failed)
-            _record_fenced(db, owner, device_id, failed_node_id)
-            _check_deadline(deadline, f"exporting the LUN on {standby.get_id()} again")
-            export = _export_on_standby(db, cluster, standby, dev, path, deadline)
+        # 4. Open-only export on the standby. A standby that fails and no
+        # longer answers is left for the next candidate (2026-11-20 FTT2 bed:
+        # the standby chosen was rebooting; the takeover failed although a
+        # third node could read the LUN, and the 1+0 cluster suspended).
+        tried, retried = set(), set()
+        while True:
+            _check_deadline(deadline, f"exporting the LUN on {standby.get_id()}")
+            try:
+                export = _export_on_standby(db, cluster, standby, dev, path, deadline)
+                break
+            except TakeoverError as e:
+                sid = standby.get_id()
+                if by_reservation:
+                    # The reservation was not taken: fence at the array.
+                    logger.warning("LUN takeover of %s: fence by reservation failed (%s); "
+                                   "fencing at the array", device_id, e)
+                    by_reservation = False
+                    _fence(cluster, dev, failed)
+                    _record_fenced(db, owner, device_id, failed_node_id)
+                if sid not in retried and _reachable(standby):
+                    retried.add(sid)
+                    continue
+                tried.add(sid)
+                logger.warning("LUN takeover of %s: export on standby %s failed (%s); trying "
+                               "another standby", device_id, sid, e)
+                _check_deadline(deadline, "choosing another standby")
+                standby, path, why = _choose_standby(owner, dev, failed_node_id, nodes_by_id,
+                                                     deadline, exclude=tried)
+                if standby is None:
+                    raise TakeoverError(f"export failed on {sorted(tried)} and no other standby "
+                                        f"can read the LUN ({why}): {e}")
         if by_reservation:
             # Fenced by the reservation: recorded now, detached at the array
             # in the background (the attachment reconcile detaches it too).
@@ -437,11 +452,11 @@ def _record_fenced(db, owner, device_id, node_id):
 
 # --------------------------------------------------------- 2 + 3. standby
 
-def _choose_standby(owner, dev, failed_node_id, nodes_by_id, deadline):
+def _choose_standby(owner, dev, failed_node_id, nodes_by_id, deadline, exclude=()):
     reasons = []
     for nid in multi_attach.standby_candidates(owner, failed_node_id):
         node = nodes_by_id.get(nid)
-        if node is None:
+        if node is None or nid in exclude:
             continue
         if node.status != StorageNode.STATUS_ONLINE:
             reasons.append(f"{nid}: {node.status}")
@@ -461,6 +476,15 @@ def _choose_standby(owner, dev, failed_node_id, nodes_by_id, deadline):
             reasons.append("deadline passed")
             break
     return None, None, "; ".join(reasons) or "no standby candidate"
+
+
+def _reachable(node) -> bool:
+    """Whether the node's SPDK answers right now (no retries)."""
+    try:
+        node.rpc_client(timeout=constants.MULTI_ATTACH_PROBE_TIMEOUT_SEC, retry=0).get_version()
+        return True
+    except Exception:                                       # noqa: BLE001
+        return False
 
 
 def _probe(node, dev, deadline):
@@ -550,7 +574,7 @@ def _export_on_standby(db, cluster, standby, dev, path, deadline) -> dict:
             created.append(("alceml", alceml))
         if kwargs.get("reservation_key"):
             # Opened active with a key: it preempts the old holder (fence).
-            _wait_active(rpc, alceml, deadline)
+            _wait_active(standby.rpc_client(timeout=1, retry=0), alceml, deadline)
             try:
                 from simplyblock_core.controllers import qos_controller
                 rpc.alceml_set_qos_weights(qos_controller.get_qos_weights_list(cluster.get_id()))
@@ -590,7 +614,13 @@ def _export_on_standby(db, cluster, standby, dev, path, deadline) -> dict:
                                              nguid=multi_attach.namespace_nguid(dev)):
                 raise TakeoverError(f"namespace {pt} not added to {nqn} on {sid}")
     except Exception:
-        _teardown(rpc, sid, created)
+        if created and not _reachable(standby):
+            # Its SPDK is gone: what it held went with it (each call would
+            # only wait out the retries).
+            logger.warning("LUN takeover cleanup on %s skipped: SPDK not answering (%s)",
+                           sid, [name for _, name in created])
+        else:
+            _teardown(rpc, sid, created)
         raise
     aliases = (pt_info or {}).get("aliases") or []
     return {
