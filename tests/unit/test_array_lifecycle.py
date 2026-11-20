@@ -804,6 +804,19 @@ class TestAwsEbs(unittest.TestCase):
         self.assertTrue(self.p.fence("vol-0abc", "i-1"))
         self.stub.assert_no_pending_responses()
 
+    def test_fence_polls_fast(self):
+        slept = []
+        self.p._sleep = slept.append
+        self._describe(self._vol(atts=[("i-1", "attached")]))
+        self.stub.add_response("detach_volume", {}, {"VolumeId": "vol-0abc", "InstanceId": "i-1",
+                                                     "Force": True})
+        self._describe(self._vol(atts=[("i-1", "detaching")]))
+        self._describe(self._vol(atts=[]))
+        self.assertTrue(self.p.fence("vol-0abc", "i-1"))
+        self.assertEqual(slept, [0.2])
+        self.p.options["fence_poll_interval"] = 0.05
+        self.assertEqual(self.p._fence_poll, 0.05)
+
     def test_detach_not_attached_is_a_noop(self):
         self._describe(self._vol(atts=[("i-2", "attached")]))
         self.p.detach("vol-0abc", "i-1")

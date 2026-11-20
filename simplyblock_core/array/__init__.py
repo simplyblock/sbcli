@@ -24,8 +24,10 @@ fences nothing.
 from __future__ import annotations
 
 import abc
+import json
 import logging
 import threading
+import time
 from importlib import metadata
 
 logger = logging.getLogger()
@@ -305,3 +307,50 @@ def plugin_for_cluster(cluster) -> ArrayPlugin:
         credentials=array_credentials(cluster),
         cluster_id=cluster.get_id(),
     )
+
+
+# cluster id -> (configuration key, monotonic time connected, plugin)
+_connected: dict[str, tuple] = {}
+_connected_lock = threading.Lock()
+
+
+def _config_key(cluster) -> tuple:
+    return (getattr(cluster, "array_plugin", "") or "",
+            getattr(cluster, "array_endpoint", "") or "",
+            json.dumps(getattr(cluster, "array_options", None) or {}, sort_keys=True, default=str),
+            getattr(cluster, "array_id", "") or "",
+            getattr(cluster, "array_has_credentials", False) is True)
+
+
+def cached_plugin_for_cluster(cluster, max_age: float | None = None) -> ArrayPlugin:
+    """:func:`plugin_for_cluster`, connected once and reused for
+    ``constants.ARRAY_PLUGIN_CACHE_SEC`` while the cluster's array
+    configuration is unchanged. For the LUN takeover's fence, which every
+    volume of a 1+0 cluster waits on: connecting validates the credentials
+    first (about a second on EBS). A caller whose call fails on the cached
+    instance drops it with :func:`forget_plugin` and connects again.
+    ``max_age`` (seconds) connects anew when the cached one is older (a
+    refresh ahead of the expiry, so a fence never waits for it)."""
+    from simplyblock_core import constants
+    cid = cluster.get_id()
+    key = _config_key(cluster)
+    # The class too: a plugin registered anew under the same name (tests).
+    key = (plugin_class(key[0]) if key[0] else None,) + key
+    with _connected_lock:
+        hit = _connected.get(cid)
+        limit = constants.ARRAY_PLUGIN_CACHE_SEC if max_age is None else max_age
+        if hit and hit[0] == key and time.monotonic() - hit[1] < limit:
+            return hit[2]
+    plugin = plugin_for_cluster(cluster)
+    with _connected_lock:
+        _connected[cid] = (key, time.monotonic(), plugin)
+    return plugin
+
+
+def forget_plugin(cluster_id: str | None = None) -> None:
+    """Drop the cached connection of one cluster (all with None)."""
+    with _connected_lock:
+        if cluster_id is None:
+            _connected.clear()
+        else:
+            _connected.pop(cluster_id, None)

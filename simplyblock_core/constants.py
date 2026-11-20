@@ -1329,9 +1329,10 @@ DISTR_AFFINITY_FLOOR_RPC = False
 # path is available (per-controller ctrlr_loss_timeout_sec), so a takeover
 # that adds the LUN's new export as a path within the window resumes I/O
 # instead of failing it. The cluster-wide bdev_nvme defaults (1 s) stay.
-# It must cover: detecting the owner unreachable (~20 s), the
-# MULTI_ATTACH_UNREACHABLE_TAKEOVER_SEC confirmation, and the takeover up to
-# its MULTI_ATTACH_TAKEOVER_DEADLINE_SEC.
+# It must cover the slowest takeover: the regular monitor's detection of the
+# node (~20 s) when the fast probe (MULTI_ATTACH_PROBE_*) did not trigger, and
+# the takeover up to its MULTI_ATTACH_TAKEOVER_DEADLINE_SEC. The I/O stall of a
+# takeover started by the fast probe is a few seconds.
 MULTI_ATTACH_HOLD_SEC = 150
 MULTI_ATTACH_RECONNECT_DELAY_SEC = 2
 MULTI_ATTACH_FAST_IO_FAIL_SEC = MULTI_ATTACH_HOLD_SEC
@@ -1352,13 +1353,21 @@ MULTI_ATTACH_MAX_NODES = 1022
 # peers' hold, or their I/O fails before the new path exists; it gives up at
 # this deadline (seconds from its start) and the device goes unavailable.
 MULTI_ATTACH_TAKEOVER_DEADLINE_SEC = 90
-# The takeover of a node's LUNs starts once the node has been UNREACHABLE
-# this long, not when it is declared OFFLINE: the OFFLINE verdict waits for
-# every online peer to see the node's journal disconnected, which took about
-# six minutes on the multi-attach bed, far past the peers' hold. The fence
-# comes first, so a takeover of a node that is alive behind a management
-# network fault is safe; it costs a short I/O pause on that LUN.
-MULTI_ATTACH_UNREACHABLE_TAKEOVER_SEC = 15
+# Fast loss detection of a node serving LUNs (services/lun_watchdog). With
+# 1+0 every volume waits on a lost node's LUN until its takeover, so the
+# takeover starts from this probe, not from the node's status: the OFFLINE
+# verdict took minutes on the multi-attach bed. The node's SPDK RPC is probed
+# every PROBE_INTERVAL with PROBE_TIMEOUT, together with its node agent. A
+# node is lost when its agent reports SPDK not running (at once), or when
+# neither SPDK nor the agent has answered for LOST_AFTER. The fence comes
+# first, so a takeover of a node that is alive behind a management network
+# fault is safe; it costs a short I/O pause on its LUNs.
+MULTI_ATTACH_PROBE_INTERVAL_SEC = 0.5
+MULTI_ATTACH_PROBE_TIMEOUT_SEC = 0.8
+MULTI_ATTACH_LOST_AFTER_SEC = 2.0
+# The array connection a fence uses is kept this long (a new one validates
+# the credentials first: about a second on EBS).
+ARRAY_PLUGIN_CACHE_SEC = 600
 # Lease of a running takeover (one per LUN, in FDB): a holder older than this
 # is presumed dead.
 MULTI_ATTACH_TAKEOVER_LOCK_TTL_SEC = 2 * MULTI_ATTACH_TAKEOVER_DEADLINE_SEC

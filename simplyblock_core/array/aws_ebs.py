@@ -33,7 +33,8 @@ boto3 chain applies (the control plane's instance role / IRSA).
 Options: ``az`` (required), ``region`` (default: ``az`` without its letter),
 ``volume_type`` (``io2`` default, or ``io1``), ``iops`` (default 3000),
 ``encrypted`` (default true), ``kms_key_id``, ``tags`` (dict, added to every
-volume), ``poll_interval`` (s, default 2), ``timeout`` (s, default 300).
+volume), ``poll_interval`` (s, default 2), ``fence_poll_interval`` (s, default
+0.2: a fence holds the volumes), ``timeout`` (s, default 300).
 ``endpoint`` (the registration's endpoint) is an EC2 endpoint URL override
 (VPC endpoint), empty for the regional default.
 """
@@ -131,6 +132,11 @@ class AwsEbsPlugin(ArrayPlugin):
         return float(self.options.get("poll_interval", 2))
 
     @property
+    def _fence_poll(self) -> float:
+        # A fence holds every volume of a 1+0 cluster: poll its detach fast.
+        return float(self.options.get("fence_poll_interval", 0.2))
+
+    @property
     def _timeout(self) -> float:
         return float(self.options.get("timeout", 300))
 
@@ -196,7 +202,7 @@ class AwsEbsPlugin(ArrayPlugin):
             "state": vol.get("State", ""),
         }
 
-    def _wait(self, what, check):
+    def _wait(self, what, check, poll=None):
         """Poll ``check()`` until it returns a truthy value or the timeout."""
         deadline = time.monotonic() + self._timeout
         while True:
@@ -205,7 +211,7 @@ class AwsEbsPlugin(ArrayPlugin):
                 return result
             if time.monotonic() >= deadline:
                 raise ArrayError(f"aws-ebs: timed out waiting for {what}")
-            self._sleep(self._poll)
+            self._sleep(self._poll if poll is None else poll)
 
     def _free_device_name(self, instance_id) -> str:
         try:
@@ -333,7 +339,12 @@ class AwsEbsPlugin(ArrayPlugin):
             return a is not None and a.get("State") == "attached"
         self._wait(f"volume {vid} to attach to {host_id}", _attached)
 
-    def detach(self, lun_id, host_id, force=False):
+    def fence(self, lun_id, host_id):
+        """A forced detach, polled every ``fence_poll_interval`` (0.2 s)."""
+        self.detach(lun_id, host_id, force=True, poll=self._fence_poll)
+        return True
+
+    def detach(self, lun_id, host_id, force=False, poll=None):
         vol = self._owned(lun_id)
         vid = vol["VolumeId"]
         att = self._attachment(vol, host_id)
@@ -351,7 +362,7 @@ class AwsEbsPlugin(ArrayPlugin):
             v = self._describe(vid)
             a = self._attachment(v or {}, host_id)
             return a is None or a.get("State") == "detached"
-        self._wait(f"volume {vid} to detach from {host_id}", _detached)
+        self._wait(f"volume {vid} to detach from {host_id}", _detached, poll)
 
     def resize(self, lun_id, size_bytes):
         vol = self._owned(lun_id)

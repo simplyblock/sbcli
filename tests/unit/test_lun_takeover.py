@@ -231,6 +231,8 @@ class _TakeoverCase(unittest.TestCase):
         FakeArrayPlugin.reset()
         array.register_plugin(PLUGIN, FakeArrayPlugin)
         self.addCleanup(array.unregister_plugin, PLUGIN)
+        array.forget_plugin()
+        self.addCleanup(array.forget_plugin)
         self.events = []
         for target, attr, kw in (
                 (lun_takeover, "DBController", {}),
@@ -313,9 +315,10 @@ class TestTakeover(_TakeoverCase):
                 db, _ = _bed()
                 self.assertEqual(self.run_takeover(db), lun_takeover.FAILED)
                 self.assertEqual(self.dev(db).serving_node(), "node-a")
+                # The standby may have been probed (read-only, during the
+                # fence); nothing was built on any node.
                 for n in db.nodes.values():
                     self.assertEqual(n.spdk.calls, [])
-                    n.agent.lun_info.assert_not_called()
 
     def test_no_plugin_refuses(self):
         db, _ = _bed(plugin="")
@@ -380,6 +383,56 @@ class TestTakeover(_TakeoverCase):
         b.spdk.fail.clear()
         self.assertEqual(self.run_takeover(db), lun_takeover.TAKEN_OVER)
         self.assertEqual(self.dev(db).serving_node(), "node-b")
+
+    def test_standby_is_chosen_while_the_fence_runs(self):
+        import threading
+        db, _ = _bed()
+        probed = threading.Event()
+        db.nodes["node-b"].agent.lun_info.side_effect = (
+            lambda *_a, **_k: (probed.set(), ([_lun_entry()], None))[1])
+        seen = []
+
+        class SlowFence(FakeArrayPlugin):
+            def fence(self, lun_id, host_id):
+                seen.append(probed.wait(5))
+                return super().fence(lun_id, host_id)
+
+        array.register_plugin(PLUGIN, SlowFence)
+        self.assertEqual(self.run_takeover(db), lun_takeover.TAKEN_OVER)
+        self.assertEqual(seen, [True])
+
+    def test_nothing_is_built_before_the_fence_is_acknowledged(self):
+        db, _ = _bed()
+        order = []
+        b = db.nodes["node-b"]
+        create = b.spdk.bdev_aio_create
+        b.spdk.bdev_aio_create = lambda *a, **k: (order.append("build"), create(*a, **k))[1]
+
+        class Fence(FakeArrayPlugin):
+            def fence(self, lun_id, host_id):
+                order.append("fence")
+                return super().fence(lun_id, host_id)
+
+        array.register_plugin(PLUGIN, Fence)
+        self.assertEqual(self.run_takeover(db), lun_takeover.TAKEN_OVER)
+        self.assertEqual(order, ["fence", "build"])
+
+    def test_array_connection_is_reused(self):
+        db, _ = _bed()
+        self.run_takeover(db)
+        db.nodes["node-b"].status = StorageNode.STATUS_OFFLINE
+        self.assertEqual(self.run_takeover(db, failed="node-b"), lun_takeover.TAKEN_OVER)
+        self.assertEqual(len(FakeArrayPlugin.connected), 1)
+
+    def test_fence_failure_retried_on_a_new_connection(self):
+        db, _ = _bed()
+        stale, fresh = MagicMock(), MagicMock()
+        stale.fence.side_effect = RuntimeError("ExpiredToken")
+        fresh.fence.return_value = True
+        with patch.object(array, "cached_plugin_for_cluster", side_effect=[stale, fresh]),                 patch.object(array, "forget_plugin") as forget:
+            self.assertEqual(self.run_takeover(db), lun_takeover.TAKEN_OVER)
+        forget.assert_called_once_with("cluster-1")
+        fresh.fence.assert_called_once_with(WWN, "host-node-a")
 
     def test_concurrent_takeover_is_refused(self):
         db, _ = _bed()
@@ -707,15 +760,14 @@ if __name__ == "__main__":
 # --------------------------------------------- multi-attach bed findings, F1
 
 class TestUnreachableTrigger(unittest.TestCase):
-    """The takeover starts once a node has been UNREACHABLE for
-    MULTI_ATTACH_UNREACHABLE_TAKEOVER_SEC, not when it is declared OFFLINE:
-    on the bed the OFFLINE verdict took ~6 min, far past the peers' hold."""
+    """The regular monitor starts the takeover as soon as it sees a node
+    UNREACHABLE (backstop of services/lun_watchdog), not when it is declared
+    OFFLINE: on the bed the OFFLINE verdict took ~6 min, far past the peers'
+    hold. No confirmation wait: the fence makes an early takeover safe."""
 
     def setUp(self):
         from simplyblock_core.services import storage_node_monitor as mon
         self.mon = mon
-        mon._unreachable_since.clear()
-        self.addCleanup(mon._unreachable_since.clear)
         self.db, self.dev = _bed()
         self.db.get_storage_node_by_id("node-a").status = StorageNode.STATUS_UNREACHABLE
         for target, attr, kw in ((mon, "db", {"new": self.db}),
@@ -726,31 +778,24 @@ class TestUnreachableTrigger(unittest.TestCase):
                 self.start = started
             self.addCleanup(p.stop)
 
-    def _trigger(self, after):
-        node = self.db.get_storage_node_by_id("node-a")
-        with patch.object(self.mon.time, "monotonic", return_value=1000.0):
-            self.mon._take_over_luns_of_unreachable(node)
-        with patch.object(self.mon.time, "monotonic", return_value=1000.0 + after):
-            self.mon._take_over_luns_of_unreachable(node)
-
-    def test_not_before_the_confirmation_time(self):
-        self._trigger(constants.MULTI_ATTACH_UNREACHABLE_TAKEOVER_SEC - 1)
-        self.start.assert_not_called()
-
-    def test_after_the_confirmation_time(self):
-        self._trigger(constants.MULTI_ATTACH_UNREACHABLE_TAKEOVER_SEC)
+    def test_at_once(self):
+        self.mon._take_over_luns_of_unreachable(self.db.get_storage_node_by_id("node-a"))
         self.start.assert_called_once_with(DEV_ID, "node-a", "node unreachable")
 
     def test_regular_cluster_never(self):
         self.db.cluster.multi_attach = False
-        self._trigger(10 * constants.MULTI_ATTACH_UNREACHABLE_TAKEOVER_SEC)
+        self.mon._take_over_luns_of_unreachable(self.db.get_storage_node_by_id("node-a"))
         self.start.assert_not_called()
 
-    def test_hold_covers_detection_trigger_and_takeover(self):
-        # ~20 s to see the node unreachable, the trigger delay, the takeover deadline
+    def test_no_confirmation_wait_left(self):
+        self.assertFalse(hasattr(constants, "MULTI_ATTACH_UNREACHABLE_TAKEOVER_SEC"))
+        self.assertFalse(hasattr(self.mon, "_unreachable_since"))
+
+    def test_hold_covers_detection_and_takeover(self):
+        # ~20 s for the regular monitor to see the node unreachable, then the
+        # takeover deadline.
         self.assertGreater(constants.MULTI_ATTACH_HOLD_SEC,
-                           20 + constants.MULTI_ATTACH_UNREACHABLE_TAKEOVER_SEC
-                           + constants.MULTI_ATTACH_TAKEOVER_DEADLINE_SEC)
+                           20 + constants.MULTI_ATTACH_TAKEOVER_DEADLINE_SEC)
 
 
 class TestRetireStaleLocalStack(unittest.TestCase):

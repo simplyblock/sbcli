@@ -10,7 +10,8 @@ fails, its peers' controllers ``remote_alceml_<uuid>`` hold I/O for
 2. picks a standby: the owner's LVS secondary, else its tertiary, else the
    owner itself; ONLINE and not fenced from this LUN;
 3. verifies through the standby's node agent that it sees the LUN and that
-   block 0 carries the alceml signature (read-only);
+   block 0 carries the alceml signature (read-only); 2 and 3 run while the
+   fence is applied, nothing is built on the standby before its ack;
 4. on the standby builds the base bdev, the alceml OPEN-ONLY
    (``pba_init_mode=1``; 2/3 would format the LUN and destroy its data), the
    PT bdev and the device subsystem under the same NQN, with the standby's
@@ -18,7 +19,8 @@ fails, its peers' controllers ``remote_alceml_<uuid>`` hold I/O for
 5. records the standby as the serving node (atomically; the device stays
    ONLINE, no unavailable broadcast, no cluster-map change);
 6. adds the standby's export as a path of ``remote_alceml_<uuid>`` on every
-   ONLINE node (the standby too: its loopback), where the held I/O resumes;
+   ONLINE node (the standby too: its loopback), all in parallel, where the
+   held I/O resumes;
 7. detaches the failed node's path from those controllers so it never
    reconnects.
 
@@ -44,6 +46,7 @@ import socket
 import threading
 import time
 import uuid as uuid_mod
+from concurrent.futures import ThreadPoolExecutor
 
 from simplyblock_core import array, constants, multi_attach, utils
 from simplyblock_core.controllers import events_controller as ec
@@ -217,14 +220,21 @@ def _take_over_locked(db, cluster, device_id, failed_node_id, reason, deadline) 
     old_ips = [ip.strip() for ip in (dev.nvmf_ip or "").split(",") if ip.strip()]
     old_port = dev.nvmf_port
 
+    # 2 + 3 run while the fence is applied: choosing the standby only reads
+    # (the node agent's LUN inventory), and nothing is built on it before
+    # the array has acknowledged the fence. Every volume of a 1+0 cluster
+    # waits on this LUN.
+    pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"standby-{device_id[:8]}")
+    choice = pool.submit(_choose_standby, owner, dev, failed_node_id, nodes_by_id, deadline)
+    pool.shutdown(wait=False)
     try:
-        # 1. Fence -- before anything else.
+        # 1. Fence -- before anything else is changed.
         _fence(cluster, dev, failed)
         _record_fenced(db, owner, device_id, failed_node_id)
         _check_deadline(deadline, "choosing a standby")
 
         # 2 + 3. A standby that can read the LUN.
-        standby, path, why = _choose_standby(owner, dev, failed_node_id, nodes_by_id, deadline)
+        standby, path, why = choice.result(timeout=max(1.0, deadline - time.monotonic()))
         if standby is None:
             msg = (f"LUN {dev.lun_wwn} of device {device_id} not taken over from node "
                    f"{failed_node_id}: no standby can read it ({why}); holding I/O until "
@@ -283,18 +293,27 @@ def _fence(cluster, dev, failed):
     lun = multi_attach.array_lun_ref(dev)
     if not lun:
         raise TakeoverError("the device has no LUN WWN to fence")
-    try:
-        plugin = array.plugin_for_cluster(cluster)
-    except array.ArrayNotConfigured:
-        raise TakeoverError(
-            "no array plugin is configured (cluster array_plugin); a LUN is never "
-            "taken over without fencing its serving node")
-    except array.ArrayError as e:
-        raise TakeoverError(f"array plugin unavailable: {e}")
-    try:
-        ok = plugin.fence(lun, host)
-    except Exception as e:                                  # noqa: BLE001
-        raise TakeoverError(f"array fence of {host} on LUN {lun} failed: {e}")
+    ok = None
+    for fresh in (False, True):
+        if fresh:
+            # The cached connection may have gone stale (expired session).
+            array.forget_plugin(cluster.get_id())
+        try:
+            plugin = array.cached_plugin_for_cluster(cluster)
+        except array.ArrayNotConfigured:
+            raise TakeoverError(
+                "no array plugin is configured (cluster array_plugin); a LUN is never "
+                "taken over without fencing its serving node")
+        except array.ArrayError as e:
+            raise TakeoverError(f"array plugin unavailable: {e}")
+        try:
+            ok = plugin.fence(lun, host)
+            break
+        except Exception as e:                              # noqa: BLE001
+            if fresh:
+                raise TakeoverError(f"array fence of {host} on LUN {lun} failed: {e}")
+            logger.warning("LUN %s: fence of %s failed (%s); again on a new array connection",
+                           lun, host, e)
     if not ok:
         raise TakeoverError(f"array did not acknowledge the fence of {host} on LUN {lun}")
     logger.info("LUN %s: node %s (%s) fenced at the array", lun, failed.get_id(), host)
@@ -534,23 +553,23 @@ def _failed_paths(failed, old_ips, old_port):
 
 def _switch_paths(db, cluster_id, dev, standby, failed, failed_paths) -> list:
     """Add the standby's export as a path of ``remote_alceml_<uuid>`` on every
-    ONLINE node, then detach the failed node's path there. Returns the ids
-    of the nodes that have the new path."""
+    ONLINE node, then detach the failed node's path there; on all nodes in
+    parallel. Returns the ids of the nodes that have the new path."""
     name = f"remote_{dev.alceml_bdev}"
     trtype = _transport(standby) or "TCP"
     new_ips = [ip.strip() for ip in (dev.nvmf_ip or "").split(",") if ip.strip()]
     dead_ips, dead_port, dead_trtype = failed_paths
     dead_ips = [ip for ip in dead_ips if ip not in new_ips]
     failed_id = failed.get_id() if failed is not None else None
-    added = []
-    for node in db.get_storage_nodes_by_cluster_id(cluster_id):
-        if node.status != StorageNode.STATUS_ONLINE or node.get_id() == failed_id:
-            continue
+    nodes = [n for n in db.get_storage_nodes_by_cluster_id(cluster_id)
+             if n.status == StorageNode.STATUS_ONLINE and n.get_id() != failed_id]
+
+    def _one(node):
         try:
             rpc = node.rpc_client(timeout=5, retry=1)
         except Exception as e:                              # noqa: BLE001
             logger.warning("LUN takeover: no RPC client for %s: %s", node.get_id(), e)
-            continue
+            return False
         ok = False
         for ip in new_ips:
             try:
@@ -564,8 +583,7 @@ def _switch_paths(db, cluster_id, dev, standby, failed, failed_paths) -> list:
         if not ok:
             logger.error("LUN takeover: %s on %s has no path to the new export; the health "
                          "check reconnects it from the record", name, node.get_id())
-            continue
-        added.append(node.get_id())
+            return False
         try:
             rpc.bdev_nvme_set_multipath_policy(f"{name}n1", "active_passive")
         except Exception as e:                              # noqa: BLE001
@@ -579,7 +597,15 @@ def _switch_paths(db, cluster_id, dev, standby, failed, failed_paths) -> list:
                 # Usually: the path is already gone (the hold destructed it).
                 logger.info("LUN takeover: old path %s of %s on %s not detached: %s",
                             ip, name, node.get_id(), e)
-    return added
+        return True
+
+    if not nodes:
+        return []
+    # All nodes at once: the held I/O of each resumes when its path is added.
+    with ThreadPoolExecutor(max_workers=min(16, len(nodes)),
+                            thread_name_prefix=f"paths-{dev.get_id()[:8]}") as pool:
+        results = list(pool.map(_one, nodes))
+    return [n.get_id() for n, ok in zip(nodes, results) if ok]
 
 
 def retire_stale_local_stack(node) -> list:

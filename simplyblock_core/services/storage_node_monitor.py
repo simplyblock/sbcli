@@ -2037,21 +2037,13 @@ def set_node_offline(node):
             logger.error("add_node_to_auto_restart for %s failed: %s", node.get_id(), ar_e)
 
 
-# node id -> monotonic time it was first seen UNREACHABLE in the current
-# episode (multi-attach LUN takeover trigger; see
-# constants.MULTI_ATTACH_UNREACHABLE_TAKEOVER_SEC). Cleared on any other status.
-_unreachable_since: dict = {}
-
-
 def _take_over_luns_of_unreachable(node):
     """Multi-attach clusters (only): start the takeover of the LUNs a node
-    serves once it has been UNREACHABLE for MULTI_ATTACH_UNREACHABLE_TAKEOVER_SEC.
-    The takeover fences the node at the array first; each LUN gets one
-    thread (_start_lun_takeover is idempotent across monitor cycles)."""
+    serves as soon as it is UNREACHABLE. Usually the fast probe
+    (services/lun_watchdog) has started it seconds earlier; this is its
+    backstop. The takeover fences the node at the array first; each LUN gets
+    one thread (_start_lun_takeover is idempotent across monitor cycles)."""
     node_id = node.get_id()
-    since = _unreachable_since.setdefault(node_id, time.monotonic())
-    if time.monotonic() - since < constants.MULTI_ATTACH_UNREACHABLE_TAKEOVER_SEC:
-        return
     try:
         cluster = db.get_cluster_by_id(node.cluster_id)
     except Exception as e:                                  # noqa: BLE001
@@ -2908,10 +2900,6 @@ PORT_PUBLISH_INTERVAL_SEC = 60
 
 def check_node(snode):
     snode = db.get_storage_node_by_id(snode.get_id())
-    if snode.status != StorageNode.STATUS_UNREACHABLE:
-        # Ends an UNREACHABLE episode: a later one starts the multi-attach
-        # LUN takeover timer afresh (_take_over_luns_of_unreachable).
-        _unreachable_since.pop(snode.get_id(), None)
     if snode.status == StorageNode.STATUS_ONLINE:
         storage_network.publish_ports(snode, at_most_every=PORT_PUBLISH_INTERVAL_SEC)
         _reintegrate_fenced_luns(snode)
@@ -3374,6 +3362,9 @@ def main():
     logger.info("Starting node monitor")
     threads_maps: dict[str, threading.Thread] = {}
     _start_housekeeping()
+    # Multi-attach clusters only; idle otherwise.
+    from simplyblock_core.services import lun_watchdog
+    lun_watchdog.start(_start_lun_takeover)
 
     while True:
         clusters = db.get_clusters()
