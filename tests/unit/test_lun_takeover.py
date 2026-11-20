@@ -1108,6 +1108,32 @@ class TestFenceByReservation(_TakeoverCase):
         # No cleanup calls into the dead standby.
         self.assertEqual(b.spdk.ops("bdev_alceml_delete"), [])
 
+    def test_dead_standby_costs_no_activation_wait(self):
+        # 2026-11-20 FTT2 bed, case 7 again: the whole 5 s activation wait
+        # and an array fence were spent on a rebooting standby (13 s stall).
+        db, _ = self._bed()
+        b, c = db.nodes["node-b"], db.nodes["node-c"]
+
+        def b_gone(name):
+            b.spdk.down = True
+            raise ConnectionError("Could not reach remote")
+        b.spdk.alceml_get_role = b_gone
+        self._roles(c, {"role": "active", "state": "active", "epoch": 3})
+        fenced_before_c = []
+        create_c = c.spdk.bdev_alceml_create
+        c.spdk.bdev_alceml_create = lambda *a, **k: (
+            fenced_before_c.append(list(FakeArrayPlugin.calls)), create_c(*a, **k))[1]
+        t0 = time.monotonic()
+        with patch.object(constants, "MULTI_ATTACH_ACTIVATION_WAIT_SEC", 5):
+            self.assertEqual(self.run_takeover(db), lun_takeover.TAKEN_OVER)
+        self.assertLess(time.monotonic() - t0, 2.0)
+        self.assertEqual(self.dev(db).serving_node(), "node-c")
+        # node-c preempted by reservation: no array fence before it opened.
+        self.assertEqual(fenced_before_c, [[]])
+        self.assertEqual(len(b.spdk.ops("bdev_alceml_create")), 1)
+        self._wait_background_fence()
+        self.assertEqual(FakeArrayPlugin.calls, [("fence", WWN, "host-node-a")])
+
     def test_no_standby_left_fails(self):
         db, _ = self._bed()
         def dies(spdk):

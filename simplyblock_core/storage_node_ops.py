@@ -4411,6 +4411,18 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                         lun_capacity += array_controller.journal_lun_size(cluster)
                 minimum_sys_memory = max(minimum_sys_memory,
                                          utils.node_config_min_sys_memory(node_config, lun_capacity))
+                if multi_attach.warm_standby_cluster(cluster):
+                    # The node will also hold the page map of the LUNs it is a
+                    # warm standby of: FTT of them, each the size of its own
+                    # (LUN sizes are uniform; growth is uniform-only). Sized
+                    # here, the standbys open right away instead of waiting
+                    # for the node's first restart (2026-11-20 bed: every
+                    # standby refused for budget after add-node).
+                    own = sum(int(e.get("size") or 0)
+                              for e in node_config.get("lblk_devices") or []) + lun_capacity
+                    ftt = max(1, int(getattr(cluster, "max_fault_tolerance", 1) or 1))
+                    minimum_sys_memory = max(minimum_sys_memory, utils.node_config_min_sys_memory(
+                        node_config, lun_capacity + ftt * own))
             else:
                 ssd_pcis = node_config.get("ssd_pcis") or []
                 capacity = utils.nvme_capacity_from_node_info(node_info.get("nvme_devices"), ssd_pcis)
@@ -4421,14 +4433,10 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                         "devices visible (unbind them from SPDK) or pass spdk_sys_mem.", ssd_pcis, node_addr)
                     return False
                 minimum_sys_memory = max(minimum_sys_memory, utils.sys_memory_for_capacity(capacity))
-        # Warm-standby multi-attach clusters (Cluster.multi_attach_warm_standby):
-        # the node will also hold the page map of every LUN it becomes a warm
-        # standby of, i.e. sys_memory_for_capacity(own + standby LUN capacity).
-        # That set (the LUNs of the nodes whose LVS secondary/tertiary this node
-        # becomes) is not known yet here; it is counted from the node's first
-        # restart on (_warm_standby_capacity), and until then
-        # lun_takeover.ensure_warm_standbys opens no standby beyond this budget
-        # and raises a cluster event instead.
+        # Warm-standby multi-attach clusters: the lblk branch above sizes for
+        # FTT standby LUNs of the node's own size; from the first restart on
+        # the actual set counts (_warm_standby_capacity), and
+        # lun_takeover.ensure_warm_standbys never opens beyond the budget.
         max_lvol = node_config.get("max_lvol")
         # Clamp rather than fail: a config file generated before the cap was
         # enforced (or hand-edited) can carry a larger value, and refusing the

@@ -366,6 +366,11 @@ def warm_standby_devices(cluster, node_id, nodes, statuses=_WARM_STANDBY_DEVICE_
     return out
 
 
+def warm_standby_cluster(cluster) -> bool:
+    """A multi-attach cluster created with warm standbys."""
+    return is_multi_attach(cluster) and getattr(cluster, "multi_attach_warm_standby", False) is True
+
+
 def warm_standby_capacity(cluster, node_id, nodes) -> int:
     """Raw capacity (bytes) of the LUNs ``node_id`` keeps (or will keep, once
     they are back online) a warm standby of: the capacity whose alceml page

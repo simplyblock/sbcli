@@ -97,6 +97,17 @@ class TakeoverError(Exception):
     """A takeover step failed; the message says which and why."""
 
 
+class StandbyUnreachable(TakeoverError):
+    """The standby's SPDK stopped answering during the export: the next
+    standby is tried at once (no retry on it, no array fence first)."""
+
+
+#: Consecutive connection errors while waiting for an activation after which
+#: the standby counts as gone (the poll interval is 50 ms, each call times out
+#: after 1 s).
+ACTIVATION_CONNECTION_ERRORS = 2
+
+
 def _local_lock(device_id) -> threading.Lock:
     with _local_locks_guard:
         return _local_locks.setdefault(device_id, threading.Lock())
@@ -275,14 +286,18 @@ def _take_over_locked(db, cluster, device_id, failed_node_id, reason, deadline) 
                 break
             except TakeoverError as e:
                 sid = standby.get_id()
-                if by_reservation:
-                    # The reservation was not taken: fence at the array.
+                gone = isinstance(e, StandbyUnreachable)
+                if by_reservation and not gone:
+                    # The standby answers but did not take the reservation:
+                    # fence at the array. A standby that is gone fenced
+                    # nothing; the next one opens with its own key and
+                    # preempts, so it is tried at once.
                     logger.warning("LUN takeover of %s: fence by reservation failed (%s); "
                                    "fencing at the array", device_id, e)
                     by_reservation = False
                     _fence(cluster, dev, failed)
                     _record_fenced(db, owner, device_id, failed_node_id)
-                if sid not in retried and _reachable(standby):
+                if not gone and sid not in retried and _reachable(standby):
                     retried.add(sid)
                     continue
                 tried.add(sid)
@@ -441,11 +456,18 @@ def _wait_active(rpc, alceml, deadline):
     holds the reservation and serves. Raises TakeoverError."""
     limit = min(deadline, time.monotonic() + constants.MULTI_ATTACH_ACTIVATION_WAIT_SEC)
     last = None
+    unreachable = 0
     while True:
         try:
             last = rpc.alceml_get_role(alceml) or {}
+            unreachable = 0
         except Exception as e:                              # noqa: BLE001
             last = {"error": str(e)}
+            unreachable += 1
+            if unreachable >= ACTIVATION_CONNECTION_ERRORS:
+                # The standby is gone (2026-11-20 FTT2 bed: a rebooting
+                # standby cost the whole wait, 5 s, of a 13 s stall).
+                raise StandbyUnreachable(f"alceml {alceml}: SPDK not answering ({e})")
         if last.get("role") == "active" and last.get("state") == "active":
             logger.info("LUN takeover: %s holds the reservation (epoch %s, activation %s ms)",
                         alceml, last.get("epoch"), last.get("last_activation_ms"))
@@ -676,14 +698,18 @@ def _export_on_standby(db, cluster, standby, dev, path, deadline, allow_warm=Tru
             if not rpc.nvmf_subsystem_add_ns(nqn, pt, multi_attach.namespace_uuid(dev),
                                              nguid=multi_attach.namespace_nguid(dev)):
                 raise TakeoverError(f"namespace {pt} not added to {nqn} on {sid}")
-    except Exception:
+    except StandbyUnreachable:
+        logger.warning("LUN takeover cleanup on %s skipped: SPDK not answering (%s)",
+                       sid, [name for _, name in created])
+        raise
+    except Exception as e:
         if created and not _reachable(standby):
             # Its SPDK is gone: what it held went with it (each call would
             # only wait out the retries).
             logger.warning("LUN takeover cleanup on %s skipped: SPDK not answering (%s)",
                            sid, [name for _, name in created])
-        else:
-            _teardown(rpc, sid, created)
+            raise StandbyUnreachable(f"standby {sid}: {e}") from e
+        _teardown(rpc, sid, created)
         raise
     aliases = (pt_info or {}).get("aliases") or []
     return {
