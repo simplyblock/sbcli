@@ -360,7 +360,7 @@ def _delete_source_if_requested(task):
         while True:
             blocked = ns_host_guard.removal_blocked(
                 getattr(src_lvol, "nqn", ""), ns_host_guard.volume_node_ids(src_lvol),
-                _target_node_ids(task.function_params),
+                _live_target_node_ids(src_lvol, task.function_params),
                 f"deleting migrated-away source {src_lvol_id}")
             if not blocked or time.time() >= deadline:
                 break
@@ -2119,6 +2119,28 @@ def _target_node_ids(params):
         return ns_host_guard.volume_node_ids(db.get_lvol_by_id(clone_id))
     except KeyError:
         return []
+
+
+def _live_target_node_ids(src_lvol, params):
+    """The nodes exporting the volume the source migrated to.
+
+    After the cutover the prepared clone's record is gone: the volume runs
+    under a new record carrying the same NQN. Bed bf29 (2026-11-20): the
+    source-delete guard looked the target up by tgt_lvol_id, found nothing,
+    took every host as stranded and kept the migrated-away source of two
+    volumes (a full volume leaked per migration, and a same-named volume left
+    on the cluster the next round migrates back to). So the target is found
+    by NQN: every other live volume exporting it, plus the clone if it still
+    exists."""
+    ids = list(_target_node_ids(params))
+    nqn = getattr(src_lvol, "nqn", "")
+    if nqn:
+        for cluster in db.get_clusters():
+            for lv in db.get_lvols(cluster.get_id()):
+                if (lv.get_id() != src_lvol.get_id() and getattr(lv, "nqn", "") == nqn
+                        and lv.status not in (LVol.STATUS_IN_DELETION, LVol.STATUS_DELETED)):
+                    ids.extend(ns_host_guard.volume_node_ids(lv))
+    return list(dict.fromkeys(ids))
 
 
 def _source_node_ids(lvol_id):
