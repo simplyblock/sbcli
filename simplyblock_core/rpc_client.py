@@ -980,7 +980,8 @@ class RPCClient:
                            alceml_cpu_mask="", alceml_worker_cpu_mask="", pba_page_size=2097152,
                            write_protection=False, full_page_unmap=False,
                            checksum_method=0, cache_size=0, cache_eviction_threshold=0,
-                           force_4k_atomic=False, stuck_io_timeout_ms=0):
+                           force_4k_atomic=False, stuck_io_timeout_ms=0,
+                           reservation_key=0, standby=False):
         params = {
             "name": alceml_name,
             "cntr_path": nvme_name,
@@ -1022,7 +1023,19 @@ class RPCClient:
         # devices, whose array LUN needs longer than multipath failover.
         if stuck_io_timeout_ms:
             params["stuck_io_timeout_ms"] = int(stuck_io_timeout_ms)
+        # LUN failover (multi-attach): a non-zero key makes the instance
+        # register it on the LUN at open, and an active one (standby False)
+        # take the reservation, preempting the old holder (fence). Sent only
+        # when set: older data planes reject the parameters.
+        if reservation_key:
+            params["reservation_key"] = int(reservation_key)
+        if standby:
+            params["standby"] = True
         return self._request("bdev_alceml_create", **params)
+
+    def alceml_get_role(self, name):
+        """LUN failover state of an alceml (role, state, epoch, keys, ...)."""
+        return self._request("alceml_get_role", name=name)
        
     def bdev_distrib_create(self, name, vuid, ndcs, npcs, num_blocks, block_size, jm_names,
                             chunk_size, ha_comm_addrs=None, ha_inode_self=None, pba_page_size=2097152,

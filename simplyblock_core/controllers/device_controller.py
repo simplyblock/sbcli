@@ -804,7 +804,7 @@ def _def_create_device_stack(device_obj, snode, force=False, clear_data=False):
                 checksum_method=checksum_method,
                 cache_size=cache_size,
                 cache_eviction_threshold=cache_eviction_threshold,
-                **multi_attach.alceml_create_kwargs(device_obj),
+                **multi_attach.alceml_create_kwargs(device_obj, snode, cluster),
             )
         except RPCException as e:
             logger.error("Failed to create alceml bdev %s: %s", alceml_name, e)

@@ -227,10 +227,15 @@ def _take_over_locked(db, cluster, device_id, failed_node_id, reason, deadline) 
     pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"standby-{device_id[:8]}")
     choice = pool.submit(_choose_standby, owner, dev, failed_node_id, nodes_by_id, deadline)
     pool.shutdown(wait=False)
+    by_reservation = False
     try:
-        # 1. Fence -- before anything else is changed.
-        _fence(cluster, dev, failed)
-        _record_fenced(db, owner, device_id, failed_node_id)
+        # 1. Fence -- before anything else is changed. With reservations the
+        # standby's alceml fences at open (preempting the failed node's
+        # reservation, step 4) and the array fence follows off the I/O path.
+        by_reservation = _fence_by_reservation(cluster, dev)
+        if not by_reservation:
+            _fence(cluster, dev, failed)
+            _record_fenced(db, owner, device_id, failed_node_id)
         _check_deadline(deadline, "choosing a standby")
 
         # 2 + 3. A standby that can read the LUN.
@@ -245,7 +250,24 @@ def _take_over_locked(db, cluster, device_id, failed_node_id, reason, deadline) 
         _check_deadline(deadline, f"exporting the LUN on {standby.get_id()}")
 
         # 4. Open-only export on the standby.
-        export = _export_on_standby(db, cluster, standby, dev, path, deadline)
+        try:
+            export = _export_on_standby(db, cluster, standby, dev, path, deadline)
+        except TakeoverError as e:
+            if not by_reservation:
+                raise
+            # The reservation was not taken: fence at the array, then once more.
+            logger.warning("LUN takeover of %s: fence by reservation failed (%s); fencing "
+                           "at the array", device_id, e)
+            by_reservation = False
+            _fence(cluster, dev, failed)
+            _record_fenced(db, owner, device_id, failed_node_id)
+            _check_deadline(deadline, f"exporting the LUN on {standby.get_id()} again")
+            export = _export_on_standby(db, cluster, standby, dev, path, deadline)
+        if by_reservation:
+            # Fenced by the reservation: recorded now, detached at the array
+            # in the background (the attachment reconcile detaches it too).
+            _record_fenced(db, owner, device_id, failed_node_id)
+            _fence_in_background(cluster, dev, failed)
         _check_deadline(deadline, "recording the takeover")
 
         # 5 (design step 6). Record, atomically.
@@ -317,6 +339,44 @@ def _fence(cluster, dev, failed):
     if not ok:
         raise TakeoverError(f"array did not acknowledge the fence of {host} on LUN {lun}")
     logger.info("LUN %s: node %s (%s) fenced at the array", lun, failed.get_id(), host)
+
+
+def _fence_by_reservation(cluster, dev) -> bool:
+    """Whether this takeover fences by persistent reservation: the device's
+    alceml instances run with keys (NVMeDevice.lun_reservations, decided
+    with the array's capability when the LUN was added)."""
+    return multi_attach.reservations_enabled(cluster, dev)
+
+
+def _fence_in_background(cluster, dev, failed):
+    """The array fence after a fence by reservation: off the I/O path, for
+    good measure (the reservation already rejects the node's writes)."""
+    def _run():
+        try:
+            _fence(cluster, dev, failed)
+        except TakeoverError as e:
+            logger.warning("LUN %s: array fence of %s after the reservation failed: %s; the "
+                           "attachment reconcile detaches it", dev.lun_wwn, failed.get_id(), e)
+    threading.Thread(target=_run, name=f"fence-{dev.get_id()[:8]}", daemon=True).start()
+
+
+def _wait_active(rpc, alceml, deadline):
+    """Wait until ``alceml`` (created with a reservation key, not standby)
+    holds the reservation and serves. Raises TakeoverError."""
+    limit = min(deadline, time.monotonic() + constants.MULTI_ATTACH_ACTIVATION_WAIT_SEC)
+    last = None
+    while True:
+        try:
+            last = rpc.alceml_get_role(alceml) or {}
+        except Exception as e:                              # noqa: BLE001
+            last = {"error": str(e)}
+        if last.get("role") == "active" and last.get("state") == "active":
+            logger.info("LUN takeover: %s holds the reservation (epoch %s, activation %s ms)",
+                        alceml, last.get("epoch"), last.get("last_activation_ms"))
+            return
+        if last.get("state") == "act_failed" or time.monotonic() >= limit:
+            raise TakeoverError(f"alceml {alceml} did not take the reservation: {last}")
+        time.sleep(0.05)
 
 
 def _record_fenced(db, owner, device_id, node_id):
@@ -424,6 +484,7 @@ def _export_on_standby(db, cluster, standby, dev, path, deadline) -> dict:
             raise TakeoverError(f"base bdev {base} on {sid} is {size} bytes, the device {dev.size}")
 
         alceml = dev.alceml_bdev or f"alceml_{dev.get_id()}"
+        kwargs = multi_attach.alceml_create_kwargs(dev, standby, cluster)
         if not rpc.bdev_get(alceml):
             checksum_method, cache_size, cache_eviction = utils.alceml_checksum_params(cluster, dev)
             ok = standby.create_alceml(
@@ -436,11 +497,14 @@ def _export_on_standby(db, cluster, standby, dev, path, deadline) -> dict:
                 cache_size=cache_size,
                 cache_eviction_threshold=cache_eviction,
                 force_4k_atomic=getattr(cluster, 'atomic_4k', False),
-                **multi_attach.alceml_create_kwargs(dev),
+                **kwargs,
             )
             if not ok:
                 raise TakeoverError(f"alceml {alceml} not opened on {sid}")
             created.append(("alceml", alceml))
+        if kwargs.get("reservation_key"):
+            # Opened active with a key: it preempts the old holder (fence).
+            _wait_active(rpc, alceml, deadline)
             try:
                 from simplyblock_core.controllers import qos_controller
                 rpc.alceml_set_qos_weights(qos_controller.get_qos_weights_list(cluster.get_id()))

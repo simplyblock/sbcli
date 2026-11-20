@@ -21,9 +21,12 @@ cluster without the flag, so regular clusters are unchanged.
 
 from __future__ import annotations
 
+import logging
 import uuid as uuid_mod
 
 from simplyblock_core import constants
+
+logger = logging.getLogger(__name__)
 
 #: The NQN infix that marks a host-independent multi-attach device subsystem.
 LUN_NQN_INFIX = ":lun:"
@@ -144,12 +147,58 @@ def attach_controller_kwargs(device) -> dict:
     }
 
 
-def alceml_create_kwargs(device) -> dict:
+def reservation_key(node) -> int:
+    """The persistent reservation key of ``node``'s alceml instances on array
+    LUNs: a node id unique in the cluster in the upper 32 bits (its
+    controller-ID block + 1, never 0); the instance sets the lower 32 bits
+    (its activation epoch). 0 when the node has no block yet."""
+    block = getattr(node, "cntlid_block", -1)
+    if not isinstance(block, int) or block < 0:
+        return 0
+    return (block + 1) << 32
+
+
+def reservations_supported(cluster, device) -> bool:
+    """Whether a new LUN device gets reservations (NVMeDevice.lun_reservations):
+    MULTI_ATTACH_RESERVATIONS on, the cluster's array honours reservations
+    (plugin capability supports_reservations), and the device's inline
+    checksum is not in fallback mode (the data plane refuses a key with
+    checksum_validation_method 2)."""
+    if not (constants.MULTI_ATTACH_RESERVATIONS and is_multi_attach(device)):
+        return False
+    from simplyblock_core import array, utils
+    if utils.alceml_checksum_params(cluster, device)[0] == 2:
+        return False
+    if not getattr(cluster, "array_plugin", ""):
+        return False
+    try:
+        caps = array.cached_plugin_for_cluster(cluster).capabilities() or {}
+    except Exception as e:                                  # noqa: BLE001
+        logger.warning("Array capabilities unavailable (%s); LUN %s without reservations",
+                       e, getattr(device, "lun_wwn", ""))
+        return False
+    return bool(caps.get("supports_reservations"))
+
+
+def reservations_enabled(cluster, device) -> bool:
+    """Whether the alceml of ``device`` runs with a reservation key: as
+    decided when it was marked a LUN (NVMeDevice.lun_reservations), the same
+    for every open of it."""
+    return is_multi_attach(device) and getattr(device, "lun_reservations", False) is True
+
+
+def alceml_create_kwargs(device, node=None, cluster=None) -> dict:
     """Extra ``bdev_alceml_create`` kwargs for a multi-attach device's alceml
-    (the stuck-I/O timeout); nothing otherwise."""
+    on ``node``: the stuck-I/O timeout, and the reservation key when
+    reservations are enabled (reservations_enabled); nothing otherwise."""
     if not is_multi_attach(device):
         return {}
-    return {"stuck_io_timeout_ms": constants.MULTI_ATTACH_ALCEML_STUCK_IO_MS}
+    out = {"stuck_io_timeout_ms": constants.MULTI_ATTACH_ALCEML_STUCK_IO_MS}
+    if node is not None and cluster is not None and reservations_enabled(cluster, device):
+        key = reservation_key(node)
+        if key:
+            out["reservation_key"] = key
+    return out
 
 
 def mark_lun_devices(cluster, snode, devices, blk_entries) -> None:
@@ -167,6 +216,7 @@ def mark_lun_devices(cluster, snode, devices, blk_entries) -> None:
         if entry.get("journal"):
             continue
         dev.multi_attach = True
+        dev.lun_reservations = reservations_supported(cluster, dev)
         # A LUN the array plugin created carries the identity the plugin
         # reported for it (array_controller.provision_node_lun); it is one of
         # the WWN / serial the host reports, so lun_keys matches either way.

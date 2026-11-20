@@ -156,6 +156,12 @@ class NVMeDevice(BaseModel):
     #: unfences on its own: a fenced node's host may still hold queued
     #: writes. Such a node is no takeover candidate for this LUN.
     fenced_node_ids: list = default_factory(list)
+    #: The LUN's alceml instances run with persistent reservation keys
+    #: (multi_attach.reservation_key): the serving one holds the reservation
+    #: and a takeover fences by preempting it. Decided once, when the device
+    #: is first marked a LUN (multi_attach.mark_lun_devices): a LUN formatted
+    #: with a key cannot be opened without one.
+    lun_reservations: bool = False
     #: The array's id of the LUN when the cluster's array plugin created it
     #: (controllers/array_controller); "" for a LUN the operator presented.
     #: Only such LUNs are attached, detached, grown and deleted by simplyblock.

@@ -2061,7 +2061,7 @@ def _create_storage_device_stack(rpc_client, nvme, snode: StorageNode, after_res
         cache_size=cache_size,
         cache_eviction_threshold=cache_eviction_threshold,
         force_4k_atomic=getattr(cluster, 'atomic_4k', False),
-        **multi_attach.alceml_create_kwargs(nvme),
+        **multi_attach.alceml_create_kwargs(nvme, snode, cluster),
     )
 
     if not ret:

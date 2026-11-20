@@ -1353,6 +1353,21 @@ MULTI_ATTACH_MAX_NODES = 1022
 # peers' hold, or their I/O fails before the new path exists; it gives up at
 # this deadline (seconds from its start) and the device goes unavailable.
 MULTI_ATTACH_TAKEOVER_DEADLINE_SEC = 90
+# Fence a lost node's LUN with an NVMe/SCSI persistent reservation instead of
+# waiting for the array to detach it: every multi-attach alceml registers a
+# key (multi_attach.reservation_key), the owner holds the reservation, and a
+# takeover's alceml preempts it at open (ultra #236), in milliseconds. The
+# array fence (EBS force-detach: 0.5-4 s, longer with several LUNs of one
+# node) then follows off the I/O path. Needs an array plugin that reports
+# supports_reservations and an ultra data plane with LUN failover.
+MULTI_ATTACH_RESERVATIONS = True
+# A takeover waits this long for its alceml to report the reservation taken.
+MULTI_ATTACH_ACTIVATION_WAIT_SEC = 5
+# Client keep-alive on multi-attach clusters: a node lost without closing its
+# connections (hard reset, network cut) leaves its own volumes' paths dead
+# until the host's keep-alive notices, 1-2 intervals: 8 s took 10-14 s on the
+# bed. 3 s bounds that to 3-6 s.
+MULTI_ATTACH_CLIENT_KEEP_ALIVE_TO = 3
 # Fast loss detection of a node serving LUNs (services/lun_watchdog). With
 # 1+0 every volume waits on a lost node's LUN until its takeover, so the
 # takeover starts from this probe, not from the node's status: the OFFLINE

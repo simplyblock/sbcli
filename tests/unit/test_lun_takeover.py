@@ -950,3 +950,110 @@ class TestTakeoverAfterGrowth(_TakeoverCase):
         b.spdk.bdev_aio_rescan = lambda name: True
         self.assertNotEqual(self.run_takeover(db), lun_takeover.TAKEN_OVER)
         self.assertEqual(b.spdk.ops("bdev_alceml_create"), [])
+
+
+# ------------------------------------- fence by persistent reservation
+
+class TestFenceByReservation(_TakeoverCase):
+    """ultra #236: the takeover's alceml opens with the standby's key and
+    preempts the failed node's reservation (fence in ms); the array fence
+    follows off the I/O path. Without the reservation: array fence first."""
+
+    def _roles(self, node, *answers):
+        seq = list(answers)
+        node.spdk.alceml_get_role = lambda name: seq.pop(0) if len(seq) > 1 else seq[0]
+
+    def _bed(self):
+        db, dev = _bed()
+        dev.lun_reservations = True
+        return db, dev
+
+    def _wait_background_fence(self):
+        import time as _t
+        for _ in range(100):
+            if FakeArrayPlugin.calls:
+                return
+            _t.sleep(0.02)
+
+    def test_reservation_fences_before_the_array(self):
+        db, _ = self._bed()
+        b = db.nodes["node-b"]
+        self._roles(b, {"role": "activating", "state": "act_reservation"},
+                    {"role": "active", "state": "active", "epoch": 2})
+        order = []
+        create = b.spdk.bdev_alceml_create
+        b.spdk.bdev_alceml_create = lambda *a, **k: (order.append(("alceml", FakeArrayPlugin.calls[:])),
+                                                     create(*a, **k))[1]
+        self.assertEqual(self.run_takeover(db), lun_takeover.TAKEN_OVER)
+        # Nothing at the array before the alceml (whose open preempts).
+        self.assertEqual(order, [("alceml", [])])
+        alceml = b.spdk.ops("bdev_alceml_create")[0]
+        self.assertEqual(alceml[2]["reservation_key"], multi_attach.reservation_key(b))
+        self.assertEqual(alceml[2]["reservation_key"], 2 << 32)
+        self.assertNotIn("standby", alceml[2])
+        self.assertEqual(self.dev(db).serving_node(), "node-b")
+        self.assertIn("node-a", self.dev(db).fenced_node_ids)
+        # The array fence follows in the background.
+        self._wait_background_fence()
+        self.assertEqual(FakeArrayPlugin.calls, [("fence", WWN, "host-node-a")])
+
+    def test_failed_activation_falls_back_to_the_array_fence(self):
+        db, _ = self._bed()
+        b = db.nodes["node-b"]
+        self._roles(b, {"role": "standby", "state": "act_failed"},
+                    {"role": "active", "state": "active"})
+        self.assertEqual(self.run_takeover(db), lun_takeover.TAKEN_OVER)
+        self.assertEqual(FakeArrayPlugin.calls, [("fence", WWN, "host-node-a")])
+        # The first instance was removed, the second one took the reservation.
+        self.assertEqual(len(b.spdk.ops("bdev_alceml_create")), 2)
+        self.assertEqual(len(b.spdk.ops("bdev_alceml_delete")), 1)
+        self.assertEqual(self.dev(db).serving_node(), "node-b")
+
+    def test_without_reservations_the_array_fences_first(self):
+        db, _ = _bed()
+        self.assertEqual(self.run_takeover(db), lun_takeover.TAKEN_OVER)
+        alceml = db.nodes["node-b"].spdk.ops("bdev_alceml_create")[0]
+        self.assertNotIn("reservation_key", alceml[2])
+
+
+class TestReservationKeys(unittest.TestCase):
+
+    def setUp(self):
+        array.forget_plugin()
+        self.addCleanup(array.forget_plugin)
+
+    def test_key_is_the_node_block_plus_one_in_the_upper_half(self):
+        n = _node("n", "10.0.0.9", 0)
+        self.assertEqual(multi_attach.reservation_key(n), 1 << 32)
+        n.cntlid_block = 41
+        self.assertEqual(multi_attach.reservation_key(n), 42 << 32)
+        n.cntlid_block = -1
+        self.assertEqual(multi_attach.reservation_key(n), 0)
+
+    def test_kwargs_follow_the_device_record(self):
+        db, dev = _bed()
+        b = db.nodes["node-b"]
+        self.assertNotIn("reservation_key", multi_attach.alceml_create_kwargs(dev, b, db.cluster))
+        dev.lun_reservations = True
+        kw = multi_attach.alceml_create_kwargs(dev, b, db.cluster)
+        self.assertEqual(kw["reservation_key"], 2 << 32)
+        self.assertEqual(kw["stuck_io_timeout_ms"], constants.MULTI_ATTACH_ALCEML_STUCK_IO_MS)
+        dev.multi_attach = False
+        self.assertEqual(multi_attach.alceml_create_kwargs(dev, b, db.cluster), {})
+
+    def test_decided_with_the_array_capability_and_checksum(self):
+        class PR(FakeArrayPlugin):
+            def capabilities(self):
+                return dict(super().capabilities(), supports_reservations=True)
+        array.register_plugin("pr-test", PR)
+        self.addCleanup(array.unregister_plugin, "pr-test")
+        db, dev = _bed()
+        self.assertFalse(multi_attach.reservations_supported(db.cluster, dev))   # fake: no PR
+        db.cluster.array_plugin = "pr-test"
+        array.forget_plugin()
+        self.assertTrue(multi_attach.reservations_supported(db.cluster, dev))
+        db.cluster.inline_checksum, dev.md_supported = True, False               # method 2
+        self.assertFalse(multi_attach.reservations_supported(db.cluster, dev))
+        with patch.object(constants, "MULTI_ATTACH_RESERVATIONS", False):
+            db.cluster.inline_checksum = False
+            self.assertFalse(multi_attach.reservations_supported(db.cluster, dev))
