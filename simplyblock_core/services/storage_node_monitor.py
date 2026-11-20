@@ -2357,6 +2357,60 @@ def node_rpc_timeout_check_and_report(node):
     return False
 
 
+#: Node id -> (cluster id, monotonic time) of its last failed port check, for
+#: the correlation guard below. Cleared by a passing check.
+_port_failed_at: dict = {}
+_port_failed_lock = threading.Lock()
+#: A failed port check counts toward the correlation for this long: a few node
+#: check cycles.
+PORT_FAILURE_CORRELATION_SEC = 30.0
+_correlated_event_at: dict = {}
+
+
+def _multi_attach_cluster(cluster_id) -> bool:
+    try:
+        return multi_attach.is_multi_attach(db.get_cluster_by_id(cluster_id))
+    except Exception:                                       # noqa: BLE001
+        return False
+
+
+def _note_port_check(snode, result):
+    with _port_failed_lock:
+        if result is False:
+            _port_failed_at[snode.get_id()] = (snode.cluster_id, time.monotonic())
+        elif result is True:
+            _port_failed_at.pop(snode.get_id(), None)
+
+
+def _correlated_port_failure(cluster, snode) -> str:
+    """Multi-attach clusters (only): why a failed port check of ``snode`` must
+    not set it DOWN, or "". Nodes that pass every liveness probe and fail only
+    the port check, more of them at once than the cluster tolerates, point at a
+    device or data-path condition (one bad LUN fences every LVS of a 1+0
+    cluster), not at the nodes: setting them DOWN breaks the node floor and
+    suspends the cluster (2026-11-20 FTT2 bed). Same rule as the LUN
+    watchdog's observer guard."""
+    if not multi_attach.is_multi_attach(cluster):
+        return ""
+    now = time.monotonic()
+    cid = cluster.get_id()
+    with _port_failed_lock:
+        failing = sorted(nid for nid, (c, t) in _port_failed_at.items()
+                         if c == cid and now - t <= PORT_FAILURE_CORRELATION_SEC)
+    ftt = max(1, int(getattr(cluster, "max_fault_tolerance", 1) or 1))
+    if len(failing) <= ftt:
+        return ""
+    reason = (f"{len(failing)} nodes fail only their port check at once ({failing}), more "
+              f"than the cluster tolerates ({ftt}): a data-path condition, not node failures")
+    if now - _correlated_event_at.get(cid, 0) > 60:
+        _correlated_event_at[cid] = now
+        try:
+            storage_events.snode_port_check_correlated(snode, reason)
+        except Exception as e:                              # noqa: BLE001
+            logger.warning("Correlated port-check event not sent: %s", e)
+    return reason
+
+
 def node_port_check_fun(snode):
     node_port_check = True
     if snode.lvstore_status == "ready":
@@ -2413,11 +2467,19 @@ def node_port_check_fun(snode):
             port_lvs_owner[_p] = snode.get_id()
             own_port = _p
 
+        # Multi-attach (1+0): a port SPDK reports blocked is its own fence
+        # (failed IO queued, leadership change), and one bad device fences
+        # every LVS of the cluster at once. The node's own port gets the
+        # grace peer-owned ports have, so the leak remediation can act before
+        # the block counts against the node (2026-11-20 FTT2 bed: three
+        # healthy nodes set DOWN within 4 s of such a fence).
+        own_port_grace = _multi_attach_cluster(snode.cluster_id)
+
         # Batched: one nvmf_get_blocked_ports fetch answers every port, so
         # carrying the advisory ports costs no extra RPC.
         try:
             port_results = health_controller.check_ports_on_node(snode, ports)
-            if own_port is not None and port_results.get(own_port) is False:
+            if own_port is not None and port_results.get(own_port) is False and not own_port_grace:
                 _reread_blocked_own_port(snode, own_port, port_results)
             for port, ret in port_results.items():
                 if port in advisory_ports:
@@ -2426,13 +2488,14 @@ def node_port_check_fun(snode):
                         f"(advisory: peer owns this LVS and may be fencing it)")
                     continue
                 owner_id = port_lvs_owner.get(port)
-                if ret is False and owner_id and owner_id != snode.get_id():
+                if ret is False and owner_id and (owner_id != snode.get_id() or own_port_grace):
                     held = _blocked_port_age(snode, port)
                     if held < PEER_PORT_FENCE_GRACE_SEC:
+                        whose = "peer-owned" if owner_id != snode.get_id() else "own"
                         logger.info(
                             f"Check: node port {snode.mgmt_ip}, {port} ... {ret} "
-                            f"(peer-owned LVS fenced {held:.0f}s, within the "
-                            f"{PEER_PORT_FENCE_GRACE_SEC:.0f}s takeover grace; not counted)")
+                            f"({whose} LVS fenced {held:.0f}s, within the "
+                            f"{PEER_PORT_FENCE_GRACE_SEC:.0f}s fence grace; not counted)")
                         continue
                 logger.info(f"Check: node port {snode.mgmt_ip}, {port} ... {ret}")
                 node_port_check &= ret
@@ -3163,9 +3226,14 @@ def check_node(snode):
     else:
         node_port_check = port_check_holder["result"]
 
+    _note_port_check(snode, node_port_check)
     if node_port_check is False:
         cluster = db.get_cluster_by_id(snode.cluster_id)
         if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
+            held = _correlated_port_failure(cluster, snode)
+            if held:
+                logger.error("Port check failed on %s, node not set down: %s", snode.get_id(), held)
+                return True
             logger.error("Port check failed")
             set_node_down(snode)
             return True

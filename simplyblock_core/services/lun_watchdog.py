@@ -190,10 +190,15 @@ class Watchdog:
                                 nid, now - t.first_fail)
                 t.first_fail, t.fired_at, t.last_ok = None, None, now
                 return None
+            if answer == SPDK_UP:
+                # The agent saw SPDK running: the node is there, its RPC is
+                # slow. The silence restarts at the next unanswered probe (it
+                # used to survive this answer, and one agent timeout after it
+                # read as "no answer for 6.1s", 2026-11-20 FTT2 bed).
+                t.first_fail = None
+                return None
             if t.first_fail is None:
                 t.first_fail = now if sent is None else sent
-            if answer == SPDK_UP:
-                return None
             if answer == SPDK_DOWN:
                 return "SPDK not running"
             silent = now - t.first_fail

@@ -127,6 +127,20 @@ class TestDecisions(unittest.TestCase):
         for t in range(60):
             self.assertIsNone(self.w.record(self.a, wd.SPDK_UP, 100.0 + t))
 
+    def test_spdk_running_restarts_the_silence(self):
+        # Slow RPC while the agent sees SPDK running, then one agent timeout:
+        # not "no answer for" the whole stretch.
+        self.assertIsNone(self.w.record(self.a, wd.NO_ANSWER, 100.0))
+        for t in (101.0, 102.0, 103.0, 104.0, 105.0):
+            self.assertIsNone(self.w.record(self.a, wd.SPDK_UP, t))
+        self.assertIsNone(self.w.record(self.a, wd.NO_ANSWER, 106.0, sent=105.2))
+        self.assertTrue(self.w.record(self.a, wd.NO_ANSWER, 107.4, sent=106.0)
+                        .startswith("no answer for 2.2s"))
+
+    def test_slow_node_is_not_counted_as_failing(self):
+        self.w.record(self.a, wd.SPDK_UP, 100.0)
+        self.assertIsNone(self.w.tracks["node-a"].first_fail)
+
     def test_an_answer_within_the_window_cancels(self):
         self.assertIsNone(self.w.record(self.a, wd.NO_ANSWER, 100.0))
         self.assertIsNone(self.w.record(self.a, wd.OK, 100.0 + LOST - 0.5))

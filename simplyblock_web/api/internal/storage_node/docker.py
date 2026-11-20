@@ -92,6 +92,45 @@ class SPDKParams(BaseModel):
     mcp_max_unavailable: int | None = Field(None)  # OpenShift-only (MCP); ignored here
 
 
+#: Where the agent keeps the last log lines of an SPDK container that died on
+#: its own, before a restart removes it (host-mounted /etc/simplyblock).
+SPDK_CRASH_LOG_DIR = os.environ.get("SPDK_CRASH_LOG_DIR", "/etc/simplyblock/spdk-crash-logs")
+SPDK_CRASH_LOG_LINES = 30000
+SPDK_CRASH_LOG_KEEP = 10
+
+
+def _preserve_exited_spdk_logs(client, name):
+    """Save the log tail and exit state of ``name`` if its container already
+    exited -- SPDK died on its own -- before a restart removes it with its
+    logs (2026-11-20 FTT2 bed: three SPDKs died in a cascade, every trace of
+    why went with the containers). A running container (a deliberate kill)
+    is left alone; best-effort, never raises."""
+    try:
+        container = client.containers.get(name)
+        state = (container.attrs or {}).get("State") or {}
+        if state.get("Status") not in ("exited", "dead"):
+            return None
+        os.makedirs(SPDK_CRASH_LOG_DIR, exist_ok=True)
+        stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
+        path = os.path.join(SPDK_CRASH_LOG_DIR, f"{name.strip('/')}-{stamp}.log")
+        logs = container.logs(tail=SPDK_CRASH_LOG_LINES, timestamps=True)
+        with open(path, "wb") as f:
+            exit_state = {k: state.get(k) for k in (
+                "ExitCode", "OOMKilled", "Error", "StartedAt", "FinishedAt")}
+            f.write(json.dumps(exit_state).encode() + os.linesep.encode())
+            f.write(logs if isinstance(logs, bytes) else str(logs).encode())
+        kept = sorted(Path(SPDK_CRASH_LOG_DIR).glob("spdk_*.log"), key=lambda q: q.stat().st_mtime)
+        for old in kept[:-SPDK_CRASH_LOG_KEEP]:
+            old.unlink(missing_ok=True)
+        logger.warning("SPDK container %s had exited (code %s, OOM %s); its log kept in %s",
+                       name, state.get("ExitCode"), state.get("OOMKilled"), path)
+        return path
+    except Exception as exc:                                 # noqa: BLE001
+        logger.info("no crash log kept for %s: %s", name, exc)
+        return None
+
+
+
 @api.post('/spdk_process_start', responses={
     200: {'content': {'application/json': {'schema': utils.response_schema({
         'type': 'boolean'
@@ -107,6 +146,7 @@ def spdk_process_start(body: SPDKParams):
     node_docker = get_docker_client(timeout=60 * 3)
     spdk_names = [f"/spdk_{body.rpc_port}", f"/spdk_proxy_{body.rpc_port}"]
     for name in spdk_names:
+        _preserve_exited_spdk_logs(node_docker, name)
         core_utils.remove_container(node_docker, name, graceful_timeout=0)
 
     # Confirm the previous instances are actually gone before we start a fresh
@@ -263,6 +303,7 @@ def spdk_process_kill(query: utils.RPCPortParams):
     # SIGKILLing whatever currently answers to the name.
     targets = []
     for name in names:
+        _preserve_exited_spdk_logs(client, name)
         try:
             targets.append(client.containers.get(name))
         except NotFound:
@@ -332,6 +373,7 @@ def spdk_process_cleanup(query: utils.RPCPortParams):
     names = [f"/spdk_{query.rpc_port}", f"/spdk_proxy_{query.rpc_port}"]
     ok = True
     for name in names:
+        _preserve_exited_spdk_logs(client, name)
         try:
             container = client.containers.get(name)
         except NotFound:
