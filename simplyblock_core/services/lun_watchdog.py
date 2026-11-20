@@ -174,9 +174,11 @@ class Watchdog:
 
     # ---------------------------------------------------------- decisions
 
-    def record(self, node, answer, now) -> str | None:
-        """Note a probe answer of ``node`` at ``now``; the reason the node is
-        lost, or None."""
+    def record(self, node, answer, now, sent=None) -> str | None:
+        """Note a probe answer of ``node`` at ``now`` to a probe ``sent`` then
+        (default ``now``); the reason the node is lost, or None. The silence
+        counts from when the first unanswered probe was sent: a probe that
+        times out returns only after its timeouts."""
         nid = node.get_id()
         with self.lock:
             self.cluster_of[nid] = node.cluster_id
@@ -189,7 +191,7 @@ class Watchdog:
                 t.first_fail, t.fired_at, t.last_ok = None, None, now
                 return None
             if t.first_fail is None:
-                t.first_fail = now
+                t.first_fail = now if sent is None else sent
             if answer == SPDK_UP:
                 return None
             if answer == SPDK_DOWN:
@@ -274,7 +276,7 @@ class Watchdog:
                 answer = probe(node, failing)
                 now = time.monotonic()
                 failing = answer != OK
-                reason = self.record(node, answer, now)
+                reason = self.record(node, answer, now, started)
                 if reason:
                     self.fire(node_id, reason, now)
             except Exception as e:                          # noqa: BLE001

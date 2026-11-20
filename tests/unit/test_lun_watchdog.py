@@ -116,6 +116,13 @@ class TestDecisions(unittest.TestCase):
         # Detection inside the 9 s stall budget with room for the takeover.
         self.assertLessEqual(LOST + 2 * step, 4.0)
 
+    def test_silence_counts_from_the_first_unanswered_probe(self):
+        # The first probe was sent at 100 and gave up (RPC + agent timeouts)
+        # at 101.6; the next one, asking both at once, ends at 102.4.
+        self.assertIsNone(self.w.record(self.a, wd.NO_ANSWER, 101.6, sent=100.0))
+        self.assertTrue(self.w.record(self.a, wd.NO_ANSWER, 102.4, sent=101.6)
+                        .startswith("no answer for 2.4s"))
+
     def test_running_spdk_is_never_lost(self):
         for t in range(60):
             self.assertIsNone(self.w.record(self.a, wd.SPDK_UP, 100.0 + t))
