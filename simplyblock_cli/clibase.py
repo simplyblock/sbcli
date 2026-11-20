@@ -2055,6 +2055,7 @@ class CLIWrapperBase:
             raid_devices=raid_devices,
             multi_attach=multi_attach,
             ftt=ftt,
+            multi_attach_warm_standby=getattr(args, 'multi_attach_warm_standby', False),
             container_image_prefix=args.container_image_prefix,
         )
 
@@ -2141,6 +2142,7 @@ class CLIWrapperBase:
             raid_devices=raid_devices,
             multi_attach=multi_attach,
             ftt=ftt,
+            multi_attach_warm_standby=getattr(args, 'multi_attach_warm_standby', False),
             container_image_prefix=args.container_image_prefix,
         )
 

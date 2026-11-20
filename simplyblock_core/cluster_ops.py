@@ -467,6 +467,13 @@ def _resolve_multi_attach(multi_attach, ftt, raid_devices, ha_type, is_single_no
     return MULTI_ATTACH_SCHEME[0], MULTI_ATTACH_SCHEME[1], int(ftt)
 
 
+def _validate_warm_standby(multi_attach, warm_standby):
+    """Warm standbys (Cluster.multi_attach_warm_standby) are a multi-attach
+    option only."""
+    if warm_standby and not multi_attach:
+        raise ValueError("multi_attach_warm_standby requires multi_attach")
+
+
 def _validate_integrity_flags(inline_checksum, atomic_4k):
     """atomic_4k only lifts the data plane's 4K gate on fallback-mode
     checksums, so without inline_checksum it is a setting that does nothing."""
@@ -497,10 +504,12 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    raid_devices=False,
                    multi_attach=False,
                    ftt=None,
+                   multi_attach_warm_standby=False,
 ) -> str:
     distr_ndcs, distr_npcs, max_fault_tolerance = _resolve_multi_attach(
         multi_attach, ftt, raid_devices, ha_type, is_single_node,
         distr_ndcs, distr_npcs, max_fault_tolerance)
+    _validate_warm_standby(multi_attach, multi_attach_warm_standby)
     if (distr_ndcs, distr_npcs) not in SUPPORTED_ERASURE_CODING_SCHEMES:
         raise ValueError("Unsupported erasure coding scheme")
     _validate_integrity_flags(inline_checksum, atomic_4k)
@@ -673,6 +682,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.md_journal = bool(md_journal)
     cluster.raid_devices = bool(raid_devices)
     cluster.multi_attach = bool(multi_attach)
+    cluster.multi_attach_warm_standby = bool(multi_attach and multi_attach_warm_standby)
     cluster.client_data_nic = client_data_nic or ""
     cluster.max_fault_tolerance = max_fault_tolerance
     cluster.nvmf_base_port = nvmf_base_port
@@ -830,6 +840,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
                 raid_devices=False,
                 multi_attach=False,
                 ftt=None,
+                multi_attach_warm_standby=False,
                 snode_api_service=constants.K8S_SNODE_API_SERVICE,
                 spdk_proxy_service=constants.K8S_SPDK_PROXY_SERVICE,
                 spdk_proxy_tls_secret=constants.K8S_SPDK_PROXY_TLS_SECRET,
@@ -872,6 +883,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
         raid_devices=raid_devices,
         multi_attach=multi_attach,
         ftt=ftt,
+        multi_attach_warm_standby=multi_attach_warm_standby,
         snode_api_service=snode_api_service,
         spdk_proxy_service=spdk_proxy_service,
         spdk_proxy_tls_secret=spdk_proxy_tls_secret,
@@ -914,6 +926,7 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
                 raid_devices=False,
                 multi_attach=False,
                 ftt=None,
+                multi_attach_warm_standby=False,
                 snode_api_service=constants.K8S_SNODE_API_SERVICE,
                 spdk_proxy_service=constants.K8S_SPDK_PROXY_SERVICE,
                 spdk_proxy_tls_secret=constants.K8S_SPDK_PROXY_TLS_SECRET,
@@ -931,6 +944,7 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
     distr_ndcs, distr_npcs, max_fault_tolerance = _resolve_multi_attach(
         multi_attach, ftt, raid_devices, ha_type, is_single_node,
         distr_ndcs, distr_npcs, max_fault_tolerance)
+    _validate_warm_standby(multi_attach, multi_attach_warm_standby)
     if (distr_ndcs, distr_npcs) not in SUPPORTED_ERASURE_CODING_SCHEMES:
         raise ValueError("Unsupported erasure coding scheme")
 
@@ -1071,6 +1085,7 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
     cluster.md_journal = bool(md_journal)
     cluster.raid_devices = bool(raid_devices)
     cluster.multi_attach = bool(multi_attach)
+    cluster.multi_attach_warm_standby = bool(multi_attach and multi_attach_warm_standby)
     cluster.client_data_nic = client_data_nic or ""
     cluster.max_fault_tolerance = max_fault_tolerance
     cluster.nvmf_base_port = nvmf_base_port

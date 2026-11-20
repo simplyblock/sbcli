@@ -36,6 +36,18 @@ array's acknowledgement of the fence; an alceml create with any init mode but
 open-only. When no standby can read the LUN, nothing is changed: peers keep
 holding until their hold expires, and the caller marks the device
 unavailable.
+
+Warm standby (opt-in, ``Cluster.multi_attach_warm_standby``): every attached
+non-serving node keeps a standby alceml of the LUN open (``standby=true``,
+never exported) whose page map the data plane keeps warm
+(:func:`ensure_warm_standbys`, driven by the storage-node monitor). Step 4
+then reuses that instance instead of opening the LUN cold (a full page-map
+load, minutes at 100 TiB): it only adds the PT bdev, subsystem, listeners and
+namespace. A standby activates on its first I/O (fence by preemption, epoch
+bump, final refresh), so the takeover waits for the activation after step 6,
+when the peers' held I/O reaches it. If it does not activate, the failed node
+is fenced at the array, the export on the standby is torn down and redone
+cold (the same NQN and IPs: the paths already point there).
 """
 
 from __future__ import annotations
@@ -307,6 +319,9 @@ def _take_over_locked(db, cluster, device_id, failed_node_id, reason, deadline) 
     # 6 + 7 (design steps 5 and 7). New path on every ONLINE node, old one off.
     added = _switch_paths(db, cluster_id, dev, standby, failed,
                           _failed_paths(failed, old_ips, old_port))
+    if export.get("warm") and not _activate_warm_standby(
+            db, cluster, owner, dev, standby, failed, path, export, deadline):
+        return FAILED
 
     if dev.status != NVMeDevice.STATUS_ONLINE:
         # The hold had expired and the device was marked unavailable; it is
@@ -517,7 +532,61 @@ def _create_base_bdev(rpc, name, path, dev):
     return True
 
 
-def _export_on_standby(db, cluster, standby, dev, path, deadline) -> dict:
+def _alceml_open_kwargs(cluster, dev, extra) -> dict:
+    """``create_alceml`` kwargs of an open-only alceml of ``dev`` (takeover,
+    warm standby): never formats, the cluster's page and checksum settings,
+    plus ``extra`` (multi_attach.alceml_create_kwargs)."""
+    checksum_method, cache_size, cache_eviction = utils.alceml_checksum_params(cluster, dev)
+    return dict(
+        pba_init_mode=ALCEML_OPEN_ONLY,
+        write_protection=cluster.distr_ndcs > 1,
+        pba_page_size=cluster.page_size_in_blocks,
+        full_page_unmap=cluster.full_page_unmap,
+        checksum_method=checksum_method,
+        cache_size=cache_size,
+        cache_eviction_threshold=cache_eviction,
+        force_4k_atomic=getattr(cluster, 'atomic_4k', False),
+        **extra,
+    )
+
+
+def _alceml_role(node, alceml) -> dict:
+    """``alceml_get_role`` of ``alceml`` on ``node`` (fast, no retries); {}
+    when it does not answer."""
+    try:
+        return node.rpc_client(timeout=1, retry=0).alceml_get_role(alceml) or {}
+    except Exception as e:                                  # noqa: BLE001
+        logger.info("alceml_get_role of %s on %s failed: %s", alceml, node.get_id(), e)
+        return {}
+
+
+def _is_standby_instance(role) -> bool:
+    """A standby alceml instance that can still activate on its first I/O
+    (opened standby, or an active instance that was deposed)."""
+    return role.get("role") == "standby" and role.get("state") != "act_failed"
+
+
+def _reuse_warm_standby(rpc, standby, alceml):
+    """The standby node holds ``alceml`` already: ``(warm, exists)``. A
+    standby instance is reused as is (warm). One whose activation failed is
+    closed, so that it is opened again active; anything else (an active
+    instance) is left to the regular path."""
+    role = _alceml_role(standby, alceml)
+    if _is_standby_instance(role):
+        logger.info("LUN takeover: reusing the warm standby %s on %s (warm %s, %s refreshes)",
+                    alceml, standby.get_id(), role.get("warm"), role.get("refreshes_count"))
+        return True, True
+    if role.get("role") == "standby":
+        logger.warning("LUN takeover: standby %s on %s failed its activation (%s); reopening it",
+                       alceml, standby.get_id(), role)
+        _teardown(rpc, standby.get_id(), [("alceml", alceml)])
+        if rpc.bdev_get(alceml):
+            raise TakeoverError(f"failed standby alceml {alceml} not closed on {standby.get_id()}")
+        return False, False
+    return False, True
+
+
+def _export_on_standby(db, cluster, standby, dev, path, deadline, allow_warm=True) -> dict:
     if getattr(dev, "bdev_type", "aio") != "aio":
         raise TakeoverError(f"device type {dev.bdev_type!r} cannot be taken over (array LUNs are lblk)")
     rpc = standby.rpc_client(timeout=_remaining(deadline, 60))
@@ -555,24 +624,18 @@ def _export_on_standby(db, cluster, standby, dev, path, deadline) -> dict:
 
         alceml = dev.alceml_bdev or f"alceml_{dev.get_id()}"
         kwargs = multi_attach.alceml_create_kwargs(dev, standby, cluster)
-        if not rpc.bdev_get(alceml):
-            checksum_method, cache_size, cache_eviction = utils.alceml_checksum_params(cluster, dev)
-            ok = standby.create_alceml(
-                alceml, base, dev.get_id(),
-                pba_init_mode=ALCEML_OPEN_ONLY,
-                write_protection=cluster.distr_ndcs > 1,
-                pba_page_size=cluster.page_size_in_blocks,
-                full_page_unmap=cluster.full_page_unmap,
-                checksum_method=checksum_method,
-                cache_size=cache_size,
-                cache_eviction_threshold=cache_eviction,
-                force_4k_atomic=getattr(cluster, 'atomic_4k', False),
-                **kwargs,
-            )
+        exists = rpc.bdev_get(alceml)
+        warm = False
+        if (exists and allow_warm and kwargs.get("reservation_key")
+                and multi_attach.warm_standby_enabled(cluster, dev)):
+            warm, exists = _reuse_warm_standby(rpc, standby, alceml)
+        if not exists:
+            ok = standby.create_alceml(alceml, base, dev.get_id(),
+                                       **_alceml_open_kwargs(cluster, dev, kwargs))
             if not ok:
                 raise TakeoverError(f"alceml {alceml} not opened on {sid}")
             created.append(("alceml", alceml))
-        if kwargs.get("reservation_key"):
+        if kwargs.get("reservation_key") and not warm:
             # Opened active with a key: it preempts the old holder (fence).
             _wait_active(standby.rpc_client(timeout=1, retry=0), alceml, deadline)
             try:
@@ -629,6 +692,10 @@ def _export_on_standby(db, cluster, standby, dev, path, deadline) -> dict:
         "port": standby.nvmf_port,
         "base": base,
         "pt_uuid": aliases[0] if aliases else "",
+        # A reused warm standby: activates on the first I/O, after the paths.
+        "warm": warm,
+        "alceml": alceml,
+        "pt": pt,
     }
 
 
@@ -649,6 +716,54 @@ def _teardown(rpc, sid, created):
                 utils.delete_lblk_bdev(rpc, name, engine)
         except Exception as e:                              # noqa: BLE001
             logger.warning("LUN takeover cleanup on %s: %s %s not removed: %s", sid, kind, name, e)
+
+
+def _activate_warm_standby(db, cluster, owner, dev, standby, failed, path, export, deadline) -> bool:
+    """After the paths were switched to a reused warm standby: wait until the
+    peers' I/O has activated it. If it does not, fence the failed node at the
+    array, tear the export down and redo it cold (alceml opened active with
+    the key, as without warm standby); the NQN and IPs stay, so the peers'
+    paths already point there. Returns False (device set unavailable, event
+    raised) only when the cold export failed as well."""
+    sid, device_id, alceml = standby.get_id(), dev.get_id(), export["alceml"]
+    try:
+        _wait_active(standby.rpc_client(timeout=1, retry=0), alceml, deadline)
+        try:
+            from simplyblock_core.controllers import qos_controller
+            standby.rpc_client(timeout=_remaining(deadline, 10)).alceml_set_qos_weights(
+                qos_controller.get_qos_weights_list(cluster.get_id()))
+        except Exception as e:                              # noqa: BLE001
+            logger.warning("LUN takeover: QoS weights not set on %s: %s", sid, e)
+        return True
+    except TakeoverError as e:
+        msg = (f"LUN takeover of device {device_id}: warm standby {alceml} on {sid} did not "
+               f"activate ({e}); fencing node {failed.get_id()} at the array and opening the LUN cold")
+        logger.warning(msg)
+        _event(owner.cluster_id, dev, msg, EventObj.LEVEL_WARN)
+    try:
+        _fence(cluster, dev, failed)
+        _record_fenced(db, owner, device_id, failed.get_id())
+        rpc = standby.rpc_client(timeout=_remaining(deadline, 60))
+        _teardown(rpc, sid, [("alceml", alceml), ("pt", export["pt"]), ("subsystem", export["nqn"])])
+        if rpc.bdev_get(alceml):
+            raise TakeoverError(f"standby alceml {alceml} not closed on {sid}")
+        _export_on_standby(db, cluster, standby, dev, path, deadline, allow_warm=False)
+        logger.info("LUN takeover of %s: opened cold on %s after the warm standby failed",
+                    device_id, sid)
+        return True
+    except Exception as e:                                  # noqa: BLE001
+        msg = (f"LUN takeover of device {device_id} from node {failed.get_id()} failed: the warm "
+               f"standby on {sid} did not activate and the cold open failed: {e}")
+        logger.error(msg)
+        _event(owner.cluster_id, dev, msg, EventObj.LEVEL_CRITICAL)
+        # The record names the standby, so the takeover worker would not mark
+        # the device lost: do it here (the regular node-loss behaviour).
+        try:
+            from simplyblock_core.controllers import device_controller
+            device_controller.device_set_unavailable(device_id)
+        except Exception as e2:                             # noqa: BLE001
+            logger.error("LUN takeover of %s: device not set unavailable: %s", device_id, e2)
+        return False
 
 
 # --------------------------------------------------------------- 5. record
@@ -785,6 +900,8 @@ def retire_stale_local_stack(node) -> list:
                 has_stack = False
             if not has_stack:
                 continue
+            if _is_kept_warm_standby(db, rpc, node, dev, pt):
+                continue
             name = f"remote_{dev.alceml_bdev}"
             own_ips = [iface.ip4_address for iface in node.data_nics or [] if iface.ip4_address]
             for ip in own_ips:
@@ -801,6 +918,23 @@ def retire_stale_local_stack(node) -> list:
                            dev.get_id(), node_id, dev.serving_node())
             retired.append(dev.get_id())
     return retired
+
+
+def _is_kept_warm_standby(db, rpc, node, dev, pt) -> bool:
+    """Whether what ``node`` holds of ``dev`` is only the warm standby
+    ensure_warm_standbys keeps there (an unexported instance opened standby)
+    on a node not fenced from the LUN: not a stale stack. Always False
+    without warm standby."""
+    if multi_attach.fenced_from(dev, node.get_id()):
+        return False
+    try:
+        cluster = db.get_cluster_by_id(node.cluster_id)
+        if not multi_attach.warm_standby_enabled(cluster, dev) or rpc.bdev_get(pt):
+            return False
+    except Exception:                                       # noqa: BLE001
+        return False
+    role = _alceml_role(node, dev.alceml_bdev)
+    return _is_standby_instance(role) and role.get("standby_at_open") is True
 
 
 def reintegrate_fenced_node(node) -> list:
@@ -936,3 +1070,190 @@ def unfence_node(device_id, node_id) -> bool:
         logger.warning("Array unfence of %s on LUN %s failed (%s); the attachment "
                        "reconcile presents it", node_id, dev.lun_wwn, e)
     return True
+
+
+# ---------------------------------------------------------- warm standby
+
+# node id -> the device ids whose warm standby did not fit its memory budget
+# when last reported (an event is raised when the set changes).
+_warm_over_budget: dict[str, frozenset] = {}
+
+
+def ensure_warm_standbys(node) -> dict:
+    """Keep the warm standby alcemls of an ONLINE node in line with the
+    record (``Cluster.multi_attach_warm_standby`` clusters only).
+
+    For every LUN the node is a standby of (multi_attach.warm_standby_devices:
+    attached, not serving, not fenced, the device ONLINE), open a standby
+    alceml (``standby=true``, open-only, the reservation key, the same
+    parameters as a takeover) over the node's own path to the LUN, unless one
+    is open already. It is never exported: a peer's I/O would activate it.
+
+    Close the standby alceml (and, on a node that does not own the device,
+    its base bdev) of every LUN the node is no longer a standby of (fenced,
+    detached, removed). Never touches the serving node's stack, an exported
+    alceml (a PT bdev over it: retire_stale_local_stack handles those) or an
+    active instance, nor a device whose takeover runs in this process.
+
+    A standby holds the LUN's page map in the node's SPDK memory: one is not
+    opened when the node's budget (StorageNode.minimum_sys_memory, its
+    container limit) does not cover its own devices plus its standbys
+    (utils.sys_memory_for_capacity); a cluster event says so instead. A
+    restart sizes the budget for them (storage_node_ops).
+
+    Returns ``{"created": [...], "removed": [...], "over_budget": [...]}``
+    (device ids); best-effort and idempotent, never raises."""
+    report: dict = {"created": [], "removed": [], "over_budget": []}
+    try:
+        _ensure_warm_standbys(node, report)
+    except Exception as e:                                  # noqa: BLE001
+        logger.error("Warm standbys of %s not reconciled: %s", node.get_id(), e)
+    return report
+
+
+def _ensure_warm_standbys(node, report):
+    node_id = node.get_id()
+    db = DBController()
+    cluster = db.get_cluster_by_id(node.cluster_id)
+    if not (multi_attach.is_multi_attach(cluster)
+            and getattr(cluster, "multi_attach_warm_standby", False) is True):
+        return
+    nodes = db.get_storage_nodes_by_cluster_id(node.cluster_id)
+    node = next((n for n in nodes if n.get_id() == node_id), node)
+    if node.status != StorageNode.STATUS_ONLINE:
+        return
+    keep = {dev.get_id() for _, dev in multi_attach.warm_standby_devices(
+        cluster, node_id, nodes, multi_attach._WARM_STANDBY_BUDGET_STATES)}
+    want = multi_attach.warm_standby_devices(cluster, node_id, nodes)
+    try:
+        rpc = node.rpc_client(timeout=10, retry=1)
+    except Exception as e:                                  # noqa: BLE001
+        logger.info("Warm standbys: no RPC client for %s: %s", node_id, e)
+        return
+
+    # Close what the node is no longer a standby of.
+    for owner in nodes:
+        for dev in owner.nvme_devices or []:
+            if (not multi_attach.is_multi_attach(dev) or dev.get_id() in keep
+                    or dev.serving_node() == node_id or _local_lock(dev.get_id()).locked()):
+                continue
+            if _remove_warm_standby(rpc, node, dev):
+                report["removed"].append(dev.get_id())
+
+    # Open what is missing, within the node's memory budget.
+    committed = sum(max(int(d.size or 0), 0) for d in node.nvme_devices or [])
+    committed += sum(max(int(d.size or 0), 0) for o, d in multi_attach.devices_served_by(nodes, node_id)
+                     if o.get_id() != node_id)
+    missing = []
+    for _owner, dev in want:
+        try:
+            held = bool(rpc.bdev_get(dev.alceml_bdev))
+        except Exception as e:                              # noqa: BLE001
+            logger.info("Warm standbys: SPDK of %s not answering: %s", node_id, e)
+            return
+        if held:
+            committed += max(int(dev.size or 0), 0)
+        else:
+            missing.append(dev)
+    budget = int(getattr(node, "minimum_sys_memory", 0) or 0)
+    for dev in missing:
+        if _local_lock(dev.get_id()).locked():
+            continue
+        size = max(int(dev.size or 0), 0)
+        if budget and utils.sys_memory_for_capacity(committed + size) > budget:
+            report["over_budget"].append(dev.get_id())
+            continue
+        if _create_warm_standby(rpc, cluster, node, dev):
+            report["created"].append(dev.get_id())
+            committed += size
+    _report_over_budget(cluster, node, report["over_budget"], committed, budget)
+
+
+def _create_warm_standby(rpc, cluster, node, dev) -> bool:
+    """Open the standby alceml of ``dev`` on ``node``; False (logged) when the
+    node cannot read the LUN or SPDK refuses it. Closes what it opened on
+    failure."""
+    node_id = node.get_id()
+    kwargs = multi_attach.alceml_create_kwargs(dev, node, cluster)
+    if not kwargs.get("reservation_key") or getattr(dev, "bdev_type", "aio") != "aio":
+        return False
+    path, why = _probe(node, dev, time.monotonic() + 15)
+    if not path:
+        logger.info("Warm standby of %s on %s not opened: %s", dev.get_id(), node_id, why)
+        return False
+    base = utils.aio_bdev_name_for_serial(dev.serial_number)
+    created = []
+    try:
+        if not rpc.bdev_get(base):
+            _create_base_bdev(rpc, base, path, dev)
+            created.append(("base", base))
+        info = rpc.bdev_get(base) or {}
+        size = int(info.get("block_size", 0)) * int(info.get("num_blocks", 0))
+        if size < int(dev.size or 0):
+            raise TakeoverError(f"base bdev {base} is {size} bytes, the device {dev.size}")
+        ok = node.create_alceml(dev.alceml_bdev, base, dev.get_id(),
+                                standby=True,
+                                refresh_interval_ms=constants.MULTI_ATTACH_WARM_REFRESH_MS,
+                                **_alceml_open_kwargs(cluster, dev, kwargs))
+        if not ok:
+            raise TakeoverError(f"standby alceml {dev.alceml_bdev} not opened")
+        created.append(("alceml", dev.alceml_bdev))
+    except Exception as e:                                  # noqa: BLE001
+        logger.warning("Warm standby of %s on %s not opened: %s", dev.get_id(), node_id, e)
+        _teardown(rpc, node_id, created)
+        return False
+    logger.info("Warm standby of %s (LUN %s) opened on %s at %s",
+                dev.get_id(), dev.lun_wwn, node_id, path)
+    return True
+
+
+def _remove_warm_standby(rpc, node, dev) -> bool:
+    """Close a standby alceml of ``dev`` the node holds although it is no
+    longer a standby of the LUN; its base bdev too unless the node owns the
+    device. Only an unexported standby instance is closed."""
+    alceml = dev.alceml_bdev
+    try:
+        if not alceml or not rpc.bdev_get(alceml):
+            return False
+        if rpc.bdev_get(dev.pt_bdev or f"{alceml}_PT"):
+            return False
+    except Exception:                                       # noqa: BLE001
+        return False
+    if _alceml_role(node, alceml).get("role") != "standby":
+        return False
+    todo = [("alceml", alceml)]
+    if dev.node_id != node.get_id():
+        todo.insert(0, ("base", utils.aio_bdev_name_for_serial(dev.serial_number)))
+    _teardown(rpc, node.get_id(), todo)
+    logger.info("Warm standby of %s closed on %s: no longer a standby of LUN %s",
+                dev.get_id(), node.get_id(), dev.lun_wwn)
+    return True
+
+
+def _report_over_budget(cluster, node, device_ids, committed, budget):
+    """A cluster event (once per change) when warm standbys of the node did
+    not fit its memory budget."""
+    node_id = node.get_id()
+    now = frozenset(device_ids)
+    if _warm_over_budget.get(node_id, frozenset()) == now:
+        return
+    _warm_over_budget[node_id] = now
+    if not now:
+        return
+    msg = (f"Node {node_id}: warm standbys of {len(now)} LUN(s) ({', '.join(sorted(now))}) not "
+           f"opened: its SPDK memory budget {utils.humanbytes(budget)} covers its own devices and "
+           f"standbys of {utils.humanbytes(committed)} only. Restart the node to size its memory "
+           f"for its standbys; a takeover of these LUNs opens them cold meanwhile.")
+    logger.warning(msg)
+    try:
+        ec.log_event_cluster(
+            cluster_id=cluster.get_id(),
+            domain=ec.DOMAIN_CLUSTER,
+            event=ec.EVENT_LUN_TAKEOVER,
+            db_object=node,
+            caused_by=ec.CAUSED_BY_MONITOR,
+            message=msg,
+            node_id=node_id,
+            event_level=EventObj.LEVEL_WARN)
+    except Exception as e:                                  # noqa: BLE001
+        logger.error("Warm standby budget event of %s not logged: %s", node_id, e)

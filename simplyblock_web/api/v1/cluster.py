@@ -73,6 +73,7 @@ def add_cluster():
         raid_devices=raid_devices,
         multi_attach=multi_attach,
         ftt=ftt,
+        multi_attach_warm_standby=bool(cl_data.get('multi_attach_warm_standby', False)),
         kms_settings=cl_data.get('kms_settings'),
         lvol_geometry_enabled=lvol_geometry_enabled,
         # Absent inherits the prefix of a cluster already on this control plane.

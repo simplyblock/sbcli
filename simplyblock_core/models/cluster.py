@@ -230,6 +230,12 @@ class Cluster(BaseModel):
     # Requires raid_devices. Gates every multi-attach path (device NQN,
     # controller-ID ranges, hold timeouts, owner loopback).
     multi_attach: bool = False
+    # Multi-attach clusters, opt-in: keep a warm standby alceml (standby=true,
+    # page map kept warm in hugepages) of every LUN on each attached
+    # non-serving node, so a takeover activates it on the first I/O instead of
+    # loading the whole page map cold (lun_takeover.ensure_warm_standbys).
+    # Costs the page-map memory of every such LUN on each standby node.
+    multi_attach_warm_standby: bool = False
     # Multi-attach clusters: the storage array the LUNs live on. A LUN is
     # taken over by another node only after its serving node is fenced at the
     # array, through the plugin named here (entry point in the group

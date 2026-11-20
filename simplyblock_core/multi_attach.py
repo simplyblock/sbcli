@@ -187,6 +187,18 @@ def reservations_enabled(cluster, device) -> bool:
     return is_multi_attach(device) and getattr(device, "lun_reservations", False) is True
 
 
+def warm_standby_enabled(cluster, device) -> bool:
+    """Whether ``device`` gets warm standby alcemls on its attached
+    non-serving nodes (lun_takeover.ensure_warm_standbys): a multi-attach
+    cluster with ``multi_attach_warm_standby`` set, and a device whose
+    alceml instances run with reservation keys (a standby activates by
+    preempting the old holder's reservation; without one nothing would fence
+    the old holder on activation)."""
+    return (is_multi_attach(cluster)
+            and getattr(cluster, "multi_attach_warm_standby", False) is True
+            and reservations_enabled(cluster, device))
+
+
 def alceml_create_kwargs(device, node=None, cluster=None) -> dict:
     """Extra ``bdev_alceml_create`` kwargs for a multi-attach device's alceml
     on ``node``: the stuck-I/O timeout, and the reservation key when
@@ -322,6 +334,44 @@ def served_by_online_node(owner, nodes_by_id) -> list:
         if server is not None and server.status == _NODE_ONLINE:
             out.append(dev)
     return out
+
+
+#: Device states in which a warm standby is kept (any other: removed).
+_WARM_STANDBY_DEVICE_STATES = ("online",)
+#: Device states whose LUN still counts in a node's warm-standby memory
+#: budget (a LUN unavailable for a while gets its standby back).
+_WARM_STANDBY_BUDGET_STATES = ("online", "unavailable", "read_only", "cannot_allocate")
+
+
+def warm_standby_devices(cluster, node_id, nodes, statuses=_WARM_STANDBY_DEVICE_STATES) -> list:
+    """``(owner, device)`` of every LUN ``node_id`` keeps a warm standby of
+    (Cluster.multi_attach_warm_standby): ``warm_standby_enabled`` for the
+    device, the device in one of ``statuses``, the node among the LUN's
+    attached hosts (array_controller.desired_hosts: the owner, its LVS
+    secondary and tertiary), not the node serving it and not fenced from it.
+    Empty on any other cluster."""
+    if not (is_multi_attach(cluster) and getattr(cluster, "multi_attach_warm_standby", False) is True):
+        return []
+    from simplyblock_core.controllers.array_controller import desired_hosts
+    by_id = {n.get_id(): n for n in nodes}
+    out = []
+    for owner in nodes:
+        for dev in getattr(owner, "nvme_devices", None) or []:
+            if not warm_standby_enabled(cluster, dev) or dev.status not in statuses:
+                continue
+            if dev.serving_node() == node_id or fenced_from(dev, node_id):
+                continue
+            if node_id in desired_hosts(owner, dev, by_id):
+                out.append((owner, dev))
+    return out
+
+
+def warm_standby_capacity(cluster, node_id, nodes) -> int:
+    """Raw capacity (bytes) of the LUNs ``node_id`` keeps (or will keep, once
+    they are back online) a warm standby of: the capacity whose alceml page
+    map the node holds on top of its own devices. 0 on any other cluster."""
+    return sum(max(int(dev.size or 0), 0) for _, dev in
+               warm_standby_devices(cluster, node_id, nodes, _WARM_STANDBY_BUDGET_STATES))
 
 
 def normalize_wwn(value) -> str:

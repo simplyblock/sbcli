@@ -1363,6 +1363,13 @@ MULTI_ATTACH_TAKEOVER_DEADLINE_SEC = 90
 MULTI_ATTACH_RESERVATIONS = True
 # A takeover waits this long for its alceml to report the reservation taken.
 MULTI_ATTACH_ACTIVATION_WAIT_SEC = 5
+# Warm standby (Cluster.multi_attach_warm_standby): ms between two refreshes
+# of a standby alceml's page map from the LUN's region counters (ultra #236,
+# refresh_interval_ms; the data plane's default is the same).
+MULTI_ATTACH_WARM_REFRESH_MS = 2000
+# How often the storage-node monitor reconciles a node's warm standbys
+# (lun_takeover.ensure_warm_standbys), per node.
+MULTI_ATTACH_WARM_STANDBY_INTERVAL_SEC = 30
 # Client keep-alive on multi-attach clusters: a node lost without closing its
 # connections (hard reset, network cut) leaves its own volumes' paths dead
 # until the host's keep-alive notices, 1-2 intervals: 8 s took 10-14 s on the

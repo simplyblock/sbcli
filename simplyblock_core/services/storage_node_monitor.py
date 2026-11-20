@@ -2966,6 +2966,7 @@ def check_node(snode):
     if snode.status == StorageNode.STATUS_ONLINE:
         storage_network.publish_ports(snode, at_most_every=PORT_PUBLISH_INTERVAL_SEC)
         _reintegrate_fenced_luns(snode)
+        _ensure_warm_standbys(snode)
 
     # Self-heal a node stranded in IN_SHUTDOWN. A completed shutdown flips the
     # node to OFFLINE; if it is still IN_SHUTDOWN well past the grace window the
@@ -3308,6 +3309,41 @@ def _reintegrate_fenced_luns(snode):
     # the liveness checks 30 s (2026-11-20 FTT2 bed, hard reset of sn3).
     t = threading.Thread(target=_run, name=f"reintegrate-{node_id[:8]}", daemon=True)
     _reintegrate_threads[node_id] = t
+    t.start()
+
+
+_warm_standby_last: dict = {}
+_warm_standby_threads: dict = {}
+
+
+def _ensure_warm_standbys(snode):
+    """Warm-standby multi-attach clusters (only, Cluster.multi_attach_warm_standby):
+    an ONLINE node keeps a standby alceml of every LUN it is an attached
+    standby of, and closes the ones it is no longer a standby of
+    (lun_takeover.ensure_warm_standbys), at most every
+    MULTI_ATTACH_WARM_STANDBY_INTERVAL_SEC per node, in its own thread."""
+    try:
+        cluster = db.get_cluster_by_id(snode.cluster_id)
+    except Exception as e:                                  # noqa: BLE001
+        logger.debug("Warm standbys of %s: cluster not read: %s", snode.get_id(), e)
+        return
+    if not (multi_attach.is_multi_attach(cluster)
+            and getattr(cluster, "multi_attach_warm_standby", False) is True):
+        return
+    node_id = snode.get_id()
+    now = time.monotonic()
+    if now - _warm_standby_last.get(node_id, 0) < constants.MULTI_ATTACH_WARM_STANDBY_INTERVAL_SEC:
+        return
+    t = _warm_standby_threads.get(node_id)
+    if t is not None and t.is_alive():
+        return
+    _warm_standby_last[node_id] = now
+
+    def _run():
+        from simplyblock_core.controllers import lun_takeover
+        lun_takeover.ensure_warm_standbys(snode)
+    t = threading.Thread(target=_run, name=f"warm-standby-{node_id[:8]}", daemon=True)
+    _warm_standby_threads[node_id] = t
     t.start()
 
 

@@ -86,6 +86,9 @@ class ClusterParams(BaseModel):
     multi_attach: bool = False
     #: Node failures to tolerate in multi-attach mode; only with multi_attach.
     ftt: Literal[1, 2] | None = None
+    #: Multi-attach only: keep warm standby alcemls of every LUN on its
+    #: attached non-serving nodes (fast takeover; costs page-map hugepages).
+    multi_attach_warm_standby: bool = False
     is_single_node: bool = False
     fabric: str = "tcp"
     cr_name: str = ""

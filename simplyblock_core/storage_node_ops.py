@@ -4414,6 +4414,14 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                         "devices visible (unbind them from SPDK) or pass spdk_sys_mem.", ssd_pcis, node_addr)
                     return False
                 minimum_sys_memory = max(minimum_sys_memory, utils.sys_memory_for_capacity(capacity))
+        # Warm-standby multi-attach clusters (Cluster.multi_attach_warm_standby):
+        # the node will also hold the page map of every LUN it becomes a warm
+        # standby of, i.e. sys_memory_for_capacity(own + standby LUN capacity).
+        # That set (the LUNs of the nodes whose LVS secondary/tertiary this node
+        # becomes) is not known yet here; it is counted from the node's first
+        # restart on (_warm_standby_capacity), and until then
+        # lun_takeover.ensure_warm_standbys opens no standby beyond this budget
+        # and raises a cluster event instead.
         max_lvol = node_config.get("max_lvol")
         # Clamp rather than fail: a config file generated before the cap was
         # enforced (or hand-edited) can carry a larger value, and refusing the
@@ -8910,6 +8918,21 @@ def _finalize_node_removal(removed_node: StorageNode):
     logger.info("done")
 
 
+def _warm_standby_capacity(db_controller, snode) -> int:
+    """Raw capacity of the LUNs ``snode`` keeps warm standbys of
+    (multi_attach.warm_standby_capacity); 0 when unknown or on any cluster
+    without Cluster.multi_attach_warm_standby."""
+    try:
+        cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+        if not multi_attach.is_multi_attach(cluster):
+            return 0
+        return multi_attach.warm_standby_capacity(
+            cluster, snode.get_id(), db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id))
+    except Exception as e:                                  # noqa: BLE001
+        logger.warning("Warm standby capacity of %s unknown: %s", snode.get_id(), e)
+        return 0
+
+
 def restart_storage_node(
         node_id, max_lvol=0, max_snap=0, max_prov=0,
         spdk_image=None, set_spdk_debug=None,
@@ -9701,6 +9724,10 @@ def _restart_storage_node_impl(
     # The SPDK container's memory limit: recomputed from the node's devices
     # (the stored figure may come from an older formula), else the stored one.
     raw_capacity = sum(max(int(d.size or 0), 0) for d in (snode.nvme_devices or []))
+    # Warm-standby multi-attach clusters: the node also holds the page map of
+    # every LUN it keeps a warm standby of (lun_takeover.ensure_warm_standbys),
+    # so those LUNs count as its own capacity. 0 on any other cluster.
+    raw_capacity += _warm_standby_capacity(db_controller, snode)
     minimum_sys_memory = (utils.sys_memory_for_capacity(raw_capacity) if raw_capacity
                           else snode.minimum_sys_memory or 0)
     snode.spdk_mem = minimum_hp_memory

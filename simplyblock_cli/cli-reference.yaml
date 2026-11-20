@@ -1056,6 +1056,14 @@ commands:
             dest: multi_attach
             type: bool
             action: store_true
+          - name: "--multi-attach-warm-standby"
+            help: >
+              Multi-attach only: keep a warm standby instance of every LUN on each node it is attached to but not
+              served by. A takeover then activates it on the first I/O instead of loading the LUN's page map cold
+              (minutes on large LUNs). Each standby holds the LUN's page map in hugepages on its node.
+            dest: multi_attach_warm_standby
+            type: bool
+            action: store_true
           - name: "--ftt"
             help: >
               Node failures to tolerate in multi-attach mode (1 or 2; 2 adds a tertiary LVS node and needs at least
@@ -1369,6 +1377,14 @@ commands:
               reached over an additional NVMe-oF path. Requires --raid-devices, --ftt and --ha-type ha. Cannot be
               changed after cluster creation.
             dest: multi_attach
+            type: bool
+            action: store_true
+          - name: "--multi-attach-warm-standby"
+            help: >
+              Multi-attach only: keep a warm standby instance of every LUN on each node it is attached to but not
+              served by. A takeover then activates it on the first I/O instead of loading the LUN's page map cold
+              (minutes on large LUNs). Each standby holds the LUN's page map in hugepages on its node.
+            dest: multi_attach_warm_standby
             type: bool
             action: store_true
           - name: "--ftt"
