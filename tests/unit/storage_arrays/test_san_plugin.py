@@ -152,3 +152,17 @@ def test_names():
     assert len(long) == 31 and long.startswith("sb-x")
     assert san.host_object_name("x" * 80, 31) == long
     assert san.host_object_name("y" * 80, 31) != long
+
+
+# NetApp creates SCSI LUNs unless told otherwise; an NVMe protocol without
+# protocol_family would create LUNs the NVMe hosts never see.
+def test_netapp_protocol_family_follows_the_protocol():
+    bed = Bed("netapp-ontap")
+    bed.protocol = Protocol.NVME_TCP
+    assert bed.plugin().client.config.options["protocol_family"] == "nvme"
+    bed.protocol = Protocol.ISCSI
+    assert bed.plugin().client.config.options.get("protocol_family", "scsi") == "scsi"
+    # A stated family that contradicts the protocol is refused.
+    bed.protocol = Protocol.NVME_TCP
+    with pytest.raises(array.ArrayError, match="protocol_family"):
+        bed.plugin(protocol_family="scsi")

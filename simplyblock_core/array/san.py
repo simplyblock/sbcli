@@ -152,6 +152,15 @@ class SanArrayPlugin(ArrayPlugin):
             raise ArrayError("the plugin has no cluster id")
         proto = self.protocol
         adapter_opts = {k: v for k, v in self.options.items() if k not in _PLUGIN_OPTIONS}
+        if self.vendor == "netapp-ontap":
+            # ONTAP creates SCSI LUNs or NVMe namespaces; which one follows
+            # from the protocol the hosts use, so it is derived, not repeated.
+            family = "nvme" if proto.is_nvme else "scsi"
+            stated = str(adapter_opts.get("protocol_family") or family).lower()
+            if stated != family:
+                raise ArrayError(f"netapp-ontap: protocol_family {stated!r} contradicts protocol "
+                                 f"{proto.value!r} (which needs {family!r})")
+            adapter_opts["protocol_family"] = family
         try:
             config = sa.ArrayConfig(
                 id=f"{self.cluster_id}",
