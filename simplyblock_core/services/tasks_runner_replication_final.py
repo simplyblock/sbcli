@@ -754,9 +754,20 @@ def task_runner(task: JobSchedule, tasks):
                        lvol_id, tgt_node.get_id(), tgt_node.status)
         _record(task, last_error=(
             f"target node {tgt_node.get_id()[:8]} is {tgt_node.status}"))
+        # An endgame cannot progress meanwhile, and while it holds the volume
+        # the volume replicates nothing (bed bf29 R3b): hand it back to the
+        # ordinary cadence after a short grace (_suspend_endgame_for_target).
+        if params.get("cutover_lvs") or params.get("shrink_snap_id"):
+            task = _suspend_endgame_for_target(task, lvol, tgt_node)
         # Deferred rather than failed: a node being offline is transient, and
         # burning a retry per pass would exhaust them all before it recovers.
         raise TaskDefer("target node not online, waiting")
+    if params.get("target_down_since"):
+        logger.info("cutover for lvol %s: target node %s is back after %ds",
+                    lvol_id, tgt_node.get_id(),
+                    int(time.time() - params["target_down_since"]))
+        task = drop_params(task, "target_down_since") or task
+        params = task.function_params
 
     # Cooldown set after a hub-attach failure to give the target node time to
     # recover and the control plane time to reflect a down state in DB.
@@ -1026,6 +1037,51 @@ def task_runner(task: JobSchedule, tasks):
     if params.get("early_prepared"):
         _record_clone_base(params)
     _record_cutover_done(task)
+
+
+def _suspend_endgame_for_target(task, lvol, tgt_node):
+    """The target node is down before the cutover clone exists: after
+    REPL_CUTOVER_TARGET_DOWN_GRACE_SEC, give the endgame up -- without
+    burning an attempt and without a back-off -- and return the task.
+
+    Bed bf29 R3b (2026-11-20): the target primary was shut down while a
+    volume was in its endgame. The endgame waited for it (the clone is built
+    through the target primary), and while it held the volume nothing
+    replicated it: the endgame takes no snapshot while it waits, and the
+    cadence snapshot and retention skip a volume in its endgame. No cycle
+    completed for ~20 min (RPO 1280 s). The wait itself dates from feb45b996
+    (2026-08-27), which made it a deferral instead of a burned retry, but
+    left the endgame -- lvstore claim, round in flight -- in place for it.
+
+    Giving it up drops the endgame's round state and releases the lvstore
+    claim and the cluster's endgame slot, so the volume falls back to its
+    ordinary cadence (snapshots + delta transfers to whichever target member
+    leads, still under the migration space rules) and another volume can
+    take the slot. The source write cap is lifted: the outage is not the
+    volume's failure to converge, and may last long. The task stays: once the
+    target is back, the catch-up gate lets it enter a fresh endgame.
+    """
+    params = task.function_params
+    now = time.time()
+    since = params.get("target_down_since")
+    if not since:
+        return _record(task, target_down_since=now)
+    if now - since < constants.REPL_CUTOVER_TARGET_DOWN_GRACE_SEC:
+        return task
+    reason = (f"target node {tgt_node.get_id()[:8]} {tgt_node.status} for "
+              f"{int(now - since)}s before the cutover clone exists")
+    logger.warning("cutover for lvol %s: endgame suspended: %s; the volume replicates "
+                   "on its ordinary cadence until the target is back",
+                   lvol.get_id(), reason)
+    xfer_timing.stamp("endgame_suspended_target_down", lvol=lvol.get_id(),
+                      round=params.get("shrink_round"))
+    task = _record(task, last_error=f"endgame suspended: {reason}")
+    task = _discard_spare_landing(task) or task
+    task = drop_params(task, *_ENDGAME_ROUND_PARAMS) or task
+    _release_lvs_claim(task)
+    _restore_source_throttle(task)
+    # (the caller defers right away; the claim's release committed on its own)
+    return task
 
 
 def _prepare_early(task, lvol, src_node, tgt_node):

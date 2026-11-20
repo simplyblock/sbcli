@@ -740,6 +740,12 @@ REPL_MIGRATION_CAPACITY_STALE_SEC = 120
 # goes ahead without the check (logged): a broken stats collector must not
 # stop migrations for good.
 REPL_MIGRATION_CAPACITY_UNKNOWN_WAIT_SEC = 120
+# A cutover endgame whose target node is down before its clone exists cannot
+# progress, and holds its volume out of ordinary replication while it waits
+# (bed bf29 R3b: RPO 1280 s). After this long it is given up -- no attempt
+# burned, no back-off -- and the volume replicates on its cadence until the
+# target is back.
+REPL_CUTOVER_TARGET_DOWN_GRACE_SEC = 60
 # --- cutover source throttle ----------------------------------------------
 # A round converges to overhead / (1 - W/T): with the application writing at
 # W and the delta transferring at T, no number of rounds gets under the
