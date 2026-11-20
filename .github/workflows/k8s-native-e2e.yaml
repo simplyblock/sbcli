@@ -41,9 +41,9 @@ on:
         required: true
         default: 'worker-0.ocp.simplyblock.ai,worker-1.ocp.simplyblock.ai,worker-2.ocp.simplyblock.ai,worker-3.ocp.simplyblock.ai,worker-4.ocp.simplyblock.ai,worker-5.ocp.simplyblock.ai'
       ifc_names:
-        description: 'Network interfaces (mgmt_ifc:data_nics)'
+        description: 'Network interfaces (mgmt_ifc:data_nics). Empty takes the environment default: eth0:eth1 on k3s-baremetal, br-ex:enp2s0f0 elsewhere.'
         required: false
-        default: 'br-ex:enp2s0f0'
+        default: ''
       max_subsys:
         description: 'Max subsystem count (cluster-level)'
         required: false
@@ -1769,7 +1769,24 @@ jobs:
         if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
         run: |
           NAMESPACE=simplyblock
-          IFC_NAMES="${{ github.event.inputs.ifc_names || 'br-ex:enp2s0f0' }}"
+          # These names are written straight into every group of the
+          # deployment config (mgmtInterface / dataInterfaces), and the
+          # draft is immutable once approved, so a wrong name here is not
+          # something a later step can correct -- it surfaces as a cluster
+          # that never activates. The openshift default is meaningless on
+          # k3s-baremetal, whose hosts are the docker lab's own machines:
+          # eth0 carries 192.168.10.0/24 and eth1 10.10.10.0/24, with no
+          # br-ex and no enp2s0f0 anywhere. eth1 is also what the docker
+          # lane calls its data NIC (BOOTSTRAP_DATA_NIC), so the two lanes
+          # address the same hardware the same way.
+          IFC_NAMES="${{ github.event.inputs.ifc_names }}"
+          if [ -z "${IFC_NAMES}" ]; then
+            case "${{ github.event.inputs.cluster_environment }}" in
+              k3s-baremetal) IFC_NAMES="eth0:eth1" ;;
+              *)             IFC_NAMES="br-ex:enp2s0f0" ;;
+            esac
+            echo "ifc_names not given; using the ${{ github.event.inputs.cluster_environment }} default ${IFC_NAMES}"
+          fi
           MGMT_IFC="${IFC_NAMES%%:*}"
           DATA_NICS="${IFC_NAMES#*:}"
           MAX_SUBSYS="${{ github.event.inputs.max_subsys || '30' }}"
