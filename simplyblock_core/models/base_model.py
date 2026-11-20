@@ -503,6 +503,13 @@ class BaseModel:
 
     @staticmethod
     def _write_tx(tr, key, value, model_cls, obj, index_list, rollup_key, version_key):
+        merge = getattr(model_cls, "merge_on_full_write", None)
+        if merge is not None and obj.needs_full_write_merge():
+            # Fields only atomic_update may change keep their stored value: a
+            # full-object write of a stale copy must not revert them.
+            raw = tr.get(key).wait()
+            if raw is not None and raw.present():
+                value = merge(json.loads(bytes(raw)), value)
         if index_list:
             BaseModel._apply_index_diff(
                 tr, model_cls, index_list,

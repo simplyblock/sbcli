@@ -1,4 +1,5 @@
 import hashlib
+import json
 import time
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, ClassVar
@@ -41,6 +42,45 @@ _HOSTNAME_DIGEST = 8
 class StorageNode(BaseNodeObject):
 
     _WATCHED = True
+
+    #: Multi-attach LUN ownership fields of a device. Only atomic_update
+    #: changes them (lun_takeover: takeover, fence, unfence; array_controller:
+    #: attachment reconcile); a full-object write keeps their stored values.
+    #: A restart's full writes from a copy loaded before an unfence restored
+    #: fenced_node_ids, and the reintegrated node stayed fenced for good
+    #: (2026-11-20 FTT2 bed, net cut + SPDK kill of the owner).
+    LUN_OWNERSHIP_FIELDS = ("serving_node_id", "fenced_node_ids", "array_attached_node_ids")
+
+    def needs_full_write_merge(self) -> bool:
+        """Only nodes with multi-attach devices pay the stored-record read
+        (every other node's write is unchanged)."""
+        return any(getattr(d, "multi_attach", False) is True for d in self.nvme_devices or [])
+
+    @staticmethod
+    def merge_on_full_write(stored: dict, value: bytes) -> bytes:
+        """``value`` (a full-object write) with the stored LUN ownership
+        fields of every multi-attach device present in both."""
+        old = {d.get("uuid"): d for d in stored.get("nvme_devices") or []
+               if isinstance(d, dict) and d.get("multi_attach") is True}
+        if not old:
+            return value
+        new = json.loads(value)
+        kept = []
+        for d in new.get("nvme_devices") or []:
+            o = old.get(d.get("uuid")) if isinstance(d, dict) else None
+            if o is None:
+                continue
+            for f in StorageNode.LUN_OWNERSHIP_FIELDS:
+                if f in o and d.get(f) != o.get(f):
+                    kept.append(f"{d.get('uuid')}.{f}: {d.get(f)!r} -> kept {o.get(f)!r}")
+                    d[f] = o[f]
+        if not kept:
+            return value
+        from simplyblock_core import utils
+        utils.get_logger(__name__).warning(
+            "[NODE-WRITE] full-object write of %s from a stale copy: LUN ownership kept from the "
+            "stored record (%s)", new.get("uuid"), "; ".join(kept))
+        return json.dumps(new).encode()
 
     # A JM built on a whole device inherits that device's uuid
     # (storage_node_ops._create_jm_stack_on_device), so a bare device id does
