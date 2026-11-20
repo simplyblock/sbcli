@@ -70,13 +70,18 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v3
-        with:
-          python-version: '3.9'
+      # actions/setup-python requires a prebuilt interpreter for the exact
+      # (python-version, runner-OS) pair from GitHub's manifest; those get
+      # dropped once a runner image ages out (e.g. no 3.9 build for
+      # ubuntu-latest once it moved to 26.04 -- see the 26.3.4 release
+      # failure). uv provisions its own interpreters from
+      # python-build-standalone, independent of the runner OS, so pin uv
+      # instead of a Python version here.
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
 
       - name: Install build tooling
-        run: pip install uv tox tox-uv
+        run: uv tool install tox --with tox-uv
 
       - name: Checking cli.py status
         run: |
