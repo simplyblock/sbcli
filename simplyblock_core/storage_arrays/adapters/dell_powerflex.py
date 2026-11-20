@@ -15,8 +15,12 @@ Auth (option ``auth``):
   ``POST /rest/auth/logout {"refresh_token"}`` ends the session. The access
   token is short-lived (minutes); rather than refreshing it, the adapter
   logs in again on the 401 (``ArrayClient`` does this transparently).
-* ``auto`` (default): try ``oauth``; a 404/405 from ``/rest/auth/login``
-  means a 3.x gateway, so fall back to ``token``.
+* ``auto`` (default): ``GET /api/login`` as for ``token`` (served by 3.x
+  and 4.x gateways alike), then ``GET /api/version`` (a JSON string such as
+  ``"3.6"`` / ``"4.5"``): below 4.0 the token goes in basic auth as for
+  ``token``, from 4.0 on as ``Authorization: Bearer <token>``. This is how
+  Dell's own clients pick the scheme (goscaleio ``Authenticate`` /
+  ``BearerAuthenticationMinVersion``; PyPowerFlex ``get_api_version``).
 
 Volumes are addressed by their 16-hex-digit id (``Volume::<id>``). Sizes
 are in KiB on create and GiB on resize and are rounded up by the array to a
@@ -47,41 +51,77 @@ name ``claim`` gave it.
 
 Mappings are SDC mappings (``addMappedSdc`` / ``removeMappedSdc``); the
 volume's ``mappedSdcInfo`` lists them (``null``, not ``[]``, when there are
-none). Mapping a volume to a second SDC needs ``allowMultipleMappings``.
+none). Mapping a volume to a second SDC needs ``allowMultipleMappings``
+(sent as ``"true"``, as csi-powerflex does).
 SDC mappings have no LUN number (``Mapping.lun`` is ``None``) and SDC
 volumes no NAA WWN or NGUID, so ``Volume.identifier`` is ``id.<volume id>``.
 
 NVMe/TCP (4.x NVMe hosts, ``/api/types/Host/instances``) is not
-implemented: a 4.x NVMe host has exactly one NQN, and the mapping actions
-for NVMe hosts could not be verified against documentation (see below).
+implemented: a 4.x NVMe host has exactly one NQN and is mapped with
+``addMappedHost`` rather than ``addMappedSdc`` (see below).
 
 Errors: the gateway answers ``{"message", "httpStatusCode", "errorCode"}``,
 and reports "not found" as HTTP **500** (sometimes 400) rather than 404, so
 missing objects are recognised by message text; any other 500 stays an
 :class:`ArrayRequestError`. Booleans and numbers in action bodies are sent as
-strings (``"TRUE"``, ``"8388608"``), as the REST reference shows them.
+strings (``"true"``, ``"8388608"``), as Dell's clients send them.
 
-Verify against a real system:
+Checked against vendor source
+-----------------------------
+(PyPowerFlex = github.com/dell/python-powerflex, goscaleio =
+github.com/dell/goscaleio, csi-powerflex = github.com/dell/csi-powerflex,
+ansible-powerflex = github.com/dell/ansible-powerflex)
 
-* ``auto`` detection: that a 3.x gateway answers ``POST /rest/auth/login``
-  with 404/405 (not 401), and whether a 4.x gateway still serves
-  ``GET /api/login``.
+* ``GET /api/login`` (basic user:password -> JSON string token), basic
+  ``user:<token>`` on 3.x, ``GET /api/logout`` (PyPowerFlex
+  ``base_client.py`` ``_login`` / ``_logout``); a 4.x gateway still serves
+  ``/api/login`` and takes that token as a Bearer token (goscaleio
+  ``api.go`` ``basicAuthenticate``, ``api/api.go``); ``GET /api/version``
+  picks the scheme (PyPowerFlex ``is_version_3``).
+* 4.x OAuth: ``POST /rest/auth/login {"username", "password"}`` ->
+  ``{"access_token", "refresh_token"}``, ``POST /rest/auth/logout
+  {"refresh_token"}`` answering 204 (PyPowerFlex ``_appliance_login`` /
+  ``_appliance_logout``).
+* Error texts: "Could not find the volume" (csi-powerflex
+  ``sioGatewayVolumeNotFound``); ``queryIdByKey`` for a missing name answers
+  "Not found" (goscaleio ``instance.go`` ``GetVolume``); "Volume name
+  already in use. Please use a different name."
+  (``sioGatewayVolumeNameInUse``).
+* Gen1 arrays create volumes in multiples of 8 GiB, rounding up
+  (csi-powerflex ``validateVolSize``); Gen2/EC arrays use 1 GiB, which the
+  8 GiB granularity also satisfies.
+* ``addMappedSdc {"sdcId", "allowMultipleMappings", "accessMode"}`` with
+  ``accessMode`` ``ReadWrite`` (goscaleio ``MapVolumeSdcParam``; PyPowerFlex
+  ``add_mapped_sdc``; ansible-powerflex ``get_access_mode``);
+  ``allowMultipleMappings`` as a boolean string (csi-powerflex
+  ``strconv.FormatBool``, PyPowerFlex ``str(bool)``).
+* ``removeMappedSdc``, ``setVolumeSize {"sizeInGB"}``, ``removeVolume
+  {"removeMode": "ONLY_ME"}``, ``queryIdByKey {"name"}``, create body
+  ``volumeSizeInKb`` / ``storagePoolId`` / ``volumeType`` as strings
+  (goscaleio ``sdc.go``, ``volume.go``, ``instance.go``,
+  ``types/v1/types.go`` ``VolumeParam``).
+* Fields ``Sdc.sdcGuid`` / ``Sdc.name``, ``Volume.mappedSdcInfo[].sdcId``,
+  ``System.systemVersionName`` (goscaleio ``types/v1/types.go``).
+* NVMe hosts map with ``addMappedHost {"hostId", ...}`` (goscaleio
+  ``nvme_host.go`` ``MapVolumeNVMe``) -- not implemented here.
+
+Verify against a real system
+----------------------------
+* ``auth=oauth`` against a 3.x gateway (assumed: 404 for
+  ``/rest/auth/login``); whether ``GET /api/logout`` ends a Bearer session
+  on 4.x (the adapter calls it best-effort).
 * 4.x token lifetime and whether a refresh-token grant would be preferable
-  to re-login; the 4.x logout body.
-* Exact error texts/codes: volume not found (``"Could not find the
-  volume"``, errorCode 79?), ``queryIdByKey`` for a missing name, name in
-  use, "already mapped", "not mapped", SDC name in use.
+  to re-login.
+* Status codes (500 vs 400 vs 404) and the wording for "already mapped",
+  "not mapped" and an SDC name in use.
 * That ``setVolumeSize`` rounds a non-multiple of 8 up rather than
   rejecting it (the adapter always sends multiples of 8, so this only
   matters for volumes created outside simplyblock).
-* ``accessMode: ReadWrite`` accepted by ``addMappedSdc`` on 3.6 and 4.x;
-  ``allowMultipleMappings`` spelling/value ``"TRUE"``.
-* Field names ``sdcGuid`` and ``name`` on ``Sdc`` and ``mappedSdcInfo[].sdcId``
-  on ``Volume``; ``systemVersionName`` on ``System``.
 * Whether SDC names are unique system-wide (the fake assumes so).
 """
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from ..base import (
@@ -112,6 +152,11 @@ _CONFLICT = ("already in use", "already exists", "already mapped", "is mapped",
 _NOT_MAPPED = ("not mapped",)
 
 
+def _json_string(text: str | None) -> str:
+    """A body that is a bare JSON string (``"abc"``), unquoted."""
+    return (text or "").strip().strip('"')
+
+
 def _message(body: Any, fallback: str) -> str:
     if isinstance(body, dict) and body.get("message"):
         msg = str(body["message"])
@@ -135,8 +180,9 @@ class DellPowerFlexAdapter(ArrayAdapter):
                   required=True),
         OptionDoc("protection_domain_id", "Protection domain of the storage pool "
                   "(sent on create; only needed where the gateway asks for it)."),
-        OptionDoc("auth", "'token' (3.x /api/login), 'oauth' (4.x /rest/auth/login) "
-                  "or 'auto' (try oauth, fall back to token).", default="auto"),
+        OptionDoc("auth", "'token' (3.x /api/login, basic auth), 'oauth' (4.x "
+                  "/rest/auth/login) or 'auto' (/api/login, then basic or Bearer by "
+                  "/api/version).", default="auto"),
         OptionDoc("sdc_naming", "'claim': name unnamed SDCs after the host and treat an "
                   "SDC named differently as another host's; 'ignore': never read or "
                   "write SDC names.", default="claim"),
@@ -164,30 +210,37 @@ class DellPowerFlexAdapter(ArrayAdapter):
         self._reset_auth()
         mode = self.option("auth")
         user, password = self.secret("username"), self.secret("password")
-        if mode in ("auto", "oauth"):
+        if mode == "oauth":
             resp = self.session.post("/rest/auth/login",
-                                     json={"username": user, "password": password},
-                                     ok=(404, 405) if mode == "auto" else ())
-            if resp.status_code < 300:
-                body = json_of(resp) or {}
-                token = body.get("access_token") if isinstance(body, dict) else None
-                if not token:
-                    raise ArrayRequestError("PowerFlex /rest/auth/login returned no access_token")
-                self.session.headers["Authorization"] = f"Bearer {token}"
-                self._refresh_token = str(body.get("refresh_token") or "")
-                self._mode = "oauth"
-                return
-            # 404/405 under "auto": a 3.x gateway without PowerFlex Manager.
+                                     json={"username": user, "password": password})
+            body = json_of(resp) or {}
+            token = body.get("access_token") if isinstance(body, dict) else None
+            if not token:
+                raise ArrayRequestError("PowerFlex /rest/auth/login returned no access_token")
+            self.session.headers["Authorization"] = f"Bearer {token}"
+            self._refresh_token = str(body.get("refresh_token") or "")
+            self._mode = "oauth"
+            return
         resp = self.session.get("/api/login", auth=(user, password))
-        token = (resp.text or "").strip().strip('"')
+        token = _json_string(resp.text)
         if not token:
             raise ArrayRequestError("PowerFlex /api/login returned no token")
+        if mode == "auto":
+            version = _json_string(self.session.get("/api/version", auth=(user, token)).text)
+            m = re.match(r"^(\d+)\.", version)
+            if not m:
+                raise ArrayRequestError(f"PowerFlex /api/version returned {version!r}")
+            if int(m.group(1)) >= 4:
+                # goscaleio: 4.x takes the /api/login token as a Bearer token.
+                self.session.headers["Authorization"] = f"Bearer {token}"
+                self._mode = "bearer"
+                return
         self.session.set_basic_auth(user, token)
         self._mode = "token"
 
     def close(self) -> None:
         try:
-            if self._mode == "token":
+            if self._mode in ("token", "bearer"):
                 self.session.get("/api/logout")
             elif self._mode == "oauth":
                 self.session.post("/rest/auth/logout",
@@ -335,7 +388,7 @@ class DellPowerFlexAdapter(ArrayAdapter):
             if m.host_id == host_id:
                 return m
         self._action(volume_id, "addMappedSdc", {
-            "sdcId": host_id, "allowMultipleMappings": "TRUE", "accessMode": "ReadWrite"})
+            "sdcId": host_id, "allowMultipleMappings": "true", "accessMode": "ReadWrite"})
         return Mapping(volume_id=volume_id, host_id=host_id, lun=None)
 
     def unmap_volume(self, volume_id: str, host_id: str) -> None:

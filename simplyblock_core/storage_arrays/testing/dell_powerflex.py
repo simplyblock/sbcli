@@ -1,7 +1,11 @@
-"""Fake Dell PowerFlex REST gateway (3.6 ``/api/login`` token auth, 4.x
-``/rest/auth/login`` OAuth), the subset the adapter uses.
+"""Fake Dell PowerFlex REST gateway (``/api/login`` token auth on 3.6 and
+4.x, 4.x ``/rest/auth/login`` OAuth), the subset the adapter uses.
 
-Quirks reproduced: the 3.x login token is a JSON *string*; "not found" is
+Quirks reproduced: the ``/api/login`` token is a JSON *string*, sent as
+basic auth ``user:<token>`` on 3.x and as ``Bearer <token>`` on 4.x
+(goscaleio); ``/api/version`` answers a JSON string (``"3.6"`` / ``"4.5"``)
+and accepts the basic-auth token on both; 3.x answers 404 for
+``/rest/auth/login``; "not found" is
 HTTP 500 with ``{"message", "httpStatusCode", "errorCode"}``; sizes round up
 to 8 GiB; ``mappedSdcInfo`` is ``null`` when unmapped; a second SDC mapping
 needs ``allowMultipleMappings``; SDCs exist before (and independently of)
@@ -45,8 +49,8 @@ class FakePowerFlex(FakeArray):
         self.generation = generation
         self.username = username
         self.password = password
-        self.tokens: set[str] = set()          # 3.x session tokens
-        self.access_tokens: set[str] = set()   # 4.x bearer tokens
+        self.tokens: set[str] = set()          # /api/login session tokens
+        self.access_tokens: set[str] = set()   # 4.x /rest/auth/login tokens
         self.system_id = "4a54e5c8a1b2c3d4"
         self.pools = {"7d2e1c5b00000001": {"id": "7d2e1c5b00000001", "name": "sb-pool",
                                            "protectionDomainId": "e1f2a3b400000000"}}
@@ -92,26 +96,31 @@ class FakePowerFlex(FakeArray):
 
     # -- auth ---------------------------------------------------------------
 
-    def _auth(self, req: Request) -> None:
-        if self.generation == 3:
+    def _auth(self, req: Request, basic_ok: bool = False) -> None:
+        if self.generation == 3 or basic_ok:
             creds = req.basic_auth()
             if creds and creds[1] in self.tokens:
                 return
-        else:
+        if self.generation >= 4:
             header = req.headers.get("Authorization", "")
-            if header.startswith("Bearer ") and header[7:] in self.access_tokens:
+            if header.startswith("Bearer ") and (header[7:] in self.access_tokens
+                                                 or header[7:] in self.tokens):
                 return
         raise _err("Unauthorized", 401)
 
+    @route("GET", "/api/version")
+    def api_version(self, req):
+        self._auth(req, basic_ok=True)
+        version = "3.6" if self.generation == 3 else "4.5"
+        return Reply(200, json.dumps(version).encode(), {"Content-Type": "application/json"})
+
     @route("GET", "/api/login")
     def api_login(self, req):
-        if self.generation != 3:
-            raise _err("Not found", 404)
         if req.basic_auth() != (self.username, self.password):
             raise _err("Unauthorized", 401)
         token = secrets.token_urlsafe(24)
         self.tokens.add(token)
-        # The 3.x gateway returns the token as a JSON string literal.
+        # The gateway returns the token as a JSON string literal.
         return Reply(200, json.dumps(token).encode(), {"Content-Type": "application/json"})
 
     @route("GET", "/api/logout")
@@ -119,6 +128,9 @@ class FakePowerFlex(FakeArray):
         creds = req.basic_auth()
         if creds:
             self.tokens.discard(creds[1])
+        header = req.headers.get("Authorization", "")
+        if header.startswith("Bearer "):
+            self.tokens.discard(header[7:])
         return Reply(200, None)
 
     @route("POST", "/rest/auth/login")

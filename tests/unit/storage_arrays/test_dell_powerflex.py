@@ -45,18 +45,55 @@ def setup(request):
     return contract_setup(generation=request.param)
 
 
-def test_auto_auth_uses_generation_specific_login(setup):
+def test_auto_auth_picks_scheme_by_api_version(setup):
+    # goscaleio / PyPowerFlex: /api/login on both generations, /api/version
+    # decides basic (3.x) vs Bearer (4.x); /rest/auth/login is not probed.
     with _client(setup) as c:
         info = c.get_info()
+        adapter = c._adapter
+        assert adapter is not None
+        bearer = adapter.session.headers.get("Authorization", "")
+        basic = adapter.session.http.auth
     fake: FakePowerFlex = setup.fake
     paths = [p for _, p in fake.requests]
-    assert paths[0] == "/rest/auth/login"
+    assert paths[:2] == ["/api/login", "/api/version"]
+    assert "/rest/auth/login" not in paths
     if fake.generation == 3:
-        assert "/api/login" in paths and "R3_6" in info.version
+        assert "R3_6" in info.version and basic and not bearer
     else:
-        assert "/api/login" not in paths and "R4_5" in info.version
+        assert "R4_5" in info.version and bearer.startswith("Bearer ") and not basic
     # close() logged out
     assert not fake.tokens and not fake.access_tokens
+
+
+def test_pinned_oauth_on_4x_uses_access_token():
+    setup = contract_setup(generation=4)
+    with _client(setup, auth="oauth") as c:
+        assert "R4_5" in c.get_info().version
+        assert setup.fake.access_tokens and not setup.fake.tokens
+    assert ("POST", "/rest/auth/login") in setup.fake.requests
+    assert ("POST", "/rest/auth/logout") in setup.fake.requests
+    assert not setup.fake.access_tokens
+
+
+def test_add_mapped_sdc_body(setup):
+    with _client(setup) as c:
+        c.get_info()
+        adapter = c._adapter
+        assert adapter is not None
+        sent = []
+        real = adapter.session.request
+
+        def spy(method, path, **kw):
+            if path.endswith("/action/addMappedSdc"):
+                sent.append(kw["json"])
+            return real(method, path, **kw)
+        adapter.session.request = spy  # type: ignore[method-assign]
+        vol = adapter.create_volume("sb-body", 8 * GIB)
+        host = adapter.ensure_host(HostSpec(name="sbtest-body", initiators=(_sdc(setup),)))
+        adapter.map_volume(vol.id, host)
+    assert sent == [{"sdcId": host, "allowMultipleMappings": "true",
+                     "accessMode": "ReadWrite"}]
 
 
 def test_pinned_token_auth_skips_oauth_probe():

@@ -3,7 +3,8 @@
 Auth: HTTP basic on every request (no session). Provisioning lives under
 ``/univmax/restapi/{api_version}/sloprovisioning/symmetrix/{symmetrix_id}``.
 Errors are ``{"message": "..."}``, mostly with status 400; 404 for missing
-objects; 401 for a rejected credential.
+objects, 409 for "already exists", some 500s; 401 for a rejected credential.
+They are classified by wording (see below).
 
 Layout (one object set per simplyblock volume):
 
@@ -34,35 +35,66 @@ Async jobs: with ``async_jobs`` the adapter sends
 ``202 Accepted``; otherwise it sends ``SYNCHRONOUS`` but still follows a 202
 should the server answer with a job.
 
+Checked against vendor source
+-----------------------------
+(PyU4V = github.com/dell/PyU4V, gopowermax = github.com/dell/gopowermax,
+csi-powermax = github.com/dell/csi-powermax)
+
+* ``sloId: "None"`` for no service level, with ``workloadSelection: "None"``
+  (PyU4V ``provisioning.py`` ``create_storage_group``; gopowermax
+  ``GetCreateStorageGroupPayload``). The adapter sends both.
+* An empty ``GET .../volume?volume_identifier=x`` answers ``count: 0``
+  without ``resultList`` (PyU4V ``get_volume_list`` reads ``resultList``
+  only when ``count > 0``); the filter is an exact match, ``<like>`` is the
+  substring form (gopowermax ``GetVolumeIDsIterator``); ``storageGroupId``
+  filter on the same endpoint (``GetVolumesInStorageGroupIterator``).
+* Error body ``{"message"}`` (gopowermax ``types.Error``). Missing objects
+  read "Could not find volume ...", "... cannot be found" (csi-powermax
+  ``controller.go`` ``cannotBeFound`` / ``errorNotFound``), removing a
+  device its storage group lacks "does not contain" (``deletion_worker.go``);
+  all three are classified as missing. "already exists" is a conflict.
+* Delete order: remove the device from its storage group, then
+  ``DELETE volume`` -- no deallocation step (csi-powermax deletion worker
+  states ``disAssociateSG`` -> ``deleteVolume``; PyU4V ``delete_volume``).
+* iSCSI and NVMe hosts are created before the node logs in to the array
+  (csi-powermax ``setupArrayForIscsi`` / ``setupArrayForNVMeTCP``).
+* NVMe host initiator ids are ``<host NQN>:<host ID>`` with the host ID as
+  32 upper-case hex digits, not the bare NQN (csi-powermax
+  ``makeNVMeInitiatorIDs``). The adapter accepts an address already in that
+  form, or derives the host ID from a ``nqn.2014-08.org.nvmexpress:uuid:<uuid>``
+  NQN; other NQNs are refused (:class:`ArrayUnsupportedError`).
+* Volume fields ``nguid``, ``effective_wwn``, ``storageGroupId``,
+  ``cap_cyl`` (gopowermax ``types/v100/volume.go``); 1 CYL = 1 966 080
+  bytes (csi-powermax ``cylinderSizeInBytes``).
+* ``maskingview/{mv}/connections?volume_id=`` rows carry
+  ``host_lun_address`` in hex (csi-powermax ``node.go``
+  ``strconv.ParseInt(..., 16, 0)``); a view may have no rows yet
+  (csi-powermax vSphere path), giving ``lun=None``.
+* Jobs: ``SUCCEEDED`` is done; ``CREATED``/``SCHEDULED``/``RUNNING``/
+  ``VALIDATING``/``VALIDATED`` are in progress; any other state is a failure
+  whose text is in ``result`` (PyU4V ``common.py`` ``_is_job_finished``,
+  ``constants.INCOMPLETE_LIST``).
+
 Verify against a real system
 ----------------------------
-* Whether ``sloId: "None"`` (no service level) is accepted on 10.x, and that
-  ``workloadSelection`` may be omitted.
-* The empty answer of ``GET .../volume?volume_identifier=x`` (assumed:
-  ``count: 0`` with no ``resultList``) and whether the filter is exact or
-  case-insensitive; iterator paging (``/common/Iterator``) is not followed --
-  fine for name lookups that match one device.
-* The ``storageGroupId`` filter on ``GET .../volume``.
-* Status codes and wording for: SG / host / masking view name already in use,
-  initiator already in another initiator group (classified by "already" /
-  "in use" / "exist" / "member of"), removing the last device of a masked SG,
-  deleting a device still in an SG, shrink.
-* Whether a device must be removed from its SG before ``DELETE volume`` (done
-  here) and whether 10.x still needs a deallocation step first (not done).
-* Whether iSCSI IQNs / NVMe host NQNs must already be logged in to the array
-  before ``POST host`` accepts them (FC WWNs need not be).
-* NVMe/TCP: initiator ids for NVMe hosts (assumed: the host NQN) and whether
-  the volume object carries an ``nguid`` field (read if present).
-* ``GET maskingview/{mv}/connections?volume_id=`` returns rows only for
-  initiator/port pairs (assumed: one row per initiator x port, logged in or
-  not); ``host_lun_address`` is hex. With no rows the mapping's LUN is None.
-* Job states (``SUCCEEDED`` / ``FAILED`` / ``VALIDATE_FAILED``; others are
-  in progress) and that the failure text is in ``result``.
+* Status codes: whether "already exists" comes as 409 or 400 and "cannot be
+  found" on masking view create as 404 or 500 (both handled), and the
+  wording for a shrink, removing the last device of a masked SG, deleting a
+  device still in an SG and an initiator in another host.
+* Whether FC WWNs must be visible to the array (logged in / zoned) before
+  ``POST host`` accepts them; csi-powermax only registers WWNs the array
+  already lists in ``GET .../initiator``.
+* That ``/etc/nvme/hostid`` equals the UUID in a uuid-form host NQN (the
+  nvme-cli default) on the hosts in use; otherwise pass ``<nqn>:<HOSTID>``.
+* Whether ``volume_identifier`` matching is case-sensitive; iterator paging
+  (``/common/Iterator``) is not followed -- fine for lookups by name or
+  storage group that match one device.
 """
 from __future__ import annotations
 
 import hashlib
 import math
+import re
 from collections.abc import Callable
 from typing import Any
 
@@ -88,10 +120,12 @@ from ..http import json_of
 CYLINDER_BYTES = 1920 * 1024
 MAX_NAME = 64
 _JOB_DONE = "SUCCEEDED"
-_JOB_FAILED = frozenset({"FAILED", "VALIDATE_FAILED"})
+# PyU4V constants.INCOMPLETE_LIST; any other non-SUCCEEDED state is terminal.
+_JOB_RUNNING = frozenset({"CREATED", "SCHEDULED", "RUNNING", "VALIDATING", "VALIDATED"})
 _JOB_POLL_S = 2.0
 
-_NOT_FOUND = ("cannot find", "not found", "does not exist", "no such")
+_NOT_FOUND = ("cannot find", "could not find", "cannot be found", "not found",
+              "does not exist", "does not contain", "no such")
 _CONFLICT = ("already", "in use", "exists", "member of", "is part of", "masking view")
 
 
@@ -119,6 +153,28 @@ def powermax_wwn(item: dict[str, Any]) -> str | None:
     v = str(item.get("effective_wwn") or item.get("wwn") or "").strip().lower()
     v = v.removeprefix("naa.")
     return f"naa.{v}" if v else None
+
+
+_HOST_ID_RE = re.compile(r"^(?P<nqn>nqn\..+):(?P<hostid>[0-9A-Fa-f]{32})$")
+_UUID_NQN_RE = re.compile(
+    r"^nqn\.2014-08\.org\.nvmexpress:uuid:(?P<uuid>[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-"
+    r"[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12})$")
+
+
+def powermax_nvme_initiator(address: str) -> str:
+    """PowerMax NVMe initiator id: ``<host NQN>:<HOSTID>`` (csi-powermax
+    ``makeNVMeInitiatorIDs``), HOSTID being the 32 upper-case hex digits of
+    ``/etc/nvme/hostid``. Accepts that form, or a uuid-form NQN whose UUID
+    is taken as the host ID."""
+    m = _HOST_ID_RE.match(address)
+    if m:
+        return f"{m.group('nqn')}:{m.group('hostid').upper()}"
+    m = _UUID_NQN_RE.match(address)
+    if m:
+        return f"{address}:{m.group('uuid').replace('-', '').upper()}"
+    raise ArrayUnsupportedError(
+        f"PowerMax needs the NVMe host ID with the host NQN: give {address!r} as "
+        "'<host NQN>:<32-hex host ID from /etc/nvme/hostid>'")
 
 
 def initiator_protocol(initiator_id: str) -> Protocol:
@@ -178,8 +234,11 @@ class DellPowerMaxAdapter(ArrayAdapter):
 
     def _call(self, method: str, path: str, *, params: dict[str, Any] | None = None,
               json: Any = None, missing_ok: bool = False) -> Any:
-        resp = self.session.request(method, path, params=params, json=json, ok=(400, 404))
-        if resp.status_code in (400, 404):
+        # 409: "already exists"; 500: e.g. "Port Group on Symmetrix cannot be
+        # found" on masking view create. Both are classified by wording.
+        resp = self.session.request(method, path, params=params, json=json,
+                                    ok=(400, 404, 409, 500))
+        if resp.status_code in (400, 404, 409, 500):
             err = _classify(f"{method} {path} -> HTTP {resp.status_code}", _message(resp),
                             resp.status_code)
             if missing_ok and isinstance(err, ArrayNotFoundError):
@@ -197,8 +256,8 @@ class DellPowerMaxAdapter(ArrayAdapter):
             status = str(job.get("status", "")).upper()
             if status == _JOB_DONE:
                 return job
-            if status in _JOB_FAILED:
-                raise _classify(f"{what} (job {job_id} {status})",
+            if status not in _JOB_RUNNING:
+                raise _classify(f"{what} (job {job_id} {status or 'no status'})",
                                 str(job.get("result") or "no result"))
             self._sleep(_JOB_POLL_S)
         raise ArrayRequestError(f"{what}: job {job_id} did not finish within "
@@ -259,6 +318,7 @@ class DellPowerMaxAdapter(ArrayAdapter):
             "emulation": "FBA",
             "sloBasedStorageGroupParam": [{
                 "sloId": self.option("service_level") or "None",
+                "workloadSelection": "None",
                 "volumeAttributes": [attrs],
             }],
             "executionOption": self._exec(),
@@ -310,7 +370,7 @@ class DellPowerMaxAdapter(ArrayAdapter):
         for sg in item.get("storageGroupId") or []:
             self._call("PUT", f"{self._slo}/storagegroup/{sg}", json={
                 "editStorageGroupActionParam": {"removeVolumeParam": {"volumeId": [volume_id]}},
-                "executionOption": self._exec()})
+                "executionOption": self._exec()}, missing_ok=True)
             if sg == name:
                 self._call("DELETE", f"{self._slo}/storagegroup/{sg}", missing_ok=True)
         self._call("DELETE", f"{self._slo}/volume/{volume_id}")
@@ -318,7 +378,8 @@ class DellPowerMaxAdapter(ArrayAdapter):
     # -- hosts ------------------------------------------------------------------
 
     def ensure_host(self, spec: HostSpec) -> str:
-        wanted = [i.normalized() for i in spec.initiators]
+        wanted = [powermax_nvme_initiator(i.address) if i.protocol.is_nvme else i.normalized()
+                  for i in spec.initiators]
         host = self._call("GET", f"{self._slo}/host/{spec.name}", missing_ok=True)
         if host is None:
             self._call("POST", f"{self._slo}/host", json={

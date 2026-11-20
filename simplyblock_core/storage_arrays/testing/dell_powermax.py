@@ -1,13 +1,15 @@
 """Fake Dell PowerMax Unisphere REST API 10.x (the subset the adapter uses).
 
 Quirks reproduced: basic auth on every request (401 plain-text body);
-``{"message": "..."}`` error bodies, 400 for most failures and 404 for
-missing objects; versioned paths (``/univmax/restapi/{ver}/...``) with
+``{"message": "..."}`` error bodies, 400 for most failures, 404 for missing
+objects ("Could not find volume", "... cannot be found"), 409 for "already
+exists", 500 for a masking view naming a missing port group; NVMe host
+initiators as ``<host NQN>:<32 upper-case hex host ID>``; versioned paths (``/univmax/restapi/{ver}/...``) with
 unknown versions refused; sizes in cylinders (1 CYL = 1920 KiB), also
 accepting MB/GB/TB; ``executionOption: ASYNCHRONOUS`` answered with
 ``202`` + job that runs on the second poll of ``/{ver}/system/job/{id}``
-(``SCHEDULED`` -> ``RUNNING`` -> ``SUCCEEDED``/``FAILED`` with the error in
-``result``); volume listing as an iterator (``count``/``resultList``, no
+(``SCHEDULED`` -> ``RUNNING`` -> ``SUCCEEDED`` or ``job_failure_status``
+with the error in ``result``); volume listing as an iterator (``count``/``resultList``, no
 ``resultList`` when empty); non-unique volume identifiers; masked storage
 groups cannot lose their last device; host LUN addresses in hex; port groups
 bound to one protocol.
@@ -75,6 +77,7 @@ class FakeDellPowerMax(FakeArray):
         self.jobs: dict[str, dict[str, Any]] = {}
         self._job_fns: dict[str, Callable[[], Reply]] = {}
         self.first_lun = 1
+        self.job_failure_status = "FAILED"
         self._dev = 0x00100
 
     # -- fake controls ------------------------------------------------------
@@ -159,7 +162,7 @@ class FakeDellPowerMax(FakeArray):
                 job["status"], job["result"] = "SUCCEEDED", "Succeeded"
             except FakeError as e:
                 body = e.reply.body if isinstance(e.reply.body, dict) else {}
-                job["status"] = "FAILED"
+                job["status"] = self.job_failure_status
                 job["result"] = f"Failed : {body.get('message', e.reply.status)}"
         return Reply(200, self._public_job(job_id))
 
@@ -182,7 +185,7 @@ class FakeDellPowerMax(FakeArray):
 
     def _vol(self, dev: str) -> dict[str, Any]:
         if dev not in self.volumes:
-            raise _err(404, f"Cannot find Volume {dev}")
+            raise _err(404, f"Could not find volume {dev}")
         return self.volumes[dev]
 
     def _vol_view(self, v: dict[str, Any]) -> dict[str, Any]:
@@ -287,7 +290,7 @@ class FakeDellPowerMax(FakeArray):
 
     def _sg(self, name: str) -> dict[str, Any]:
         if name not in self.storage_groups:
-            raise _err(404, f"Cannot find Storage Group {name}")
+            raise _err(404, f"The requested storage group {name} cannot be found")
         return self.storage_groups[name]
 
     def _sg_view(self, sg: dict[str, Any]) -> dict[str, Any]:
@@ -331,7 +334,7 @@ class FakeDellPowerMax(FakeArray):
 
         def do() -> Reply:
             if name in self.storage_groups:
-                raise _bad(f"Storage Group {name} already exists")
+                raise _err(409, "The requested storage group resource already exists")
             slo = next((p.get("sloId") for p in params if p.get("sloId") != "None"), None)
             sg = self._sg_record(name, srp, slo)
             self.storage_groups[name] = sg
@@ -360,7 +363,7 @@ class FakeDellPowerMax(FakeArray):
             def remove() -> Reply:
                 for d in devs:
                     if d not in sg["volumes"]:
-                        raise _bad(f"Volume {d} is not in Storage Group {name}")
+                        raise _bad(f"Storage Group {name} does not contain volume {d}")
                 if sg["maskingview"] and len(set(sg["volumes"]) - set(devs)) == 0:
                     raise _bad(f"Cannot remove the last volume from Storage Group {name} "
                                "because it is part of a masking view")
@@ -396,7 +399,7 @@ class FakeDellPowerMax(FakeArray):
 
     def _host(self, name: str) -> dict[str, Any]:
         if name not in self.hosts:
-            raise _err(404, f"Cannot find Host {name}")
+            raise _err(404, f"Host {name} cannot be found")
         return self.hosts[name]
 
     def _host_view(self, h: dict[str, Any]) -> dict[str, Any]:
@@ -413,6 +416,8 @@ class FakeDellPowerMax(FakeArray):
             proto = _proto_of(i)
             if proto == "fc" and not re.match(r"^[0-9a-f]{16}$", i):
                 raise _bad(f"Invalid initiator {i}: expected a 16-digit WWN")
+            if proto == "nvme-tcp" and not re.match(r"^nqn\..+:[0-9A-F]{32}$", i):
+                raise _bad(f"Invalid initiator {i}: expected <host NQN>:<host ID>")
             for other in self.hosts.values():
                 if i.lower() in (x.lower() for x in other["initiator"]):
                     if other["hostId"] == host:
@@ -436,7 +441,7 @@ class FakeDellPowerMax(FakeArray):
 
         def do() -> Reply:
             if name in self.hosts:
-                raise _bad(f"Host {name} already exists")
+                raise _err(409, f"Host {name} already exists")
             claimed = self._claim(name, initiators)
             self.hosts[name] = {"hostId": name, "initiator": claimed, "maskingview": []}
             return Reply(200, self._host_view(self.hosts[name]))
@@ -474,7 +479,7 @@ class FakeDellPowerMax(FakeArray):
 
     def _view(self, name: str) -> dict[str, Any]:
         if name not in self.views:
-            raise _err(404, f"Cannot find Masking View {name}")
+            raise _err(404, f"Masking View {name} cannot be found")
         return self.views[name]
 
     @route("POST", _SLO + "/maskingview")
@@ -495,10 +500,10 @@ class FakeDellPowerMax(FakeArray):
 
         def do() -> Reply:
             if name in self.views:
-                raise _bad(f"Masking View {name} already exists")
+                raise _err(409, "The requested masking view resource already exists")
             h, s = self._host(host), self._sg(sg)
             if pg not in self.port_groups:
-                raise _err(404, f"Cannot find Port Group {pg}")
+                raise _err(500, "Port Group on Symmetrix cannot be found")
             if not s["volumes"]:
                 raise _bad(f"Storage Group {sg} is empty")
             protos = {_proto_of(i) for i in h["initiator"]}
@@ -584,9 +589,11 @@ def contract_setup(**options: Any) -> ContractSetup:
             ),
             Protocol.NVME_TCP: (
                 (Initiator(protocol=Protocol.NVME_TCP,
-                           address="nqn.2014-08.org.nvmexpress:uuid:host-a"),),
+                           address="nqn.2014-08.org.nvmexpress:uuid:"
+                                   "8c8e1a3c-0b7e-4b8e-9d2a-0000000000a1"),),
                 (Initiator(protocol=Protocol.NVME_TCP,
-                           address="nqn.2014-08.org.nvmexpress:uuid:host-b"),),
+                           address="nqn.2014-08.org.nvmexpress:uuid:"
+                                   "8c8e1a3c-0b7e-4b8e-9d2a-0000000000b2"),),
             ),
         },
         create_foreign_volume=lambda name, size: fake.add_volume(name, size, "customer_sg"),

@@ -26,33 +26,61 @@ maxAutoLun}`` answers 201 with an empty body and a ``Location`` header
 so entries are de-duplicated by (volume, host).
 
 Only iSCSI and FC hosts are supported: NVMe/TCP and NVMe/FC hosts exist on
-Alletra MP and Primera but their WSAPI host fields (``NVMETCPPaths``/NQN
-attributes) are not verified, so NVMe is refused up front.
+Alletra MP and Primera (python-3parclient's ``createHost`` sends an ``NQN``
+field) but NVMe host paths and exports are not implemented here, so NVMe is
+refused up front.
+
+Checked against vendor source
+-----------------------------
+(python-3parclient ``hpe3parclient/client.py``/``http.py`` and its WSAPI mock
+``test/HPE3ParMockServer_flask.py``; HPE ``hpe_storage_flowkit_py``
+``v1/core/rest_client.py``/``session.py``/``utils/volume_utils.py``, the
+library behind Cinder's Alletra MP driver; Cinder ``hpe_3par_common.py``,
+``hpe_3par_iscsi.py``; HPE ``common-host-libs`` ``linux/device.go``.)
+
+* Login/logout, the session header, ``{"code", "desc"}`` errors.
+* Error codes: 5 INV_USER_PASS (403 on login), 16 EXISTENT_HOST (409), 17
+  NON_EXISTENT_HOST (404), 19 NON_EXISTENT_VLUN (404), 22 EXISTENT_VOL
+  (409), 23 NON_EXISTENT_VOL (404), 26 EXPORTED_VLUN (409, host still
+  exported), 34 "resource in use" (409, e.g. volume in a VV set or
+  exported), 73 EXISTENT_PATH (409). Code 29 is *not* a VLUN conflict:
+  Cinder sees it as HTTP 400 on a volume delete, so it is no longer treated
+  as a conflict.
+* 403 is also used for non-auth refusals (PERM_DENIED, 150 cannot grow this
+  volume type, 153 new size exceeds the CPG limit, 120 volume in remote copy,
+  VV_SIZE_CANNOT_REDUCE, ...). python-3parclient still re-authenticates once
+  on any 401/403, so a 403 stays an auth error except for the listed
+  non-auth codes (``_FORBIDDEN_NOT_AUTH``), which fail directly.
+* GROW (``action`` 3) takes the increment in MiB; minimum create size is
+  256 MiB, name limit 31 characters (vendor mock).
+* ``reduce: true`` is the dedup+compression create key on Primera *and*
+  Alletra MP (python-3parclient maps ``tdvv``+``compression`` to it when the
+  WSAPI is Primera-class; flowkit sends ``tpvv``/``reduce``); ``tpvv: true``
+  is thin. 3PAR (pre-Primera) dedup/compression is not offered.
+* ``POST /hosts`` and ``PUT /hosts`` refuse ``iSCSINames`` together with
+  ``FCWWNs`` (INV_INPUT_PARAM_CONFLICT), hence one path type per request; a
+  host may carry both types (Cinder's iSCSI driver adds iSCSI names to an
+  existing host that has none).
+* VLUN query ``"volumeName EQ <vol>"`` (quotes included), ``members`` list,
+  template VLUNs ``active: false`` plus active per-path VLUNs; the
+  ``Location`` header is ``/api/v1/vluns/<vol>,<lun>,<host>``.
+* Personas: 1 Generic, 2 Generic-ALUA, 8 VMware, 11 WindowsServer.
+* Volume ``wwn`` field; HPE host tooling shows 3PAR-family WWIDs as
+  ``naa.60002ac...``.
 
 Verify against a real system
 ----------------------------
-* Error codes (taken from python-3parclient / Cinder usage, not from a
-  spec): 23 NON_EXISTENT_VOL (404), 22 EXISTENT_VOL (409), 17
-  NON_EXISTENT_HOST (404), 16 EXISTENT_HOST (409), 73 EXISTENT_PATH -- WWN/IQN
-  already owned by another host (409), 19 NON_EXISTENT_VLUN (404), 29
-  EXISTENT_VLUN (409), 34 VOLUME_HAS_VLUNS / 26 HOST_IN_USE (409), 5 invalid
-  login (403), 6 invalid/expired session key (401). The adapter keys its
-  behaviour on HTTP status first and on codes only where listed in
-  ``_NOT_FOUND_CODES`` / ``_CONFLICT_CODES``.
-* Whether a 403 is ever returned for a non-auth reason (it would trigger a
-  pointless re-login before failing).
-* Size granularity: 3PAR/Primera allocate in 256 MiB units and report the
-  rounded ``sizeMiB``; we therefore round to 256 MiB (min 256 MiB) so the
-  requested and reported sizes agree. Alletra MP may accept 1 MiB units.
-* ``reduce: true`` (dedup + compression) as the Alletra MP create flag, versus
-  ``tdvv``/``compression`` on Primera; ``tpvv: true`` for thin on 3PAR/Primera.
-* Whether one host may carry both iSCSI and FC paths (passed through as given).
-* The exact ``query`` syntax (``"volumeName EQ x"``, double quotes included)
-  and that it returns ``{"total", "members"}`` with an empty list (not 404)
-  when nothing matches; whether active VLUN entries carry ``active: true``.
-* Persona 2 = "Generic-ALUA" (persona 1 = Generic, 11 = VMware).
+* The status/code for an expired or unknown session key (the fake uses 401
+  code 6); python-3parclient re-authenticates on both 401 and 403.
+* Size granularity on Alletra MP (the 256 MiB step is from the vendor mock
+  and growVolume's "rounded up to the next chunklet size (e.g. 256 or 1000
+  MiB)"); we round to 256 MiB so requested and reported sizes agree.
+* A filtered VLUN query with no hits answering 200 with an empty
+  ``members`` list (python-3parclient implies it but cannot tell it apart
+  from a 404) and the status/code for a duplicate VLUN.
 * Max session count per user (stale keys from crashed processes may exhaust
-  it); we always ``DELETE`` the key on close.
+  it; flowkit reuses one session per user and drops it after 14 minutes);
+  we always ``DELETE`` the key on close.
 """
 from __future__ import annotations
 
@@ -89,7 +117,11 @@ GROW_VOLUME = 3
 PATH_ADD = 1
 
 _NOT_FOUND_CODES = frozenset({17, 19, 23})
-_CONFLICT_CODES = frozenset({16, 22, 26, 29, 34, 73})
+_CONFLICT_CODES = frozenset({16, 22, 26, 34, 73})
+#: 403 codes that are refusals, not session/credential problems: 120 volume
+#: in remote copy, 150 cannot grow this volume type, 153 new size exceeds the
+#: CPG limit, 215 remote copy group already started.
+_FORBIDDEN_NOT_AUTH = frozenset({120, 150, 153, 215})
 
 _LOCATION_RE = re.compile(r"/api/v1/vluns/(?P<vol>[^,]+),(?P<lun>\d+),(?P<host>[^,/]*)")
 
@@ -111,8 +143,8 @@ class HpeWsapiAdapter(ArrayAdapter):
     option_docs = (
         OptionDoc("cpg", "Common Provisioning Group new volumes are created in.",
                   required=True),
-        OptionDoc("provisioning", "'tpvv' (thin, 3PAR/Primera) or 'reduce' "
-                  "(thin + dedup + compression, Alletra MP).", default="tpvv"),
+        OptionDoc("provisioning", "'tpvv' (thin) or 'reduce' (thin + dedup + "
+                  "compression, Primera / Alletra MP).", default="tpvv"),
         OptionDoc("persona", "Host persona id for new hosts (2 = Generic-ALUA).",
                   default=2),
     )
@@ -171,6 +203,8 @@ class HpeWsapiAdapter(ArrayAdapter):
             pass
         msg = f"{method} {path} -> HTTP {status}" + (f" code {code}" if code is not None else "") \
             + f": {desc}"
+        if status == 403 and code in _FORBIDDEN_NOT_AUTH:
+            raise ArrayRequestError(msg, status=status)
         if status in (401, 403):
             raise ArrayAuthError(msg)
         if status == 404 or code in _NOT_FOUND_CODES:
@@ -248,8 +282,8 @@ class HpeWsapiAdapter(ArrayAdapter):
         wwns = [w.upper() for w in spec.addresses(Protocol.FC)]
         host = self._host(spec.name)
         if host is None:
-            # Create with one path type; any second type is added below
-            # (whether WSAPI accepts both in one request is unverified).
+            # Create with one path type (WSAPI refuses iSCSINames together
+            # with FCWWNs: INV_INPUT_PARAM_CONFLICT); a second type is added below.
             body: dict[str, Any] = {"name": spec.name, "persona": int(self.option("persona"))}
             if iqns:
                 body["iSCSINames"] = iqns
@@ -263,8 +297,7 @@ class HpeWsapiAdapter(ArrayAdapter):
         have_wwns = {str(p.get("wwn", "")).upper() for p in host.get("FCPaths") or []}
         add_iqns = [i for i in iqns if i.lower() not in have_iqns]
         add_wwns = [w for w in wwns if w not in have_wwns]
-        # One path type per request (whether WSAPI accepts both in one
-        # modify is unverified; separate requests are always valid).
+        # One path type per request: a modify with both is refused too.
         if add_iqns:
             self._call("PUT", f"/hosts/{quote(spec.name, safe='')}",
                        json={"pathOperation": PATH_ADD, "iSCSINames": add_iqns})

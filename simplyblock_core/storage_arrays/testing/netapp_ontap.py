@@ -9,11 +9,21 @@ Modelled behaviour:
   and ``name`` are always returned), so an adapter that forgets to ask for a
   field does not get it.
 * Errors: ``{"error": {"message": ..., "code": ...}}``; ``404`` for unknown
-  objects, ``409`` for duplicates, ``400`` for everything else. Numeric
+  objects, ``409`` for duplicates, ``400`` for everything else. Codes ``4``
+  (entry doesn't exist), ``5374242`` (LUN exists), ``72090025`` (subsystem
+  exists) and ``5374922`` (LUN map exists) are ONTAP's own, as listed in
+  Trident ``storage_drivers/ontap/api/abstraction_error.go``; the other
   codes are illustrative.
 * FlexVol create/resize/delete are asynchronous: ``202`` with a job link;
   the effect happens when the job runs, after ``job_polls`` polls of
-  ``/api/cluster/jobs/{uuid}``.
+  ``/api/cluster/jobs/{uuid}``. With ``async_san`` LUN and namespace
+  create/modify/delete answer the same way (the ONTAP spec allows ``202``
+  for them).
+* FlexVol ``DELETE`` without ``force=true`` moves the volume to
+  :attr:`FakeNetAppOntap.recovery_queue`.
+* An igroup's ``protocol`` cannot be changed after creation.
+* ``GET /api/cluster`` returns ``disaggregated`` (ASA r2) only when asked for
+  in ``fields``, as for SVM-scoped accounts.
 * Size rules: FlexVol >= 20 MiB (rounded up to 4 KiB); LUN/namespace must fit
   in its FlexVol (usable = size minus snapshot reserve), cannot shrink, and a
   namespace is a multiple of its block size.
@@ -55,7 +65,7 @@ MIN_VOLUME = 20 << 20
 MAX_LUN = 128 << 40
 
 
-def _err(status: int, message: str, code: str = "1", target: str | None = None) -> FakeError:
+def _err(status: int, message: str, code: str = "2", target: str | None = None) -> FakeError:
     body: dict[str, Any] = {"error": {"message": message, "code": code}}
     if target:
         body["error"]["target"] = target
@@ -130,6 +140,13 @@ class FakeNetAppOntap(FakeArray):
         #: When True, jobs never finish.
         self.jobs_stuck = False
         self._job_failures: list[tuple[str, str]] = []
+        #: When True, LUN/namespace create/modify/delete answer 202 + job.
+        self.async_san = False
+        #: FlexVols deleted without ``force=true``, by uuid.
+        self.recovery_queue: dict[str, dict[str, Any]] = {}
+        self.version = (9, 14, 1)
+        #: ASA r2 personality.
+        self.disaggregated = False
 
     # -- fake controls ------------------------------------------------------
 
@@ -232,6 +249,16 @@ class FakeNetAppOntap(FakeArray):
 
     # -- jobs -----------------------------------------------------------------
 
+    def _san(self, description: str, run: Callable[[], Reply]) -> Reply:
+        """LUN/namespace calls: synchronous, or a job when ``async_san``."""
+        if not self.async_san:
+            return run()
+
+        def action() -> None:
+            run()
+
+        return self._job(description, action)
+
     def _job(self, description: str, action: Callable[[], None]) -> Reply:
         jid = str(uuid_mod.uuid4())
         failure = self._job_failures.pop(0) if self._job_failures else None
@@ -270,10 +297,18 @@ class FakeNetAppOntap(FakeArray):
     @route("GET", "/api/cluster")
     def cluster(self, req):
         self._auth(req)
-        return Reply(200, {"name": "fake-ontap", "uuid": "1cd8a442-86d1-11e0-ae1c-123478563412",
-                           "version": {"full": "NetApp Release 9.14.1: Mon Jan 01 00:00:00 UTC "
-                                               "2024", "generation": 9, "major": 14,
-                                       "minor": 1}})
+        gen, major, minor = self.version
+        rec: dict[str, Any] = {
+            "name": "fake-ontap", "uuid": "1cd8a442-86d1-11e0-ae1c-123478563412",
+            "version": {"full": f"NetApp Release {gen}.{major}.{minor}: Mon Jan 01 00:00:00 "
+                                "UTC 2024", "generation": gen, "major": major,
+                        "minor": minor}}
+        asked = {f.strip() for f in (req.q("fields") or "").split(",")}
+        if "disaggregated" in asked and self.version >= (9, 16, 1):
+            rec["disaggregated"] = self.disaggregated
+        if "san_optimized" in asked and self.version >= (9, 16, 1):
+            rec["san_optimized"] = self.disaggregated
+        return Reply(200, rec)
 
     @route("GET", "/api/cluster/nodes")
     def nodes(self, req):
@@ -383,6 +418,8 @@ class FakeNetAppOntap(FakeArray):
         if uuid not in self.volumes:
             raise _not_found()
 
+        force = req.q("force") == "true"
+
         def delete() -> None:
             contained = self._luns_in(uuid)
             if any(o["status"]["mapped"] for o in contained):
@@ -390,7 +427,9 @@ class FakeNetAppOntap(FakeArray):
             for o in contained:
                 self.luns.pop(o["uuid"], None)
                 self.namespaces.pop(o["uuid"], None)
-            del self.volumes[uuid]
+            vol = self.volumes.pop(uuid)
+            if not force:
+                self.recovery_queue[uuid] = vol
 
         return self._job(f"DELETE /api/storage/volumes/{uuid}", delete)
 
@@ -427,17 +466,23 @@ class FakeNetAppOntap(FakeArray):
         vol = self._vol_of_path(path, svm["name"])
         if not body.get("os_type"):
             raise _err(400, 'Field "os_type" is required.', "2")
-        if any(o["name"] == path for o in list(self.luns.values()) +
-               list(self.namespaces.values())):
-            raise _err(409, f'A LUN or namespace already exists at path "{path}".', "5374863")
-        size = int((body.get("space") or {}).get("size", 0))
-        self._check_size(vol, size)
-        lid = self.add_lun(path, size, svm["name"])
-        lun = self.luns[lid]
-        lun["os_type"] = body["os_type"]
-        requested = bool(((body.get("space") or {}).get("guarantee") or {}).get("requested"))
-        lun["space"]["guarantee"] = {"requested": requested, "reserved": requested}
-        return self._created(req, lun, f"/api/storage/luns/{lid}")
+
+        def run() -> Reply:
+            if any(o["name"] == path for o in list(self.luns.values()) +
+                   list(self.namespaces.values())):
+                raise _err(409, f'A LUN or namespace already exists at path "{path}".',
+                           "5374242")
+            size = int((body.get("space") or {}).get("size", 0))
+            self._check_size(vol, size)
+            lid = self.add_lun(path, size, svm["name"])
+            lun = self.luns[lid]
+            lun["os_type"] = body["os_type"]
+            requested = bool(((body.get("space") or {}).get("guarantee") or {})
+                             .get("requested"))
+            lun["space"]["guarantee"] = {"requested": requested, "reserved": requested}
+            return self._created(req, lun, f"/api/storage/luns/{lid}")
+
+        return self._san(f"POST /api/storage/luns {path}", run)
 
     @route("PATCH", "/api/storage/luns/" + _U)
     def patch_lun(self, req, uuid):
@@ -446,15 +491,19 @@ class FakeNetAppOntap(FakeArray):
         if lun is None:
             raise _not_found()
         size = ((req.json() or {}).get("space") or {}).get("size")
-        if size is not None:
-            size = int(size)
-            if size < lun["space"]["size"]:
-                raise _err(400, "Reducing the size of a LUN might cause permanent data loss "
-                                "or corruption and is not supported by the LUN REST API.",
-                           "5374922")
-            self._check_size(self.volumes[lun["location"]["volume"]["uuid"]], size)
-            lun["space"]["size"] = size
-        return Reply(200, {})
+
+        def run() -> Reply:
+            if size is not None:
+                new = int(size)
+                if new < lun["space"]["size"]:
+                    raise _err(400, "Reducing the size of a LUN might cause permanent data "
+                                    "loss or corruption and is not supported by the LUN REST "
+                                    "API.", "5374923")
+                self._check_size(self.volumes[lun["location"]["volume"]["uuid"]], new)
+                lun["space"]["size"] = new
+            return Reply(200, {})
+
+        return self._san(f"PATCH /api/storage/luns/{uuid}", run)
 
     @route("DELETE", "/api/storage/luns/" + _U)
     def delete_lun(self, req, uuid):
@@ -462,12 +511,17 @@ class FakeNetAppOntap(FakeArray):
         lun = self.luns.get(uuid)
         if lun is None:
             raise _not_found()
-        if lun["status"]["mapped"] and req.q("allow_delete_while_mapped") != "true":
-            raise _err(400, "The LUN is mapped; unmap it or set allow_delete_while_mapped.",
-                       "5374875")
-        self.lun_maps = [m for m in self.lun_maps if m["lun"]["uuid"] != uuid]
-        del self.luns[uuid]
-        return Reply(200, {})
+        allow = req.q("allow_delete_while_mapped") == "true"
+
+        def run() -> Reply:
+            if lun["status"]["mapped"] and not allow:
+                raise _err(400, "The LUN is mapped; unmap it or set "
+                                "allow_delete_while_mapped.", "5374875")
+            self.lun_maps = [m for m in self.lun_maps if m["lun"]["uuid"] != uuid]
+            self.luns.pop(uuid, None)
+            return Reply(200, {})
+
+        return self._san(f"DELETE /api/storage/luns/{uuid}", run)
 
     @route("GET", "/api/storage/namespaces")
     def get_namespaces(self, req):
@@ -483,24 +537,29 @@ class FakeNetAppOntap(FakeArray):
         vol = self._vol_of_path(path, svm["name"])
         if not body.get("os_type"):
             raise _err(400, 'Field "os_type" is required.', "2")
-        if any(o["name"] == path for o in list(self.luns.values()) +
-               list(self.namespaces.values())):
-            raise _err(409, f'A LUN or namespace already exists at path "{path}".', "72090019")
-        space = body.get("space") or {}
-        block = int(space.get("block_size", 4096))
-        if block not in (512, 4096):
-            raise _err(400, "block_size must be 512 or 4096.", "72089653")
-        size = int(space.get("size", 0))
-        self._check_size(vol, size, block)
-        nid = str(uuid_mod.uuid4())
-        self.namespaces[nid] = {
-            "uuid": nid, "name": path, "svm": svm, "os_type": body["os_type"],
-            "space": {"size": size, "block_size": block},
-            "location": {"namespace": path.rsplit("/", 1)[1],
-                         "volume": {"name": vol["name"], "uuid": vol["uuid"]}},
-            "status": {"mapped": False, "state": "online"},
-        }
-        return self._created(req, self.namespaces[nid], f"/api/storage/namespaces/{nid}")
+
+        def run() -> Reply:
+            if any(o["name"] == path for o in list(self.luns.values()) +
+                   list(self.namespaces.values())):
+                raise _err(409, f'A LUN or namespace already exists at path "{path}".',
+                           "72090019")
+            space = body.get("space") or {}
+            block = int(space.get("block_size", 4096))
+            if block not in (512, 4096):
+                raise _err(400, "block_size must be 512 or 4096.", "72089653")
+            size = int(space.get("size", 0))
+            self._check_size(vol, size, block)
+            nid = str(uuid_mod.uuid4())
+            self.namespaces[nid] = {
+                "uuid": nid, "name": path, "svm": svm, "os_type": body["os_type"],
+                "space": {"size": size, "block_size": block},
+                "location": {"namespace": path.rsplit("/", 1)[1],
+                             "volume": {"name": vol["name"], "uuid": vol["uuid"]}},
+                "status": {"mapped": False, "state": "online"},
+            }
+            return self._created(req, self.namespaces[nid], f"/api/storage/namespaces/{nid}")
+
+        return self._san(f"POST /api/storage/namespaces {path}", run)
 
     @route("PATCH", "/api/storage/namespaces/" + _U)
     def patch_namespace(self, req, uuid):
@@ -509,14 +568,18 @@ class FakeNetAppOntap(FakeArray):
         if ns is None:
             raise _not_found()
         size = ((req.json() or {}).get("space") or {}).get("size")
-        if size is not None:
-            size = int(size)
-            if size < ns["space"]["size"]:
-                raise _err(400, "Shrinking a namespace is not supported.", "72090031")
-            self._check_size(self.volumes[ns["location"]["volume"]["uuid"]], size,
-                             ns["space"]["block_size"])
-            ns["space"]["size"] = size
-        return Reply(200, {})
+
+        def run() -> Reply:
+            if size is not None:
+                new = int(size)
+                if new < ns["space"]["size"]:
+                    raise _err(400, "Shrinking a namespace is not supported.", "72090031")
+                self._check_size(self.volumes[ns["location"]["volume"]["uuid"]], new,
+                                 ns["space"]["block_size"])
+                ns["space"]["size"] = new
+            return Reply(200, {})
+
+        return self._san(f"PATCH /api/storage/namespaces/{uuid}", run)
 
     @route("DELETE", "/api/storage/namespaces/" + _U)
     def delete_namespace(self, req, uuid):
@@ -524,11 +587,17 @@ class FakeNetAppOntap(FakeArray):
         ns = self.namespaces.get(uuid)
         if ns is None:
             raise _not_found()
-        if ns["status"]["mapped"] and req.q("allow_delete_while_mapped") != "true":
-            raise _err(400, "The namespace is mapped to a subsystem.", "72090024")
-        self.subsystem_maps = [m for m in self.subsystem_maps if m["namespace"]["uuid"] != uuid]
-        del self.namespaces[uuid]
-        return Reply(200, {})
+        allow = req.q("allow_delete_while_mapped") == "true"
+
+        def run() -> Reply:
+            if ns["status"]["mapped"] and not allow:
+                raise _err(400, "The namespace is mapped to a subsystem.", "72090024")
+            self.subsystem_maps = [m for m in self.subsystem_maps
+                                   if m["namespace"]["uuid"] != uuid]
+            self.namespaces.pop(uuid, None)
+            return Reply(200, {})
+
+        return self._san(f"DELETE /api/storage/namespaces/{uuid}", run)
 
     # -- igroups -------------------------------------------------------------------
 
@@ -586,10 +655,11 @@ class FakeNetAppOntap(FakeArray):
         if group is None:
             raise _not_found()
         proto = (req.json() or {}).get("protocol")
-        if proto is not None:
-            if proto not in ("iscsi", "fcp", "mixed"):
-                raise _err(400, f'Invalid protocol "{proto}".', "2")
-            group["protocol"] = proto
+        if proto is not None and proto != group["protocol"]:
+            # ONTAP spec, igroup.protocol: "The protocol of an initiator group
+            # cannot be changed after creation of the group."
+            raise _err(400, "The protocol of an initiator group cannot be changed after "
+                            "creation of the group.", "5374746")
         return Reply(200, {})
 
     @route("POST", "/api/protocols/san/igroups/" + _U + "/initiators")
@@ -697,7 +767,7 @@ class FakeNetAppOntap(FakeArray):
             raise _err(400, 'Field "os_type" is required.', "2")
         if any(s["name"] == name and s["svm"]["name"] == svm["name"]
                for s in self.subsystems.values()):
-            raise _err(409, f'Subsystem "{name}" already exists.', "72089709")
+            raise _err(409, f'Subsystem "{name}" already exists.', "72090025")
         hosts = []
         for h in body.get("hosts") or []:
             self._check_nqn(h["nqn"])
@@ -747,7 +817,7 @@ class FakeNetAppOntap(FakeArray):
             raise _not_found()
         if any(m["subsystem"]["uuid"] == uuid for m in self.subsystem_maps) and \
                 req.q("allow_delete_while_mapped") != "true":
-            raise _err(400, "The subsystem has mapped namespaces.", "72090025")
+            raise _err(400, "The subsystem has mapped namespaces.", "72090028")
         if sub["hosts"] and req.q("allow_delete_with_hosts") != "true":
             raise _err(400, "The subsystem has hosts; set allow_delete_with_hosts.",
                        "72090026")

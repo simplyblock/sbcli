@@ -10,11 +10,12 @@ Every response is an envelope ``{"result": ..., "error": ..., "metadata":
 ``error.message``. Lists are paged (``page``, ``page_size`` up to 1000;
 ``metadata.pages_total``) and filtered with ``field=eq:value``.
 
-Destructive requests (delete volume/host, unmap, shrink) need
-``?approved=true``; without it the array answers **403**
-``APPROVAL_REQUIRED``, which must not be mistaken for an auth failure, so
-the adapter always sends the flag and maps that code to
-:class:`ArrayRequestError`.
+Operations the array considers risky need ``?approved=true``; without it
+the array answers ``APPROVAL_REQUIRED`` (or a more specific
+``APPROVAL_REQUIRED_*`` code such as ``..._VOLUME_HAS_CHILDREN``). Like
+infinisdk in non-interactive mode, the adapter sends the flag on *every*
+non-GET request, and maps any ``APPROVAL_REQUIRED*`` code to
+:class:`ArrayRequestError` (never to an auth failure, even on 403).
 
 Objects have integer ids, returned here as strings. Volumes are created in
 the pool named by the ``pool`` option (resolved to its id once per session),
@@ -35,29 +36,62 @@ again. Mappings: ``POST /hosts/{id}/luns {volume_id}`` -> ``{lun, ...}``;
 through a host *cluster* (``clustered: true``) are not listed by this adapter
 (it never creates them), so ``delete_volume`` on such a volume fails.
 
-Higher-fidelity testing: Infinidat publishes ``infinisim`` (a Python
-InfiniBox simulator serving this REST API) and ``infinisdk`` (the official
-SDK). Running the contract suite's live tier against infinisim would check
-this adapter's API reading; neither is a dependency here.
+Simulator: infinisdk's test extra pins ``infinisim`` (and its doctests run
+against ``infinisim.infinibox.Infinibox``), but infinisim is Infinidat's
+internal package: it is on neither PyPI nor GitHub, so no public simulator
+can back a live contract run.
 
-Verify against a real system:
+Checked against vendor source
+-----------------------------
+(Infinidat ``infinisdk``: ``core/api/api.py``, ``core/config.py``,
+``core/field_filter.py``, ``core/object_query.py``,
+``core/translators_and_types.py``, ``infinibox/scsi_serial.py``,
+``infinibox/dataset.py``, ``infinibox/system_object.py``; Infinidat
+``infinibox-csi-driver``: ``iboxapi/host.go``, ``volumes.go``,
+``system.go``, ``storage/common/*.go``; Infinidat ``api_7_3`` Postman
+collection.)
 
-* Size granularity/minimum: the adapter rounds to 1 MiB (minimum 1 MiB)
-  because InfiniBox may round byte sizes up to its own allocation unit; if
-  the array rounds to a coarser unit, raise ``size_granularity_bytes`` (a
-  silent round-up would make later resizes look like shrinks).
-* ``serial`` format (with or without the leading ``6``).
-* Error codes and statuses: ``VOLUME_NOT_FOUND``/``HOST_NOT_FOUND``/
-  ``POOL_NOT_FOUND`` (404?), name conflict (409 ``*_NAME_CONFLICT``?),
-  port owned by another host (409 ``PORT_ALREADY_BELONGS_TO_HOST``?),
-  volume still mapped on delete, ``APPROVAL_REQUIRED`` on unmap/delete.
-* FC port address format accepted/returned (colons or not) -- both are
-  normalised on read.
-* That LUN numbers start at 1 and ``GET /volumes/{id}/luns`` includes
-  ``host_id``.
-* ``GET /system`` field names ``serial_number``, ``model_name``, ``version``.
-* NVMe/TCP (``NVMEOF`` port type?) is not implemented.
+* Envelope ``{result, error, metadata}``; ``metadata`` has ``page``,
+  ``page_size``, ``pages_total``, ``number_of_objects``; ``page_size=1000``
+  works (infinisdk and the CSI driver use it); filters ``field=eq:value``.
+* Basic auth on every request; an expired session answers 401 (infinisdk
+  logs in again on 401).
+* Approval: codes ``APPROVAL_REQUIRED`` and
+  ``APPROVAL_REQUIRED_VOLUME_HAS_CHILDREN``; infinisdk adds
+  ``approved=true`` to every non-GET request.
+* Not found is HTTP 404 (infinisdk ``is_in_system``) with codes
+  ``VOLUME_NOT_FOUND``, ``HOST_NOT_FOUND``, ``POOL_NOT_FOUND``,
+  ``LUN_NOT_FOUND``; mapping twice answers ``MAPPING_ALREADY_EXISTS``.
+* ``serial``: infinisdk parses it as IEEE company id (first 6 hex digits,
+  ``742b0f``) + reserved + system id + 64-bit volume id, i.e. *without* the
+  NAA type nibble; hosts see ``naa.6742b0f...`` (CSI driver).
+* ``PUT /volumes/{id} {"size"}`` sets the absolute size (infinisdk
+  ``resize`` sends current + delta); shrinking needs ``force_resize``.
+* Ports: ``{type, address}`` with type ``FC``/``ISCSI``/``NVME``
+  (case-insensitive: infinisdk sends ``fc``/``iscsi``, the CSI driver
+  ``FC``/``ISCSI``/``NVME``); FC WWPNs are accepted with colons (infinisdk)
+  and as 16 bare hex digits (CSI driver).
+* ``POST /hosts/{id}/luns {volume_id[, lun]}`` -> LUN object;
+  ``GET /volumes/{id}/luns`` entries carry ``lun``, ``host_id``,
+  ``host_cluster_id``, ``clustered``, ``volume_id``.
+* ``GET /system``: ``model``, ``full_model``, ``serial_number`` (an
+  integer), ``version``, ``name``.
+
+Verify against a real system
+----------------------------
+* Size granularity/minimum: the adapter rounds to 1 MiB (minimum 1 MiB).
+  Volumes have ``num_blocks`` (512-byte blocks), and the CSI driver only
+  ever requests whole GB/GiB with a 1 GB minimum; if the array rounds MiB
+  sizes up, raise ``size_granularity_bytes`` (a silent round-up would make
+  later resizes look like shrinks).
+* Codes/statuses the fake invents: name conflicts (``*_NAME_CONFLICT``,
+  409?), a port owned by another host (``PORT_ALREADY_BELONGS_TO_HOST``,
+  409?), deleting a mapped volume or a host with LUNs, and the HTTP status
+  of ``APPROVAL_REQUIRED`` (403?).
+* The FC address format the array *returns* (normalised on read either way).
+* That auto-assigned LUN numbers start at 1.
 * Name limit (adapter declares 63 characters).
+* NVMe/TCP (port type ``NVME``, host NQN) is not implemented.
 """
 from __future__ import annotations
 
@@ -136,7 +170,11 @@ class InfinidatAdapter(ArrayAdapter):
     def _send(self, method: str, path: str, *, params: dict[str, Any] | None = None,
               json: Any = None, missing_ok: bool = False) -> dict[str, Any] | None:
         """Return the response envelope, or ``None`` for a missing object when
-        ``missing_ok``; map envelope errors to :class:`ArrayError` types."""
+        ``missing_ok``; map envelope errors to :class:`ArrayError` types.
+        Every non-GET request is pre-approved (``approved=true``), as infinisdk
+        does."""
+        if method.upper() != "GET":
+            params = {**(params or {}), **_APPROVED}
         resp = self.session.request(method, _API + path, params=params, json=json,
                                     ok=(400, 403, 404, 409, 500))
         try:
@@ -152,7 +190,7 @@ class InfinidatAdapter(ArrayAdapter):
         code = str(err.get("code") or "")
         msg = str(err.get("message") or "") or body_text(resp)
         text = f"{method} {path} -> HTTP {status}: {code} {msg}".strip()
-        if status == 403 and code == "APPROVAL_REQUIRED":
+        if code.startswith("APPROVAL_REQUIRED"):
             raise ArrayRequestError(text, status=status)
         if status == 403:
             raise ArrayAuthError(text)
@@ -208,7 +246,8 @@ class InfinidatAdapter(ArrayAdapter):
 
     def get_info(self) -> ArrayInfo:
         system = self._call("GET", "/system") or {}
-        return ArrayInfo(vendor=self.vendor, model=str(system.get("model_name") or "InfiniBox"),
+        model = system.get("model") or system.get("full_model") or "InfiniBox"
+        return ArrayInfo(vendor=self.vendor, model=str(model),
                          version=str(system.get("version") or ""),
                          serial=str(system.get("serial_number") or ""))
 

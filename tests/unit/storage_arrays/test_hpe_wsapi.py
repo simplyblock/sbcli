@@ -10,12 +10,17 @@ from simplyblock_core.storage_arrays.base import (
     ArrayConflictError,
     ArrayError,
     ArrayNotFoundError,
+    ArrayRequestError,
     HostSpec,
     Initiator,
     Protocol,
 )
 from simplyblock_core.storage_arrays.client import ArrayClient
-from simplyblock_core.storage_arrays.testing import FakeTransport, make_config
+from simplyblock_core.storage_arrays.testing import (
+    FakeError,
+    FakeTransport,
+    make_config,
+)
 from simplyblock_core.storage_arrays.testing.hpe_wsapi import contract_setup
 
 from .conftest import StaticProvider
@@ -186,3 +191,53 @@ def test_host_name_limit_enforced_by_client():
     with pytest.raises(ArrayError, match="exceeds 31"):
         client.ensure_host(_iscsi("h" * 32, "iqn.2026-01.io.sb:long"))
     assert not fake.requests
+
+
+def _logins(fake):
+    return sum(1 for m, p in fake.requests if m == "POST" and p == "/api/v1/credentials")
+
+
+def test_non_auth_403_fails_without_relogin():
+    # 403 code 153 (VV_NEW_SIZE_EXCEED_CPG_LIMIT) is a refusal, not an
+    # expired session: no re-login, no credential invalidation.
+    client, fake = _client()
+    fake.cpg_limit_mib = 2048
+    vol = client.create_volume(str(uuid.uuid4()), GIB)
+    with pytest.raises(ArrayRequestError, match="code 153") as exc:
+        client.resize_volume(vol.id, 4 * GIB)
+    assert exc.value.status == 403
+    assert _logins(fake) == 1
+
+
+def test_expired_session_still_relogs_in():
+    client, fake = _client()
+    client.get_info()
+    fake.expire_sessions()
+    client.get_info()
+    assert _logins(fake) == 2
+
+
+def test_create_below_256_mib_is_refused_by_array():
+    client, _ = _client()
+    adapter = client._build()  # logs in
+    with pytest.raises(ArrayRequestError, match="code 43"):
+        adapter._call("POST", "/volumes", json={"name": "tiny", "cpg": "SSD_r6",
+                                                "sizeMiB": 255})
+
+
+def test_code_29_is_not_a_conflict():
+    # Cinder sees code 29 as HTTP 400 on a volume delete (online copy), not
+    # as an existing VLUN.
+    client, fake = _client()
+    vol = client.create_volume(str(uuid.uuid4()), GIB)
+
+    def refuse(req, name):
+        raise FakeError(400, {"code": 29, "desc": "volume has an online copy"})
+
+    fake._routes = [(m, p, refuse if h == fake.delete_volume else h)
+                    for m, p, h in fake._routes]
+    adapter = client._adapter
+    assert adapter is not None
+    with pytest.raises(ArrayRequestError, match="code 29") as exc:
+        adapter.delete_volume(vol.id)
+    assert not isinstance(exc.value, ArrayConflictError)

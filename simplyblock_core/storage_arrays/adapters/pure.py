@@ -8,7 +8,45 @@ volumes into a recycle bin (recoverable for the eradication delay, 24 h by
 default) before eradication; ``eradicate=true`` removes them at once.
 
 Volume identity: SCSI ``naa.624a9370<serial>``; NVMe NGUID
-``eui.00<serial[0:14]>24a937<serial[14:24]>``.
+``eui.00<serial[0:14]>24a937<serial[14:24]>``. A connection's ``lun`` is set
+for SCSI hosts only; NVMe hosts get ``nsid`` instead (REST 2.27+), which the
+adapter reports as :attr:`Mapping.lun`.
+
+Checked against vendor source
+-----------------------------
+* Login: ``POST /api/<ver>/login`` with header ``api-token``, session token
+  in the ``x-auth-token`` response header; ``POST .../logout`` ends it
+  (py-pure-client ``pypureclient/api_token_manager.py``, ``keywords.py``
+  ``Headers``).
+* Version discovery: ``GET /api/api_version`` -> ``{"version": [...]}``
+  (py-pure-client ``pypureclient/_helpers.py`` ``get_target_versions``).
+* ``POST /volumes?names=`` with body ``provisioned``; ``PATCH /volumes``
+  (``ids``/``names``) with ``provisioned`` / ``destroyed``; ``DELETE
+  /volumes`` eradicates only destroyed volumes; ``GET /volumes`` without
+  ``destroyed=`` lists destroyed volumes too (py-pure-client
+  ``_common/apis/volumes_api_v_2_36.py``, ``models/volume_post_v_2_33.py``,
+  ``volume_patch_v_2_33.py``, ``volume_v_2_34.py``).
+* ``GET/POST/DELETE /connections`` take ``host_names`` and ``volume_ids``;
+  items carry ``host.name``, ``volume.id``, ``lun`` and ``nsid``
+  (``connections_api_v_2_36.py``, ``models/connection_v_2_27.py``).
+* Hosts: ``iqns``/``wwns``/``nqns`` on POST, ``add_iqns``/``add_wwns``/
+  ``add_nqns`` on PATCH, ``names`` on every call (``hosts_api_v_2_36.py``,
+  ``models/host_post_v_2_16.py``, ``host_patch_v_2_16.py``); WWNs are sent
+  as 16 hex digits without colons, upper case (Ansible
+  ``purestorage.flasharray`` ``plugins/modules/purefa_host.py``).
+* ``naa.624a9370<serial>`` and ``eui.00<serial[0:14]>24a937<serial[-10:]>``
+  (Ansible ``purefa_volume.py`` ``PURE_OUI`` / ``_create_nguid``; Cinder
+  ``volume/drivers/pure.py`` ``_get_wwn`` / ``_get_nguid``).
+* Errors are HTTP 400 with ``{"errors": [{"message": ...}]}``; missing
+  objects say "does not exist", duplicates "already exists" (Cinder
+  ``pure.py`` ``ERR_MSG_*``; ``models/error_context_response_v_2_38.py``).
+
+Verify against a real system
+----------------------------
+* Whether ``PATCH destroyed=true`` is refused for a volume that still has
+  host connections (the fake refuses; the contract unmaps first anyway).
+* Whether REST 2.4..2.26 report NVMe connections in ``lun`` (``nsid`` was
+  added in 2.27).
 """
 from __future__ import annotations
 
@@ -206,8 +244,16 @@ class PureFlashArrayAdapter(ArrayAdapter):
         if host_id is not None:
             params["host_names"] = host_id
         items = self._items("GET", "/connections", params=params, missing_ok=True)
-        return [Mapping(volume_id=i["volume"]["id"], host_id=i["host"]["name"],
-                        lun=i.get("lun")) for i in items if i.get("host")]
+        return [self._mapping(i) for i in items if i.get("host")]
+
+    @staticmethod
+    def _mapping(item: dict[str, Any]) -> Mapping:
+        # ``lun`` is set for SCSI connections only, ``nsid`` for NVMe ones.
+        number = item.get("lun")
+        if number is None:
+            number = item.get("nsid")
+        return Mapping(volume_id=item["volume"]["id"], host_id=item["host"]["name"],
+                       lun=number)
 
     def map_volume(self, volume_id: str, host_id: str) -> Mapping:
         existing = self._connections(volume_id, host_id)
@@ -215,8 +261,7 @@ class PureFlashArrayAdapter(ArrayAdapter):
             return existing[0]
         items = self._items("POST", "/connections",
                             params={"host_names": host_id, "volume_ids": volume_id})
-        i = items[0]
-        return Mapping(volume_id=i["volume"]["id"], host_id=i["host"]["name"], lun=i.get("lun"))
+        return self._mapping(items[0])
 
     def unmap_volume(self, volume_id: str, host_id: str) -> None:
         if not self._connections(volume_id, host_id):

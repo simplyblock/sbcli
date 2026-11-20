@@ -8,7 +8,18 @@ change with the change applied only when the job runs (after ``job_polls``
 read back as ``NOT DEFINED`` after deletion, per-port host groups with
 default group 0, FC WWN uniqueness per port (iSCSI names may repeat across
 targets, as on the array), LU paths listed on the LDEV, the resource-group
-lock, and ``{"errorSource", "message", "solution", "messageId"}`` errors.
+lock (under ``/ConfigurationManager/v1[/{storageDeviceId}]/services``, not
+``/objects``), and ``{"errorSource", "message", "solution", "messageId"}``
+errors. ``GET /ldevs`` treats ``count`` as a window of LDEV numbers from
+``headLdevId`` (a window past the last LDEV number answers KART40044-E), which
+is how Hitachi's Cinder driver pages through it.
+
+Message ids and SSB codes the adapter acts on follow Hitachi's Cinder driver
+(``hbsd_rest_api.py``): KART30013-E (object does not exist), KART40050-E..
+KART40052-E (resource group locked), SSB 2E22/0001 (LDEV already defined),
+2E11/2209 (no free LDEV number), B958/015A (LU path already defined),
+B958/0947 (another LDEV on that LUN), B957/4184 (too many WWNs). Other SSBs
+here are illustrative.
 """
 from __future__ import annotations
 
@@ -26,6 +37,7 @@ from . import ContractSetup, FakeArray, FakeError, Reply, Request, make_config, 
 
 _ROOT = "/ConfigurationManager/v1/objects"
 _P = _ROOT + r"(?:/storages/(?P<sdid>\d{12}))?"
+_SVC = r"/ConfigurationManager/v1(?:/(?P<sdid>\d{12}))?/services"
 _MAX_LDEV = 65279
 NOT_DEFINED = "NOT DEFINED"
 _UNITS = {"K": 1 << 10, "M": 1 << 20, "G": 1 << 30, "T": 1 << 40}
@@ -78,6 +90,8 @@ class FakeHitachiVsp(FakeArray):
         self.require_lock = False
         self.lock_owner: str | None = None
         self.max_count = 16384
+        #: Highest LDEV number this model has (GET /ldevs windows beyond it fail).
+        self.last_ldev = _MAX_LDEV
 
     @staticmethod
     def _group(name: str, mode: str) -> dict[str, Any]:
@@ -102,7 +116,7 @@ class FakeHitachiVsp(FakeArray):
     def _free_ldev(self, start: int, end: int) -> int:
         lid = next((i for i in range(start, end + 1) if i not in self.ldevs), None)
         if lid is None:
-            raise _storage_err("No free LDEV number in the specified range.", "2E11", "0012")
+            raise _storage_err("No free LDEV number in the specified range.", "2E11", "2209")
         return lid
 
     def naa(self, lid: int) -> str:
@@ -143,7 +157,7 @@ class FakeHitachiVsp(FakeArray):
     def delete_session(self, req, sdid, sid):
         token = self._auth(req, sdid)
         if self.sessions.get(token) != int(sid):
-            raise _err(404, f"Session {sid} does not exist.", "KART40050-E")
+            raise _err(404, f"Session {sid} does not exist.", "KART30013-E")
         del self.sessions[token]
         if self.lock_owner == token:
             self.lock_owner = None
@@ -164,7 +178,7 @@ class FakeHitachiVsp(FakeArray):
         if not lock_request:
             if self.lock_owner and self.lock_owner != token:
                 raise _err(409, "The resource group is locked by another user.",
-                           "KART40049-E")
+                           "KART40052-E")
             if self.require_lock and self.lock_owner != token:
                 raise _storage_err("The resource group is not locked.", "2E10", "A001")
         jid = self.next_id()
@@ -187,7 +201,7 @@ class FakeHitachiVsp(FakeArray):
         self._auth(req, sdid)
         job = self.jobs.get(int(jid))
         if job is None:
-            raise _err(404, f"Job {jid} does not exist.", "KART40050-E")
+            raise _err(404, f"Job {jid} does not exist.", "KART30013-E")
         jid_i = int(jid)
         if jid_i in self._pending:
             if self._polls_left[jid_i] > 0:
@@ -206,10 +220,11 @@ class FakeHitachiVsp(FakeArray):
 
     # -- resource-group lock -------------------------------------------------------
 
-    @route("POST", _P + r"/services/resource-group-service/actions/(?P<act>lock|unlock)/invoke")
+    @route("POST", _SVC + r"/resource-group-service/actions/(?P<act>lock|unlock)/invoke")
     def rg_lock(self, req, sdid, act):
         token = self._auth(req, sdid)
-        prefix = self._prefix(sdid)
+        prefix = (f"/ConfigurationManager/v1/{sdid}/services" if sdid
+                  else "/ConfigurationManager/v1/services")
 
         def run() -> list[str]:
             if act == "lock":
@@ -219,9 +234,14 @@ class FakeHitachiVsp(FakeArray):
                 self.lock_owner = token
             elif self.lock_owner == token:
                 self.lock_owner = None
-            return [f"{prefix}/services/resource-group-service"]
+            return [f"{prefix}/resource-group-service"]
 
         return self._job(req, sdid, token, run, lock_request=True)
+
+    @route("PUT", _SVC + r"/resource-group-service/actions/(?P<act>lock|unlock)/invoke")
+    def rg_lock_put(self, req, sdid, act):
+        # Hitachi's Cinder driver sends the lock as PUT, Ansible as POST.
+        return self.rg_lock(req, sdid, act)
 
     # -- LDEVs ------------------------------------------------------------------
 
@@ -267,16 +287,21 @@ class FakeHitachiVsp(FakeArray):
         pool = req.q("poolId")
         if pool is not None and option != "dpVolume":
             raise _err(400, "poolId can be specified only with ldevOption=dpVolume.",
-                       "KART40044-E")
+                       "KART40041-E")
         if option not in (None, "defined", "dpVolume"):
-            raise _err(400, f"fake: ldevOption={option} not implemented", "KART40044-E")
+            raise _err(400, f"fake: ldevOption={option} not implemented", "KART40041-E")
         count = int(req.q("count", "100") or 100)
         if not 1 <= count <= self.max_count:
             raise _err(400, f"The value of count ({count}) is out of range.", "KART40042-E")
         head = int(req.q("headLdevId", "0") or 0)
+        if head > self.last_ldev:
+            body = _body(f"The value of headLdevId ({head}) is out of range.", "KART40044-E")
+            body["errorCode"] = {"errorCode": "EX_ENLDEV"}
+            raise FakeError(400, body)
         data = [self._ldev_view(lid) for lid in sorted(self.ldevs)
-                if lid >= head and (pool is None or self.ldevs[lid]["pool"] == int(pool))]
-        return Reply(200, {"data": data[:count]})
+                if head <= lid < head + count
+                and (pool is None or self.ldevs[lid]["pool"] == int(pool))]
+        return Reply(200, {"data": data})
 
     @staticmethod
     def _blocks(body: dict[str, Any]) -> int:
@@ -305,7 +330,7 @@ class FakeHitachiVsp(FakeArray):
             if "ldevId" in body:
                 lid = int(body["ldevId"])
                 if lid in self.ldevs:
-                    raise _storage_err(f"LDEV {lid} is already defined.", "2E11", "0011")
+                    raise _storage_err(f"LDEV {lid} is already defined.", "2E22", "0001")
             else:
                 lid = self._free_ldev(int(body.get("startLdevId", 0)),
                                       int(body.get("endLdevId", _MAX_LDEV)))
@@ -375,7 +400,7 @@ class FakeHitachiVsp(FakeArray):
 
     def _port(self, port: str | None) -> str:
         if port not in self.ports:
-            raise _err(404, f"The specified port ({port}) does not exist.", "KART40050-E")
+            raise _err(404, f"The specified port ({port}) does not exist.", "KART30013-E")
         return port  # type: ignore[return-value]
 
     @route("GET", _P + r"/ports/(?P<port>[^/]+)")
@@ -411,7 +436,7 @@ class FakeHitachiVsp(FakeArray):
         except (TypeError, ValueError) as e:
             raise _err(400, "hostGroupNumber is required.", "KART40041-E") from e
         if key not in self.groups:
-            raise _err(404, f"Host group {port},{num} does not exist.", "KART40050-E")
+            raise _err(404, f"Host group {port},{num} does not exist.", "KART30013-E")
         return key
 
     @route("GET", _P + r"/host-groups")
@@ -494,7 +519,7 @@ class FakeHitachiVsp(FakeArray):
                 if p == port and wwn in g["wwns"]:
                     raise _storage_err(
                         f"The WWN {wwn} is already registered in host group {p},{n}.",
-                        "B957", "4184")
+                        "B957", "4180")
             self.groups[(port, num)]["wwns"].append(wwn)
             return [f"{prefix}/host-wwns/{port},{num},{wwn}"]
 
@@ -565,12 +590,12 @@ class FakeHitachiVsp(FakeArray):
                 raise _storage_err(f"LDEV {lid} is not defined.", "2E10", "0000")
             if lid in g["luns"].values():
                 raise _storage_err(f"LDEV {lid} is already mapped in host group "
-                                   f"{port},{num}.", "B958", "0233")
+                                   f"{port},{num}.", "B958", "015A")
             n = int(lun) if lun is not None else next(
                 i for i in range(2048) if i not in g["luns"])
             if n in g["luns"]:
                 raise _storage_err(f"LUN {n} is already in use in host group "
-                                   f"{port},{num}.", "B958", "0234")
+                                   f"{port},{num}.", "B958", "0947")
             g["luns"][n] = lid
             return [f"{prefix}/luns/{port},{num},{n}"]
 
@@ -582,7 +607,7 @@ class FakeHitachiVsp(FakeArray):
         key = self._existing_group(port, num)
         prefix = self._prefix(sdid)
         if int(lun) not in self.groups[key]["luns"]:
-            raise _err(404, f"LU path {port},{num},{lun} does not exist.", "KART40050-E")
+            raise _err(404, f"LU path {port},{num},{lun} does not exist.", "KART30013-E")
 
         def run() -> list[str]:
             self.groups[key]["luns"].pop(int(lun), None)

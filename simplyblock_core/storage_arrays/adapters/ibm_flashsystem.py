@@ -16,11 +16,11 @@ candidate.`` The ``CMMVCnnnnE`` code is mapped as follows (anything else is
 an :class:`ArrayRequestError`):
 
 * not found: CMMVC5753E, CMMVC5754E, CMMVC5804E, CMMVC5842E
-* conflict: CMMVC6035E (name exists), CMMVC6581E (IQN/NQN already assigned
-  or invalid), CMMVC5867E (WWPN already assigned or invalid), CMMVC5878E
-  (volume already mapped to that host), CMMVC6071E (mapped to another host,
-  needs ``force``), CMMVC5840E (volume still mapped), CMMVC5871E (host
-  still has mappings)
+* conflict: CMMVC6035E (name exists), CMMVC6578E (iSCSI name already
+  assigned or invalid), CMMVC5867E (WWPN already assigned or invalid),
+  CMMVC9328E (NQN already assigned), CMMVC5878E (volume already mapped to
+  that host), CMMVC6071E (mapped to another host, needs ``force``),
+  CMMVC5840E (volume still mapped), CMMVC5871E (host still has mappings)
 
 Objects: volumes are addressed by their numeric id (``Volume.id``), hosts by
 name (``ensure_host`` returns the host name). Note that the array reuses the
@@ -33,34 +33,62 @@ the virtual capacity has 512-byte granularity (extents only govern the real
 allocation). Resizing grows with ``expandvdisksize`` (a delta). Deletion uses
 ``rmvolume``. Volume identity: ``vdisk_UID`` (32 hex) -> ``naa.<lowercase>``.
 
-Initiator ownership: ``mkhost``/``addhostport`` fail with CMMVC6581E /
-CMMVC5867E when a port already belongs to another host; the adapter first
-reads its own host (``lshost <name>``, ports in the ``nodes`` list) so ports
-it already owns are never re-added, and treats those codes as
+Hosts: ``mkhost`` takes exactly one of ``-fcwwpn`` / ``-iscsiname`` /
+``-nqn``, so a host with FC and iSCSI initiators is created with one kind and
+the other added with ``addhostport``. ``mkhost`` and ``addhostport`` always
+carry ``-force`` (needed for FC WWPNs that are not logged in).
+
+Initiator ownership: ``mkhost``/``addhostport`` fail with CMMVC6578E /
+CMMVC5867E / CMMVC9328E when a port already belongs to another host; the
+adapter first reads its own host (``lshost <name>``, ports in the ``nodes``
+list) so ports it already owns are never re-added, and treats those codes as
 :class:`ArrayConflictError`.
+
+Checked against vendor source
+-----------------------------
+IBM Ansible collection ``ibm.storage_virtualize`` (``module_utils/
+ibm_svc_utils.py``, ``modules/ibm_svc_host.py``, ``ibm_svc_manage_volume.py``,
+``ibm_svc_vol_map.py``), IBM block CSI driver (``controllers/array_action/
+array_mediator_svc.py``) and the OpenStack Cinder Storwize driver
+(``storwize_svc/storwize_const.py``, ``storwize_svc_common.py``):
+
+* REST root ``https://<host>:7443/rest``, ``POST /rest/auth`` with
+  ``X-Auth-Username``/``X-Auth-Password`` -> ``{"token"}``, then
+  ``X-Auth-Token``; positional args in the path, flags as a JSON object.
+* A failed command is HTTP 500 whose body is the CLI text with the
+  ``CMMVCnnnnE`` code (Ansible ``svc_obj_info`` reads the code from it).
+* Codes: CMMVC5753E / CMMVC5754E / CMMVC5804E / CMMVC5842E (not found /
+  not mapped), CMMVC6035E (exists), CMMVC6071E (already mapped to a host),
+  CMMVC5867E / CMMVC6578E / CMMVC9328E (FC / iSCSI / NVMe port already
+  assigned or invalid).
+* ``mkhost -protocol`` values ``scsi``, ``iscsi``, ``fcscsi``, ``tcpnvme``,
+  ``rdmanvme``, ``fcnvme``; ``mkhost``/``addhostport`` with ``-force``;
+  ``-fcwwpn`` ``:``-separated, ``-iscsiname``/``-nqn`` ``,``-separated, one
+  of them per ``mkhost``.
+* ``lshost <name>`` ports under ``nodes`` (``WWPN``, ``iscsi_name``,
+  ``nqn``); ``lsvdisk <id>`` is a list (volume, then copies);
+  ``lsvdiskhostmap`` with one row may be a bare dict (``host_name``,
+  ``SCSI_id``); ``mkvdiskhostmap -force``.
+* ``mkvolume`` with ``size``/``unit=b``/``thin``/``iogrp``,
+  ``expandvdisksize`` with a byte delta, ``rmvolume``; ``lssystem``
+  ``code_level`` is ``"<version> (build ...)"``.
 
 Verify against a real system
 ----------------------------
-* REST root: ``/rest`` (as used by IBM's Ansible collection). Code level
-  8.5+ documents ``/rest/v1``; set the ``rest_root`` option if ``/rest`` is
-  rejected.
+* ``/rest/v1`` on code levels that reject ``/rest`` (no vendor source uses
+  it); set the ``rest_root`` option.
 * HTTP status on an expired token (assumed 403, 401 handled the same) and on
-  bad credentials at ``/rest/auth`` (assumed 403).
-* Error body format: plain text with the CMMVC message (JSON bodies are also
-  parsed). Codes CMMVC5804E, CMMVC5840E (rmvolume of a mapped volume; newer
-  levels may answer with a different code), CMMVC5871E (rmhost with
-  mappings) and the NQN-already-assigned code (assumed CMMVC6581E as for
-  IQNs) are from memory of the CLI reference.
-* ``mkhost -protocol`` values for NVMe hosts (``tcpnvme``, ``rdmanvme`` on
-  8.6+; older levels only knew ``nvme``) -- set ``nvme_protocol_value`` if
-  the array rejects them. SCSI hosts are created without ``-protocol``.
-* Detail views (``lsvdisk <id>``, ``lshost <name>``) may come back as a list
-  of dicts (object, then copies) or one dict; ``lsvdiskhostmap`` with a
-  single row may come back as a dict instead of a one-element list. Both
-  shapes are accepted.
-* ``mkvolume -unit b`` with a size that is not a 512-byte multiple (we never
-  send one).
-* ``mkhost -force`` for FC WWPNs that are not logged in (we always pass it).
+  bad credentials at ``/rest/auth`` (assumed 403); the Ansible collection
+  only special-cases 429.
+* Codes CMMVC5840E (rmvolume of a mapped volume), CMMVC5871E (rmhost with
+  mappings) and CMMVC5878E (volume already mapped to that host) are from
+  memory of the CLI reference; no vendor driver handles them (Cinder and CSI
+  check ``lsvdiskhostmap`` first, as this adapter does).
+* NVMe ``-protocol`` on levels before 8.6 (``nvme`` only?) -- set
+  ``nvme_protocol_value`` if the array rejects ``tcpnvme`` / ``rdmanvme``.
+* Whether a SCSI host may hold both FC and iSCSI ports (``addhostport`` of the
+  other kind) on code levels that split ``-protocol`` into ``fcscsi`` and
+  ``iscsi``. SCSI hosts are created without ``-protocol`` (default ``scsi``).
 """
 from __future__ import annotations
 
@@ -90,15 +118,17 @@ _CODE_RE = re.compile(r"CMMVC\d{4}[EW]")
 NOT_FOUND_CODES = frozenset({"CMMVC5753E", "CMMVC5754E", "CMMVC5804E", "CMMVC5842E"})
 CONFLICT_CODES = frozenset({
     "CMMVC6035E",  # object already exists
-    "CMMVC6581E",  # IQN (and, we assume, NQN) already assigned or not valid
+    "CMMVC6578E",  # iSCSI name already assigned or not valid
     "CMMVC5867E",  # WWPN already assigned or not valid
+    "CMMVC9328E",  # NQN already assigned
     "CMMVC5878E",  # volume already mapped to this host
     "CMMVC6071E",  # volume mapped to another host; needs -force
     "CMMVC5840E",  # volume not deleted: still mapped
     "CMMVC5871E",  # host has mappings
 })
 #: Codes meaning "this port is owned by another host" on mkhost/addhostport.
-PORT_TAKEN_CODES = frozenset({"CMMVC6581E", "CMMVC5867E"})
+PORT_TAKEN_CODES = frozenset({"CMMVC6578E", "CMMVC5867E", "CMMVC9328E"})
+_PORT_SEP = {"nqn": ",", "fcwwpn": ":", "iscsiname": ","}
 
 _NVME_PROTOCOL = {Protocol.NVME_TCP: "tcpnvme", Protocol.NVME_RDMA: "rdmanvme"}
 
@@ -292,37 +322,34 @@ class IbmFlashSystemAdapter(ArrayAdapter):
 
     def ensure_host(self, spec: HostSpec) -> str:
         wanted = {
-            "iscsiname": spec.addresses(Protocol.ISCSI),
-            "fcwwpn": [a.upper() for a in spec.addresses(Protocol.FC)],
             "nqn": spec.addresses(Protocol.NVME_TCP, Protocol.NVME_RDMA),
+            "fcwwpn": [a.upper() for a in spec.addresses(Protocol.FC)],
+            "iscsiname": spec.addresses(Protocol.ISCSI),
         }
         protocol = self._nvme_protocol(spec)
         host = self._host(spec.name)
         try:
             if host is None:
-                opts: dict[str, Any] = {"name": spec.name}
-                if wanted["iscsiname"]:
-                    opts["iscsiname"] = ",".join(wanted["iscsiname"])
-                if wanted["fcwwpn"]:
-                    opts["fcwwpn"] = ":".join(wanted["fcwwpn"])
-                    opts["force"] = True
-                if wanted["nqn"]:
-                    opts["nqn"] = ",".join(wanted["nqn"])
+                # mkhost takes exactly one of -fcwwpn / -iscsiname / -nqn; the
+                # other port kinds are added with addhostport below.
+                kind = next(k for k, v in wanted.items() if v)
+                opts: dict[str, Any] = {"name": spec.name,
+                                        kind: _PORT_SEP[kind].join(wanted[kind]),
+                                        "force": True}
                 if protocol:
                     opts["protocol"] = protocol
                 self._cmd("mkhost", **opts)
-                return spec.name
-            have = self._ports(host)
+                have = {k: {v.lower() for v in wanted[kind]} if k == kind else set()
+                        for k in wanted}
+            else:
+                have = self._ports(host)
             for key, values in wanted.items():
                 missing = [v for v in values if v.lower() not in have[key]
                            and v not in have[key]]
-                if not missing:
-                    continue
-                sep = ":" if key == "fcwwpn" else ","
-                opts = {key: sep.join(missing)}
-                if key == "fcwwpn":
-                    opts["force"] = True
-                self._cmd("addhostport", spec.name, **opts)
+                if missing:
+                    port_opts: dict[str, Any] = {key: _PORT_SEP[key].join(missing),
+                                                 "force": True}
+                    self._cmd("addhostport", spec.name, **port_opts)
         except ArrayConflictError as e:
             code = _CODE_RE.search(str(e))
             if code and code.group(0) in PORT_TAKEN_CODES:

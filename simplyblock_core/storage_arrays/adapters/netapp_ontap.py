@@ -44,36 +44,78 @@ ONTAP lets an initiator / host NQN sit in several igroups / subsystems. The
 contract does not: before adding one, the adapter looks it up and raises
 :class:`ArrayConflictError` if another host (igroup or host subsystem) has it.
 
-Asynchronous calls (FlexVol create/resize/delete) answer ``202`` with a job
-link; the adapter polls ``/api/cluster/jobs/{uuid}`` until ``success`` or
+Asynchronous calls answer ``202`` with a job link: FlexVol create/resize/
+delete always, LUN and namespace create/modify/delete on some systems. The
+adapter polls ``/api/cluster/jobs/{uuid}`` until ``success`` or
 ``failure``, at most ``job_timeout_s`` seconds.
+
+A deleted FlexVol goes to ONTAP's volume recovery queue (still using space)
+unless ``skip_recovery_queue`` is set, which sends ``force=true``.
+
+An igroup's ``protocol`` cannot be changed after creation, so an existing
+``iscsi``/``fcp`` igroup (not created by this adapter) that would need the
+other kind of initiator raises :class:`ArrayConflictError`.
+
+ASA r2 (``disaggregated`` clusters, ONTAP 9.16.1+) has no FlexVols; ``login``
+detects it and raises :class:`ArrayUnsupportedError`.
+
+Checked against vendor source
+-----------------------------
+Trident = github.com/NetApp/trident ``storage_drivers/ontap/api`` (its REST
+client under ``rest/`` is generated from the ONTAP OpenAPI spec); Ansible =
+``netapp.ontap`` collection; Cinder = ``volume/drivers/netapp/dataontap``.
+
+* FlexVol ``DELETE`` of an online volume needs no offline first (Ansible
+  ``na_ontap_volume.py`` ``rest_delete_volume``; Trident ``ontap_rest.go``
+  ``destroyVolumeByUUID``); ``force`` bypasses the recovery queue
+  (``rest/client/storage/volume_delete_parameters.go``).
+* ``aggregates`` is optional on FlexVol ``POST`` (``rest/models/volume.go``;
+  Ansible ``aggregates_rest`` omits it when no aggregate is given); ``|``
+  is the OR operator in queries (Trident ``ontap_rest.go`` aggregates query).
+* LUN/namespace ``POST``/``PATCH``/``DELETE`` and FlexVol
+  ``POST``/``PATCH``/``DELETE`` may answer ``202`` + job; igroup, lun-map,
+  subsystem, subsystem-map and subsystem-host calls are synchronous
+  (``rest/client/*/*_responses.go``; Trident ``lunCreate``).
+* Error codes: ``4`` entry doesn't exist, ``1`` duplicate entry, ``5374242``
+  LUN exists, ``5702832`` LUN create in progress, ``72090025`` subsystem
+  exists, ``5374922`` LUN map exists; a missing object addressed by UUID is
+  HTTP 404 (Trident ``abstraction_error.go``, ``ontap_rest.go``
+  ``isRestNotFoundError``). The adapter classifies by status, code and
+  message text.
+* igroup ``protocol`` is ``fcp``/``iscsi``/``mixed`` (default ``mixed``) and
+  "cannot be changed after creation of the group" (``rest/models/igroup.go``).
+* ``nsid`` is 8 hex digits plus ``h`` (``"00000001h"``,
+  ``rest/models/nvme_subsystem_map.go``); paths
+  ``/protocols/nvme/subsystem-maps/{subsystem.uuid}/{namespace.uuid}``,
+  ``/protocols/nvme/subsystems/{subsystem.uuid}/hosts/{nqn}``,
+  ``/protocols/san/lun-maps/{lun.uuid}/{igroup.uuid}``,
+  ``/protocols/san/igroups/{igroup.uuid}/initiators``
+  (``rest/client/n_v_me/nv_me_client.go``, ``s_a_n`` client).
+* ``allow_delete_with_hosts`` on subsystem ``DELETE`` (Trident
+  ``NVMeSubsystemDelete``); namespace resize via ``PATCH space.size``
+  (Trident ``NVMeNamespaceSetSize``).
+* ``records`` arrays for bulk igroup-initiator and subsystem-host ``POST``
+  (``rest/models/igroup_initiator.go``, ``nvme_subsystem_host.go``).
+* NVMe hosts (NVMe/FC included) are subsystem ``hosts[].nqn`` only
+  (``rest/models/nvme_subsystem_host.go``).
+* ``naa.600a0980`` + hex of the 12-character LUN serial (Ansible
+  ``na_ontap_lun_map.py``, ``na_ontap_rest_info.py``); ``serial_number``
+  is exactly 12 characters (``rest/models/lun.go``).
+* ASA r2 detection: ``GET /cluster?fields=disaggregated`` on 9.16.1+
+  (Trident ``ontap_rest.go`` ``MinimumASAR2Version``; Cinder
+  ``client_cmode_rest_asar2.py`` uses ``/storage/storage-units``).
 
 Verify against a real system
 ----------------------------
-* FlexVol ``DELETE`` of an online volume without a junction path succeeds
-  without first taking it offline (the adapter does not offline it).
 * A thin LUN/namespace may not be larger than its FlexVol (the fake
   enforces this; it is why resize grows the FlexVol first).
-* ``aggregates`` omitted on FlexVol ``POST`` lets ONTAP place the volume
-  (9.8+); with several ``aggregates`` configured the adapter picks the one
-  with the most ``space.block_storage.available`` (needs read access to
-  ``/api/storage/aggregates``, which SVM-scoped accounts may lack).
-* Name/duplicate errors: HTTP 409 vs 400, and the numeric ONTAP error codes
-  (the adapter classifies by status and message text, not by code).
-* FlexVol duplicate name surfaces as a failed job rather than a synchronous
-  error.
-* ``PATCH`` of an igroup's ``protocol`` to ``mixed`` (only needed for igroups
-  not created by this adapter).
-* ``nsid`` in subsystem-maps is a hex string such as ``"00000001h"``; the
-  subsystem-map ``DELETE`` path is
-  ``/subsystem-maps/{subsystem.uuid}/{namespace.uuid}``.
-* ``allow_delete_with_hosts`` on subsystem ``DELETE``.
-* Namespace resize via ``PATCH space.size`` (grow only).
+* With several ``aggregates`` configured the adapter picks the one with the
+  most ``space.block_storage.available``; needs read access to
+  ``/api/storage/aggregates``, which SVM-scoped accounts may lack.
+* Whether a duplicate FlexVol name fails synchronously (``400``/``409``) or
+  as a failed job, and its exact message text.
 * Whether query values match case-insensitively (WWPNs are always written in
   lowercase colon form, IQNs in lowercase).
-* ASA r2 systems (ONTAP 9.16+ "ASA r2") hide FlexVols; this adapter targets
-  the classic unified/ASA personality.
-* NVMe/FC hosts are identified by NQN, not WWPN (see :meth:`_nqn`).
 """
 from __future__ import annotations
 
@@ -110,6 +152,11 @@ _FAMILIES = ("scsi", "nvme")
 _GUARANTEES = ("none", "volume")
 _LUN = "lun"
 _NS = "namespace"
+
+#: ONTAP error codes (Trident ``storage_drivers/ontap/api/abstraction_error.go``).
+_NOT_FOUND_CODES = frozenset({"4"})
+_CONFLICT_CODES = frozenset({"1", "5374242", "5702832", "72090025", "5374922"})
+_ASA_R2_MIN_VERSION = (9, 16, 1)
 
 _LUN_FIELDS = "uuid,name,serial_number,space.size,location.logical_unit,location.volume,svm"
 _NS_FIELDS = "uuid,name,space.size,location.namespace,location.volume,svm"
@@ -178,6 +225,8 @@ class NetAppOntapAdapter(ArrayAdapter):
                   default=4096),
         OptionDoc("job_timeout_s", "How long to wait for an asynchronous ONTAP job.",
                   default=300),
+        OptionDoc("skip_recovery_queue", "Delete FlexVols with force=true so they do not "
+                  "linger (and use space) in the volume recovery queue.", default=False),
     )
 
     def __init__(self, ctx):
@@ -209,6 +258,7 @@ class NetAppOntapAdapter(ArrayAdapter):
             raise ArrayError("NetApp ONTAP namespace_block_size must be 512 or 4096")
         self.job_timeout_s = float(self._int_option("job_timeout_s", 1, 86400))
         self.os_type = str(self.option("os_type"))
+        self.skip_recovery_queue = _as_bool(self.option("skip_recovery_queue"))
 
     def _int_option(self, name: str, lo: int, hi: int) -> int:
         raw = self.option(name)
@@ -226,6 +276,24 @@ class NetAppOntapAdapter(ArrayAdapter):
         self.session.set_basic_auth(self.secret("username"), self.secret("password"))
         if not self._records("/api/svm/svms", {"name": self.svm, "fields": "uuid,name"}):
             raise ArrayNotFoundError(f"SVM {self.svm!r} not found on array {self.config.id}")
+        if self._is_disaggregated():
+            raise ArrayUnsupportedError(
+                f"Array {self.config.id} is an ONTAP ASA r2 (disaggregated) system, which has "
+                "no FlexVols; the NetApp ONTAP adapter supports unified ONTAP and classic ASA")
+
+    def _is_disaggregated(self) -> bool:
+        """ASA r2 check as in Trident: ``disaggregated``, asked for on 9.16.1+."""
+        cluster = json_of(self._call("GET", "/api/cluster", params={"fields": "version"})) or {}
+        ver = cluster.get("version") or {}
+        try:
+            parsed = (int(ver["generation"]), int(ver["major"]), int(ver["minor"]))
+        except (KeyError, TypeError, ValueError):
+            return False
+        if parsed < _ASA_R2_MIN_VERSION:
+            return False
+        info = json_of(self._call("GET", "/api/cluster",
+                                  params={"fields": "disaggregated"})) or {}
+        return _as_bool(info.get("disaggregated", False))
 
     def close(self) -> None:
         self.session.clear_auth()
@@ -244,12 +312,14 @@ class NetAppOntapAdapter(ArrayAdapter):
     def _error(method: str, path: str, body: dict[str, Any]) -> ArrayError:
         err = body.get("error") or {}
         message = str(err.get("message", "")) or "request failed"
-        code = err.get("code", "")
+        code = str(err.get("code", ""))
         text = f"{method} {path}: {message} (ONTAP error {code})"
         lowered = message.lower()
-        if "doesn't exist" in lowered or "does not exist" in lowered or "not found" in lowered:
+        if code in _NOT_FOUND_CODES or "doesn't exist" in lowered \
+                or "does not exist" in lowered or "not found" in lowered:
             return ArrayNotFoundError(text)
-        if any(w in lowered for w in ("already", "duplicate", "in use", "is mapped")):
+        if code in _CONFLICT_CODES or any(
+                w in lowered for w in ("already", "duplicate", "in use", "is mapped")):
             return ArrayConflictError(text)
         return ArrayRequestError(text, status=400)
 
@@ -434,7 +504,8 @@ class NetAppOntapAdapter(ArrayAdapter):
 
     def _delete_flexvol(self, uuid: str) -> None:
         try:
-            self._async("DELETE", f"/api/storage/volumes/{uuid}")
+            self._async("DELETE", f"/api/storage/volumes/{uuid}",
+                        params={"force": "true"} if self.skip_recovery_queue else None)
         except ArrayNotFoundError:
             pass
 
@@ -456,15 +527,16 @@ class NetAppOntapAdapter(ArrayAdapter):
         kind = _LUN if self.family == "scsi" else _NS
         try:
             if kind == _LUN:
-                self._call("POST", "/api/storage/luns", params={"return_records": "true"}, json={
+                self._async("POST", "/api/storage/luns", params={"return_records": "true"}, json={
                     "svm": self._svm_ref(), "name": path, "os_type": self.os_type,
                     "space": {"size": size_bytes, "guarantee": {"requested": False}},
                 })
             else:
-                self._call("POST", "/api/storage/namespaces", params={"return_records": "true"},
-                           json={"svm": self._svm_ref(), "name": path, "os_type": self.os_type,
-                                 "space": {"size": size_bytes,
-                                           "block_size": self.block_size}})
+                self._async("POST", "/api/storage/namespaces",
+                            params={"return_records": "true"},
+                            json={"svm": self._svm_ref(), "name": path, "os_type": self.os_type,
+                                  "space": {"size": size_bytes,
+                                            "block_size": self.block_size}})
         except ArrayError:
             if created_flexvol:
                 try:
@@ -492,7 +564,7 @@ class NetAppOntapAdapter(ArrayAdapter):
                 raise ArrayNotFoundError(f"FlexVol of volume {volume_id} not found")
             self._grow_flexvol(vol, self._flexvol_bytes(size_bytes))
         base = "/api/storage/luns" if kind == _LUN else "/api/storage/namespaces"
-        self._call("PATCH", f"{base}/{volume_id}", json={"space": {"size": size_bytes}})
+        self._async("PATCH", f"{base}/{volume_id}", json={"space": {"size": size_bytes}})
         kind, rec = self._require(volume_id)
         return self._to_volume(kind, rec)
 
@@ -500,7 +572,7 @@ class NetAppOntapAdapter(ArrayAdapter):
         kind, rec = self._require(volume_id)
         loc_vol = (rec.get("location") or {}).get("volume") or {}
         if kind == _LUN:
-            self._call("DELETE", f"/api/storage/luns/{volume_id}")
+            self._async("DELETE", f"/api/storage/luns/{volume_id}")
         else:
             smap = self._subsystem_map(volume_id)
             if smap is not None:
@@ -508,7 +580,7 @@ class NetAppOntapAdapter(ArrayAdapter):
                 self._call("DELETE",
                            f"/api/protocols/nvme/subsystem-maps/{sub['uuid']}/{volume_id}")
                 self._delete_subsystem(sub["uuid"])
-            self._call("DELETE", f"/api/storage/namespaces/{volume_id}")
+            self._async("DELETE", f"/api/storage/namespaces/{volume_id}")
         # Only a FlexVol of our own (one per LUN) is removed; never the shared one.
         flex = loc_vol.get("name", "")
         if self._owns_flexvol(kind, rec):
@@ -582,9 +654,14 @@ class NetAppOntapAdapter(ArrayAdapter):
             needs = {"iscsi" if i.protocol == Protocol.ISCSI else "fcp"
                      for i in spec.initiators
                      if self._norm_initiator(self._igroup_initiator(i)) not in have}
-            if group.get("protocol") not in ("mixed", *needs) or len(needs) > 1:
-                self._call("PATCH", f"/api/protocols/san/igroups/{group['uuid']}",
-                           json={"protocol": "mixed"})
+            proto = group.get("protocol") or "mixed"
+            if proto != "mixed" and needs - {proto}:
+                # "The protocol of an initiator group cannot be changed after
+                # creation of the group." (ONTAP REST spec, igroup.protocol)
+                raise ArrayConflictError(
+                    f"igroup {spec.name!r} in SVM {self.svm} has protocol {proto!r} and "
+                    f"cannot take {', '.join(sorted(needs - {proto}))} initiators; ONTAP "
+                    "does not allow changing an igroup's protocol")
             self._call("POST", f"/api/protocols/san/igroups/{group['uuid']}/initiators",
                        json={"records": [{"name": m} for m in missing]})
         return spec.name

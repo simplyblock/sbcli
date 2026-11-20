@@ -6,6 +6,16 @@ responses; ``{"messages": [{"code": "SM_...", ...}]}`` errors; 42-hex object
 ids; sizes in MiB; volumes that must be offline before deletion and cannot be
 offlined or deleted while ACRs exist; FC WWPNs in colon form; and LUN 0 for
 every iSCSI ACR with volume-scoped targets.
+
+Modelled on the NimbleOS SDK and Cinder: error bodies carry a generic
+``SM_http_<status>`` message followed by the specific one (``SM_eexist``,
+``SM_http_not_found``, ``SM_vol_size_decreased``, ...); offlining an offline
+volume is refused with "Object is already in requested state"; and with
+``async_ops`` a mutating request answers 202 + ``SM_async_job_id`` and the
+job is polled on ``GET /v1/jobs/<id>`` until ``state`` is ``done``. The
+specific codes for ACR/online refusals (``SM_vol_online``,
+``SM_vol_has_acl``, ``SM_vol_has_connections``, ``SM_igrp_has_acl``) are
+the fake's own.
 """
 from __future__ import annotations
 
@@ -27,8 +37,16 @@ _WWPN_RE = re.compile(r"^([0-9a-f]{2}:){7}[0-9a-f]{2}$")
 _NG_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.:\-]{0,63}$")
 
 
+_HTTP_CODE = {400: "SM_http_bad_request", 401: "SM_http_unauthorized",
+              404: "SM_http_not_found", 409: "SM_http_conflict"}
+
+
 def _err(status: int, code: str, text: str) -> FakeError:
-    return FakeError(status, {"messages": [{"code": code, "severity": "error", "text": text}]})
+    messages = [{"code": code, "severity": "error", "text": text}]
+    generic = _HTTP_CODE.get(status)
+    if generic and generic != code:
+        messages.insert(0, {"code": generic, "severity": "error", "text": text})
+    return FakeError(status, {"messages": messages})
 
 
 class FakeHpeNimble(FakeArray):
@@ -40,6 +58,12 @@ class FakeHpeNimble(FakeArray):
         self.username = username
         self.password = password
         self.volume_scoped_targets = volume_scoped_targets
+        #: "METHOD kind" pairs (kind = volume, initiator_group, initiator, acr)
+        #: that answer 202 + an async job instead of the object.
+        self.async_ops: set[str] = set()
+        #: polls a job reports ``running`` before ``done``
+        self.job_polls = 2
+        self.jobs: dict[str, int] = {}                 # job id -> polls left
         self.tokens: dict[str, str] = {}               # token id -> session_token
         self.pools = {self._new_id(0x0a): "default", self._new_id(0x0a): "fast"}
         self.perfpolicies = {self._new_id(0x03): "default", self._new_id(0x03): "Oracle OLTP"}
@@ -110,6 +134,26 @@ class FakeHpeNimble(FakeArray):
             raise _err(404, "SM_http_not_found", f"Object not found: {what} {obj_id}")
         return table[obj_id]
 
+    def _done(self, op: str, status: int, data: Any) -> Reply:
+        """The reply for a completed mutation, or 202 + a job for ``async_ops``."""
+        if op not in self.async_ops:
+            return Reply(status, {"data": data} if data is not None else {})
+        jid = self._new_id(0x29)
+        self.jobs[jid] = self.job_polls
+        return Reply(202, {"messages": [{"code": "SM_async_job_id", "severity": "info",
+                                         "text": f"Job {jid} is running",
+                                         "arguments": {"job_id": jid}}]})
+
+    @route("GET", "/v1/jobs/" + _ID)
+    def get_job(self, req, obj_id):
+        self._auth(req)
+        if obj_id not in self.jobs:
+            raise _err(404, "SM_http_not_found", f"Object not found: job {obj_id}")
+        left = self.jobs[obj_id]
+        self.jobs[obj_id] = max(0, left - 1)
+        return Reply(200, {"data": {"id": obj_id, "state": "running" if left else "done",
+                                    "result": "" if left else "success"}})
+
     # -- auth / info ----------------------------------------------------------
 
     @route("POST", "/v1/tokens")
@@ -168,7 +212,7 @@ class FakeHpeNimble(FakeArray):
         if pp_id is not None and pp_id not in self.perfpolicies:
             raise _err(404, "SM_http_not_found", f"Object not found: perfpolicy {pp_id}")
         vid = self.add_volume(name, size << 20, pool_id, pp_id)
-        return Reply(201, {"data": self.volumes[vid]})
+        return self._done("POST volume", 201, self.volumes[vid])
 
     @route("GET", "/v1/volumes/detail")
     def volumes_detail(self, req):
@@ -187,17 +231,22 @@ class FakeHpeNimble(FakeArray):
         data = self._body(req)
         if "size" in data:
             size = data["size"]
-            if not isinstance(size, int) or size < vol["size"]:
+            if not isinstance(size, int) or size < 1:
+                raise _err(400, "SM_invalid_arg", "Invalid argument: size (MiB)")
+            if size < vol["size"] and not data.get("force"):
                 raise _err(400, "SM_vol_size_decreased",
-                           "Volume size cannot be decreased")
+                           "the operation will decrease the size of the volume. "
+                           "use force option to proceed.")
             vol["size"] = size
         if "online" in data:
+            if bool(data["online"]) == vol["online"]:
+                raise _err(400, "SM_ealready", "Object is already in requested state")
             if not data["online"] and self._vol_acrs(obj_id) and not data.get("force"):
                 raise _err(409, "SM_vol_has_connections",
                            "Volume has access control records; cannot offline")
             vol["online"] = bool(data["online"])
             vol["vol_state"] = "online" if vol["online"] else "offline"
-        return Reply(200, {"data": vol})
+        return self._done("PUT volume", 200, vol)
 
     @route("DELETE", "/v1/volumes/" + _ID)
     def delete_volume(self, req, obj_id):
@@ -208,7 +257,7 @@ class FakeHpeNimble(FakeArray):
         if self._vol_acrs(obj_id):
             raise _err(409, "SM_vol_has_acl", "Volume has access control records")
         del self.volumes[obj_id]
-        return Reply(200, {})
+        return self._done("DELETE volume", 200, None)
 
     # -- initiator groups / initiators ----------------------------------------------
 
@@ -250,7 +299,7 @@ class FakeHpeNimble(FakeArray):
         self.groups[gid] = {"id": gid, "name": name, "access_protocol": proto,
                             "description": data.get("description", ""),
                             "target_subnets": [], "host_type": "auto"}
-        return Reply(201, {"data": self._group_view(self.groups[gid])})
+        return self._done("POST initiator_group", 201, self._group_view(self.groups[gid]))
 
     @route("DELETE", "/v1/initiator_groups/" + _ID)
     def delete_group(self, req, obj_id):
@@ -262,7 +311,7 @@ class FakeHpeNimble(FakeArray):
         for iid in [i for i, v in self.initiators.items() if v["initiator_group_id"] == obj_id]:
             del self.initiators[iid]
         del self.groups[obj_id]
-        return Reply(200, {})
+        return self._done("DELETE initiator_group", 200, None)
 
     @route("GET", "/v1/initiators/detail")
     def initiators_detail(self, req):
@@ -295,7 +344,7 @@ class FakeHpeNimble(FakeArray):
                 raise _err(409, "SM_eexist", f"Object exists: initiator {wwpn}")
             item.update(wwpn=wwpn, alias=data.get("alias", ""))
         self.initiators[item["id"]] = item
-        return Reply(201, {"data": item})
+        return self._done("POST initiator", 201, item)
 
     # -- access control records ------------------------------------------------
 
@@ -330,14 +379,14 @@ class FakeHpeNimble(FakeArray):
                           "initiator_group_name": group["name"],
                           "apply_to": data.get("apply_to", "both"), "lun": lun,
                           "chap_user_id": "", "pe_id": "", "snap_id": ""}
-        return Reply(201, {"data": self.acrs[aid]})
+        return self._done("POST acr", 201, self.acrs[aid])
 
     @route("DELETE", "/v1/access_control_records/" + _ID)
     def delete_acr(self, req, obj_id):
         self._auth(req)
         self._get(self.acrs, obj_id, "access control record")
         del self.acrs[obj_id]
-        return Reply(200, {})
+        return self._done("DELETE acr", 200, None)
 
 
 def contract_setup() -> ContractSetup:

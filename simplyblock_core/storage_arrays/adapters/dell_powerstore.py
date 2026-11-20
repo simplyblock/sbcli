@@ -5,44 +5,76 @@ response carries the session cookie (``auth_cookie``) and a CSRF token in the
 ``DELL-EMC-TOKEN`` header; every later request sends the cookie, and every
 non-GET request must also send the token header (the array answers 403
 without it). Basic auth is *not* kept on the session afterwards, so an expired
-session surfaces as 401 and :class:`ArrayClient` logs in again.
+session surfaces as 401 or 403 and :class:`ArrayClient` logs in again.
 
-Queries use the PostgREST-style syntax: ``select=a,b`` picks fields,
-``name=eq.x`` filters, ``limit``/``offset`` page; a partial page is answered
-with ``206 Partial Content`` and a ``Content-Range`` header.
+Queries use the PostgREST-style syntax: ``select=a,b`` picks fields (with
+embedded objects as ``host(host_initiators)``), ``name=eq.x`` filters,
+``limit``/``offset`` page; a partial page is answered with
+``206 Partial Content`` and a ``Content-Range`` header.
 
 Errors: ``{"messages": [{"code": "0x...", "severity": "Error",
-"message_l10n": "...", "arguments": [...]}]}``. Semantic failures (name in
-use, initiator owned by another host, volume still attached, shrink) come
-back as ``422 Unprocessable Entity``; malformed requests as 400.
+"message_l10n": "...", "arguments": [...]}]}``. Semantic failures (initiator
+owned by another host, volume still attached, shrink) come back as
+``422 Unprocessable Entity``; a duplicate volume name as 422 or 500; malformed
+requests, a missing host and a detach of a volume that is not attached
+(``"Host is not attached to volume"``) as 400. Errors are classified by
+wording: "not attached" and "not found" mean missing, "already" / "in use" /
+"attached" / "mapped" mean conflict.
 
 Objects are addressed by id (UUID) for volumes and hosts. Volume identity:
 ``wwn`` is returned as ``naa.<hex>``, ``nguid`` as ``nguid.<32 hex>``; this
 adapter reports them as ``naa.<hex>`` / ``eui.<hex>`` (lowercase).
 
+Mappings: ``host_volume_mapping.logical_unit_number`` is the SCSI LUN. For
+NVMe hosts the namespace id is the volume's own ``nsid`` field ("NVMe
+Namespace unique identifier in the NVME subsystem"), so a mapping to a host
+whose initiators are all ``NVMe`` reports that ``nsid`` (falling back to
+``logical_unit_number`` when the array returns none).
+
 Sizes are bytes; PowerStore requires a multiple of 8 KiB (8192) and at least
 1 MiB.
 
+Checked against vendor source
+-----------------------------
+(PyPowerStore = github.com/dell/python-powerstore, gopowerstore =
+github.com/dell/gopowerstore, csi-powerstore = github.com/dell/csi-powerstore)
+
+* Session: ``auth_cookie`` cookie and ``DELL-EMC-TOKEN`` header from
+  ``GET login_session``, both sent on later requests, logout is
+  ``POST /logout`` (PyPowerStore ``client.py`` ``AuthenticationManager``);
+  gopowerstore re-logs in on 403 (``api/api.go`` ``Query``).
+* Create answers ``{"id"}`` (gopowerstore ``CreateResponse``), modify /
+  delete / attach / detach an empty body (``EmptyResponse``); attach and
+  detach are ``POST volume/{id}/attach|detach {"host_id"}`` (PyPowerStore
+  ``constants.py`` ``MAP_VOLUME_TO_HOST_URL``).
+* Error body ``messages[].message_l10n`` (gopowerstore ``api/api.go``
+  ``ErrorMsg``); status codes per gopowerstore ``gopowerstore_types.go``:
+  name in use 422 or 500, delete of an attached volume 422, detach of a
+  non-attached volume / missing host 400 or 404; wording "Host is not
+  attached to volume" and "already registered with another host"
+  (csi-powerstore ``controller/base.go``, ``node/node.go``).
+* Host fields ``host_initiators`` (GET), ``initiators`` (create),
+  ``add_initiators`` (modify), each ``{"port_name", "port_type"}`` with
+  ``port_type`` ``iSCSI``/``FC``/``NVMe`` (gopowerstore ``host_types.go``);
+  NVMe/TCP and NVMe/FC hosts both register their NQN as ``NVMe``, FC WWPNs
+  colon-separated lowercase (csi-powerstore ``buildInitiatorsArray``,
+  ``formatWWPN``).
+* Volume ``nsid`` field (gopowerstore ``volume_types.go``) and embedded
+  selects on ``host_volume_mapping`` (``HostVolumeMapping.Fields``).
+* ``name=eq.<value>`` unquoted (gopowerstore ``GetHostByName``,
+  ``GetVolumeByName``).
+* Size: multiple of 8192, minimum 1 MB (gopowerstore ``VolumeCreate``,
+  csi-powerstore ``VolumeSizeMultiple`` / ``MinVolumeSizeBytes``).
+
 Verify against a real system
 ----------------------------
-* The session cookie name (``auth_cookie``) and that the CSRF header is
-  exactly ``DELL-EMC-TOKEN`` on both the login response and requests.
-* That ``POST /volume`` and ``POST /host`` answer ``201 {"id": ...}`` and that
-  PATCH/DELETE/attach/detach answer ``204`` with an empty body.
-* The status code (422 assumed) and ``message_l10n`` wording for: duplicate
-  name, initiator already registered to another host, delete of an attached
-  volume/host, shrink, detach of a non-attached volume. Classification below
-  is by wording ("already", "in use", "attached", "mapped", "not found").
-* The host field holding initiators on GET is ``host_initiators``
-  (create uses ``initiators``, modify ``add_initiators``), each
-  ``{"port_name", "port_type"}``; ``port_type`` values ``iSCSI``/``FC``/
-  ``NVMe`` (NVMe/TCP and NVMe/FC both ``NVMe``), and that FC ``port_name`` is
-  accepted/returned colon-separated lowercase (``21:00:...``).
-* That ``logical_unit_number`` in ``host_volume_mapping`` is the NVMe NSID for
-  NVMe hosts, and which LUN the array picks first (fake: 1).
-* That a ``name=eq.<value>`` filter needs no quoting for host names containing
-  dots or commas.
-* That the size multiple is 8192 bytes on 4.x as on 3.x.
+* Status and wording for a shrink, deleting a host with mapped volumes, and
+  re-adding an initiator already on the same host.
+* Whether ``logical_unit_number`` on an NVMe host's mapping equals the
+  volume's ``nsid`` (the adapter prefers ``nsid``), and which LUN the array
+  picks first for SCSI (fake: 1).
+* Exact behaviour of ``name=eq.`` for names containing commas or parentheses
+  (simplyblock names are ``sb-<hex>``; host names are caller-chosen).
 """
 from __future__ import annotations
 
@@ -73,10 +105,12 @@ API = "/api/rest"
 TOKEN_HEADER = "DELL-EMC-TOKEN"
 VOLUME_FIELDS = "id,name,size,wwn,nguid"
 HOST_FIELDS = "id,name,host_initiators"
-MAPPING_FIELDS = "id,host_id,host_group_id,volume_id,logical_unit_number"
+MAPPING_FIELDS = ("id,host_id,host_group_id,volume_id,logical_unit_number,"
+                  "host(host_initiators),volume(nsid)")
 _PAGE = 1000
 
-_NOT_FOUND = ("not found", "does not exist", "not exist", "no such")
+# "not attached": detach of a volume that is not (or no longer) attached.
+_NOT_FOUND = ("not found", "does not exist", "not exist", "no such", "not attached")
 _CONFLICT = ("already", "in use", "exists", "attached", "mapped", "is used", "duplicate")
 
 
@@ -130,6 +164,14 @@ def _port_key(port_type: str, port_name: str) -> str:
     if port_type == "iSCSI":
         return port_name.lower()
     return port_name
+
+
+def _is_nvme_host(host: Any) -> bool:
+    """True for an embedded ``host`` whose initiators are all NVMe."""
+    ports = host.get("host_initiators") if isinstance(host, dict) else None
+    if not ports:
+        return False
+    return all(p.get("port_type") == "NVMe" for p in ports)
 
 
 class DellPowerStoreAdapter(ArrayAdapter):
@@ -189,9 +231,10 @@ class DellPowerStoreAdapter(ArrayAdapter):
 
     def _call(self, method: str, path: str, *, params: dict[str, Any] | None = None,
               json: Any = None, missing_ok: bool = False) -> requests.Response | None:
+        # 500 included: a duplicate volume name may come back as 500, not 422.
         resp = self.session.request(method, f"{API}{path}", params=params, json=json,
-                                    ok=(400, 404, 422))
-        if resp.status_code in (400, 404, 422):
+                                    ok=(400, 404, 422, 500))
+        if resp.status_code in (400, 404, 422, 500):
             err = _classify(method, path, resp)
             if missing_ok and isinstance(err, ArrayNotFoundError):
                 return None
@@ -307,6 +350,8 @@ class DellPowerStoreAdapter(ArrayAdapter):
             host = i.get("host_id") or i.get("host_group_id")
             if host:
                 lun = i.get("logical_unit_number")
+                if _is_nvme_host(i.get("host")):
+                    lun = (i.get("volume") or {}).get("nsid") or lun
                 out.append(Mapping(volume_id=i["volume_id"], host_id=host,
                                    lun=int(lun) if lun is not None else None))
         return out

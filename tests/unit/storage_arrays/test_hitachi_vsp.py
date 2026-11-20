@@ -154,16 +154,43 @@ def test_label_failure_deletes_the_new_ldev(env):
 
 
 def test_find_pages_through_ldevs(env, monkeypatch):
+    # count is a window of LDEV numbers: the head steps by count and the scan
+    # ends at the first window past the last LDEV number (KART40044-E).
     client, fake, _ = env
     monkeypatch.setattr(vsp, "PAGE_SIZE", 2)
+    fake.last_ldev = 9
     for i in range(5):
         fake.add_ldev(f"other-{i}", GIB)
     vol_uuid = _uuid()
     vol = client.create_volume(vol_uuid, GIB)
     assert int(vol.id) == 5
+    fake.requests.clear()
     assert client.find_volume(vol_uuid) == vol
     heads = [p for m, p in fake.requests if m == "GET" and p.endswith("/ldevs")]
-    assert len(heads) >= 3
+    assert len(heads) == 6          # windows 0, 2, 4, 6, 8, then 10 is past the end
+
+
+def test_find_scans_past_sparse_windows(env):
+    # An LDEV far above the first 16384 numbers is still found, although the
+    # first window returns (almost) nothing.
+    client, fake, _ = env
+    vol_uuid = _uuid()
+    name = client.volume_name(vol_uuid)
+    fake.add_ldev("other", GIB, ldev_id=3)
+    fake.add_ldev(name, GIB, ldev_id=40000)
+    vol = client.find_volume(vol_uuid)
+    assert vol is not None and vol.id == "40000"
+    gets = [p for m, p in fake.requests if m == "GET" and p.endswith("/ldevs")]
+    assert len(gets) == 4           # 0, 16384, 32768, 49152 up to LDEV 65535
+
+
+def test_find_first_window_error_is_not_swallowed(env):
+    client, fake, _ = env
+    client.get_info()
+    fake.fail_next(400, {"errorSource": "x", "message": "bad range",
+                         "messageId": "KART40044-E"}, path=r"/ldevs$")
+    with pytest.raises(ArrayError, match="KART40044-E"):
+        client.find_volume(_uuid())
 
 
 def test_duplicate_labels_conflict(env):
@@ -358,3 +385,41 @@ def test_classify_error_bodies():
     assert isinstance(cf, ArrayConflictError) and "SSB1=B957" in str(cf)
     other = vsp._classify("POST x", 503, {"message": "busy"})
     assert isinstance(other, ArrayRequestError) and other.status == 503
+
+
+@pytest.mark.parametrize("body, kind", [
+    # codes from Hitachi's Cinder driver (hbsd_rest_api.py / hbsd_rest.py)
+    ({"message": "x", "messageId": "KART30013-E"}, "ArrayNotFoundError"),
+    ({"message": "x", "messageId": "KART30000-E", "errorCode": {"errorCode": "EX_ENOOBJ"}},
+     "ArrayNotFoundError"),
+    ({"message": "x", "messageId": "KART40050-E"}, "ArrayConflictError"),
+    ({"message": "x", "messageId": "KART30000-E",
+      "errorCode": {"SSB1": "2E22", "SSB2": "0001"}}, "ArrayConflictError"),
+    ({"message": "x", "messageId": "KART30000-E",
+      "errorCode": {"SSB1": "b958", "SSB2": "0947"}}, "ArrayConflictError"),
+    ({"message": "x", "messageId": "KART30000-E",
+      "errorCode": {"SSB1": "2E11", "SSB2": "2209"}}, "ArrayRequestError"),
+])
+def test_classify_structured_codes(body, kind):
+    assert type(vsp._classify("POST x", 400, body)).__name__ == kind
+
+
+def test_lock_uses_services_root():
+    client, fake, _ = _client(use_lock=True)
+    try:
+        client.create_volume(_uuid(), GIB)
+        locks = [p for _, p in fake.requests if p.endswith("/lock/invoke")]
+        assert locks and all(
+            p == "/ConfigurationManager/v1/services/resource-group-service/actions/lock/invoke"
+            for p in locks)
+    finally:
+        client.close()
+    sdid = contract_setup().fake.storage_device_id
+    client, fake, _ = _client(use_lock=True, storage_device_id=sdid)
+    try:
+        client.create_volume(_uuid(), GIB)
+        locks = [p for _, p in fake.requests if p.endswith("/lock/invoke")]
+        assert locks and all(p.startswith(f"/ConfigurationManager/v1/{sdid}/services/")
+                             for p in locks)
+    finally:
+        client.close()

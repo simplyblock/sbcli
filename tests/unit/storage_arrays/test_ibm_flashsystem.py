@@ -185,3 +185,32 @@ def test_delete_host_with_mappings_conflicts():
     client.map_volume(vol.id, host)
     with pytest.raises(ArrayConflictError, match="CMMVC5871E"):
         client.delete_host(host)
+
+
+def test_mixed_fc_iscsi_host_uses_one_port_kind_per_mkhost():
+    # mkhost takes exactly one of -fcwwpn / -iscsiname / -nqn (Ansible
+    # ibm_svc_host, Cinder create_host); the rest goes through addhostport.
+    client, fake = _client()
+    client.ensure_host(HostSpec(name="sbtest-mix", initiators=(
+        Initiator(protocol=Protocol.ISCSI, address="iqn.2026-01.io.sb:mix"),
+        Initiator(protocol=Protocol.FC, address="21:00:00:24:ff:4c:1a:2d"))))
+    (mk,) = _cmds(fake, "mkhost")
+    assert mk == {"name": "sbtest-mix", "fcwwpn": "21000024FF4C1A2D", "force": True}
+    assert _cmds(fake, "addhostport") == [{"iscsiname": "iqn.2026-01.io.sb:mix",
+                                            "force": True}]
+    host = fake.hosts["sbtest-mix"]
+    assert host["fcwwpn"] == ["21000024FF4C1A2D"]
+    assert host["iscsiname"] == ["iqn.2026-01.io.sb:mix"]
+
+
+@pytest.mark.parametrize("initiator, code", [
+    (Initiator(protocol=Protocol.ISCSI, address="iqn.2026-01.io.sb:shared"), "CMMVC6578E"),
+    (Initiator(protocol=Protocol.NVME_TCP, address="nqn.2014-08.org.nvmexpress:uuid:s"),
+     "CMMVC9328E"),
+])
+def test_iscsi_and_nvme_port_of_other_host_conflicts(initiator, code):
+    client, fake = _client()
+    client.ensure_host(HostSpec(name="sbtest-one", initiators=(initiator,)))
+    with pytest.raises(ArrayConflictError, match=f"registered to another host.*{code}"):
+        client.ensure_host(HostSpec(name="sbtest-two", initiators=(initiator,)))
+    assert "sbtest-two" not in fake.hosts

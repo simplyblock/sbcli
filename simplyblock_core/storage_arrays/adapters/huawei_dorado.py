@@ -49,36 +49,64 @@ fails on the array).
 
 NVMe hosts are not supported by this adapter (iSCSI and FC only).
 
+Checked against vendor source
+-----------------------------
+Huawei CSI ``eSDK_K8S_Plugin`` (``storage/constants.go``,
+``storage/oceanstorage/base/client*.go``, ``attacher/attacher.go``,
+``oceanstor/client/client_lun.go``, ``csi/backend/plugin/oceanstor.go``) and
+the OpenStack Cinder Huawei driver (``huawei/rest_client.py``,
+``constants.py``, ``huawei_utils.py``):
+
+* Login/logout, ``deviceid``/``iBaseToken``, the envelope and every error
+  code listed above (``WrongPasswordErrorCodes``, ``AccountBeenLocked``,
+  ``NeedReLogin`` on -401 / 1077949069, the per-object constants).
+* ``CAPACITY`` in 512-byte sectors (CSI sends ``ceil(bytes / 512)`` with no
+  further rounding; the 1 MiB rounding here is merely conservative);
+  ``ALLOCTYPE`` 1 = thin; ``PUT /lun/expand {ID, CAPACITY}``.
+* Names: 31 characters (CSI ``maxLunNameLength``, Cinder
+  ``MAX_NAME_LENGTH``; V6 may allow more).
+* ``filter=NAME::<name>&range=[0-100]`` with a literal ``::`` (CSI uses the
+  first row as the exact match; only a value is ever escaped). The adapter
+  used to URL-encode the whole ``filter`` parameter (``NAME%3A%3A...``); it
+  now builds the query like the vendor drivers.
+* Initiators: ``GET /iscsi_initiator/<iqn>`` / ``/fc_initiator/<wwpn>``
+  (1077948996 = unknown), ``ISFREE``/``PARENTID`` ownership as in CSI's
+  attacher, ``POST /iscsi_initiator {ID[, TYPE]}`` (1077948997 = exists),
+  bind with ``PUT .../<id> {PARENTTYPE: 21, PARENTID}``; unbind with ``PUT
+  /iscsi_initiator/remove_iscsi_from_host`` / ``/fc_initiator/
+  remove_fc_from_host {TYPE, ID}``; list a host's with ``?PARENTTYPE=21&
+  PARENTID=`` -- Cinder re-checks ``PARENTID`` on each row and so does this
+  adapter now (an ignored filter would otherwise unbind every initiator on
+  the array).
+* ``POST /host {NAME, OPERATIONSYSTEM: 0}``; host group / LUN group /
+  mapping view calls, ``DELETE`` with a JSON body (``/lungroup/associate``,
+  ``/host/associate``), ``PUT /mappingview/create_associate`` /
+  ``remove_associate``, ``GET /lun/associate?TYPE=11&ASSOCIATEOBJTYPE=21&
+  ASSOCIATEOBJID=`` with ``HostLUNID`` in ``ASSOCIATEMETADATA``.
+* ``GET /system/``: ``ID``, ``PRODUCTMODE``, ``PRODUCTVERSION``,
+  ``productModeString``, ``pointRelease``.
+
 Verify against a real system
 ----------------------------
-* Size granularity: CAPACITY is in 512-byte sectors, but whether Dorado
-  accepts any sector count is unverified; we round sizes to 1 MiB to be safe.
-  Whether CAPACITY stays in 512-byte units for 4K-sector LUNs (``SECTORSIZE``).
-* Name limits: LUN names and host names assumed <= 31 characters.
-* ``filter=NAME::x`` is assumed to be an exact match (results are
-  re-filtered by exact name anyway); query values are sent URL-encoded.
+* Whether ``CAPACITY`` stays in 512-byte units for 4K-sector LUNs
+  (``SECTORSIZE``).
 * Creating an FC initiator object for a WWPN that has never logged in
-  (``POST /fc_initiator {ID, TYPE: "223"}``).
-* Unbinding initiators: ``PUT /iscsi_initiator/remove_iscsi_from_host`` and
-  ``PUT /fc_initiator/remove_fc_from_host`` with ``{ID, TYPE}`` (from the
-  OpenStack Cinder Huawei driver), and listing them with ``?PARENTID=``.
-* ``DELETE`` requests carry a JSON body (``/lungroup/associate``,
-  ``/host/associate``) as the CSI driver sends them.
+  (``POST /fc_initiator {ID, TYPE: "223"}``): neither vendor driver does it
+  (CSI skips unknown or offline WWPNs).
 * Error codes for: deleting a LUN that is still in a LUN group, deleting a
   host that still has initiators or group membership, binding an initiator
   that is bound elsewhere, and a host already in another host group (a host
   can belong to one host group only; the adapter checks this itself and
   raises :class:`ArrayConflictError`).
-* ``GET /system/`` fields used for ``get_info``: ``ID`` (serial),
-  ``productModeString`` or ``PRODUCTMODE`` (model code), ``pointRelease`` or
-  ``PRODUCTVERSION``.
 * Some firmware may answer an expired session with HTTP 401 instead of the
-  -401 envelope; both are treated as an auth error.
+  -401 envelope (the vendor drivers only read the envelope); both are
+  treated as an auth error.
 """
 from __future__ import annotations
 
 import json
 from typing import Any
+from urllib.parse import quote
 
 from ..base import (
     ArrayAdapter,
@@ -206,8 +234,16 @@ class HuaweiDoradoAdapter(ArrayAdapter):
         data = self._call("GET", path, params=params)
         return [d for d in data if isinstance(d, dict)] if isinstance(data, list) else []
 
+    @staticmethod
+    def _name_query(path: str, name: str) -> str:
+        """``<path>?filter=NAME::<name>&range=[0-100]`` with the ``::``
+        separator and the range brackets left literal, as Huawei's CSI driver
+        and Cinder driver send them; only the name itself is percent-encoded."""
+        return f"{path}?filter=NAME::{quote(name, safe='')}&range=[0-100]"
+
     def _by_name(self, path: str, name: str) -> dict[str, Any] | None:
-        rows = self._list(path, {"filter": f"NAME::{name}", "range": "[0-100]"})
+        rows = self._list(self._name_query(path, name))
+        # The filter is treated as an exact match by the vendor drivers; check.
         return next((r for r in rows if r.get("NAME") == name), None)
 
     # -- info / pool ------------------------------------------------------------------
@@ -332,7 +368,13 @@ class HuaweiDoradoAdapter(ArrayAdapter):
         for collection, itype, action in (
                 ("iscsi_initiator", TYPE_ISCSI_INITIATOR, "remove_iscsi_from_host"),
                 ("fc_initiator", TYPE_FC_INITIATOR, "remove_fc_from_host")):
-            for ini in self._list(f"/{collection}", {"PARENTID": host_id}):
+            # Cinder re-checks PARENTID on every row of this query; so do we,
+            # so that an ignored filter can never unbind another host's ports.
+            rows = self._list(f"/{collection}", {"PARENTTYPE": OBJ_HOST,
+                                                 "PARENTID": host_id})
+            for ini in rows:
+                if str(ini.get("PARENTID") or "") != host_id:
+                    continue
                 self._call("PUT", f"/{collection}/{action}",
                            body={"ID": ini["ID"], "TYPE": itype})
         self._call("DELETE", f"/host/{host_id}", missing_ok=True)

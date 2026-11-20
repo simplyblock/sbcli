@@ -1,4 +1,9 @@
-"""Fake Pure FlashArray REST 2.x (the subset the adapter uses)."""
+"""Fake Pure FlashArray REST 2.x (the subset the adapter uses).
+
+Modelled on py-pure-client (``_common/apis/*_v_2_36.py``, ``models``):
+connections of NVMe hosts carry ``nsid`` and no ``lun`` (REST 2.27+), SCSI
+ones ``lun``; errors are HTTP 400 ``{"errors": [{"message", "context"}]}``.
+"""
 from __future__ import annotations
 
 import secrets
@@ -20,7 +25,7 @@ def _err(msg: str, status: int = 400) -> FakeError:
 
 class FakePureFlashArray(FakeArray):
     vendor = "pure-flasharray"
-    versions: ClassVar[list[str]] = ["1.19", "2.0", "2.4", "2.17", "2.21"]
+    versions: ClassVar[list[str]] = ["1.19", "2.0", "2.4", "2.17", "2.21", "2.36", "2.40"]
 
     def __init__(self, api_token: str = "pure-token"):
         super().__init__()
@@ -28,7 +33,7 @@ class FakePureFlashArray(FakeArray):
         self.sessions: set[str] = set()
         self.volumes: dict[str, dict[str, Any]] = {}   # id -> volume
         self.hosts: dict[str, dict[str, Any]] = {}     # name -> host
-        self.connections: list[dict[str, Any]] = []    # {host, volume_id, lun}
+        self.connections: list[dict[str, Any]] = []    # {host, volume_id, lun|nsid}
 
     # -- fake controls ------------------------------------------------------
 
@@ -202,8 +207,10 @@ class FakePureFlashArray(FakeArray):
 
     def _conn_item(self, c):
         v = self.volumes[c["volume_id"]]
-        return {"host": {"name": c["host"]}, "volume": {"id": v["id"], "name": v["name"]},
-                "lun": c["lun"]}
+        item = {"host": {"name": c["host"]}, "host_group": None,
+                "volume": {"id": v["id"], "name": v["name"]}, "lun": None, "nsid": None}
+        item["nsid" if "nsid" in c else "lun"] = c.get("nsid", c.get("lun"))
+        return item
 
     @route("GET", _V + "/connections")
     def get_connections(self, req, ver):
@@ -225,9 +232,10 @@ class FakePureFlashArray(FakeArray):
             raise _err("Host does not exist.")
         if any(c["volume_id"] == vid and c["host"] == host for c in self.connections):
             raise _err("Connection already exists.")
-        used = {c["lun"] for c in self.connections if c["host"] == host}
-        lun = next(n for n in range(1, 4096) if n not in used)
-        c = {"host": host, "volume_id": vid, "lun": lun}
+        key = "nsid" if self.hosts[host]["nqns"] else "lun"
+        used = {c.get(key) for c in self.connections if c["host"] == host}
+        c = {"host": host, "volume_id": vid,
+             key: next(n for n in range(1, 4096) if n not in used)}
         self.connections.append(c)
         return Reply(200, {"items": [self._conn_item(c)]})
 

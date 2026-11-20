@@ -210,3 +210,39 @@ def test_api_token_credential_is_refused():
     with pytest.raises(ArrayError, match="username"):
         DellPowerStoreAdapter(AdapterContext(
             config, Credential({"api_token": SecretStr("t")}), session))
+
+
+def test_nvme_mapping_reports_volume_nsid(setup):
+    # gopowerstore volume_types.go: the NVMe namespace id is the volume's nsid
+    setup.fake.next_nsid = 42
+    adapter = _adapter(setup)
+    vol = adapter.create_volume("sb-nsid", GIB)
+    nvme = adapter.ensure_host(HostSpec(name="sbtest-nsid", initiators=(
+        Initiator(protocol=Protocol.NVME_TCP, address="nqn.2014-08.org.nvmexpress:uuid:n"),)))
+    scsi = adapter.ensure_host(_iscsi("sbtest-nsid-scsi"))
+    assert adapter.map_volume(vol.id, nvme).lun == 42
+    assert adapter.map_volume(vol.id, scsi).lun == 1
+    assert {m.host_id: m.lun for m in adapter.list_mappings(vol.id)} == {nvme: 42, scsi: 1}
+
+
+def test_detach_race_with_not_attached_is_idempotent(setup):
+    adapter = _adapter(setup)
+    vol = adapter.create_volume("sb-race", GIB)
+    host = adapter.ensure_host(_iscsi("sbtest-race"))
+    adapter.map_volume(vol.id, host)
+    # Detached elsewhere between unmap_volume's mapping check and its detach:
+    # the array answers 400 "Host is not attached to volume", read as missing.
+    listed = adapter._mappings(vol.id)
+    setup.fake.mappings.clear()
+    adapter._mappings = lambda vid: listed  # type: ignore[method-assign]
+    adapter.unmap_volume(vol.id, host)
+    assert ("POST", f"/api/rest/volume/{vol.id}/detach") in setup.fake.requests
+
+
+@pytest.mark.parametrize("status", [422, 500])
+def test_duplicate_volume_name_is_conflict(setup, status):
+    setup.fake.name_conflict_status = status
+    adapter = _adapter(setup)
+    adapter.create_volume("sb-dup", GIB)
+    with pytest.raises(ArrayConflictError, match="already in use"):
+        adapter.create_volume("sb-dup", GIB)

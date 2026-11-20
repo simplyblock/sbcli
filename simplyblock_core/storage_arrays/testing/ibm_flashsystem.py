@@ -10,7 +10,10 @@ message as plain text; an unknown/expired token is HTTP 403. Quirks kept:
 * a one-row ``lsvdiskhostmap`` comes back as a bare dict;
 * object ids are the lowest free integer, so a deleted volume's id is reused;
 * ``mkvdiskhostmap`` to a second host needs ``force`` (CMMVC6071E);
-* FC WWPNs that are not logged in need ``force`` on mkhost/addhostport.
+* FC WWPNs that are not logged in need ``force`` on mkhost/addhostport;
+* ``mkhost`` takes only one of ``-iscsiname`` / ``-fcwwpn`` / ``-nqn``;
+* a port owned by another host fails with CMMVC6578E (iSCSI), CMMVC5867E
+  (FC) or CMMVC9328E (NVMe).
 """
 from __future__ import annotations
 
@@ -31,8 +34,11 @@ E_NAME_RULES = ("CMMVC5754E The specified object does not exist, or the name sup
                 "does not meet the naming rules.")
 E_IN_REQUEST = "CMMVC5842E The action failed because an object that was in the request does not exist."
 E_EXISTS = "CMMVC6035E The action failed as the object already exists."
-E_IQN = ("CMMVC6581E The command has failed because the maximum number of allowed iSCSI "
-         "qualified names (IQNs) has been reached, or the IQN is already assigned or is not valid.")
+# Codes as handled by IBM's CSI driver (array_mediator_svc.py) and Cinder
+# (storwize_const.py); the message texts are approximations.
+E_IQN = ("CMMVC6578E The command has failed because the iSCSI name is already assigned "
+         "or is not valid.")
+E_NQN = "CMMVC9328E The command failed because the NQN is already assigned to a host."
 E_WWPN = ("CMMVC5867E The action failed because the worldwide port name is already "
           "assigned or is not valid.")
 E_ALREADY_MAPPED = ("CMMVC5878E The virtual disk (VDisk)-to-host mapping was not created "
@@ -48,6 +54,7 @@ E_BAD_NAME = ("CMMVC6527E The name that you have entered is not valid. The name 
               "letters, numbers, spaces, periods, dashes, and underscores. The name must "
               "begin with a letter or an underscore.")
 E_PARAM = "CMMVC5707E Required parameters are missing."
+E_EXCLUSIVE = "CMMVC5731E Parameter -fcwwpn is incompatible with parameter -iscsiname."
 E_SHRINK = "CMMVC5709E [-size] is not a supported parameter."
 
 
@@ -257,7 +264,7 @@ class FakeIbmFlashSystem(FakeArray):
         return ports
 
     def _claim(self, host: str | None, ports: dict[str, list[str]]) -> None:
-        errors = {"iscsiname": E_IQN, "fcwwpn": E_WWPN, "nqn": E_IQN}
+        errors = {"iscsiname": E_IQN, "fcwwpn": E_WWPN, "nqn": E_NQN}
         for kind, values in ports.items():
             for value in values:
                 if self._owner(kind, value) is not None:  # even when it is this host
@@ -274,6 +281,8 @@ class FakeIbmFlashSystem(FakeArray):
         protocol = opts.get("protocol", "scsi")
         if protocol not in ("scsi", "iscsi", "fcscsi", "tcpnvme", "rdmanvme", "fcnvme", "nvme"):
             raise _cli_error(E_PARAM)
+        if sum(1 for k in ("iscsiname", "fcwwpn", "nqn") if opts.get(k)) > 1:
+            raise _cli_error(E_EXCLUSIVE)
         ports = self._parse_ports(opts)
         if not any(ports.values()):
             raise _cli_error(E_PARAM)

@@ -26,32 +26,63 @@ present it to hosts as a 16-byte **EUI-64** designator (multipath WWID
 reports it as ``wwn="eui.<serial>"`` (``Volume.wwn`` holds the SCSI
 designator, NAA or EUI-64), so the identifier equals the host's sysfs wwid.
 
+Asynchronous jobs: a mutating request may answer **202** with
+``{"messages": [{"code": "SM_async_job_id", "arguments": {"job_id": ...}}]}``
+instead of the object; the adapter then polls ``GET /v1/jobs/<id>`` until
+``state`` is ``done`` (as the NimbleOS SDK does) and re-reads what it needs.
+
+Checked against vendor source
+-----------------------------
+(HPE ``nimble-python-sdk``: ``nimbleclient/v1/restclient.py``, the
+``nimbleclient/v1/api/*.py`` field docs and ``tests/``; Cinder
+``cinder/volume/drivers/hpe/nimble.py``; HPE ``common-host-libs``
+``linux/device.go``.)
+
+* Tokens: ``POST /v1/tokens {"data": {username, password}}`` ->
+  ``data.session_token`` / ``data.id``; ``X-Auth-Token``; release with
+  ``DELETE /v1/tokens/<id>``; bad logins and expired tokens answer
+  ``SM_http_unauthorized``.
+* ``{"data": ...}`` envelopes; errors ``{"messages": [...]}`` where a generic
+  ``SM_http_<status>`` entry precedes the specific one (Cinder reads
+  ``messages[1]``). Specific codes seen in vendor code: ``SM_eexist`` (with
+  ``SM_http_conflict``) for duplicates, ``SM_enoent`` / ``SM_http_not_found``
+  for unknown objects, ``SM_vol_size_decreased`` (shrink without ``force``;
+  we never send ``force``), ``SM_vol_has_clone``. Older NimbleOS ("fiji and
+  below") answers ``SM_http_bad_request`` (400) for an unknown id, hence
+  ``get_volume`` treats 400 as missing.
+* Sizes in MiB; ``serial_number`` is the volume's SCSI identifier; arrays
+  report ``model``/``serial``/``version``.
+* Offline before delete (``PUT {"online": false}``). Offlining a volume that
+  is already offline fails with "Object is already in requested state";
+  ``delete_volume`` tolerates that, as Cinder does, so a retried delete works.
+* Query filters as plain parameters (``?vol_id=...``,
+  ``?initiator_group_id=...``, ``?name=...``) returning an empty ``data``
+  list when nothing matches (Cinder ``get_query`` callers).
+* ``label`` is required for iSCSI initiators; FC WWPNs in colon form (Cinder
+  ``_format_to_wwpn``); ACRs with ``apply_to: "both"``.
+* ACR ``lun``: 0 for iSCSI, 0-2047 for FC (SDK field doc); Cinder uses LUN 0
+  unless group-scoped targets are enabled.
+* Multipath shows an EUI-64 device as WWID ``2<serial>``: common-host-libs
+  strips the leading type digit (2 EUI, 3 NAA) to compare with the serial
+  the CSP returns.
+
 Verify against a real system
 ----------------------------
-* The EUI-64 derivation above (``eui.`` + ``serial_number`` lowercase), both
-  for iSCSI and FC, on NimbleOS 5.x/6.x.
-* Error codes: ``SM_http_unauthorized`` (401) for bad login and expired
-  tokens; ``SM_eexist`` (409) for duplicate names and ACRs;
-  ``SM_http_not_found``/``SM_enoent`` (404) for unknown ids; ``SM_vol_online``
-  (409, deleting an online volume); ``SM_vol_has_acl`` / ACR-related refusal
-  when offlining a connected volume; ``SM_invalid_arg`` (400). The adapter
-  keys on HTTP status, and treats 400 + ``SM_enoent`` / "not found" as
-  not-found.
-* Whether ``GET /v1/volumes/<id>`` for a malformed id answers 400 or 404
-  (both are treated as "missing" by ``get_volume``).
-* Query filtering on any attribute (``/v1/initiators/detail?iqn=...``,
-  ``/v1/access_control_records/detail?vol_id=...``) and that a filtered list
-  with no hits returns ``data: []`` rather than 404.
-* LUN assignment: with volume-scoped iSCSI targets (the default on recent
-  NimbleOS) every iSCSI ACR shows ``lun`` 0; group-scoped targets and FC get
-  distinct LUNs per initiator group.
-* That ``label`` is required for iSCSI initiators (max 64 chars) and is
-  unique only within its group.
-* Shrinking (``PUT size`` below current) is refused; we never request it.
+* That this CSP serial is the volume's ``serial_number`` on NimbleOS 5.x/6.x
+  for iSCSI and FC, i.e. ``eui.`` + lowercase ``serial_number`` equals the
+  sysfs ``wwid`` (the nimble-csp source is not published).
+* Status and code of the refusals the fake invents: deleting an online
+  volume (``SM_vol_online``?), offlining or deleting a volume that has ACRs,
+  deleting an initiator group with ACRs, offlining an offline volume.
+* Which operations answer 202 on a real array, and the ``result`` of a
+  failed job (the SDK only waits for ``state == "done"``).
+* ``label`` length limit (64?) and uniqueness scope; whether an initiator may
+  sit in two groups (not relied on: the adapter checks ownership first).
 """
 from __future__ import annotations
 
 import hashlib
+import math
 from typing import Any
 from urllib.parse import quote
 
@@ -77,6 +108,9 @@ from ..base import (
 from ..http import body_text, json_of
 
 MIB = 1 << 20
+_JOB_POLL_S = 2.0
+#: markers of "Object is already in requested state" (offlining an offline volume)
+_ALREADY = ("SM_ealready", "already in requested state")
 _NOT_FOUND_CODES = frozenset({"SM_enoent", "SM_http_not_found", "SM_no_such_object"})
 
 
@@ -99,6 +133,8 @@ class HpeNimbleAdapter(ArrayAdapter):
                   "array's default pool)."),
         OptionDoc("performance_policy", "Performance policy name for new volumes "
                   "(default: the array default)."),
+        OptionDoc("job_timeout_s", "How long to wait for an asynchronous (HTTP 202) job.",
+                  default=300),
     )
 
     def __init__(self, ctx):
@@ -158,10 +194,33 @@ class HpeNimbleAdapter(ArrayAdapter):
         raise ArrayRequestError(msg, status=status)
 
     def _data(self, method: str, path: str, **kw: Any) -> Any:
+        """The response's ``data``; ``None`` for a missing object (with
+        ``missing_ok``) or after waiting for an asynchronous job, in which
+        case the caller re-reads the object."""
         resp = self._request(method, path, **kw)
         if resp is None:
             return None
-        return (json_of(resp) or {}).get("data")
+        body = json_of(resp) or {}
+        if resp.status_code == 202:
+            self._wait_job(body, f"{method} {path}")
+            return None
+        return body.get("data")
+
+    def _wait_job(self, body: dict[str, Any], what: str) -> None:
+        job_id = None
+        for m in body.get("messages") or []:
+            if m.get("code") == "SM_async_job_id":
+                job_id = (m.get("arguments") or {}).get("job_id")
+        if not job_id:
+            return  # 202 without a job: nothing to wait for
+        polls = max(1, math.ceil(float(self.option("job_timeout_s")) / _JOB_POLL_S))
+        for _ in range(polls):
+            job = self._data("GET", f"/v1/jobs/{quote(str(job_id), safe='')}") or {}
+            if job.get("state") == "done":
+                return
+            self.session.sleep(_JOB_POLL_S)
+        raise ArrayRequestError(f"{what}: job {job_id} did not finish within "
+                                f"{self.option('job_timeout_s')} s")
 
     def _list(self, path: str, **filters: str) -> list[dict[str, Any]]:
         return list(self._data("GET", path, params=filters) or [])
@@ -203,7 +262,11 @@ class HpeNimbleAdapter(ArrayAdapter):
 
     def create_volume(self, name: str, size_bytes: int) -> Volume:
         body = {"name": name, "size": -(-size_bytes // MIB), **self._volume_extra()}
-        return self._volume(self._data("POST", "/v1/volumes", json={"data": body}))
+        data = self._data("POST", "/v1/volumes", json={"data": body})
+        vol = self._volume(data) if data else self.find_volume(name)
+        if vol is None:
+            raise ArrayRequestError(f"Volume {name} not found right after creation")
+        return vol
 
     def get_volume(self, volume_id: str) -> Volume | None:
         try:
@@ -222,12 +285,22 @@ class HpeNimbleAdapter(ArrayAdapter):
     def resize_volume(self, volume_id: str, size_bytes: int) -> Volume:
         data = self._data("PUT", f"/v1/volumes/{quote(volume_id, safe='')}",
                           json={"data": {"size": -(-size_bytes // MIB)}})
-        return self._volume(data)
+        if data:
+            return self._volume(data)
+        vol = self.get_volume(volume_id)
+        if vol is None:
+            raise ArrayNotFoundError(f"Volume {volume_id} vanished during resize")
+        return vol
 
     def delete_volume(self, volume_id: str) -> None:
         path = f"/v1/volumes/{quote(volume_id, safe='')}"
-        self._data("PUT", path, json={"data": {"online": False}})
-        self._request("DELETE", path)
+        try:
+            self._data("PUT", path, json={"data": {"online": False}})
+        except (ArrayRequestError, ArrayConflictError) as e:
+            # A retried delete finds the volume already offline.
+            if not any(marker in str(e) for marker in _ALREADY):
+                raise
+        self._data("DELETE", path)
 
     # -- hosts (initiator groups) -------------------------------------------
 
@@ -275,7 +348,11 @@ class HpeNimbleAdapter(ArrayAdapter):
         if group is None:
             group = self._data("POST", "/v1/initiator_groups",
                                json={"data": {"name": spec.name, "access_protocol": protocol,
-                                              "description": "simplyblock"}})
+                                              "description": "simplyblock"}}) \
+                or self._group(spec.name)
+            if group is None:
+                raise ArrayRequestError(f"Initiator group {spec.name} not found right "
+                                        "after creation")
         group_id = str(group["id"])
         for value in wanted:
             body: dict[str, Any] = {"initiator_group_id": group_id,
@@ -286,8 +363,8 @@ class HpeNimbleAdapter(ArrayAdapter):
         return group_id
 
     def delete_host(self, host_id: str) -> None:
-        self._request("DELETE", f"/v1/initiator_groups/{quote(host_id, safe='')}",
-                      missing_ok=True)
+        self._data("DELETE", f"/v1/initiator_groups/{quote(host_id, safe='')}",
+                   missing_ok=True)
 
     # -- mappings (access control records) -----------------------------------
 
@@ -309,13 +386,18 @@ class HpeNimbleAdapter(ArrayAdapter):
         acr = self._data("POST", "/v1/access_control_records",
                          json={"data": {"vol_id": volume_id, "initiator_group_id": host_id,
                                         "apply_to": "both"}})
-        return self._mapping(acr)
+        if acr:
+            return self._mapping(acr)
+        existing = self._acrs(volume_id, host_id)
+        if not existing:
+            raise ArrayRequestError(f"ACR {volume_id} -> {host_id} not found after creation")
+        return self._mapping(existing[0])
 
     def unmap_volume(self, volume_id: str, host_id: str) -> None:
         for acr in self._acrs(volume_id, host_id):
-            self._request("DELETE",
-                          f"/v1/access_control_records/{quote(str(acr['id']), safe='')}",
-                          missing_ok=True)
+            self._data("DELETE",
+                       f"/v1/access_control_records/{quote(str(acr['id']), safe='')}",
+                       missing_ok=True)
 
     def list_mappings(self, volume_id: str) -> list[Mapping]:
         return [self._mapping(a) for a in self._acrs(volume_id)]

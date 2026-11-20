@@ -5,6 +5,7 @@ import uuid
 
 import pytest
 
+from simplyblock_core.storage_arrays.adapters.huawei_dorado import HuaweiDoradoAdapter
 from simplyblock_core.storage_arrays.base import (
     ArrayAuthError,
     ArrayConflictError,
@@ -170,3 +171,25 @@ def test_lun_in_customer_lungroup_is_not_listed_and_blocks_delete():
     with pytest.raises(ArrayRequestError):
         client.delete_volume(vol.id)
     assert client.get_volume(vol.id) is not None
+
+
+def test_name_query_keeps_separator_literal():
+    # Huawei's CSI driver and Cinder send filter=NAME::<name>&range=[0-100]
+    # with a literal "::"; only the name is escaped.
+    q = HuaweiDoradoAdapter._name_query("/lun", "sb-a b/c")
+    assert q == "/lun?filter=NAME::sb-a%20b%2Fc&range=[0-100]"
+    client, _ = _client()
+    vol_uuid = str(uuid.uuid4())
+    vol = client.create_volume(vol_uuid, GIB)
+    assert client.find_volume(vol_uuid) == vol
+
+
+def test_delete_host_never_unbinds_foreign_initiators():
+    client, fake = _client()
+    fake.ignore_parent_filter = True
+    keep = client.ensure_host(HostSpec(name="sbtest-keep", initiators=(IQN_A,)))
+    gone = client.ensure_host(HostSpec(name="sbtest-gone", initiators=(IQN_B,)))
+    client.delete_host(gone)
+    ini = fake.initiators["iscsi_initiator"][IQN_A.address]
+    assert ini["ISFREE"] == "false" and ini["PARENTID"] == keep
+    assert fake.initiators["iscsi_initiator"][IQN_B.address]["ISFREE"] == "true"

@@ -35,38 +35,61 @@ Object model:
 
 Volume identity: SCSI ``naa.<naaId>`` (lowercase).
 
+Checked against vendor source (Hitachi's OpenStack Cinder driver
+``cinder/volume/drivers/hitachi/hbsd_rest.py`` / ``hbsd_rest_api.py`` and the
+Ansible collection ``hitachivantara.vspone_block``, ``plugins/module_utils/
+gateway/gateway_manager.py``, ``vsp_volume.py``, ``vsp_host_group_gateway.py``,
+``vsp_rg_lock_gateway.py``, ``common/vsp_constants.py``, ``vsp_utils.py``):
+
+* Sessions: ``POST .../sessions`` with basic auth -> ``token``/``sessionId``,
+  ``Authorization: Session <token>``, ``DELETE .../sessions/{id}``; 401 means
+  re-login. Jobs: 202 + ``jobId``, done at ``status == "Completed"``,
+  ``state == "Succeeded"``, new object = last segment of
+  ``affectedResources[0]``; a failed job's ``error`` is the usual body.
+* ``POST /ldevs {poolId, blockCapacity}`` without ``ldevId`` auto-assigns
+  the number (``startLdevId``/``endLdevId`` restrict it); the label is set
+  afterwards with ``PUT /ldevs/{id} {"label"}``, exactly as Cinder does.
+  Expand: ``POST .../actions/expand/invoke {"parameters":
+  {"additionalBlockCapacity"}}``. A deleted LDEV reads ``emulationType ==
+  "NOT DEFINED"``.
+* Lookup by label: there is no label filter; Cinder scans ``GET /ldevs?
+  ldevOption=dpVolume&headLdevId=&count=16384`` stepping the head by
+  ``count`` up to LDEV 65535 and ignoring KART40044-E (window past the
+  end). This adapter does the same (it used to stop after the first short
+  page, which missed LDEVs above the first 16k numbers).
+* NAA: derived from the storage serial and the LDEV number (Ansible
+  ``NAIDCalculator``), so a reused LDEV number has the same WWN.
+* ``GET /ldevs/{id}`` lists LU paths under ``ports`` (``portId``,
+  ``hostGroupNumber``, ``hostGroupName``, ``lun``); ``GET /host-wwns`` /
+  ``/host-iscsis`` take ``portId`` + ``hostGroupNumber``; ``POST
+  /host-groups {portId, hostGroupName, hostMode[, hostModeOptions]}``;
+  ``POST /luns {portId, hostGroupNumber, ldevId, lun}``; ``DELETE
+  /luns/{port},{gid},{lun}``.
+* Resource-group lock: ``.../resource-group-service/actions/lock/invoke``
+  with ``{"parameters": {"waitTime"}}`` lives under
+  ``/ConfigurationManager/v1/services`` (embedded) or
+  ``/ConfigurationManager/v1/{storageDeviceId}/services`` (REST server),
+  not under ``/objects`` (fixed here). Ansible POSTs it, Cinder PUTs it.
+* Error codes (classified before the text fallback): KART30013-E and
+  ``EX_ENOOBJ`` = not found; KART40050-E..52-E, SSB 2E11/2205, 2E11/2207,
+  ``EX_EACCES`` = resource group locked; SSB 2E22/0001 (LDEV already
+  defined), B958/015A (LU path already defined), B958/0947 (another LDEV on
+  that LUN) = conflict. Storage failures carry SSB1/SSB2 in ``errorCode``.
+
 Verify against a real system:
 
-* ``POST /ldevs`` without ``ldevId`` auto-assigns a free LDEV number (newer
-  API versions); older microcode may require ``ldevId`` or a
-  ``startLdevId``/``endLdevId`` range -- set ``ldev_range`` there.
-* The label is set in a second request (``PUT /ldevs/{id}``); a crash between
-  the two leaves an unlabeled LDEV the client cannot find (a label failure
-  is cleaned up here, a crash is not).
-* ``find_volume`` lists DP-VOLs of the pool (``ldevOption=dpVolume&poolId=``,
-  paged by ``headLdevId``/``count``) and matches labels client-side: one or a
-  few requests per 16k LDEVs. The API has no label filter that we know of.
-* ``naaId`` is derived from the serial and LDEV number, so a deleted LDEV's
-  number reused by a later volume has the same WWN; ownership then rests on
-  the ``sb-`` label.
-* DP-VOL capacity: the adapter rounds to 1 MiB (safe for data-reduction
-  volumes, which need MiB alignment) and creates at least 64 MiB (DP-VOLs
-  have a ~47 MB floor on some models).
-* ``GET /ldevs/{id}`` lists its LU paths under ``ports`` (``portId``,
-  ``hostGroupNumber``, ``hostGroupName``, ``lun``); mappings are read from
-  there.
-* ``GET /host-wwns`` and ``/host-iscsis`` need ``portId`` and
-  ``hostGroupNumber``, so detecting an initiator owned by another host lists
-  every host group on each configured port (one request per group).
-  FC rejects a WWN registered to two host groups of one port; iSCSI allows
-  the same initiator in several targets, so the scan is what enforces
-  ownership there.
-* Some models / configurations require the resource-group lock
-  (``services/resource-group-service/actions/lock/invoke``) around changes;
-  enable with ``use_lock``.
-* Error ``messageId``s: storage-side failures mostly arrive as
-  ``KART30000-E`` with SSB codes in ``errorCode``; errors are classified by
-  HTTP status first, then by message text (see ``_classify``).
+* Older microcode that may require ``ldevId`` on ``POST /ldevs`` (set
+  ``ldev_range`` there).
+* A crash between LDEV create and label leaves an unlabeled LDEV the client
+  cannot find (a label failure is cleaned up here, a crash is not).
+* DP-VOL capacity: the adapter rounds to 1 MiB and creates at least 64 MiB
+  (Cinder only creates whole GiB); the real floor per model.
+* Whether every model returns ``naaId`` (Ansible computes it when absent;
+  this adapter then reports no WWN).
+* FC refusing a WWN in two host groups of one port and iSCSI allowing an
+  initiator in several targets (the ownership scan does not rely on either).
+* Which models need the resource-group lock (``use_lock``); Cinder retries
+  lock errors for up to two hours, this adapter reports a conflict.
 * NVMe-oF (``/nvm-subsystems``) is not implemented: only FC and iSCSI.
 """
 from __future__ import annotations
@@ -93,12 +116,17 @@ from ..base import (
 )
 from ..http import json_of
 
+API = "/ConfigurationManager/"
 ROOT = "/ConfigurationManager/v1/objects"
 BLOCK = 512
 NOT_DEFINED = "NOT DEFINED"
 MAX_LUN = 2047
-#: ``count`` per ``GET /ldevs`` page (the API maximum).
+#: ``count`` per ``GET /ldevs`` page (the API maximum). ``headLdevId`` steps
+#: by this much, as in Hitachi's Cinder driver (``hbsd_rest.py``).
 PAGE_SIZE = 16384
+#: Highest LDEV number scanned when no ``ldev_range`` is set (Cinder's
+#: ``_MAX_LDEV_ID``).
+MAX_LDEV_ID = 65535
 
 _PORT_RE = re.compile(r"^CL[0-9A-Z]+-[A-Z0-9]+$")
 _RANGE_RE = re.compile(r"^\s*(\d+)\s*-\s*(\d+)\s*$")
@@ -106,6 +134,22 @@ _PORT_TYPES = {"FIBRE": Protocol.FC, "ISCSI": Protocol.ISCSI}
 #: HTTP statuses whose Hitachi error body the adapter classifies itself
 #: (401/403 stay with RestSession -> ArrayAuthError).
 _OWN_STATUSES = (400, 404, 405, 409, 412, 500, 502, 503, 504)
+
+# Structured codes, from Hitachi's Cinder driver (hbsd_rest_api.py, hbsd_rest.py).
+#: messageId of "the specified object does not exist".
+_MSGID_NOT_FOUND = frozenset({"KART30013-E"})
+#: messageIds of a resource-group lock held by someone else.
+_MSGID_LOCKED = frozenset({"KART40050-E", "KART40051-E", "KART40052-E"})
+#: (SSB1, SSB2) pairs: LDEV already defined, LU path already defined, another
+#: LDEV already mapped to that LUN, resource group locked.
+_SSB_CONFLICT = frozenset({("2E22", "0001"), ("B958", "015A"), ("B958", "0947"),
+                           ("2E11", "2205"), ("2E11", "2207")})
+#: errorCode.errorCode values.
+_RC_NOT_FOUND = frozenset({"EX_ENOOBJ"})
+_RC_CONFLICT = frozenset({"EX_EACCES"})
+#: A ``GET /ldevs`` window beyond the array's last LDEV number.
+_MSGID_BAD_RANGE = "KART40044-E"
+_RC_BAD_RANGE = ("EX_ENLDEV", "EX_INVARG")
 
 _CONFLICT_TEXT = ("already", "in use", "is used", "registered", "duplicat",
                   "lu path is defined", "lu paths are defined", "locked")
@@ -133,6 +177,16 @@ def _classify(where: str, status: int | None, body: Any) -> ArrayError:
     if status:
         text += f" [HTTP {status}]"
     lowered = message.lower()
+    if isinstance(body, dict):
+        raw = body.get("errorCode")
+        err: dict[str, Any] = raw if isinstance(raw, dict) else {}
+        ssb_pair = (str(err.get("SSB1", "")).upper(), str(err.get("SSB2", "")).upper())
+        rc = str(err.get("errorCode", ""))
+        mid = str(body.get("messageId") or "")
+        if mid in _MSGID_NOT_FOUND or rc in _RC_NOT_FOUND:
+            return ArrayNotFoundError(text)
+        if mid in _MSGID_LOCKED or ssb_pair in _SSB_CONFLICT or rc in _RC_CONFLICT:
+            return ArrayConflictError(text)
     if status == 404:
         return ArrayNotFoundError(text)
     if status in (409, 412):
@@ -205,6 +259,12 @@ class HitachiVspAdapter(ArrayAdapter):
             self._range = (int(m.group(1)), int(m.group(2)))
         sdid = self.option("storage_device_id")
         self._base = f"{ROOT}/storages/{sdid}" if sdid else ROOT
+        # Services are not under /objects: /ConfigurationManager/v1/services
+        # (embedded, Hitachi Ansible vsp_rg_lock_gateway.py) or
+        # /ConfigurationManager/v1/{storageDeviceId}/services (REST API
+        # server, Hitachi Cinder hbsd_rest_api.py ``service_url``).
+        self._services = (f"{API}v1/{sdid}/services" if sdid
+                          else f"{API}v1/services")
         self._session_id: Any = None
         self._port_types: dict[str, Protocol | None] = {}
 
@@ -235,7 +295,7 @@ class HitachiVspAdapter(ArrayAdapter):
 
     def _req(self, method: str, path: str, *, params: Any = None,
              json: Any = None) -> tuple[int, Any]:
-        full = path if path.startswith(ROOT) else f"{self._base}{path}"
+        full = path if path.startswith(API) else f"{self._base}{path}"
         resp = self.session.request(method, full, params=params, json=json,
                                     ok=_OWN_STATUSES)
         try:
@@ -288,7 +348,7 @@ class HitachiVspAdapter(ArrayAdapter):
         if not self.option("use_lock"):
             yield
             return
-        svc = "/services/resource-group-service/actions"
+        svc = f"{self._services}/resource-group-service/actions"
         self._run("POST", f"{svc}/lock/invoke",
                   {"parameters": {"waitTime": int(self.option("lock_wait_s"))}})
         try:
@@ -361,29 +421,40 @@ class HitachiVspAdapter(ArrayAdapter):
         return self._volume(ldev) if ldev else None
 
     def find_volume(self, name: str) -> Volume | None:
-        head, end = self._range if self._range else (0, None)
-        found: list[dict[str, Any]] = []
-        while True:
-            page = self._data("/ldevs", ldevOption="dpVolume", poolId=self._pool,
-                              headLdevId=head, count=PAGE_SIZE)
-            for ldev in page:
-                if end is not None and int(ldev["ldevId"]) > end:
+        # ``count`` is a window of LDEV numbers starting at ``headLdevId``, so
+        # step the head by ``count`` (not by the last id returned) as Hitachi's
+        # Cinder driver does; a window past the array's last LDEV number
+        # answers KART40044-E / EX_ENLDEV and ends the scan. ``poolId`` is not
+        # combined with ``headLdevId`` (no vendor client does); the pool is
+        # checked on each entry instead.
+        start, end = self._range if self._range else (0, MAX_LDEV_ID)
+        found: dict[int, dict[str, Any]] = {}
+        head = start
+        while head <= end:
+            count = min(PAGE_SIZE, end - head + 1)
+            try:
+                page = self._data("/ldevs", ldevOption="dpVolume", headLdevId=head,
+                                  count=count)
+            except ArrayError as e:
+                past_end = _MSGID_BAD_RANGE in str(e) or any(
+                    rc in str(e) for rc in _RC_BAD_RANGE)
+                if past_end and head > start:  # never on the first window
                     break
-                if ldev.get("label") == name and self._defined(ldev):
-                    found.append(ldev)
-            if len(page) < PAGE_SIZE:
-                break
-            head = int(page[-1]["ldevId"]) + 1
-            if end is not None and head > end:
-                break
+                raise
+            for ldev in page:
+                lid = int(ldev["ldevId"])
+                if (start <= lid <= end and ldev.get("label") == name
+                        and self._defined(ldev)
+                        and int(ldev.get("poolId", self._pool)) == self._pool):
+                    found[lid] = ldev
+            head += count
         if len(found) > 1:
             raise ArrayConflictError(
-                f"Several LDEVs labeled {name!r}: "
-                + ", ".join(str(f["ldevId"]) for f in found))
+                f"Several LDEVs labeled {name!r}: " + ", ".join(str(i) for i in sorted(found)))
         if not found:
             return None
         # List entries may omit fields; read the LDEV itself.
-        return self.get_volume(str(found[0]["ldevId"]))
+        return self.get_volume(str(next(iter(found))))
 
     def resize_volume(self, volume_id: str, size_bytes: int) -> Volume:
         ldev = self._require(volume_id)

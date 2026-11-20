@@ -186,3 +186,62 @@ def test_host_in_use_cannot_be_deleted():
     client.map_volume(vol.id, hid)
     with pytest.raises(ArrayConflictError, match="SM_igrp_has_acl"):
         client.delete_host(hid)
+
+
+def test_error_body_has_generic_then_specific_message():
+    client, _ = _client()
+    client.ensure_host(_iscsi("sbdup", "iqn.2026-01.io.sb:d1"))
+    adapter = client._adapter
+    assert adapter is not None
+    with pytest.raises(ArrayConflictError, match="SM_http_conflict: .*; SM_eexist"):
+        adapter._data("POST", "/v1/initiator_groups",
+                      json={"data": {"name": "sbdup", "access_protocol": "iscsi"}})
+
+
+def test_retried_delete_tolerates_already_offline_volume():
+    # Offlining an offline volume answers "Object is already in requested
+    # state" (Cinder ignores it); a delete retried after the offline step
+    # must not fail on it.
+    client, fake = _client()
+    vol = client.create_volume(str(uuid.uuid4()), GIB)
+    fake.volumes[vol.id]["online"] = False
+    assert client.delete_volume(vol.id) is True
+    assert vol.id not in fake.volumes
+
+
+def test_shrink_is_refused_without_force():
+    client, fake = _client()
+    vol = client.create_volume(str(uuid.uuid4()), 2 * GIB)
+    adapter = client._adapter
+    assert adapter is not None
+    with pytest.raises(ArrayError, match="SM_vol_size_decreased"):
+        adapter.resize_volume(vol.id, GIB)
+    assert fake.volumes[vol.id]["size"] == 2048
+
+
+def test_async_jobs_are_awaited_and_objects_reread():
+    client, fake = _client()
+    fake.async_ops = {"POST volume", "PUT volume", "DELETE volume", "POST initiator_group",
+                      "POST initiator", "POST acr", "DELETE acr", "DELETE initiator_group"}
+    vol = client.create_volume(str(uuid.uuid4()), GIB)
+    assert vol.size_bytes == GIB and vol.id in fake.volumes
+    assert client.resize_volume(vol.id, 2 * GIB).size_bytes == 2 * GIB
+    hid = client.ensure_host(_iscsi("sbasync", "iqn.2026-01.io.sb:as"))
+    assert len(fake.initiators) == 1
+    m = client.map_volume(vol.id, hid)
+    assert m.lun == 0 and m.host_id == hid
+    client.unmap_volume(vol.id, hid)
+    assert fake.acrs == {}
+    assert client.delete_volume(vol.id) is True
+    client.delete_host(hid)
+    assert fake.volumes == {} and fake.groups == {}
+    polls = [p for m_, p in fake.requests if m_ == "GET" and p.startswith("/v1/jobs/")]
+    assert len(polls) >= 3 * len(fake.jobs) and all(v == 0 for v in fake.jobs.values())
+
+
+def test_async_job_timeout():
+    client, fake = _client(job_timeout_s=4)
+    fake.async_ops = {"POST volume"}
+    fake.job_polls = 100
+    with pytest.raises(ArrayError, match="did not finish within 4"):
+        client.create_volume(str(uuid.uuid4()), GIB)

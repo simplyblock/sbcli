@@ -82,6 +82,40 @@ def test_destructive_requests_send_approval(setup):
     assert not setup.fake.volumes and not setup.fake.hosts
 
 
+def test_every_mutation_is_preapproved(setup):
+    # infinisdk sends approved=true on every non-GET request; so does the adapter.
+    setup.fake.approval_for_all = True
+    fc = Initiator(protocol=Protocol.FC, address="21:00:00:24:ff:4c:1a:2b")
+    with _client(setup) as c:
+        vol = c.create_volume(str(uuid.uuid4()), GIB)
+        vol = c.resize_volume(vol.id, 2 * GIB)
+        host = c.ensure_host(HostSpec(name="h1", initiators=(_iqn("a"), fc)))
+        c.map_volume(vol.id, host)
+        c.unmap_volume(vol.id, host)
+        assert c.delete_volume(vol.id)
+        c.delete_host(host)
+    assert not setup.fake.volumes and not setup.fake.hosts
+
+
+@pytest.mark.parametrize("code", ["APPROVAL_REQUIRED", "APPROVAL_REQUIRED_VOLUME_HAS_CHILDREN"])
+def test_specific_approval_codes_are_not_auth_errors(setup, code):
+    with _client(setup) as c:
+        vol = c.create_volume(str(uuid.uuid4()), GIB)
+        setup.fake.fail_next(403, {"result": None, "error": {
+            "code": code, "message": "needs approval", "reasons": ["has children"]},
+            "metadata": {"ready": True}}, path=r"/volumes/\d+$")
+        adapter = c._adapter
+        assert adapter is not None
+        with pytest.raises(ArrayRequestError, match=code):
+            adapter.delete_volume(vol.id)
+
+
+def test_get_info_reads_model_field(setup):
+    with _client(setup) as c:
+        info = c.get_info()
+    assert info.model == "F4304" and info.serial == "1250" and info.version == "7.3.10.0"
+
+
 def test_approval_required_is_not_an_auth_error(setup):
     with _client(setup) as c:
         vol = c.create_volume(str(uuid.uuid4()), GIB)

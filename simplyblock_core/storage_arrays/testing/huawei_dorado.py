@@ -9,6 +9,8 @@ Quirks reproduced:
   the ``iBaseToken`` header, else ``-401``; wrong password is 1077987870;
 * every value is a string; LUN ``CAPACITY`` is in 512-byte sectors;
 * initiators are free-standing objects bound to a host via ``PARENTID``;
+  ``ignore_parent_filter`` makes the ``?PARENTID=`` list filter a no-op;
+* name lookups are ``?filter=NAME::<name>&range=[0-100]`` (exact match);
 * mapping is host group + LUN group + mapping view; a host can be in one host
   group only; host LUN ids are assigned when a LUN becomes visible to a host
   and reported inside the ``ASSOCIATEMETADATA`` JSON string.
@@ -97,6 +99,10 @@ class FakeHuaweiDorado(FakeArray):
         self.initiators: dict[str, dict[str, dict[str, Any]]] = {
             "iscsi_initiator": {}, "fc_initiator": {}}
         self.host_lun_ids: dict[tuple[str, str], int] = {}
+        #: Answer ``GET /<initiators>?PARENTID=`` with every initiator, as if
+        #: the filter were ignored (Huawei's Cinder driver re-checks PARENTID
+        #: on each row, so clients must not trust the filter).
+        self.ignore_parent_filter = False
 
     # -- fake controls -------------------------------------------------------------
 
@@ -304,7 +310,7 @@ class FakeHuaweiDorado(FakeArray):
     @route("GET", _D + r"/(?P<coll>iscsi_initiator|fc_initiator)")
     def list_initiators(self, req, dev, coll):
         self._auth(req, dev)
-        parent = req.q("PARENTID")
+        parent = None if self.ignore_parent_filter else req.q("PARENTID")
         return _ok([i for i in self.initiators[coll].values()
                     if parent is None or i["PARENTID"] == parent])
 

@@ -2,13 +2,20 @@
 uses.
 
 Quirks reproduced: every reply is a ``{"result", "error", "metadata"}``
-envelope; lists are paged and filtered with ``field=eq:value``; destructive
-requests without ``?approved=true`` get **403** ``APPROVAL_REQUIRED``;
-object ids are integers; volume ``serial`` is the NAA-6 identifier without
-its leading ``6``; LUN numbers start at 1 per host. Error codes follow the
-``OBJECT_NOT_FOUND`` / ``*_CONFLICT`` style of the real API but are our
-reading of it, not a verified list. For higher fidelity run the contract
-suite's live tier against Infinidat's ``infinisim``.
+envelope (metadata ``page``/``page_size``/``pages_total``/
+``number_of_objects``); lists are paged and filtered with
+``field=eq:value``; destructive requests without ``?approved=true`` get
+``APPROVAL_REQUIRED``; object ids are integers; volume ``serial`` is the
+NAA-6 identifier without its leading ``6``; port types are
+case-insensitive and FC addresses are accepted with or without colons;
+``GET /system`` reports ``model``/``full_model``/integer ``serial_number``.
+
+Codes taken from Infinidat's infinisdk / CSI driver: ``VOLUME_NOT_FOUND``,
+``HOST_NOT_FOUND``, ``POOL_NOT_FOUND``, ``LUN_NOT_FOUND``,
+``MAPPING_ALREADY_EXISTS``, ``APPROVAL_REQUIRED``. The name-conflict, port
+ownership, mapped-volume and host-with-LUNs codes, the 403 status of
+``APPROVAL_REQUIRED`` and LUN numbering from 1 are the fake's own reading.
+Infinidat's simulator (``infinisim``) is not publicly available.
 """
 from __future__ import annotations
 
@@ -59,6 +66,10 @@ class FakeInfiniBox(FakeArray):
         self.volumes: dict[int, dict[str, Any]] = {}
         self.hosts: dict[int, dict[str, Any]] = {}
         self.luns: list[dict[str, Any]] = []   # {host_id, volume_id, lun, id}
+        #: require ``approved=true`` on every non-GET request, not only on
+        #: destructive ones (which requests need approval varies by operation
+        #: and version; infinisdk approves all of them)
+        self.approval_for_all = False
         self.add_pool("sb-pool")
 
     # -- fake controls ------------------------------------------------------
@@ -89,6 +100,8 @@ class FakeInfiniBox(FakeArray):
     def _auth(self, req: Request) -> None:
         if req.basic_auth() != (self.username, self.password):
             raise _err(401, "UNAUTHORIZED", "Invalid credentials")
+        if self.approval_for_all and req.method != "GET":
+            self._approved(req, f"{req.method} {req.path}")
 
     @staticmethod
     def _approved(req: Request, what: str) -> None:
@@ -137,8 +150,9 @@ class FakeInfiniBox(FakeArray):
     @route("GET", _R + "/system")
     def system(self, req):
         self._auth(req)
-        return _ok({"name": "ibox-fake", "serial_number": 1250, "model_name": "F4304",
-                    "version": "7.3.10.0", "system_type": "INFINIBOX"})
+        return _ok({"name": "ibox-fake", "serial_number": 1250, "model": "F4304",
+                    "full_model": "InfiniBox F4304", "version": "7.3.10.0",
+                    "product_id": "INFINIBOX", "wwnn": "57:42:b0:f0:00:04:e2:00"})
 
     @route("GET", _R + "/pools")
     def list_pools(self, req):
@@ -240,7 +254,7 @@ class FakeInfiniBox(FakeArray):
         h = self._host(int(oid))
         body = req.json() or {}
         ptype = str(body.get("type", "")).upper()
-        if ptype not in ("ISCSI", "FC"):
+        if ptype not in ("ISCSI", "FC", "NVME"):
             raise _err(400, "BAD_REQUEST", f"Unsupported port type {ptype}")
         address = _port_address(ptype, str(body.get("address", "")))
         for other in self.hosts.values():

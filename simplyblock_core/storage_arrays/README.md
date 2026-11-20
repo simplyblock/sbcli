@@ -22,6 +22,25 @@ There is no usable cross-vendor standard, so each array has its own adapter. SMI
 Each adapter's module docstring lists the options it reads, the credential fields it needs, and a section called **"Verify against a real system"**.
 That section names every API detail its author was unsure of. Work through it before the adapter is first used against a real array.
 
+## Using an array with a cluster
+
+The adapters are the array plugins of the multi-attach array LUN mode (`simplyblock_core.array.san`, one plugin per key above).
+Register the array on a multi-attach cluster:
+
+```
+sbctl cluster set-array <cluster-id> --plugin pure-flasharray --endpoint https://pure01.example \
+    --options '{"protocol": "iscsi", "ca_bundle": "-----BEGIN CERTIFICATE-----..."}' \
+    --credentials-file pure01.json --lun-size 4T
+```
+
+- `protocol` (required): `iscsi`, `fc`, `nvme-tcp`, `nvme-rdma`, `nvme-fc` or `sdc`. The nodes are registered on the array with the initiators of that protocol, as their agents report them.
+- `ca_bundle`, `verify_tls`, `timeout_s`, plus the adapter's own options (pool, SVM, CPG, port group, ...; see the adapter docstring).
+- Credentials: `--credentials-file` (wrapped by the cluster's KMS, bound to the array id and endpoint; the local KMS only with `allow_local_kms_credentials`), or `--credential-ref` naming a Vault KV / KMIP secret simplyblock only reads.
+
+Each node added afterwards gets a LUN of `--lun-size` created, mapped to its host, and found after a SCSI/NVMe rescan; the LUN is presented to the node's secondary and tertiary as well.
+The hosts must already have their SAN paths: iSCSI sessions logged in, FC zoning done, NVMe-oF controllers connected.
+LUNs are named `sb-<cluster hash><lun hash>`; a cluster never acts on a LUN of another name.
+
 ## Layers
 
 - `base.py`: the adapter contract (`ArrayAdapter`) and the shared model.
@@ -62,7 +81,7 @@ These are partly from memory; check availability with each vendor.
 - **HPE:** the 3PAR StoreServ simulator (older WSAPI). Alletra through HPE demo and partner labs.
 - **IBM:** Storage Virtualize for Public Cloud, plus IBM Technology Zone labs.
 - **Hitachi, Huawei:** partner and demo labs only.
-- **Infinidat:** `infinisim`, an open-source Python simulator of the InfiniBox API.
+- **Infinidat:** partner and demo labs. (`infinisim`, the simulator infinisdk's own tests use, is not published.)
 
 Vendor SDKs make good reference code for API details: `py-pure-client`, `netapp-ontap`, `PyPowerStore`, `PyU4V`, `PyPowerFlex`, `hpe3parclient`, `nimble-sdk`, `infinisdk`.
 The same goes for each vendor's Ansible collection, CSI driver and OpenStack Cinder driver.

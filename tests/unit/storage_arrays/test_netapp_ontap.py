@@ -206,7 +206,7 @@ def test_lun_create_failure_removes_new_flexvol(monkeypatch):
     client, fake = make()
 
     def refuse(*a, **kw):
-        raise FakeError(400, {"error": {"message": "LUN creation refused", "code": "1"}})
+        raise FakeError(400, {"error": {"message": "LUN creation refused", "code": "2"}})
 
     monkeypatch.setattr(fake, "_check_size", refuse)
     with pytest.raises(ArrayRequestError, match="refused"):
@@ -245,7 +245,8 @@ def test_initiator_in_foreign_igroup_conflicts_although_ontap_allows_it():
     assert "mine" not in {g["name"] for g in fake.igroups.values()}
 
 
-def test_existing_iscsi_igroup_is_widened_for_fc():
+def test_existing_iscsi_igroup_cannot_take_fc():
+    """ONTAP spec: an igroup's protocol cannot be changed after creation."""
     client, fake = make()
     client.get_info()
     adapter = client._adapter
@@ -253,11 +254,27 @@ def test_existing_iscsi_igroup_is_widened_for_fc():
     adapter._call("POST", "/api/protocols/san/igroups", json={
         "svm": {"name": "svm1"}, "name": "h2", "os_type": "linux", "protocol": "iscsi",
         "initiators": [{"name": "iqn.2026-01.io.sb:h2"}]})
-    client.ensure_host(HostSpec(name="h2", initiators=(
-        Initiator(protocol=Protocol.ISCSI, address="iqn.2026-01.io.sb:h2"),
-        Initiator(protocol=Protocol.FC, address="21:00:00:24:ff:4c:1a:99"))))
+    with pytest.raises(ArrayConflictError, match="cannot take fcp"):
+        client.ensure_host(HostSpec(name="h2", initiators=(
+            Initiator(protocol=Protocol.ISCSI, address="iqn.2026-01.io.sb:h2"),
+            Initiator(protocol=Protocol.FC, address="21:00:00:24:ff:4c:1a:99"))))
+    assert not calls(fake, "PATCH", "/api/protocols/san/igroups/")
+    # more iSCSI initiators still fit
+    client.ensure_host(iscsi("h2", "iqn.2026-01.io.sb:h2", "iqn.2026-01.io.sb:h2b"))
     (group,) = fake.igroups.values()
-    assert group["protocol"] == "mixed" and len(group["initiators"]) == 2
+    assert group["protocol"] == "iscsi" and len(group["initiators"]) == 2
+
+
+def test_fake_refuses_igroup_protocol_change():
+    client, fake = make()
+    client.ensure_host(iscsi("h3", "iqn.2026-01.io.sb:h3"))
+    adapter = client._adapter
+    assert adapter is not None
+    (group,) = fake.igroups.values()
+    group["protocol"] = "iscsi"
+    with pytest.raises(ArrayRequestError, match="cannot be changed"):
+        adapter._call("PATCH", f"/api/protocols/san/igroups/{group['uuid']}",
+                      json={"protocol": "mixed"})
 
 
 def test_nvme_fc_wwpn_address_is_refused():
@@ -428,3 +445,82 @@ def test_map_to_missing_host_is_not_found():
     vol = client.create_volume(str(uuid.uuid4()), GIB)
     with pytest.raises(ArrayNotFoundError):
         client.map_volume(vol.id, "ghost")
+
+
+# -- behaviour checked against vendor source ----------------------------------------------
+
+
+@pytest.mark.parametrize("family", ["scsi", "nvme"])
+def test_lun_and_namespace_calls_may_be_jobs(family):
+    """The ONTAP spec allows 202 + job for LUN/namespace create/modify/delete."""
+    client, fake = make(protocol_family=family)
+    fake.async_san = True
+    fake.job_polls = 2
+    vol = client.create_volume(str(uuid.uuid4()), 4 * GIB)
+    assert client.get_volume(vol.id) == vol
+    assert client.resize_volume(vol.id, 8 * GIB).size_bytes == 8 * GIB
+    host = client.ensure_host(nvme("n", NQN_A) if family == "nvme"
+                              else iscsi("s", "iqn.2026-01.io.sb:s"))
+    client.map_volume(vol.id, host)
+    client.unmap_volume(vol.id, host)
+    assert client.delete_volume(vol.id)
+    assert not fake.luns and not fake.namespaces and not fake.volumes
+    san = "/api/storage/luns" if family == "scsi" else "/api/storage/namespaces"
+    assert {fake.jobs[j]["description"].split(" ")[0] for j in fake.jobs
+            if san in fake.jobs[j]["description"]} == {"POST", "PATCH", "DELETE"}
+
+
+def test_async_lun_create_failure_is_classified():
+    client, fake = make()
+    fake.async_san = True
+    vol = client.create_volume(str(uuid.uuid4()), GIB)
+    adapter = client._adapter
+    assert adapter is not None
+    with pytest.raises(ArrayConflictError, match="5374242"):
+        adapter._async("POST", "/api/storage/luns", json={
+            "svm": {"name": "svm1"}, "name": fake.luns[vol.id]["name"], "os_type": "linux",
+            "space": {"size": GIB}})
+
+
+def test_deleted_flexvol_goes_to_recovery_queue_by_default():
+    client, fake = make()
+    vol = client.create_volume(str(uuid.uuid4()), GIB)
+    client.delete_volume(vol.id)
+    assert not fake.volumes and len(fake.recovery_queue) == 1
+
+
+def test_skip_recovery_queue_deletes_with_force():
+    client, fake = make(skip_recovery_queue=True)
+    vol = client.create_volume(str(uuid.uuid4()), GIB)
+    client.delete_volume(vol.id)
+    assert not fake.volumes and not fake.recovery_queue
+
+
+def test_asa_r2_is_refused_at_login():
+    client, fake = make()
+    fake.version = (9, 16, 1)
+    fake.disaggregated = True
+    with pytest.raises(ArrayUnsupportedError, match="ASA r2"):
+        client.get_info()
+    assert not fake.volumes
+
+
+def test_unified_9_16_is_accepted():
+    client, fake = make()
+    fake.version = (9, 16, 1)
+    assert client.get_info().version.startswith("NetApp Release 9.16.1")
+    assert any(m == "GET" and p == "/api/cluster" for m, p in fake.requests)
+
+
+@pytest.mark.parametrize(("code", "message", "exc"), [
+    ("4", "entry missing", ArrayNotFoundError),
+    ("1", "entry exists", ArrayConflictError),
+    ("5374242", "LUN exists.", ArrayConflictError),
+    ("72090025", "subsystem exists", ArrayConflictError),
+    ("5374922", "map exists", ArrayConflictError),
+    ("917627", "something else", ArrayRequestError),
+])
+def test_error_codes_are_classified(code, message, exc):
+    err = NetAppOntapAdapter._error("POST", "/api/x", {"error": {"message": message,
+                                                                  "code": code}})
+    assert type(err) is exc

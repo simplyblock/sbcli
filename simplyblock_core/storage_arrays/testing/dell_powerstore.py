@@ -3,10 +3,14 @@
 Quirks reproduced: basic auth only on ``login_session``; session cookie
 ``auth_cookie`` plus ``DELL-EMC-TOKEN`` CSRF header required on non-GET
 requests (403 without it); PostgREST-style ``select``/``eq.`` filters with
-400 on unknown fields; ``limit``/``offset`` paging answered with 206 and
-``Content-Range``; 201 ``{"id"}`` on create, 204 on modify/delete/attach;
-422 with ``{"messages": [...]}`` for semantic errors; sizes in bytes, a
-multiple of 8192; ``wwn``/``nguid`` prefixed ``naa.``/``nguid.``.
+400 on unknown fields and embedded selects (``host(host_initiators)``);
+``limit``/``offset`` paging answered with 206 and ``Content-Range``; 201
+``{"id"}`` on create, 204 on modify/delete/attach; 422 with
+``{"messages": [...]}`` for semantic errors (a duplicate volume name answers
+``name_conflict_status``, 422 or 500 on real arrays); 400 "Host is not
+attached to volume" for a detach of an unattached volume; sizes in bytes, a
+multiple of 8192; ``wwn``/``nguid`` prefixed ``naa.``/``nguid.``; a volume
+gets its NVMe ``nsid`` on its first attach to an NVMe host.
 """
 from __future__ import annotations
 
@@ -31,7 +35,7 @@ MAX_SIZE = 256 << 40
 GRANULARITY = 8192
 
 _FIELDS = {
-    "volume": {"id", "name", "description", "type", "wwn", "nguid", "size", "state",
+    "volume": {"id", "name", "description", "type", "wwn", "nguid", "nsid", "size", "state",
                "appliance_id", "creation_timestamp", "is_replication_destination",
                "performance_policy_id", "protection_policy_id"},
     "host": {"id", "name", "description", "os_type", "host_group_id", "host_initiators",
@@ -44,6 +48,11 @@ _FIELDS = {
     "software_installed": {"id", "release_version", "build_version", "is_cluster",
                            "release_timestamp"},
 }
+
+
+# (kind, embedded relation) -> foreign key on the row
+_EMBEDS = {("host_volume_mapping", "host"): "host_id",
+           ("host_volume_mapping", "volume"): "volume_id"}
 
 
 def _err(status: int, message: str, code: str = "0xE04040010005") -> FakeError:
@@ -72,6 +81,8 @@ class FakeDellPowerStore(FakeArray):
         self.mappings: list[dict[str, Any]] = []
         self.page_limit = 2000                         # array-side default/max page size
         self.first_lun = 1
+        self.next_nsid = 1
+        self.name_conflict_status = 422
 
     # -- fake controls ------------------------------------------------------
 
@@ -87,7 +98,7 @@ class FakeDellPowerStore(FakeArray):
         self.volumes[vid] = {
             "id": vid, "name": name, "description": None, "type": "Primary",
             "wwn": "naa.68ccf098" + secrets.token_hex(12),
-            "nguid": "nguid." + secrets.token_hex(16),
+            "nguid": "nguid." + secrets.token_hex(16), "nsid": None,
             "size": size, "state": "Ready", "appliance_id": "A1",
             "creation_timestamp": "2026-11-20T00:00:00+00:00",
             "is_replication_destination": False, "performance_policy_id": "default_medium",
@@ -149,19 +160,13 @@ class FakeDellPowerStore(FakeArray):
             want = m.group(1)
             rows = [r for r in rows if _as_filter(r.get(key)) == want]
         select = req.q("select")
-        if select:
-            names = select.split(",")
-            bad = [n for n in names if n not in fields]
-            if bad:
-                raise _err(400, f"Invalid select field: {','.join(bad)}.", "0xE04040020009")
-        else:
-            names = ["id"]
+        names = self._select(kind, select) if select else ["id"]
         offset = int(req.q("offset", "0") or 0)
         limit = min(int(req.q("limit", str(self.page_limit)) or self.page_limit),
                     self.page_limit)
         total = len(rows)
         page = rows[offset:offset + limit]
-        body = [{n: r.get(n) for n in names} for r in page]
+        body = [self._row(kind, r, names) for r in page]
         if offset + len(page) < total:
             end = offset + len(page) - 1
             return Reply(206, body, {"Content-Range": f"{offset}-{end}/{total}"})
@@ -169,11 +174,46 @@ class FakeDellPowerStore(FakeArray):
 
     def _project(self, req: Request, kind: str, row: dict[str, Any]) -> Reply:
         select = req.q("select")
-        names = select.split(",") if select else sorted(_FIELDS[kind])
-        bad = [n for n in names if n not in _FIELDS[kind]]
+        names = self._select(kind, select) if select else sorted(_FIELDS[kind])
+        return Reply(200, self._row(kind, row, names))
+
+    @staticmethod
+    def _select(kind: str, select: str) -> list[str]:
+        """Top-level select items; ``rel(a,b)`` embeds a related object."""
+        names, depth, cur = [], 0, ""
+        for ch in select:
+            if ch == "," and depth == 0:
+                names.append(cur)
+                cur = ""
+                continue
+            depth += (ch == "(") - (ch == ")")
+            cur += ch
+        names.append(cur)
+        bad = []
+        for n in names:
+            m = re.match(r"^(\w+)\(([\w,]+)\)$", n)
+            if m:
+                rel, sub = m.group(1), m.group(2).split(",")
+                if (kind, rel) not in _EMBEDS or any(f not in _FIELDS[rel] for f in sub):
+                    bad.append(n)
+            elif n not in _FIELDS[kind]:
+                bad.append(n)
         if bad:
             raise _err(400, f"Invalid select field: {','.join(bad)}.", "0xE04040020009")
-        return Reply(200, {n: row.get(n) for n in names})
+        return names
+
+    def _row(self, kind: str, row: dict[str, Any], names: list[str]) -> dict[str, Any]:
+        out: dict[str, Any] = {}
+        for n in names:
+            m = re.match(r"^(\w+)\(([\w,]+)\)$", n)
+            if not m:
+                out[n] = row.get(n)
+                continue
+            rel, sub = m.group(1), m.group(2).split(",")
+            store = self.hosts if rel == "host" else self.volumes
+            target = store.get(row.get(_EMBEDS[(kind, rel)]) or "")
+            out[rel] = {f: target.get(f) for f in sub} if target else None
+        return out
 
     # -- system ------------------------------------------------------------------
 
@@ -239,7 +279,9 @@ class FakeDellPowerStore(FakeArray):
             raise _err(400, "Invalid value for name.", "0xE04040020009")
         size = self._check_size(body.get("size"))
         if any(v["name"] == name for v in self.volumes.values()):
-            raise _unprocessable(f"The name {name} is already in use by another volume.")
+            raise _err(self.name_conflict_status,
+                       f"The name {name} is already in use by another volume.",
+                       "0xE0A07001000C")
         vid = self.add_volume(name, size)
         if body.get("appliance_id"):
             self.volumes[vid]["appliance_id"] = body["appliance_id"]
@@ -284,6 +326,11 @@ class FakeDellPowerStore(FakeArray):
             lun = next(n for n in range(self.first_lun, 16384) if n not in used)
         elif lun in used:
             raise _unprocessable(f"Logical unit number {lun} is already in use on the host.")
+        vol = self.volumes[oid]
+        nvme = all(p["port_type"] == "NVMe" for p in self.hosts[host_id]["host_initiators"])
+        if nvme and self.hosts[host_id]["host_initiators"] and vol["nsid"] is None:
+            vol["nsid"] = self.next_nsid
+            self.next_nsid += 1
         self.mappings.append({"id": str(uuid.uuid4()), "host_id": host_id,
                               "host_group_id": None, "volume_id": oid,
                               "logical_unit_number": lun})
@@ -298,7 +345,7 @@ class FakeDellPowerStore(FakeArray):
         self.mappings = [m for m in self.mappings
                          if not (m["volume_id"] == oid and m["host_id"] == host_id)]
         if len(self.mappings) == before:
-            raise _unprocessable(f"Volume {oid} is not attached to host {host_id}.")
+            raise _err(400, "Host is not attached to volume.", "0xE0A08001000F")
         return Reply(204)
 
     @route("GET", API + "/host_volume_mapping")

@@ -7,6 +7,17 @@ taking an increment; host requests using ``iSCSINames``/``FCWWNs`` while
 responses report ``iSCSIPaths``/``FCPaths``; VLUN creation answering 201
 with an empty body and a ``Location`` header; and VLUN listings that contain
 the template plus one active VLUN per host path.
+
+Error codes and statuses follow python-3parclient's own WSAPI mock
+(``test/HPE3ParMockServer_flask.py``): 5 INV_USER_PASS, 12 INV_INPUT, 15
+NON_EXISTENT_CPG, 16 EXISTENT_HOST, 17 NON_EXISTENT_HOST, 19
+NON_EXISTENT_VLUN, 22 EXISTENT_VOL, 23 NON_EXISTENT_VOL, 26 EXPORTED_VLUN,
+39 INV_INPUT_WRONG_TYPE, 40 INV_INPUT_MISSING_REQUIRED, 43
+INV_INPUT_EXCEEDS_RANGE (create below 256 MiB), 44 INV_INPUT_PARAM_CONFLICT,
+57 INV_INPUT_EXCEEDS_LENGTH, 73 EXISTENT_PATH, 152 INV_INPUT_VV_GROW_SIZE,
+153 VV_NEW_SIZE_EXCEED_CPG_LIMIT (a *403* that is not an auth failure), plus
+34 "resource in use" (409) from HPE flowkit. The session-expiry answer (401
+code 6) is a guess.
 """
 from __future__ import annotations
 
@@ -24,6 +35,7 @@ from . import ContractSetup, FakeArray, FakeError, Reply, Request, make_config, 
 
 _A = "/api/v1"
 _UNIT_MIB = 256
+_MIN_MIB = 256
 _MAX_NAME = 31
 _QUERY_RE = re.compile(r'^"?\s*volumeName\s+EQ\s+(?P<vol>\S+?)\s*"?$')
 
@@ -36,13 +48,16 @@ class FakeHpeWsapi(FakeArray):
     vendor = "hpe-wsapi"
 
     def __init__(self, username: str = "3paradm", password: str = "3pardata",
-                 cpgs: tuple[str, ...] = ("SSD_r6",), paths_per_host: int = 2):
+                 cpgs: tuple[str, ...] = ("SSD_r6",), paths_per_host: int = 2,
+                 cpg_limit_mib: int | None = None):
         super().__init__()
         self.username = username
         self.password = password
         self.cpgs = set(cpgs)
         #: active VLUN entries listed per mapping (one per host port path)
         self.paths_per_host = paths_per_host
+        #: growth limit per volume; exceeding it answers 403 code 153
+        self.cpg_limit_mib = cpg_limit_mib
         self.sessions: set[str] = set()
         self.volumes: dict[str, dict[str, Any]] = {}   # name -> volume
         self.hosts: dict[str, dict[str, Any]] = {}     # name -> host
@@ -114,15 +129,15 @@ class FakeHpeWsapi(FakeArray):
         self.created_bodies.append(body)
         name, cpg, size = body.get("name"), body.get("cpg"), body.get("sizeMiB")
         if not name or not cpg or not isinstance(size, int):
-            raise _err(400, 15, "missing required field")
+            raise _err(400, 40, "missing required field")
         if len(name) > _MAX_NAME:
-            raise _err(400, 21, "invalid input: string length exceeds limit")
+            raise _err(400, 57, "invalid input: string length exceeds limit")
         if cpg not in self.cpgs:
             raise _err(404, 15, "CPG does not exist")
         if name in self.volumes:
             raise _err(409, 22, "volume exists")
-        if size < 1:
-            raise _err(400, 40, "invalid input: number exceeds expected range")
+        if size < _MIN_MIB:
+            raise _err(400, 43, "Minimum volume size is 256 MiB")
         self.add_volume(name, size << 20)
         return Reply(201, None, {"Location": f"{_A}/volumes/{name}"})
 
@@ -139,10 +154,13 @@ class FakeHpeWsapi(FakeArray):
         if body.get("action") == 3:
             delta = body.get("sizeMiB")
             if not isinstance(delta, int) or delta <= 0:
-                raise _err(400, 40, "invalid input: number exceeds expected range")
-            vol["sizeMiB"] = -(-(vol["sizeMiB"] + delta) // _UNIT_MIB) * _UNIT_MIB
+                raise _err(400, 152, "invalid grow size")
+            new = -(-(vol["sizeMiB"] + delta) // _UNIT_MIB) * _UNIT_MIB
+            if self.cpg_limit_mib is not None and new > self.cpg_limit_mib:
+                raise _err(403, 153, "new volume size exceeds CPG limit")
+            vol["sizeMiB"] = new
             return Reply(200)
-        raise _err(400, 29, "invalid input: unsupported action")
+        raise _err(400, 12, "invalid input: unsupported action")
 
     @route("DELETE", _A + "/volumes/(?P<name>[^/]+)")
     def delete_volume(self, req, name):
@@ -166,7 +184,7 @@ class FakeHpeWsapi(FakeArray):
         wwns = [str(w).upper().replace(":", "") for w in body.get("FCWWNs") or []]
         for w in wwns:
             if not re.fullmatch(r"[0-9A-F]{16}", w):
-                raise _err(400, 32, "invalid WWN")
+                raise _err(400, 39, "invalid WWN")
         for other in self.hosts.values():
             if other["name"] == host:
                 continue
@@ -189,14 +207,13 @@ class FakeHpeWsapi(FakeArray):
         body = req.json() or {}
         name = body.get("name")
         if not name:
-            raise _err(400, 15, "missing required field")
+            raise _err(400, 40, "missing required field")
         if len(name) > _MAX_NAME:
-            raise _err(400, 21, "invalid input: string length exceeds limit")
+            raise _err(400, 57, "invalid input: string length exceeds limit")
         if name in self.hosts:
             raise _err(409, 16, "host exists")
         if body.get("iSCSINames") and body.get("FCWWNs"):
-            # Mirrors the adapter's conservative reading: one path type per request.
-            raise _err(400, 28, "invalid input: iSCSINames and FCWWNs are exclusive")
+            raise _err(400, 44, "invalid input: iSCSINames and FCWWNs are exclusive")
         self.hosts[name] = {"id": self.next_id(), "name": name,
                             "persona": body.get("persona", 2),
                             "iSCSIPaths": [], "FCPaths": [], "descriptors": {}}
@@ -218,9 +235,9 @@ class FakeHpeWsapi(FakeArray):
         host = self._host(name)
         body = req.json() or {}
         if body.get("pathOperation") != 1:
-            raise _err(400, 29, "invalid input: unsupported pathOperation")
+            raise _err(400, 46, "invalid input: unsupported pathOperation")
         if body.get("iSCSINames") and body.get("FCWWNs"):
-            raise _err(400, 28, "invalid input: iSCSINames and FCWWNs are exclusive")
+            raise _err(400, 44, "invalid input: iSCSINames and FCWWNs are exclusive")
         self._claim(host["name"], body)
         return Reply(200)
 
@@ -272,13 +289,14 @@ class FakeHpeWsapi(FakeArray):
         if host not in self.hosts:
             raise _err(404, 17, "host does not exist")
         if any(t["volumeName"] == vol and t["hostname"] == host for t in self.vluns):
-            raise _err(409, 29, "VLUN exists")
+            # The real code for a duplicate VLUN is not in vendor source.
+            raise _err(409, 0, "VLUN exists")
         used = {t["lun"] for t in self.vluns if t["hostname"] == host}
         start = int(body.get("lun", 0))
         if body.get("autoLun"):
             lun = next(n for n in range(start, 16384) if n not in used)
         elif start in used:
-            raise _err(409, 29, "LUN already in use")
+            raise _err(409, 0, "LUN already in use")
         else:
             lun = start
         self.vluns.append({"volumeName": vol, "hostname": host, "lun": lun})
@@ -289,7 +307,7 @@ class FakeHpeWsapi(FakeArray):
         self._auth(req)
         parts = unquote(spec).split(",")
         if len(parts) != 3 or not parts[1].isdigit():
-            raise _err(400, 28, "invalid VLUN id")
+            raise _err(400, 12, "invalid VLUN id")
         vol, lun, host = parts[0], int(parts[1]), parts[2]
         for t in self.vluns:
             if t["volumeName"] == vol and t["lun"] == lun and t["hostname"] == host:

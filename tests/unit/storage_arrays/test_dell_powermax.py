@@ -10,6 +10,7 @@ import pytest
 from simplyblock_core.storage_arrays.adapters.dell_powermax import (
     CYLINDER_BYTES,
     DellPowerMaxAdapter,
+    powermax_nvme_initiator,
 )
 from simplyblock_core.storage_arrays.base import (
     AdapterContext,
@@ -254,3 +255,77 @@ def test_basic_auth_on_every_request(setup):
     assert adapter.session.http.auth == ("smc", "pmax-pass")
     adapter.close()
     assert adapter.session.http.auth is None
+
+
+def test_nvme_initiator_ids_carry_the_host_id(setup):
+    # csi-powermax makeNVMeInitiatorIDs: "<host NQN>:<HOSTID upper hex>"
+    nqn = "nqn.2014-08.org.nvmexpress:uuid:c32abcdf-35f9-4800-88ad-396225c90b70"
+    assert powermax_nvme_initiator(nqn) == nqn + ":C32ABCDF35F9480088AD396225C90B70"
+    explicit = "nqn.2026-01.io.sb:node1:c32abcdf35f9480088ad396225c90b70"
+    assert powermax_nvme_initiator(explicit) == (
+        "nqn.2026-01.io.sb:node1:C32ABCDF35F9480088AD396225C90B70")
+    with pytest.raises(ArrayUnsupportedError, match="host ID"):
+        powermax_nvme_initiator("nqn.2026-01.io.sb:node1")
+
+    adapter = _adapter(setup)
+    spec = HostSpec(name="sbtest-nvme", initiators=(
+        Initiator(protocol=Protocol.NVME_TCP, address=nqn),))
+    host = adapter.ensure_host(spec)
+    assert setup.fake.hosts[host]["initiator"] == [nqn + ":C32ABCDF35F9480088AD396225C90B70"]
+    assert adapter.ensure_host(spec) == host  # already present: no re-add
+    vol = adapter.create_volume("sb-nvme", GIB)
+    adapter.map_volume(vol.id, host)
+    assert setup.fake.views[f"{vol.name}_{host}"]["pg"] == "sb_pg_nvme"
+    with pytest.raises(ArrayUnsupportedError):
+        adapter.ensure_host(HostSpec(name="sbtest-nvme2", initiators=(
+            Initiator(protocol=Protocol.NVME_TCP, address="nqn.2026-01.io.sb:x"),)))
+
+
+def test_storage_group_payload_names_workload_none(setup):
+    adapter = _adapter(setup)
+    sent = []
+    real = adapter.session.request
+
+    def spy(method, path, **kw):
+        if method == "POST" and path.endswith("/storagegroup"):
+            sent.append(kw["json"])
+        return real(method, path, **kw)
+    adapter.session.request = spy  # type: ignore[method-assign]
+    adapter.create_volume("sb-wl", GIB)
+    (param,) = sent[0]["sloBasedStorageGroupParam"]
+    assert param["sloId"] == "None" and param["workloadSelection"] == "None"
+
+
+@pytest.mark.parametrize("state", ["VALIDATE_FAILED", "UNSCHEDULED"])
+def test_any_other_job_state_is_a_failure(setup, state):
+    setup.fake.job_failure_status = state
+    adapter = _adapter(setup, async_jobs=True)
+    vol = adapter.create_volume("sb-jobstate", 4 * GIB)
+    with pytest.raises(ArrayRequestError, match=f"{state}.*larger"):
+        adapter.resize_volume(vol.id, 2 * GIB)
+
+
+def test_vendor_not_found_and_conflict_wording(setup):
+    adapter = _adapter(setup)
+    vol = adapter.create_volume("sb-words", GIB)
+    host = adapter.ensure_host(_iscsi("sbtest-words"))
+    # "cannot be found" (404 and 500) and "Could not find volume" are missing
+    assert adapter._call("GET", f"{adapter._slo}/host/nobody", missing_ok=True) is None
+    with pytest.raises(ArrayNotFoundError, match="cannot be found"):
+        adapter._call("POST", f"{adapter._slo}/maskingview", json={
+            "maskingViewId": "sb_mv_nopg",
+            "hostOrHostGroupSelection": {"useExistingHostParam": {"hostId": host}},
+            "portGroupSelection": {"useExistingPortGroupParam": {"portGroupId": "nopg"}},
+            "storageGroupSelection": {"useExistingStorageGroupParam": {
+                "storageGroupId": vol.name}}})
+    with pytest.raises(ArrayNotFoundError, match="Could not find volume"):
+        adapter.resize_volume("0FFFF", GIB)
+    # removing a device its storage group lacks: "does not contain" -> missing
+    other = setup.fake.add_volume("sb-other", GIB)
+    assert adapter._call("PUT", f"{adapter._slo}/storagegroup/{vol.name}", json={
+        "editStorageGroupActionParam": {"removeVolumeParam": {"volumeId": [other]}}},
+        missing_ok=True) is None
+    # 409 "already exists" is a conflict
+    with pytest.raises(ArrayConflictError, match="already exists"):
+        adapter._call("POST", f"{adapter._slo}/host",
+                      json={"hostId": host, "initiatorId": []})
