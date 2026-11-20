@@ -1396,6 +1396,9 @@ def _take_shrink_snapshot(task, lvol, direct=False):
                     round=params.get("shrink_round", 0))
     name = params.get("next_shrink_snap_name") or _new_shrink_snap_name(direct)
     if direct != name.startswith(DIRECT_ROUND_PREFIX):
+        # The landing volume pre-staged under the old name would never be
+        # adopted (bf29: three 10 GiB REP_repl_round_* left on cluster A).
+        _discard_landing_named(name, lvol.get_id(), task.cluster_id)
         name = _new_shrink_snap_name(direct)
     # The pre-recorded name may already exist: an earlier pass created the
     # snapshot but did not get to record it (bf17, 2026-11-08: "Snapshot name
@@ -1409,6 +1412,7 @@ def _take_shrink_snapshot(task, lvol, direct=False):
         new_snap, err = existing[0].get_id(), None
     else:
         if existing:
+            _discard_landing_named(name, lvol.get_id(), task.cluster_id)
             name = _new_shrink_snap_name(direct)
         with xfer_timing.phase("take_shrink_snapshot", lvol=lvol.get_id(),
                                round=params.get("shrink_round", 0) + 1):
@@ -1416,7 +1420,9 @@ def _take_shrink_snapshot(task, lvol, direct=False):
                 lvol, name, snap_type=SnapShot.TYPE_INTERNAL,
                 **({"replicate": False} if direct else {}))
         if err and "must be unique" in str(err):
-            # taken by something not ours: next pass uses a fresh name
+            # taken by something not ours: next pass uses a fresh name, and
+            # what was pre-staged for this one is never adopted
+            _discard_landing_named(name, lvol.get_id(), task.cluster_id)
             task = _record(task, next_shrink_snap_name=_new_shrink_snap_name(direct))
     if err:
         # Three values like the success path: every caller unpacks three, and
@@ -1936,25 +1942,59 @@ def _discard_spare_landing(task):
     if not name:
         return task
     task = drop_params(task, "next_shrink_snap_name") or task
+    _discard_landing_named(name, (task.function_params or {}).get("lvol_id"),
+                           task.cluster_id)
+    return task
+
+
+def _landing_in_transfer(landing_id, cluster_id):
+    """True when a live replication task transfers into *landing_id*, or when
+    that cannot be ruled out (the task table is unreadable)."""
+    try:
+        tasks = db.get_job_tasks(cluster_id)
+    except Exception as e:                                # noqa: BLE001
+        logger.warning("Cannot read tasks to check landing volume %s: %s", landing_id, e)
+        return True
+    for t in tasks:
+        if (t.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION
+                and t.status != JobSchedule.STATUS_DONE and not t.canceled
+                and (t.function_params or {}).get("remote_lvol_id") == landing_id):
+            return True
+    return False
+
+
+def _discard_landing_named(name, lvol_id, cluster_id):
+    """Delete the landing volume pre-staged for round snapshot *name*
+    (REP_<name>, snapshot_replication._prestage_next_landing) when that name
+    will not be used: it exists, is online and no transfer lands in it.
+
+    Nothing else reclaims such a volume: bed bf29 (2026-11-20) left three
+    10 GiB REP_repl_round_* landing volumes on cluster A for good. Best
+    effort, logged loudly when it fails."""
+    if not name:
+        return
     rep_name = f"REP_{name}"
     try:
         spare = db.get_lvol_by_name(rep_name)
     except KeyError:
-        return task
+        return
     except Exception as e:                                # noqa: BLE001
         logger.error("Could not look up the spare landing volume %s: %s", rep_name, e)
-        return task
-    if spare.status == LVol.STATUS_IN_DELETION:
-        return task
+        return
+    if spare.status != LVol.STATUS_ONLINE:
+        return
+    if _landing_in_transfer(spare.get_id(), cluster_id):
+        logger.info("cutover for lvol %s: pre-staged landing volume %s is in use by a "
+                    "transfer; kept", lvol_id, rep_name)
+        return
     try:
         from simplyblock_core.controllers import lvol_controller
         logger.info("cutover for lvol %s: deleting the unused pre-staged landing "
-                    "volume %s", task.function_params.get("lvol_id"), rep_name)
+                    "volume %s", lvol_id, rep_name)
         lvol_controller.delete_lvol(spare, force_delete=True)
     except Exception as e:                                # noqa: BLE001
         logger.error("Could not delete the unused pre-staged landing volume %s "
                      "(%s): %s", rep_name, spare.get_id(), e)
-    return task
 
 
 def _shrink_round_done(snap_id):
