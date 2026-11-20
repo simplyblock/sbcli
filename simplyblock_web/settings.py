@@ -63,7 +63,7 @@ class Settings(BaseSettings):
         ),
         BeforeValidator(_parse_int_list),
         AfterValidator(_check_api_versions),
-    ] = {1, 2}
+    ] = {2}
     enable_cluster_secret_auth: bool = True
     k8s_admin_service_accounts: Annotated[
         list[str],
