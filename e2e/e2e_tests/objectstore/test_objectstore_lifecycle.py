@@ -57,7 +57,10 @@ class S3BucketLifecycleK8s(_ObjectStoreBase):
         self.bucket_is_consistent(name, context="right after Ready")
         pvc = (obj["status"] or {}).get("persistentVolumeClaimName")
         export = (obj["status"] or {}).get("nfsExportName")
-        pvc_obj = self.k8s_utils.get_pvc_status(pvc)
+        # The PVC's own object, not get_pvc_status(): that one returns a flat
+        # {phase, capacity} projection, so reading status.phase out of it
+        # yields None on every cluster and this gate could never pass.
+        pvc_obj = self.k8s_utils.get_resource_json("pvc", pvc)
         if (pvc_obj.get("status") or {}).get("phase") != "Bound":
             raise s3.S3EvidenceError(
                 f"[TC-S3-001] PVC {pvc} is {(pvc_obj.get('status') or {}).get('phase')!r}, "
@@ -392,7 +395,7 @@ class S3BucketCapacityPatchK8s(_ObjectStoreBase):
         deadline = time.time() + 600
         reached = None
         while time.time() < deadline:
-            req = ((self.k8s_utils.get_pvc_status(pvc).get("spec") or {})
+            req = ((self.k8s_utils.get_resource_json("pvc", pvc).get("spec") or {})
                    .get("resources", {}).get("requests", {}).get("storage", ""))
             if req and self._bytes(req) >= grown:
                 reached = req
@@ -402,7 +405,7 @@ class S3BucketCapacityPatchK8s(_ObjectStoreBase):
             raise s3.S3EvidenceError(
                 f"[TC-S3-004] 10 minutes after capacityBytes went to {grown}, "
                 f"PVC {pvc} still requests "
-                f"{(self.k8s_utils.get_pvc_status(pvc).get('spec') or {})}")
+                f"{(self.k8s_utils.get_resource_json('pvc', pvc).get('spec') or {})}")
         self.logger.info("[TC-S3-004] PVC expanded to %s", reached)
 
         if s3.phase_of(s3.s3bucket(self.k8s_utils, name)) != "Ready":
@@ -434,7 +437,7 @@ class S3BucketCapacityPatchK8s(_ObjectStoreBase):
             # accept is the finding.
             time.sleep(60)
             obj = s3.s3bucket(self.k8s_utils, name)
-            req = ((self.k8s_utils.get_pvc_status(pvc).get("spec") or {})
+            req = ((self.k8s_utils.get_resource_json("pvc", pvc).get("spec") or {})
                    .get("resources", {}).get("requests", {}).get("storage", ""))
             degraded = s3.phase_of(obj) == "Degraded"
             pvc_held = self._bytes(req) >= grown
