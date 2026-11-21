@@ -931,6 +931,14 @@ REPL_MERGE_ALERT_EVERY_SEC = 600.0
 # leader within about a minute of its primary going down (crashed or shut
 # down); a wait beyond this means no member could be proven safe to lead.
 REPL_TARGET_LEADERLESS_ALERT_SEC = 180
+# A transfer that has waited this long for a target lvstore whose members are
+# ALL online asks the control plane's guarded leaderless recovery
+# (storage_node_ops.restore_healthy_lvs_leadership) to give it a leader, then
+# at most every REPL_TARGET_LEADERLESS_RECOVER_EVERY_SEC. A primary SPDK that
+# dropped the leadership itself takes it back only on IO, and a target gets
+# none while replication waits (bf32 2026-11-21: LVS_7/LVS_10, 76 min).
+REPL_TARGET_LEADERLESS_RECOVER_SEC = 60
+REPL_TARGET_LEADERLESS_RECOVER_EVERY_SEC = 120
 # Pass interval of the snapshot replication runner while any transfer or
 # merge is in flight; TASK_EXEC_INTERVAL_SEC when idle. Not sub-second: each
 # pass reads the task table (see test_transfer_completion_latency).

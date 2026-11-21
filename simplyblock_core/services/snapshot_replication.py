@@ -1016,6 +1016,10 @@ def process_snap_replicate_start(task, snapshot):
     # recovery run from here, during a forced shutdown of the target primary,
     # left LVS_10 with two leaders and corrupted metadata). A leaderless
     # target is waited out: the transfer stays suspended and the RPO grows.
+    # A wait that outlasts REPL_TARGET_LEADERLESS_RECOVER_SEC with every
+    # target member online asks the control plane's guarded recovery
+    # (_ask_target_leadership_recovery); that recovery, not replication,
+    # decides whether a grant is safe.
     remote_lv_node, lead_why = _stable_target_leader(remote_lv)
     if remote_lv_node is None:
         # Waiting, not failing: the target's leadership is not this transfer's
@@ -1483,8 +1487,10 @@ def _wait_for_target_leader(task, remote_lv, lead_why):
     IO, so no member promotes itself when its primary goes down; the node
     monitor's proven takeover gives it a leader, during the down member's
     restart too while that member's SPDK is down (bf24 2026-11-14, LVS_22:
-    the transfer waited ~110 s for the crashed primary to come back). The
-    wait is polled every REPL_RETRY_BACKOFF_BASE_SEC (step 0, whatever the
+    the transfer waited ~110 s for the crashed primary to come back). With
+    every member online the wait asks the control plane's guarded recovery
+    (_ask_target_leadership_recovery) once it lasts
+    REPL_TARGET_LEADERLESS_RECOVER_SEC. The wait is polled every REPL_RETRY_BACKOFF_BASE_SEC (step 0, whatever the
     task's earlier retries), costs no retry, and raises a REPLICATION_STALLED
     event once it lasts REPL_TARGET_LEADERLESS_ALERT_SEC, then at most every
     REPL_MERGE_ALERT_EVERY_SEC."""
@@ -1507,14 +1513,53 @@ def _wait_for_target_leader(task, remote_lv, lead_why):
         except Exception as e:                            # noqa: BLE001
             logger.error("Replication task %s: could not log the leaderless-target "
                          "event: %s", task.uuid, e)
+    _ask_target_leadership_recovery(task, remote_lv, waited, now)
     _suspend_for_retry(task, msg, backoff=True, count=_switches_exhausted(task),
                        backoff_step=0)
+
+
+def _ask_target_leadership_recovery(task, remote_lv, waited, now):
+    """Once a leaderless-target wait has lasted REPL_TARGET_LEADERLESS_RECOVER_SEC,
+    ask the control plane to restore the target's leadership, at most every
+    REPL_TARGET_LEADERLESS_RECOVER_EVERY_SEC per task.
+
+    Replication still grants nothing itself and never forces: the recovery
+    (storage_node_ops.restore_healthy_lvs_leadership) acts only when EVERY
+    member of the target lvstore is online, answers and reports non-leader,
+    and then through the guarded reload-then-grant every object path uses.
+    A member that is down or restarting leaves it to the node monitor's
+    offline takeover and to the restart, as before (bf8 2026-11-02: the
+    unguarded grant from here during a forced shutdown made two leaders).
+    bf32 2026-11-21: both target lvstores (LVS_7, LVS_10) lost their leader to
+    an SPDK self-demotion on a failed write; every member was back online
+    minutes later, nothing restored the leadership, and the transfers waited
+    76 min."""
+    params = task.function_params
+    if waited < constants.REPL_TARGET_LEADERLESS_RECOVER_SEC:
+        return
+    tried = params.get("target_recover_tried_at") or 0
+    if now - tried < constants.REPL_TARGET_LEADERLESS_RECOVER_EVERY_SEC:
+        return
+    params["target_recover_tried_at"] = now
+    try:
+        from simplyblock_core import storage_node_ops
+        leader, why = storage_node_ops.restore_healthy_lvs_leadership(
+            remote_lv.node_id, remote_lv.lvs_name,
+            reason=f"replication task {task.uuid} waited {waited}s")
+    except Exception as e:                                # noqa: BLE001
+        logger.error("Replication task %s: leadership recovery of %s failed: %s",
+                     task.uuid, remote_lv.lvs_name, e)
+        return
+    logger.info("Replication task %s: leadership recovery of target %s: %s",
+                task.uuid, remote_lv.lvs_name, why if leader is None
+                else f"{why} (leader {leader.get_id()})")
 
 
 def _target_leader_found(task):
     """End a leaderless-target wait: log how long it lasted."""
     since = task.function_params.pop("target_leaderless_since", None)
     task.function_params.pop("target_leaderless_alerted_at", None)
+    task.function_params.pop("target_recover_tried_at", None)
     if since:
         logger.info("Replication task %s: target leadership settled after %ds without "
                     "a leader", task.uuid, int(time.time() - since))
