@@ -71,6 +71,34 @@ def _cluster_cap_event(cluster, msg, event_level):
         event_level=event_level)
 
 
+def cluster_floor_violation(cluster, violations):
+    """The monitor found the online resources below a floor (the cluster is
+    DEGRADED for it); ``violations`` are the floor texts of
+    simplyblock_core.floors.floor_violations. One event per change of the set."""
+    msg = "Cluster below resource floor: " + "; ".join(violations)
+    return ec.log_event_cluster(
+        cluster_id=cluster.get_id(),
+        node_id=cluster.get_id(),
+        domain=ec.DOMAIN_CLUSTER,
+        event=ec.EVENT_FLOOR,
+        db_object=cluster,
+        caused_by=ec.CAUSED_BY_MONITOR,
+        message=msg,
+        event_level=EventObj.LEVEL_WARN)
+
+
+def cluster_floor_restored(cluster):
+    return ec.log_event_cluster(
+        cluster_id=cluster.get_id(),
+        node_id=cluster.get_id(),
+        domain=ec.DOMAIN_CLUSTER,
+        event=ec.EVENT_FLOOR,
+        db_object=cluster,
+        caused_by=ec.CAUSED_BY_MONITOR,
+        message="Cluster back at or above every resource floor",
+        event_level=EventObj.LEVEL_INFO)
+
+
 def cluster_cap_warn(cluster, util):
     msg = f"Cluster absolute capacity reached: {util}%"
     return _cluster_cap_event(cluster, msg, event_level=EventObj.LEVEL_WARN)

@@ -10,6 +10,7 @@ from simplyblock_core import (
     constants,
     db_controller,
     distr_controller,
+    multi_attach,
     rpc_client,
     utils,
 )
@@ -274,6 +275,22 @@ def process_device_event(event, logger):
                     event.status = f'late_by_{int(time_delta.total_seconds())}s_skipping'
                     return
 
+        if multi_attach.served_elsewhere(device_obj, event_node_obj.get_id()):
+            # A multi-attach LUN this node reaches through another node's
+            # export: its I/O errors are about that path. The LUN watchdog
+            # and the takeover handle a lost serving node and switch every
+            # node's path; marking the device unavailable for this node (or
+            # dropping its remote device) only turns a short hold into
+            # failed I/O on 1+0, and nothing marks it available again
+            # (2026-11-21 FTT2 bed: such events, processed during a
+            # takeover, left a device unavailable in a node's map; an LVS
+            # failover read there failed and its SPDK aborted).
+            logger.info(f"Multi-attach device {device_obj.get_id()} is served by "
+                        f"{device_obj.serving_node()}, not by reporting node {event_node_obj.get_id()}: "
+                        f"{event.message} left to the LUN takeover")
+            event.status = 'skipped:multi_attach_remote_path'
+            return
+
         if device_obj.is_connection_in_progress_to_node(event_node_obj.get_id()):
             logger.warning("Connection attempt was found from node to device, sleeping 5 seconds")
             time.sleep(5)
@@ -399,7 +416,12 @@ def process_device_event(event, logger):
             return
 
 
-        if device_node_obj.get_id() == event_node_obj.get_id():
+        # On multi-attach the home node of a LUN served by another node reads
+        # it remotely like any peer: its error is about that path, not the
+        # LUN (2026-11-20 FTT2 bed: a home node's error_read on the dead
+        # serving node's export, processed after the takeover, marked the
+        # taken-over LUN unavailable cluster-wide and blocked every LVS).
+        if device_node_obj.get_id() == event_node_obj.get_id() and                 not multi_attach.served_elsewhere(device_obj, event_node_obj.get_id()):
             # The device's home node itself reported an IO error against its
             # local device — this is the only path that may count toward the
             # per-device flap budget. The CAUSE_LOCAL_FAILURE opt-in is

@@ -212,6 +212,9 @@ class ClusterDTO(BaseModel):
     atomic_4k: bool
     page_copy: bool = False
     md_journal: bool = False
+    raid_devices: bool = False
+    multi_attach: bool = False
+    multi_attach_warm_standby: bool = False
     secret: SecretStr
     tls_enabled: bool
     max_fault_tolerance: int
@@ -264,6 +267,9 @@ class ClusterDTO(BaseModel):
             atomic_4k=model.atomic_4k,
             page_copy=model.page_copy,
             md_journal=model.md_journal,
+            raid_devices=model.raid_devices,
+            multi_attach=model.multi_attach,
+            multi_attach_warm_standby=getattr(model, "multi_attach_warm_standby", False) is True,
             secret=model.secret,
             tls_enabled=model.tls,
             max_fault_tolerance=model.max_fault_tolerance,
