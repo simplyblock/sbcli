@@ -2294,6 +2294,78 @@ jobs:
           echo "ERROR: Cluster is still not active after forced activation"
           exit 1
 
+      - name: Verify the CSI controller is Ready
+        if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
+        timeout-minutes: 8
+        run: |
+          set -uo pipefail
+          NAMESPACE=simplyblock
+
+          # An active cluster does not mean a usable one. On run 44879822918
+          # the cluster reported active at 07:38:55 while
+          # simplyblock-csi-controller-0 had already been crash-looping since
+          # 07:28, and nothing here looked. The test then created 12 PVCs,
+          # waited 5 minutes on each, and failed at 08:45 with "PVC
+          # provisioning is completely broken. Check CSI controller logs for
+          # connectivity errors" -- an hour of lab time for something that was
+          # visible in the first minute, reported as a connectivity fault it
+          # was not.
+          #
+          # The cause there is the class of failure this step exists to name:
+          # the chart passed --link/--link-hub-address to a plugin image that
+          # does not implement them, so the container exited on its first line
+          # with "flag provided but not defined: -link". A chart and a driver
+          # image from different builds cannot be caught by looking at either
+          # one alone -- only by whether the container stays up.
+          DEADLINE=$(( $(date +%s) + 420 ))
+          pods() {
+            kubectl -n "$NAMESPACE" get pods -o name 2>/dev/null \
+              | grep -E 'csi-controller' | sed 's|^pod/||'
+          }
+
+          while :; do
+            P="$(pods)"
+            if [ -n "${P}" ]; then
+              not_ready=""
+              for p in ${P}; do
+                # Every container, not just the pod's phase: the pod reports
+                # Running with 5 of 6 up, and the one that is down is the one
+                # that provisions.
+                bad="$(kubectl -n "$NAMESPACE" get pod "$p" \
+                  -o go-template='{{range .status.containerStatuses}}{{if not .ready}}{{.name}} {{end}}{{end}}' \
+                  2>/dev/null)"
+                [ -n "${bad}" ] && not_ready="${not_ready} ${p}:${bad}"
+              done
+              if [ -z "${not_ready// /}" ]; then
+                echo "CSI controller Ready:"
+                kubectl -n "$NAMESPACE" get pods ${P} \
+                  -o custom-columns=NAME:.metadata.name,READY:.status.containerStatuses[*].ready,RESTARTS:.status.containerStatuses[0].restartCount
+                exit 0
+              fi
+              echo "waiting on${not_ready}"
+            else
+              echo "no csi-controller pod yet"
+            fi
+            [ "$(date +%s)" -lt "${DEADLINE}" ] || break
+            sleep 10
+          done
+
+          echo "::error title=CSI controller not Ready::The cluster activated but the CSI controller never became Ready, so no PVC can be provisioned. Container logs below. A plugin that exits on 'flag provided but not defined' means the chart and the driver image are different builds -- leave csi_repository empty so the operator derives the plugin image from its own release."
+          for p in $(pods); do
+            echo "=== describe ${p} ==="
+            kubectl -n "$NAMESPACE" describe pod "$p" 2>&1 | sed -n '/^Containers:/,/^Conditions:/p'
+            for c in $(kubectl -n "$NAMESPACE" get pod "$p" \
+                -o go-template='{{range .status.containerStatuses}}{{if not .ready}}{{.name}} {{end}}{{end}}' 2>/dev/null); do
+              echo "--- ${p}/${c} current ---"
+              kubectl -n "$NAMESPACE" logs "$p" -c "$c" --tail=40 2>&1 | tail -40
+              echo "--- ${p}/${c} previous ---"
+              kubectl -n "$NAMESPACE" logs "$p" -c "$c" --previous --tail=40 2>&1 | tail -40
+            done
+          done
+          echo "=== SimplyblockDriver, which carries the plugin image ==="
+          kubectl -n "$NAMESPACE" get simplyblockdriver -o yaml 2>&1 | grep -E 'name:|image:' | head -20
+          exit 1
+
       - name: Patch fluent-bit daemonset (post-cluster-active)
         if: ${{ env.FLUENTBIT_PATCHED != 'true' }}
         run: |
