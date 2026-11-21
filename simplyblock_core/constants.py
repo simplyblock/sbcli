@@ -954,6 +954,13 @@ REPL_ACTIVE_PASS_SEC = 1.0
 REPL_RUNNER_WORKERS = int(os.getenv("REPL_RUNNER_WORKERS", "8"))
 # Pause before a task that returned a failure is dispatched again.
 REPL_RUNNER_RETRY_PAUSE_SEC = 3.0
+# An in_creation landing volume (REP_*) whose create is not running in this
+# runner and that no other live task of its snapshot may be creating is taken
+# for a dead attempt's leftover and deleted only after this long. Landing
+# creates take up to ~50 s on a loaded target (bed bf13); bed bf32 (2026-11-21)
+# deleted one 2 s into its create, which left a stale registration on the
+# secondaries.
+REPL_LANDING_ABANDON_SEC = int(os.getenv("REPL_LANDING_ABANDON_SEC", "600"))
 # Requests a replication transfer keeps in flight. A full transfer sends one
 # whole cluster per request (16 x 2 MiB = 32 MiB in flight); a delta
 # (allow_partial) sends at most 64 KiB per request, so it needs a deeper window
