@@ -19,19 +19,19 @@ on:
       operator_repository:
         description: 'Operator image repository, INCLUDING the registry host. A bare name lets the node registries.conf pick the registry: the OCP lab mirrors docker.io/simplyblock to a stale local registry, so a bare name there serves an old image against a current chart.'
         required: false
-        default: 'public.ecr.aws/simply-block/simplyblock-operator'
+        default: 'registry.simplyblock.ai/simplyblock/simplyblock-operator'
       operator_tag:
         description: 'Operator image tag'
         required: false
         default: 'main'
       csi_repository:
-        description: 'CSI driver image repository (leave empty for chart default)'
+        description: 'CSI driver image repository. Empty -- the default -- lets the operator supply the CSI plugin image from its own release, so driver and operator are always the same build. Setting this overrides that derivation and csi_tag then becomes required.'
         required: false
-        default: 'simplyblock/spdkcsi'
+        default: ''
       csi_tag:
-        description: 'CSI driver image tag (leave empty for chart default)'
+        description: 'CSI driver image tag. Only used when csi_repository is set, and required then.'
         required: false
-        default: 'latest'
+        default: ''
       spdk_image:
         description: 'SPDK container image'
         required: true
@@ -1341,7 +1341,7 @@ jobs:
             --set controlplane.storageclass.name=${SC_NAME} \
             --set image.simplyblock.repository="${{ github.event.inputs.simplyblock_repository || 'public.ecr.aws/simply-block/simplyblock' }}" \
             --set image.simplyblock.tag="${{ github.event.inputs.simplyblock_image }}" \
-            --set image.operator.repository="${{ github.event.inputs.operator_repository || 'public.ecr.aws/simply-block/simplyblock-operator' }}" \
+            --set image.operator.repository="${{ github.event.inputs.operator_repository || 'registry.simplyblock.ai/simplyblock/simplyblock-operator' }}" \
             --set image.operator.tag="${{ github.event.inputs.operator_tag || 'main' }}" \
             --set csiConfig.simplybk.ip="http://simplyblock-webappapi.simplyblock:5000" \
             --set prometheus.server.persistentVolume.storageClass=${SC_NAME} \
