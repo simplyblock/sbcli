@@ -617,7 +617,8 @@ def test_interrupted_landing_volume_is_adopted_or_cleared():
     src = inspect.getsource(sr.process_snap_replicate_start)
     probe = src.index('rep_name = f"REP_{snapshot.snap_name}"')
     create = src.index("_create_landing_volume(")
-    assert "lvol_controller.add_lvol_ha" in inspect.getsource(sr._create_landing_volume)
+    assert "lvol_controller.add_lvol_ha" in inspect.getsource(sr._create_landing_volume_unguarded)
+    assert "_create_landing_volume_unguarded(" in inspect.getsource(sr._create_landing_volume)
     assert probe < create, "the adopt/clear probe must run before the create"
     adopt = src.index("Adopting landing volume")
     assert probe < adopt < create
