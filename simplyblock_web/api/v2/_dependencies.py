@@ -93,10 +93,10 @@ def _lookup_volume(volume_id: UUID, pool: StoragePool) -> LVol:
     try:
         volume = _db.get_lvol_by_id(str(volume_id))
     except KeyError as e:
-        volume = _volume_by_ns_uuid(str(volume_id), pool.get_id())
-        if volume is None:
+        migrated = _volume_by_ns_uuid(str(volume_id), pool.get_id())
+        if migrated is None:
             raise HTTPException(404, str(e))
-        return volume
+        return migrated
     if volume.pool_uuid != pool.get_id():
         moved = _volume_by_ns_uuid(str(volume_id), pool.get_id())
         if moved is not None:
