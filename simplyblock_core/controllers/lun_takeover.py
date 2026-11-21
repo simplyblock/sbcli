@@ -932,6 +932,16 @@ def _switch_paths(db, cluster_id, dev, standby, failed, failed_paths) -> list:
                 # Usually: the path is already gone (the hold destructed it).
                 logger.info("LUN takeover: old path %s of %s on %s not detached: %s",
                             ip, name, node.get_id(), e)
+        # The node's distribs may have been told the device is unavailable
+        # while its old path failed; it is served again. On 1+0 a device left
+        # unavailable in one node's map fails every read there (2026-11-21
+        # FTT2 bed: an LVS failover read on such a node aborted its SPDK).
+        try:
+            from simplyblock_core import distr_controller
+            distr_controller.send_dev_status_event(dev, NVMeDevice.STATUS_ONLINE, node)
+        except Exception as e:                              # noqa: BLE001
+            logger.warning("LUN takeover: device status of %s not sent to %s: %s",
+                           dev.get_id(), node.get_id(), e)
         return True
 
     if not nodes:

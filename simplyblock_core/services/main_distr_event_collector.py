@@ -275,6 +275,22 @@ def process_device_event(event, logger):
                     event.status = f'late_by_{int(time_delta.total_seconds())}s_skipping'
                     return
 
+        if multi_attach.served_elsewhere(device_obj, event_node_obj.get_id()):
+            # A multi-attach LUN this node reaches through another node's
+            # export: its I/O errors are about that path. The LUN watchdog
+            # and the takeover handle a lost serving node and switch every
+            # node's path; marking the device unavailable for this node (or
+            # dropping its remote device) only turns a short hold into
+            # failed I/O on 1+0, and nothing marks it available again
+            # (2026-11-21 FTT2 bed: such events, processed during a
+            # takeover, left a device unavailable in a node's map; an LVS
+            # failover read there failed and its SPDK aborted).
+            logger.info(f"Multi-attach device {device_obj.get_id()} is served by "
+                        f"{device_obj.serving_node()}, not by reporting node {event_node_obj.get_id()}: "
+                        f"{event.message} left to the LUN takeover")
+            event.status = 'skipped:multi_attach_remote_path'
+            return
+
         if device_obj.is_connection_in_progress_to_node(event_node_obj.get_id()):
             logger.warning("Connection attempt was found from node to device, sleeping 5 seconds")
             time.sleep(5)

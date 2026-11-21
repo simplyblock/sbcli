@@ -379,6 +379,18 @@ class TestTakeover(_TakeoverCase):
         self.assertEqual(self.dev(db).serving_node(), "node-b")
         self.assertTrue(b.spdk.ops("attach"))
 
+    def test_path_switch_marks_the_device_online_on_every_node(self):
+        # A node told "unavailable" during the gap must not keep it (1+0:
+        # every read there would fail).
+        from simplyblock_core import distr_controller
+        db, _ = _bed()
+        with patch.object(distr_controller, "send_dev_status_event") as sent:
+            self.assertEqual(self.run_takeover(db), lun_takeover.TAKEN_OVER)
+        targets = sorted(c.args[2].get_id() for c in sent.call_args_list
+                         if c.args[1] == NVMeDevice.STATUS_ONLINE)
+        self.assertEqual(targets, sorted(n for n, x in db.nodes.items()
+                                         if n != "node-a" and x.status == StorageNode.STATUS_ONLINE))
+
     def test_rerun_after_partial_export_reuses_it(self):
         db, _ = _bed()
         standbys = [db.nodes[n] for n in ("node-b", "node-c", "node-d")]
