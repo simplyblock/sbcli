@@ -559,6 +559,18 @@ class TestHelpers(unittest.TestCase):
         self.assertTrue(out[0]["has_alceml_signature"])
         sig.assert_called_once_with("sdb")
 
+    def test_find_lun_devices_skips_a_dead_controller(self):
+        # A volume detached while the host booted: the kernel keeps a 0-byte
+        # namespace of a dead controller.
+        from simplyblock_web import node_utils
+        inv = [{"type": "disk", "name": "nvme3n1", "device_path": "/dev/nvme3n1", "wwn": "",
+                "serial": "vol08dcbe488933595ca", "size": 0, "by_id_path": "/x"}]
+        states = {"/sys/block/nvme3n1/device/state": "dead"}
+        with patch.object(node_utils, "get_block_devices_info", return_value=inv),                 patch.object(node_utils, "_read_sysfs", side_effect=lambda p: states.get(p, "")),                 patch.object(node_utils, "simplyblock_data_signature", return_value=None):
+            self.assertEqual(node_utils.find_lun_devices("vol08dcbe488933595ca"), [])
+            states["/sys/block/nvme3n1/device/state"] = "live"
+            self.assertEqual(len(node_utils.find_lun_devices("vol08dcbe488933595ca")), 1)
+
 
 # ------------------------------------------------------------------ monitor
 

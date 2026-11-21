@@ -591,6 +591,12 @@ def scan_for_new_luns() -> dict:
     return {"scanned": scanned}
 
 
+def _controller_dead(disk_name: str) -> bool:
+    """An NVMe namespace whose controller the kernel gave up on (state
+    ``dead``): no I/O can reach it or be queued on it."""
+    return bool(disk_name) and _read_sysfs(f"/sys/block/{disk_name}/device/state") == "dead"
+
+
 def find_lun_devices(wwn: str) -> list[dict]:
     """The whole disks of this host that carry LUN ``wwn`` (multi-attach array
     LUN mode): every lsblk disk whose WWN, or serial (the inventory falls back
@@ -610,6 +616,12 @@ def find_lun_devices(wwn: str) -> list[dict]:
     matched = [d for d in devices
                if d.get("type") in ("disk", "mpath")
                and want in (_normalize_wwn(d.get("wwn", "")), _normalize_wwn(d.get("serial", "")))]
+    # A disk whose NVMe controller is dead holds no path to the LUN and no
+    # I/O for it: the kernel keeps such a 0-byte remnant when the volume was
+    # detached while the host booted (2026-11-21 FTT2 bed: the fenced node,
+    # back from a hard reset, kept reporting the detached LUN and stayed
+    # fenced for good).
+    matched = [d for d in matched if not _controller_dead(d.get("name", ""))]
     # Several paths of one LUN under a multipath map: the map, not the paths.
     if any(d.get("type") == "mpath" for d in matched):
         matched = [d for d in matched if d.get("type") == "mpath"]
