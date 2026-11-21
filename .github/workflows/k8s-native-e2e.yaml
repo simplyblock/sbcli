@@ -25,11 +25,11 @@ on:
         required: false
         default: 'main'
       csi_repository:
-        description: 'CSI driver image repository. Empty -- the default -- lets the operator supply the CSI plugin image from its own release, so driver and operator are always the same build. Setting this overrides that derivation and csi_tag then becomes required.'
+        description: 'CSI plugin image repository. Empty -- the default -- derives it from operator_repository: same registry and namespace, repository name spdkcsi. Set it only to test a plugin build deliberately.'
         required: false
         default: ''
       csi_tag:
-        description: 'CSI driver image tag. Only used when csi_repository is set, and required then.'
+        description: 'CSI plugin image tag. Empty -- the default -- takes operator_tag, since plugin and operator are built from one tree. Setting it to anything else is warned about in the log.'
         required: false
         default: ''
       spdk_image:
@@ -1345,13 +1345,43 @@ jobs:
             TLS_FLAGS="--set tls.enabled=true --set tls.mutual_enabled=true"
           fi
 
-          CSI_FLAGS=""
-          if [ -n "${{ github.event.inputs.csi_repository }}" ]; then
-            CSI_FLAGS="$CSI_FLAGS --set driver.image.repository=${{ github.event.inputs.csi_repository }}"
+          # The CSI plugin image follows the operator image: same registry,
+          # same tag, differing only in the repository name. The two are built
+          # from one source tree, so a run that takes them from different
+          # places is testing a combination nobody ships.
+          #
+          # This was two independent inputs defaulting to
+          # `simplyblock/spdkcsi:latest`, which is a different lineage from the
+          # plugin this chart drives. Run 44879822918: the chart passed
+          # --link/--link-hub-address (in the chart since operator #493/#513,
+          # September) to an image that does not implement them, so
+          # csi-controller exited on its first line with "flag provided but
+          # not defined: -link", crash-looped 56 times, and no PVC provisioned.
+          # The image was not stale -- it was Docker Hub's current `latest`,
+          # built 40 minutes before the run. The repository was simply wrong,
+          # so no tag would have helped.
+          #
+          # Leaving both empty makes the operator derive the plugin image from
+          # its own release, which is correct but invisible: the run log shows
+          # no image and a mismatch is only findable by describing the pod.
+          # Deriving it here puts the exact reference in the helm command.
+          OPERATOR_REPO="${{ github.event.inputs.operator_repository || 'registry.simplyblock.ai/simplyblock/simplyblock-operator' }}"
+          OPERATOR_TAG="${{ github.event.inputs.operator_tag || 'main' }}"
+
+          # Same registry and namespace as the operator, with the plugin's own
+          # repository name: .../simplyblock-operator -> .../spdkcsi. Requires
+          # the operator repository to carry its registry host, which is why
+          # the input demands one.
+          CSI_REPO="${{ github.event.inputs.csi_repository }}"
+          CSI_TAG="${{ github.event.inputs.csi_tag }}"
+          [ -n "${CSI_REPO}" ] || CSI_REPO="${OPERATOR_REPO%/*}/spdkcsi"
+          [ -n "${CSI_TAG}" ]  || CSI_TAG="${OPERATOR_TAG}"
+          echo "operator image: ${OPERATOR_REPO}:${OPERATOR_TAG}"
+          echo "CSI plugin image: ${CSI_REPO}:${CSI_TAG}"
+          if [ "${CSI_TAG}" != "${OPERATOR_TAG}" ]; then
+            echo "::warning title=CSI tag differs from the operator::plugin ${CSI_TAG} against operator ${OPERATOR_TAG}. They are built from one tree; a mismatch is how run 44879822918 failed."
           fi
-          if [ -n "${{ github.event.inputs.csi_tag }}" ]; then
-            CSI_FLAGS="$CSI_FLAGS --set driver.image.tag=${{ github.event.inputs.csi_tag }}"
-          fi
+          CSI_FLAGS="--set driver.image.repository=${CSI_REPO} --set driver.image.tag=${CSI_TAG}"
 
           # Resolve the StorageClass the chart's PVCs will ask for, and
           # prove it exists before installing anything.
