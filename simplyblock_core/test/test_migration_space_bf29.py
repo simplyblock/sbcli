@@ -18,6 +18,7 @@ Three rules (simplyblock_core/migration_space.py):
 None of them touches client IO: only the migration's own snapshots wait.
 """
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -314,7 +315,7 @@ def test_bf29_a_held_round_is_not_measured_twice(monkeypatch, clock, real_rules)
         with pytest.raises(TaskDefer, match="waits for 1 deletion"):
             runner._shrink_step(task.frozen_view(), lvol)
     assert task.function_params["shrink_round_times"] == [20.0, 10.0]
-    runner._take_shrink_snapshot.assert_not_called()
+    cast(MagicMock, runner._take_shrink_snapshot).assert_not_called()
 
 
 def test_bf29_the_endgame_is_not_entered_while_its_first_round_would_wait(
@@ -349,7 +350,7 @@ def test_bf29_no_round_snapshot_with_the_source_nearly_full(monkeypatch, clock, 
     err, _ = runner._take_round(task.frozen_view(), _lvol("LV1", "LVS_1"))
     assert err
     assert len(events) == 1
-    runner._take_shrink_snapshot.assert_not_called()
+    cast(MagicMock, runner._take_shrink_snapshot).assert_not_called()
     assert fake.rpc_calls == 0, "under the floor there is nothing to ask SPDK"
 
 

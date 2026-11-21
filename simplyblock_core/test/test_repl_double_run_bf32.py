@@ -78,6 +78,22 @@ def _repl_task(uuid, snap=SNAP, status=JobSchedule.STATUS_NEW, date=1795237024, 
 
 # -- (1) one task per snapshot: the atomic claim --------------------------------
 
+
+def _recorder(ran):
+    """A task_runner stand-in that records which task ran."""
+    def run(task):
+        ran.append(task.uuid)
+        return True
+    return run
+
+
+def _snapshot_creating(seen):
+    """A create stand-in that records the in-flight registry while it runs."""
+    def create(*_a):
+        seen.append(dict(sr._LANDING_CREATING))
+        return ("id", None)
+    return create
+
 def test_bf32_second_task_of_a_snapshot_is_refused_by_the_claim(dbc):
     first, created = dbc.ensure_snapshot_replication_task(_repl_task("5571400c"))
     assert (first, created) == ("5571400c", True)
@@ -180,9 +196,9 @@ def test_bf32_only_one_of_two_live_tasks_of_a_snapshot_is_dispatched(status):
     the old RUNNING-only yield let both through."""
     older = _repl_task("5571400c", status=status, date=100)
     newer = _repl_task("a6f9b7b7", status=status, date=101)
-    ran = []
+    ran: list[str] = []
     with patch.object(sr, "db", _TaskDB([older, newer])), \
-            patch.object(sr, "task_runner", side_effect=lambda t: ran.append(t.uuid) or True):
+            patch.object(sr, "task_runner", side_effect=_recorder(ran)):
         assert sr._dispatch(newer) is True
         assert sr._dispatch(older) is True
     assert ran == ["5571400c"]
@@ -191,9 +207,9 @@ def test_bf32_only_one_of_two_live_tasks_of_a_snapshot_is_dispatched(status):
 def test_bf32_the_task_owning_a_landing_volume_runs_first():
     older = _repl_task("5571400c", date=100)
     newer = _repl_task("a6f9b7b7", date=101, remote_lvol_id="5eeb989b")
-    ran = []
+    ran: list[str] = []
     with patch.object(sr, "db", _TaskDB([older, newer])), \
-            patch.object(sr, "task_runner", side_effect=lambda t: ran.append(t.uuid) or True):
+            patch.object(sr, "task_runner", side_effect=_recorder(ran)):
         sr._dispatch(older)
         sr._dispatch(newer)
     assert ran == ["a6f9b7b7"]
@@ -315,9 +331,9 @@ def test_bf32_cleanup_does_not_delete_a_young_landing_volume():
 
 
 def test_bf32_a_landing_volume_mid_create_is_registered_while_add_lvol_ha_runs():
-    seen = []
+    seen: list[dict] = []
     with patch.object(sr, "_create_landing_volume_unguarded",
-                      side_effect=lambda *a: seen.append(dict(sr._LANDING_CREATING)) or ("id", None)):
+                      side_effect=_snapshot_creating(seen)):
         assert sr._create_landing_volume(REP_NAME, None, None, None) == ("id", None)
     assert seen == [{REP_NAME: 1}]
     assert REP_NAME not in sr._LANDING_CREATING

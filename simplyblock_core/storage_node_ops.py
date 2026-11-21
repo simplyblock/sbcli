@@ -12664,10 +12664,11 @@ def healthy_lvs_leadership_state(owner_id, lvs_name=None):
     except KeyError:
         return "skip", [], f"node {owner_id} unknown"
     if lvs_name and owner.lvstore != lvs_name:
-        owner = next((n for n in db.get_storage_nodes_by_cluster_id(owner.cluster_id)
-                      if n.lvstore == lvs_name and not n.is_secondary_node), None)
-        if owner is None:
+        primary = next((n for n in db.get_storage_nodes_by_cluster_id(owner.cluster_id)
+                        if n.lvstore == lvs_name and not n.is_secondary_node), None)
+        if primary is None:
             return "skip", [], f"no primary of {lvs_name} found"
+        owner = primary
     lvs_name = owner.lvstore
     if not lvs_name or owner.is_secondary_node or not owner.jm_vuid:
         return "skip", [], f"{owner.get_id()} holds no primary lvstore"
