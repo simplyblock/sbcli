@@ -1,8 +1,10 @@
+import errno
 import logging
 import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 
 from simplyblock_core import (
     constants,
@@ -47,6 +49,12 @@ _WORKERS = None
 # attach-to-RUNNING window must not interleave.
 _HUB_LOCKS: dict = {}
 _HUB_LOCKS_GUARD = threading.Lock()
+
+# Names of the landing volumes this process is creating right now
+# (_create_landing_volume). A record wearing one of them is in_creation
+# because its create is still running here, not because an attempt died.
+_LANDING_CREATING: dict = {}            # name -> number of creates in flight
+_LANDING_CREATING_GUARD = threading.Lock()
 
 
 def _hub_lock(source_node_id, hub_node_id):
@@ -633,7 +641,138 @@ def _await_transfer_completion(task, snapshot, snode):
 
 
 def _create_landing_volume(name, snapshot, remote_node, remote_pool_uuid):
-    """add_lvol_ha for the landing copy of *snapshot*: (lvol id, error)."""
+    """add_lvol_ha for the landing copy of *snapshot*: (lvol id, error).
+
+    The name is registered in _LANDING_CREATING while add_lvol_ha runs, so
+    the half-created-landing cleanup never takes a volume under creation for
+    a dead attempt's leftover (bed bf32 2026-11-21)."""
+    with _LANDING_CREATING_GUARD:
+        _LANDING_CREATING[name] = _LANDING_CREATING.get(name, 0) + 1
+    try:
+        return _create_landing_volume_unguarded(
+            name, snapshot, remote_node, remote_pool_uuid)
+    finally:
+        with _LANDING_CREATING_GUARD:
+            left = _LANDING_CREATING.get(name, 1) - 1
+            if left > 0:
+                _LANDING_CREATING[name] = left
+            else:
+                _LANDING_CREATING.pop(name, None)
+
+
+def _landing_age_sec(lvol, now=None):
+    """Seconds since *lvol*'s record was created; None when unknown."""
+    try:
+        created = datetime.fromisoformat(str(lvol.create_dt))
+    except (TypeError, ValueError):
+        return None
+    return ((datetime.now() if now is None else now) - created).total_seconds()
+
+
+def _landing_creation_live(task, existing, rep_name):
+    """Why the in_creation landing volume *existing* may still be under
+    creation -- "" only when it is provably abandoned.
+
+    bed bf32 (2026-11-21): a second task of the same snapshot took the
+    landing volume another worker was creating for a dead attempt's leftover
+    and deleted it; the delete ran on the leader while the creator was still
+    registering the volume on the secondary and tertiary, which kept a stale
+    registration that SPDK later crashed on. A landing volume is abandoned
+    only when nothing here is creating it, no other live task of the snapshot
+    may be creating it, and it has been in_creation longer than any create
+    takes (REPL_LANDING_ABANDON_SEC, which also covers a create in another
+    process, e.g. an old runner pod during a rolling update)."""
+    with _LANDING_CREATING_GUARD:
+        if _LANDING_CREATING.get(rep_name):
+            return "its create is running in this runner"
+    try:
+        siblings = _live_siblings(task)
+    except Exception as e:                                # noqa: BLE001
+        return f"the task table cannot be read ({e})"
+    if siblings:
+        return f"task {siblings[0].uuid} of the same snapshot is live"
+    age = _landing_age_sec(existing)
+    if age is not None and age < constants.REPL_LANDING_ABANDON_SEC:
+        return (f"it is only {int(age)}s old "
+                f"(abandoned after {constants.REPL_LANDING_ABANDON_SEC}s)")
+    return ""
+
+
+def _landing_member_nodes(lvol):
+    """Every node the landing volume may be registered on: its own nodes and
+    the members of its lvstore (a register can land before the record lists
+    the node)."""
+    ids = []
+    for nid in [lvol.node_id] + list(lvol.nodes or []):
+        if nid and nid not in ids:
+            ids.append(nid)
+    try:
+        primary = db.get_storage_node_by_id(lvol.node_id)
+        for nid in (getattr(primary, "secondary_node_id", ""),
+                    getattr(primary, "tertiary_node_id", "")):
+            if nid and nid not in ids:
+                ids.append(nid)
+    except KeyError:
+        pass
+    return ids
+
+
+def _confirm_landing_gone(lvol, member_ids):
+    """After a half-created landing volume's delete: confirm its bdev is gone
+    on every member, sync-deleting a registration left behind. Returns the
+    members where removal is not confirmed; each of them gets a durable
+    sync-delete task, so no registration is left behind untracked.
+
+    A record still present (in_deletion) is the lvol monitor's to finish;
+    nothing is probed then."""
+    try:
+        db.get_lvol_by_id(lvol.get_id())
+        return []
+    except KeyError:
+        pass
+    if not lvol.lvol_bdev or not lvol.lvs_name:
+        return []
+    bdev = f"{lvol.lvs_name}/{lvol.lvol_bdev}"
+    unconfirmed = []
+    for nid in member_ids:
+        try:
+            node = db.get_storage_node_by_id(nid)
+        except KeyError:
+            continue                    # gone with its lvstore: owes nothing
+        confirmed = False
+        if node.status == StorageNode.STATUS_ONLINE:
+            try:
+                rpc = node.rpc_client(timeout=5, retry=2)
+                if rpc.bdev_get(bdev) is None:
+                    confirmed = True
+                else:
+                    logger.warning("Landing volume %s left %s registered on %s; "
+                                   "deleting it there", lvol.get_id(), bdev, nid[:8])
+                    try:
+                        rpc.delete_lvol(bdev, sync=True)
+                    except RPCException as e:
+                        if getattr(e, "code", None) != -errno.ENODEV:
+                            raise
+                    confirmed = rpc.bdev_get(bdev) is None
+            except Exception as e:                        # noqa: BLE001
+                logger.warning("Cannot confirm %s is gone on %s: %s", bdev, nid[:8], e)
+        if not confirmed:
+            unconfirmed.append(nid)
+            try:
+                from simplyblock_core.controllers import tasks_controller
+                tasks_controller.add_lvol_sync_del_task(
+                    node.cluster_id, nid, bdev, lvol.node_id)
+            except Exception as e:                        # noqa: BLE001
+                logger.error("Could not queue the delete of %s on %s: %s",
+                             bdev, nid[:8], e)
+    if unconfirmed:
+        logger.error("Removal of landing volume %s (%s) not confirmed on %s; "
+                     "a durable sync delete is queued for each",
+                     lvol.get_id(), bdev, [n[:8] for n in unconfirmed])
+    return unconfirmed
+
+
+def _create_landing_volume_unguarded(name, snapshot, remote_node, remote_pool_uuid):
     # Carry the source volume's subsystem-packing capacity onto the landing
     # copy. Without it the copy defaults to a one-namespace subsystem, which
     # can never be joined by later namespaced volumes -- so every replicated
@@ -961,6 +1100,9 @@ def process_snap_replicate_start(task, snapshot):
             logger.warning(f"Landing volume {existing.get_id()} ({rep_name}) has size "
                            f"{existing.size}, the snapshot {snapshot.size}; replacing it")
             existing.status = LVol.STATUS_IN_CREATION      # -> the delete branch below
+            replacing = True
+        else:
+            replacing = False
         if existing is not None:
             if existing.status == LVol.STATUS_ONLINE:
                 logger.info(f"Adopting landing volume {existing.get_id()} "
@@ -973,13 +1115,24 @@ def process_snap_replicate_start(task, snapshot):
                 _suspend_for_retry(task, f"stale landing volume {rep_name} still deleting, retrying")
                 return
             else:
+                # Only a provably abandoned one (bed bf32 2026-11-21: the
+                # volume deleted here was being created by another worker).
+                busy = "" if replacing else _landing_creation_live(task, existing, rep_name)
+                if busy:
+                    _suspend_for_retry(
+                        task, f"landing volume {rep_name} is in_creation and may "
+                              f"still be under creation ({busy}); waiting",
+                        count=False, level=logging.INFO)
+                    return
                 logger.warning(f"Deleting half-created landing volume "
                                f"{existing.get_id()} ({rep_name}, status "
                                f"{existing.status}) from an interrupted attempt")
+                members = _landing_member_nodes(existing)
                 try:
                     lvol_controller.delete_lvol(existing, force_delete=True)
                 except Exception as e:
                     logger.error(f"Failed to clear stale landing volume {rep_name}: {e}")
+                _confirm_landing_gone(existing, members)
                 _suspend_for_retry(task, f"cleared stale landing volume {rep_name}, retrying")
                 return
 
@@ -1016,6 +1169,10 @@ def process_snap_replicate_start(task, snapshot):
     # recovery run from here, during a forced shutdown of the target primary,
     # left LVS_10 with two leaders and corrupted metadata). A leaderless
     # target is waited out: the transfer stays suspended and the RPO grows.
+    # A wait that outlasts REPL_TARGET_LEADERLESS_RECOVER_SEC with every
+    # target member online asks the control plane's guarded recovery
+    # (_ask_target_leadership_recovery); that recovery, not replication,
+    # decides whether a grant is safe.
     remote_lv_node, lead_why = _stable_target_leader(remote_lv)
     if remote_lv_node is None:
         # Waiting, not failing: the target's leadership is not this transfer's
@@ -1483,8 +1640,10 @@ def _wait_for_target_leader(task, remote_lv, lead_why):
     IO, so no member promotes itself when its primary goes down; the node
     monitor's proven takeover gives it a leader, during the down member's
     restart too while that member's SPDK is down (bf24 2026-11-14, LVS_22:
-    the transfer waited ~110 s for the crashed primary to come back). The
-    wait is polled every REPL_RETRY_BACKOFF_BASE_SEC (step 0, whatever the
+    the transfer waited ~110 s for the crashed primary to come back). With
+    every member online the wait asks the control plane's guarded recovery
+    (_ask_target_leadership_recovery) once it lasts
+    REPL_TARGET_LEADERLESS_RECOVER_SEC. The wait is polled every REPL_RETRY_BACKOFF_BASE_SEC (step 0, whatever the
     task's earlier retries), costs no retry, and raises a REPLICATION_STALLED
     event once it lasts REPL_TARGET_LEADERLESS_ALERT_SEC, then at most every
     REPL_MERGE_ALERT_EVERY_SEC."""
@@ -1507,14 +1666,53 @@ def _wait_for_target_leader(task, remote_lv, lead_why):
         except Exception as e:                            # noqa: BLE001
             logger.error("Replication task %s: could not log the leaderless-target "
                          "event: %s", task.uuid, e)
+    _ask_target_leadership_recovery(task, remote_lv, waited, now)
     _suspend_for_retry(task, msg, backoff=True, count=_switches_exhausted(task),
                        backoff_step=0)
+
+
+def _ask_target_leadership_recovery(task, remote_lv, waited, now):
+    """Once a leaderless-target wait has lasted REPL_TARGET_LEADERLESS_RECOVER_SEC,
+    ask the control plane to restore the target's leadership, at most every
+    REPL_TARGET_LEADERLESS_RECOVER_EVERY_SEC per task.
+
+    Replication still grants nothing itself and never forces: the recovery
+    (storage_node_ops.restore_healthy_lvs_leadership) acts only when EVERY
+    member of the target lvstore is online, answers and reports non-leader,
+    and then through the guarded reload-then-grant every object path uses.
+    A member that is down or restarting leaves it to the node monitor's
+    offline takeover and to the restart, as before (bf8 2026-11-02: the
+    unguarded grant from here during a forced shutdown made two leaders).
+    bf32 2026-11-21: both target lvstores (LVS_7, LVS_10) lost their leader to
+    an SPDK self-demotion on a failed write; every member was back online
+    minutes later, nothing restored the leadership, and the transfers waited
+    76 min."""
+    params = task.function_params
+    if waited < constants.REPL_TARGET_LEADERLESS_RECOVER_SEC:
+        return
+    tried = params.get("target_recover_tried_at") or 0
+    if now - tried < constants.REPL_TARGET_LEADERLESS_RECOVER_EVERY_SEC:
+        return
+    params["target_recover_tried_at"] = now
+    try:
+        from simplyblock_core import storage_node_ops
+        leader, why = storage_node_ops.restore_healthy_lvs_leadership(
+            remote_lv.node_id, remote_lv.lvs_name,
+            reason=f"replication task {task.uuid} waited {waited}s")
+    except Exception as e:                                # noqa: BLE001
+        logger.error("Replication task %s: leadership recovery of %s failed: %s",
+                     task.uuid, remote_lv.lvs_name, e)
+        return
+    logger.info("Replication task %s: leadership recovery of target %s: %s",
+                task.uuid, remote_lv.lvs_name, why if leader is None
+                else f"{why} (leader {leader.get_id()})")
 
 
 def _target_leader_found(task):
     """End a leaderless-target wait: log how long it lasted."""
     since = task.function_params.pop("target_leaderless_since", None)
     task.function_params.pop("target_leaderless_alerted_at", None)
+    task.function_params.pop("target_recover_tried_at", None)
     if since:
         logger.info("Replication task %s: target leadership settled after %ds without "
                     "a leader", task.uuid, int(time.time() - since))
@@ -3288,15 +3486,62 @@ def _wait(seconds, wake):
         _check_endgame_wake(wake)
 
 
+def _live_siblings(task):
+    """The other live (not done, not canceled) replication tasks of *task*'s
+    snapshot, through the repl_snapshot_id index (a point read, not a scan
+    of the never-pruned task table)."""
+    snapshot_id = (task.function_params or {}).get("snapshot_id")
+    if not snapshot_id:
+        return []
+    return [t for t in db.get_replication_tasks_for_snapshot(snapshot_id)
+            if t.uuid != task.uuid
+            and (not task.cluster_id or t.cluster_id == task.cluster_id)
+            and t.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION
+            and t.status != JobSchedule.STATUS_DONE and t.canceled is False]
+
+
+def _task_precedence(t):
+    """Sort key: which of several live tasks of one snapshot may run. A
+    transfer already running first, then one that owns a landing volume,
+    then the oldest; the uuid breaks ties, so every worker picks the same."""
+    params = t.function_params or {}
+    return (t.status != JobSchedule.STATUS_RUNNING,
+            not params.get("remote_lvol_id"),
+            int(t.date or 0), t.uuid)
+
+
+def _yields_to_sibling(task):
+    """The task of the same snapshot *task* must wait for, or None.
+
+    One snapshot has one replication task (_add_task claims it atomically),
+    but a duplicate written before that claim existed -- or by any other
+    path -- must not run beside it: two runs of one snapshot each create and
+    delete the same REP_* landing volume (bed bf32 2026-11-21). Of the live
+    tasks of a snapshot exactly one runs, by _task_precedence; the others
+    wait until it is done, then find the snapshot replicated."""
+    siblings = _live_siblings(task)
+    if not siblings:
+        return None
+    first = min(siblings + [task], key=_task_precedence)
+    return None if first.uuid == task.uuid else first
+
+
 def _dispatch(task):
     """Run one replication task the way a pass does; task_runner's result
     (False on a failure, which the caller follows with a short pause)."""
-    if task.status in [JobSchedule.STATUS_NEW, JobSchedule.STATUS_SUSPENDED]:
-        for t in db.get_job_tasks(task.cluster_id):
-            if t.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION and t.function_params["snapshot_id"] ==  task.function_params['snapshot_id']:
-                if t.status == JobSchedule.STATUS_RUNNING and t.canceled is False:
-                    logger.info("replication task found for same snapshot, retry")
-                    return True
+    if task.status != JobSchedule.STATUS_DONE and not task.canceled:
+        try:
+            first = _yields_to_sibling(task)
+        except Exception as e:                            # noqa: BLE001
+            # Unknown is not "alone": run it on a later pass.
+            logger.warning("Cannot read the tasks of snapshot %s: %s",
+                           task.function_params.get("snapshot_id"), e)
+            return False
+        if first is not None:
+            logger.info("Replication task %s waits: task %s of the same snapshot %s "
+                        "runs first", task.uuid, first.uuid,
+                        task.function_params.get("snapshot_id"))
+            return True
     if task.status == JobSchedule.STATUS_DONE:
         return True
     # Re-read the task in case cancel changed it. If it has
@@ -3365,6 +3610,7 @@ class _Workers:
                       if self.size else None)
         self._guard = threading.Lock()
         self._inflight: dict = {}       # task uuid -> Future
+        self._inflight_snaps: dict = {}  # snapshot id -> task uuid running it
         self._not_before: dict = {}     # task uuid -> earliest next submit
 
     def paused(self, task):
@@ -3382,11 +3628,18 @@ class _Workers:
         result then, True otherwise."""
         if self._pool is None:
             return _dispatch(task)
+        snap_id = (task.function_params or {}).get("snapshot_id") or ""
         with self._guard:
             if task.uuid in self._inflight:
                 return True
+            # One snapshot on one worker: a second task of the same snapshot
+            # never runs beside the first (bed bf32 2026-11-21).
+            if snap_id and self._inflight_snaps.get(snap_id, task.uuid) != task.uuid:
+                return True
             if time.time() < self._not_before.get(task.uuid, 0.0):
                 return True
+            if snap_id:
+                self._inflight_snaps[snap_id] = task.uuid
             self._inflight[task.uuid] = self._pool.submit(self._run, task)
         return True
 
@@ -3400,6 +3653,9 @@ class _Workers:
         finally:
             with self._guard:
                 self._inflight.pop(task.uuid, None)
+                snap_id = (task.function_params or {}).get("snapshot_id") or ""
+                if snap_id and self._inflight_snaps.get(snap_id) == task.uuid:
+                    del self._inflight_snaps[snap_id]
                 if not res:
                     self._not_before[task.uuid] = (
                         time.time() + constants.REPL_RUNNER_RETRY_PAUSE_SEC)

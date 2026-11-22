@@ -63,6 +63,10 @@ class _TaskDB:
     def get_job_tasks(self, cluster_id, reverse=False):
         return list(self.tasks.values())
 
+    def get_replication_tasks_for_snapshot(self, snapshot_id):
+        return [t for t in self.tasks.values()
+                if (t.function_params or {}).get("snapshot_id") == snapshot_id]
+
     def get_task_by_id(self, uuid):
         if uuid not in self.tasks:
             raise KeyError(uuid)
