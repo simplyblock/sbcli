@@ -545,10 +545,11 @@ def _choose_standby(owner, dev, failed_node_id, nodes_by_id, deadline, exclude=(
                 break
         if best and not pending_before:
             break
-        if best and first_ready_at is None:
-            first_ready_at = now
-        if best and now - first_ready_at >= STANDBY_ORDER_GRACE_SEC:
-            break
+        if best:
+            if first_ready_at is None:
+                first_ready_at = now
+            if now - first_ready_at >= STANDBY_ORDER_GRACE_SEC:
+                break
         if now >= probes_done_by or all(f.done() for _n, _o, f in probes):
             break
         time.sleep(0.02)
