@@ -573,9 +573,14 @@ def scan_for_new_luns() -> dict:
     controller rescans its namespaces. Existing devices are not touched.
 
     The host must already have its SAN paths: iSCSI sessions logged in, FC
-    zoning done, NVMe-oF controllers connected. Returns ``{"scanned": [...]}``."""
+    zoning done. NVMe-oF subsystems are connected here, by ``nvme
+    connect-all`` for every entry of the host's ``/etc/nvme/discovery.conf``
+    (the file nvmf-autoconnect reads at boot): arrays that present every LUN
+    in a subsystem of its own (NetApp ONTAP) add a subsystem with each LUN,
+    which no connection made earlier reaches. Returns ``{"scanned": [...]}``,
+    with ``connect-all <entry>`` for each discovery entry run."""
     import glob as _glob
-    scanned: list[str] = []
+    scanned: list[str] = _connect_nvme_discovery_entries()
     for path in sorted(_glob.glob("/sys/class/scsi_host/host*/scan")):
         try:
             _write_sysfs(path, "- - -")
@@ -589,6 +594,37 @@ def scan_for_new_luns() -> dict:
         except OSError as e:
             logger.warning("NVMe rescan %s failed: %s", path, e)
     return {"scanned": scanned}
+
+
+def _connect_nvme_discovery_entries() -> list[str]:
+    """``nvme connect-all`` for each line of the host's
+    /etc/nvme/discovery.conf, with the host's NQN; subsystems already
+    connected are skipped by nvme-cli. Failures are logged, not raised."""
+    import shlex
+    import subprocess
+    conf = _host_file("/etc/nvme/discovery.conf")
+    if not conf or not shutil.which("nvme"):
+        return []
+    hostnqn = (_host_file("/etc/nvme/hostnqn") or "").strip()
+    done = []
+    for line in conf.splitlines():
+        line = line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        args = shlex.split(line)
+        cmd = ["nvme", "connect-all", *args]
+        if hostnqn and not {"-q", "--hostnqn"} & set(args) and not any(a.startswith("--hostnqn=") for a in args):
+            cmd += ["--hostnqn", hostnqn]
+        try:
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            logger.warning("nvme connect-all %s failed: %s", line, e)
+            continue
+        # nvme-cli exits non-zero when every subsystem was connected already.
+        if res.returncode != 0 and "already connected" not in (res.stderr or ""):
+            logger.warning("nvme connect-all %s: rc %s: %s", line, res.returncode, (res.stderr or "").strip()[:200])
+        done.append(f"connect-all {line}")
+    return done
 
 
 def _controller_dead(disk_name: str) -> bool:

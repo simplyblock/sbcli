@@ -85,6 +85,30 @@ class TestScan(_Root):
         self.assertEqual(written["/sys/class/scsi_host/host7/scan"], "- - -")
         self.assertEqual(written["/sys/class/nvme/nvme2/rescan_controller"], "1")
 
+    def test_discovery_entries_are_connected_with_the_hosts_nqn(self):
+        runs = []
+
+        class R:
+            returncode, stderr = 0, ""
+        files = {"/etc/nvme/discovery.conf": "# array\n-t tcp -a 10.0.0.5 -s 8009\n\n-t tcp -a 10.0.0.6 -s 8009 -q nqn.x\n",
+                 "/etc/nvme/hostnqn": "nqn.2014-08.org.nvmexpress:uuid:h1\n"}
+        with (patch.object(node_utils, "_host_file", side_effect=lambda p: files.get(p, "")),
+              patch.object(node_utils.shutil, "which", return_value="/usr/sbin/nvme"),
+              patch("subprocess.run", side_effect=lambda cmd, **kw: runs.append(cmd) or R()),
+              patch("glob.glob", return_value=[])):
+            out = node_utils.scan_for_new_luns()
+        self.assertEqual(runs[0], ["nvme", "connect-all", "-t", "tcp", "-a", "10.0.0.5", "-s", "8009",
+                                   "--hostnqn", "nqn.2014-08.org.nvmexpress:uuid:h1"])
+        self.assertEqual(runs[1], ["nvme", "connect-all", "-t", "tcp", "-a", "10.0.0.6", "-s", "8009", "-q", "nqn.x"])
+        self.assertEqual(out["scanned"], ["connect-all -t tcp -a 10.0.0.5 -s 8009",
+                                          "connect-all -t tcp -a 10.0.0.6 -s 8009 -q nqn.x"])
+
+    def test_no_discovery_conf_connects_nothing(self):
+        with (patch.object(node_utils, "_host_file", return_value=""),
+              patch("subprocess.run") as run, patch("glob.glob", return_value=[])):
+            self.assertEqual(node_utils.scan_for_new_luns()["scanned"], [])
+        run.assert_not_called()
+
     def test_a_failing_host_does_not_stop_the_scan(self):
         paths = ["/sys/class/scsi_host/host0/scan", "/sys/class/scsi_host/host1/scan"]
 

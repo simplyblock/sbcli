@@ -402,7 +402,11 @@ class NetAppOntapAdapter(ArrayAdapter):
     def _volume_from_ns(rec: dict[str, Any]) -> Volume:
         loc = rec.get("location") or {}
         name = loc.get("namespace") or str(rec.get("name", "")).rsplit("/", 1)[-1]
-        return Volume(id=rec["uuid"], name=name, size_bytes=int(rec["space"]["size"]))
+        # The host reports an ONTAP namespace by its UUID (lsblk WWN
+        # ``uuid.<uuid>``; the kernel prefers it to the NGUID), which is the
+        # namespace's REST uuid (FSx for ONTAP 9.19, 2026-11-22).
+        return Volume(id=rec["uuid"], name=name, size_bytes=int(rec["space"]["size"]),
+                      nguid=f"uuid.{rec['uuid']}".lower())
 
     def _kinds(self) -> tuple[str, str]:
         return (_LUN, _NS) if self.family == "scsi" else (_NS, _LUN)

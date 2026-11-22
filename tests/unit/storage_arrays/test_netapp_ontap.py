@@ -358,7 +358,8 @@ def test_nvme_family_creates_namespace():
     assert vol.id in fake.namespaces and not fake.luns
     ns = fake.namespaces[vol.id]
     assert ns["space"]["block_size"] == 4096 and ns["os_type"] == "linux"
-    assert vol.wwn is None and vol.identifier == f"id.{vol.id}"
+    # The host reports the namespace by its UUID (FSx for ONTAP 9.19: lsblk WWN uuid.<uuid>).
+    assert vol.wwn is None and vol.identifier == f"uuid.{vol.id}"
     assert client.get_volume(vol.id) == vol
     grown = client.resize_volume(vol.id, 16 * GIB, expected_identifier=vol.identifier)
     assert grown.size_bytes == 16 * GIB

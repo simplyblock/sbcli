@@ -56,24 +56,43 @@ class Initiator:
         else:
             raise SystemExit(f"protocol {protocol} is not handled by this test")
 
+    # The host settings the deployment preparation docs require; the files
+    # they replace are restored afterwards.
+    MULTIPATH_CONF = ("defaults {\n    find_multipaths yes\n    polling_interval 5\n}\n"
+                      "overrides {\n    no_path_retry 6\n}\n")
+    SAVED = ".sb-real-array-selftest"
+
+    def _replace(self, path: str, text: str) -> None:
+        if os.path.exists(path) and not os.path.exists(path + self.SAVED):
+            os.replace(path, path + self.SAVED)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(text)
+        self.replaced.append(path)
+
     def login(self) -> None:
+        self.replaced: list[str] = []
         if self.protocol == "iscsi":
+            if sh("systemctl", "is-active", "multipathd", check=False).stdout.strip() == "active":
+                self._replace("/etc/multipath.conf", self.MULTIPATH_CONF)
+                sh("multipathd", "reconfigure", check=False)
             sh("systemctl", "start", "iscsid", check=False)
             for p in self.portals:
                 sh("iscsiadm", "-m", "discovery", "-t", "st", "-p", p)
             sh("iscsiadm", "-m", "node", "--login", check=False)
         else:
+            # Discovery entries only: the node agent's scan connects them,
+            # as it does on a storage node.
             sh("modprobe", "nvme-tcp")
+            entries = []
             for p in self.portals:
                 ip, _, port = p.rpartition(":")
-                sh("nvme", "connect-all", "-t", "tcp", "-a", ip, "-s", port or "4420", check=False)
+                entries.append(f"-t tcp -a {ip} -s {port or '8009'}\n")
+            self._replace("/etc/nvme/discovery.conf", "".join(entries))
 
     def rescan(self) -> None:
         if self.protocol == "iscsi":
             sh("iscsiadm", "-m", "session", "--rescan", check=False)
-        else:
-            for ctrl in os.listdir("/sys/class/nvme"):
-                sh("nvme", "ns-rescan", f"/dev/{ctrl}", check=False)
         sh("udevadm", "settle", check=False)
 
     def logout(self) -> None:
@@ -81,8 +100,15 @@ class Initiator:
             for p in self.portals:
                 sh("iscsiadm", "-m", "node", "-p", p, "--logout", check=False)
                 sh("iscsiadm", "-m", "node", "-p", p, "-o", "delete", check=False)
+            sh("multipath", "-F", check=False)
         else:
             sh("nvme", "disconnect-all", check=False)
+        for path in getattr(self, "replaced", []):
+            os.unlink(path)
+            if os.path.exists(path + self.SAVED):
+                os.replace(path + self.SAVED, path)
+        if "/etc/multipath.conf" in getattr(self, "replaced", []):
+            sh("multipathd", "reconfigure", check=False)
 
 
 def devices_of(node_utils, ini: Initiator, wwn: str, timeout: float) -> list[dict]:

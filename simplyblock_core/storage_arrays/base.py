@@ -154,7 +154,9 @@ class Volume(BaseModel):
     #: EUI-64 designator (HPE Nimble). Lowercase. This matches the array volume
     #: to ``/dev/disk/by-id`` / the multipath WWID on the host.
     wwn: str | None = None
-    #: NVMe identity, ``eui.<32 hex>`` (NGUID) where the array exposes one.
+    #: NVMe identity as the host reports it (lsblk ``WWN``): ``eui.<32 hex>``
+    #: (NGUID), or ``uuid.<uuid>`` for a namespace with a UUID, which the
+    #: kernel prefers (NetApp ONTAP). Lowercase.
     nguid: str | None = None
 
     @property
