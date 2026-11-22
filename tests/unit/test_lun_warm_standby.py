@@ -77,6 +77,7 @@ class TestEnsureWarmStandbys(_WarmCase):
             self.assertEqual(kw["pba_init_mode"], lun_takeover.ALCEML_OPEN_ONLY)
             self.assertEqual(kw["reservation_key"], multi_attach.reservation_key(db.nodes[nid]))
             self.assertEqual(kw["refresh_interval_ms"], constants.MULTI_ATTACH_WARM_REFRESH_MS)
+            self.assertEqual(kw["warm_verify"], constants.MULTI_ATTACH_WARM_VERIFY)
             self.assertEqual(kw["stuck_io_timeout_ms"], constants.MULTI_ATTACH_ALCEML_STUCK_IO_MS)
             # Over the node's own path to the LUN (its agent's lun_info).
             self.assertEqual(spdk.ops("bdev_aio_create")[0][1][:2], (BASE, BY_ID))
@@ -450,13 +451,17 @@ class TestWarmStandbyPlumbing(unittest.TestCase):
         rpc = RPCClient.__new__(RPCClient)
         rpc._request = MagicMock(return_value=True)
         rpc.bdev_alceml_create("a", "b", "u", pba_init_mode=1, reservation_key=1 << 32,
-                               standby=True, refresh_interval_ms=2000)
+                               standby=True, refresh_interval_ms=2000, warm_verify=True)
         params = rpc._request.call_args.kwargs
-        self.assertEqual((params["standby"], params["refresh_interval_ms"]), (True, 2000))
-        rpc.bdev_alceml_create("a", "b", "u", pba_init_mode=1, refresh_interval_ms=2000)
+        self.assertEqual((params["standby"], params["refresh_interval_ms"], params["warm_verify"]),
+                         (True, 2000, True))
+        rpc.bdev_alceml_create("a", "b", "u", pba_init_mode=1, reservation_key=1 << 32, standby=True)
+        self.assertNotIn("warm_verify", rpc._request.call_args.kwargs)
+        rpc.bdev_alceml_create("a", "b", "u", pba_init_mode=1, refresh_interval_ms=2000, warm_verify=True)
         params = rpc._request.call_args.kwargs
         self.assertNotIn("standby", params)
         self.assertNotIn("refresh_interval_ms", params)
+        self.assertNotIn("warm_verify", params)
 
     def test_monitor_drives_warm_clusters_only(self):
         db, _ = _warm_bed()

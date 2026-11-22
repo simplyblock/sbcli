@@ -981,7 +981,8 @@ class RPCClient:
                            write_protection=False, full_page_unmap=False,
                            checksum_method=0, cache_size=0, cache_eviction_threshold=0,
                            force_4k_atomic=False, stuck_io_timeout_ms=0,
-                           reservation_key=0, standby=False, refresh_interval_ms=0):
+                           reservation_key=0, standby=False, refresh_interval_ms=0,
+                           warm_verify=False):
         params = {
             "name": alceml_name,
             "cntr_path": nvme_name,
@@ -1035,6 +1036,10 @@ class RPCClient:
             # LUN's region counters (data-plane default 2000 ms when unset).
             if refresh_interval_ms:
                 params["refresh_interval_ms"] = int(refresh_interval_ms)
+            # Diagnostics: verify the warm map at activation (sent only
+            # when set: older data planes reject the parameter).
+            if warm_verify:
+                params["warm_verify"] = True
         return self._request("bdev_alceml_create", **params)
 
     def alceml_get_role(self, name):

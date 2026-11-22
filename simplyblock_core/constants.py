@@ -1367,6 +1367,12 @@ MULTI_ATTACH_ACTIVATION_WAIT_SEC = 5
 # of a standby alceml's page map from the LUN's region counters (ultra #236,
 # refresh_interval_ms; the data plane's default is the same).
 MULTI_ATTACH_WARM_REFRESH_MS = 2000
+# Warm standby diagnostics: at a warm activation the data plane reads every
+# page header once more, compares it with the warm map, logs each difference
+# and falls back to the full reload (ultra warm_verify). Costs a cold
+# activation's header scan; on while warm standby is test-only
+# (MULTI_ATTACH_WARM_STANDBY_ALLOWED).
+MULTI_ATTACH_WARM_VERIFY = True
 # How often the storage-node monitor reconciles a node's warm standbys
 # (lun_takeover.ensure_warm_standbys), per node.
 MULTI_ATTACH_WARM_STANDBY_INTERVAL_SEC = 30

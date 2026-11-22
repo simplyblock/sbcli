@@ -1285,6 +1285,7 @@ def _create_warm_standby(rpc, cluster, node, dev) -> bool:
         ok = node.create_alceml(dev.alceml_bdev, base, dev.get_id(),
                                 standby=True,
                                 refresh_interval_ms=constants.MULTI_ATTACH_WARM_REFRESH_MS,
+                                warm_verify=constants.MULTI_ATTACH_WARM_VERIFY,
                                 **_alceml_open_kwargs(cluster, dev, kwargs))
         if not ok:
             raise TakeoverError(f"standby alceml {dev.alceml_bdev} not opened")
