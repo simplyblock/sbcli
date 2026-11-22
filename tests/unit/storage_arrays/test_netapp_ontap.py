@@ -159,6 +159,22 @@ def test_rerun_reuses_flexvol_of_interrupted_create():
     assert fake.volumes[fake.luns[vol.id]["location"]["volume"]["uuid"]]["size"] >= 8 * GIB
 
 
+def test_without_aggregates_the_svms_assigned_one_is_used():
+    # A FlexVol POST without an aggregate is refused (ONTAP 9.19 on FSx: 918242).
+    client, fake = make()
+    fake.svm_aggregates[next(iter(fake.svms))] = ["aggr1"]
+    vol = client.create_volume(str(uuid.uuid4()), GIB)
+    flex = fake.volumes[fake.luns[vol.id]["location"]["volume"]["uuid"]]
+    assert [a["name"] for a in flex["aggregates"]] == ["aggr1"]
+
+
+def test_without_aggregates_or_assignment_the_freest_aggregate_is_used():
+    client, fake = make()
+    vol = client.create_volume(str(uuid.uuid4()), GIB)
+    flex = fake.volumes[fake.luns[vol.id]["location"]["volume"]["uuid"]]
+    assert [a["name"] for a in flex["aggregates"]] == ["aggr2"]
+
+
 def test_multiple_aggregates_pick_most_free_space():
     client, fake = make(aggregates="aggr1, aggr2")
     vol = client.create_volume(str(uuid.uuid4()), GIB)

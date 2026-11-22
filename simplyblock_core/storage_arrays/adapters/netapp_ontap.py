@@ -69,9 +69,14 @@ client under ``rest/`` is generated from the ONTAP OpenAPI spec); Ansible =
   ``na_ontap_volume.py`` ``rest_delete_volume``; Trident ``ontap_rest.go``
   ``destroyVolumeByUUID``); ``force`` bypasses the recovery queue
   (``rest/client/storage/volume_delete_parameters.go``).
-* ``aggregates`` is optional on FlexVol ``POST`` (``rest/models/volume.go``;
-  Ansible ``aggregates_rest`` omits it when no aggregate is given); ``|``
-  is the OR operator in queries (Trident ``ontap_rest.go`` aggregates query).
+* A FlexVol ``POST`` needs exactly one aggregate. Seen on Amazon FSx for
+  NetApp ONTAP 9.19 (2026-11-22): without ``aggregates`` and ``style`` it is
+  refused with ``787140``, and with ``style: flexvol`` but no aggregate with
+  ``918242`` ("one aggregate must be specified"). Without configured
+  ``aggregates`` the adapter takes the SVM's assigned aggregates
+  (``/api/svm/svms`` ``aggregates``), or all of the cluster's when none are
+  assigned, and picks one. ``|`` is the OR operator in queries (Trident
+  ``ontap_rest.go`` aggregates query).
 * LUN/namespace ``POST``/``PATCH``/``DELETE`` and FlexVol
   ``POST``/``PATCH``/``DELETE`` may answer ``202`` + job; igroup, lun-map,
   subsystem, subsystem-map and subsystem-host calls are synchronous
@@ -466,17 +471,36 @@ class NetAppOntapAdapter(ArrayAdapter):
         return self._one("/api/storage/volumes",
                          {"name": name, "svm.name": self.svm, "fields": "uuid,name,size"})
 
+    def _candidate_aggregates(self) -> list[str]:
+        """The configured aggregates, else the SVM's assigned ones (empty
+        when the SVM has none assigned: then any of the cluster's)."""
+        if self.aggregates:
+            return list(self.aggregates)
+        svm = self._one("/api/svm/svms", {"name": self.svm, "fields": "aggregates"}) or {}
+        return [str(a["name"]) for a in svm.get("aggregates") or [] if a.get("name")]
+
     def _pick_aggregate(self) -> list[dict[str, str]]:
-        if not self.aggregates:
-            return []
-        if len(self.aggregates) == 1:
-            return [{"name": self.aggregates[0]}]
-        # More than one aggregate in the POST would make a FlexGroup: choose one.
-        recs = self._records("/api/storage/aggregates",
-                             {"name": "|".join(self.aggregates),
-                              "fields": "name,space.block_storage.available"})
+        """The one aggregate of a new FlexVol: ONTAP requires one (918242),
+        and more than one in the POST would make a FlexGroup."""
+        names = self._candidate_aggregates()
+        if len(names) == 1:
+            return [{"name": names[0]}]
+        params: dict[str, Any] = {"fields": "name,space.block_storage.available"}
+        if names:
+            params["name"] = "|".join(names)
+        try:
+            recs = self._records("/api/storage/aggregates", params)
+        except ArrayNotFoundError:
+            raise
+        except ArrayError:
+            # An SVM-scoped account may not read aggregates: take the first.
+            if names:
+                return [{"name": names[0]}]
+            raise
         if not recs:
-            raise ArrayNotFoundError(f"None of the aggregates {self.aggregates} exist")
+            if names:
+                raise ArrayNotFoundError(f"None of the aggregates {names} exist")
+            raise ArrayNotFoundError(f"No aggregate for SVM {self.svm!r}: set the option aggregates")
         best = max(recs, key=lambda r: int(
             ((r.get("space") or {}).get("block_storage") or {}).get("available", 0)))
         return [{"name": best["name"]}]
@@ -492,9 +516,7 @@ class NetAppOntapAdapter(ArrayAdapter):
             "snapshot_policy": {"name": str(self.option("snapshot_policy"))},
             "comment": FLEXVOL_COMMENT,
         }
-        aggrs = self._pick_aggregate()
-        if aggrs:
-            body["aggregates"] = aggrs
+        body["aggregates"] = self._pick_aggregate()
         self._async("POST", "/api/storage/volumes", json=body)
 
     def _grow_flexvol(self, vol: dict[str, Any], size_bytes: int) -> None:

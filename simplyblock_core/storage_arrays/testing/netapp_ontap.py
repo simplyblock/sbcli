@@ -127,6 +127,8 @@ class FakeNetAppOntap(FakeArray):
             {"uuid": str(uuid_mod.uuid4()), "name": "aggr2",
              "space": {"block_storage": {"available": 30 << 40}}},
         ]
+        #: aggregates assigned to an SVM (none: it may use any of the cluster's)
+        self.svm_aggregates: dict[str, list[str]] = {}
         self.volumes: dict[str, dict[str, Any]] = {}
         self.luns: dict[str, dict[str, Any]] = {}
         self.namespaces: dict[str, dict[str, Any]] = {}
@@ -337,7 +339,12 @@ class FakeNetAppOntap(FakeArray):
     @route("GET", "/api/svm/svms")
     def get_svms(self, req):
         self._auth(req)
-        return self._collection(req, [{"uuid": u, "name": n} for n, u in self.svms.items()])
+        by_name = {a["name"]: a for a in self.aggregates}
+        return self._collection(req, [
+            {"uuid": u, "name": n,
+             "aggregates": [{"name": a, "uuid": by_name[a]["uuid"]}
+                            for a in self.svm_aggregates.get(n, []) if a in by_name]}
+            for n, u in self.svms.items()])
 
     @route("GET", "/api/storage/aggregates")
     def get_aggregates(self, req):
@@ -374,6 +381,13 @@ class FakeNetAppOntap(FakeArray):
             raise _err(400, f"Volume size {size} is too small; minimum is {MIN_VOLUME}.",
                        "917534")
         aggrs = body.get("aggregates") or []
+        if not aggrs:
+            # ONTAP 9.19 (FSx): 787140 without style, 918242 with it.
+            if not body.get("style"):
+                raise _err(400, 'One of "aggregates.uuid", "aggregates.name", or "style" must be '
+                                'provided.', "787140")
+            raise _err(400, 'When creating a FlexVol volume, one aggregate must be specified '
+                            'with either "aggregates.name" or "aggregates.uuid".', "918242")
         if len(aggrs) > 1:
             # Several aggregates would create a FlexGroup: the adapter must not.
             raise _err(400, "Specifying multiple aggregates creates a FlexGroup volume, "
