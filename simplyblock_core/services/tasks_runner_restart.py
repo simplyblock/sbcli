@@ -267,7 +267,8 @@ def _jm_reshape_blocker(task, node) -> str:
     The rebuild leaves the node without a journal copy of its own until the
     resync is done, so it starts only when nothing else is in the way: every
     node online, the cluster active, no data movement or restart queued, no
-    other node being rebuilt, and every journal this JM belongs to in sync."""
+    other node being rebuilt, every journal this JM belongs to in sync, and
+    every member of the new raid present."""
     cluster = db.get_cluster_by_id(task.cluster_id)
     if cluster.status != Cluster.STATUS_ACTIVE:
         return f"cluster is {cluster.status}"
@@ -285,7 +286,7 @@ def _jm_reshape_blocker(task, node) -> str:
     pending = device_controller.jm_resync_pending(node, require_held=False)
     if pending:
         return f"journal not in sync: {'; '.join(pending)}"
-    return ""
+    return device_controller.jm_raid_reshape_not_ready(node)
 
 
 def task_runner_jm_reshape(task):

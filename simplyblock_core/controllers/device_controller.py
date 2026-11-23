@@ -1519,6 +1519,27 @@ def _delete_jm_stack(snode: StorageNode, rpc_client: RPCClient) -> None:
         rpc_client.bdev_raid_delete(name)
 
 
+def jm_raid_reshape_not_ready(snode: StorageNode) -> str:
+    """Why the JM raid of ``snode`` cannot be rebuilt over its current devices
+    now, or "" when it can. Touches nothing.
+
+    The node must be online and have a JM raid over its devices, and every
+    member the new raid consists of must be there: a device that is only
+    missing keeps its member (jm_raid_target_members), and a raid is not built
+    over a list with a hole in it."""
+    if snode.status != StorageNode.STATUS_ONLINE:
+        return f"node {snode.get_id()} is {snode.status}"
+    target = jm_raid_target_members(snode)
+    if not target:
+        return f"node {snode.get_id()} has no JM raid over its devices to rebuild"
+    rpc_client = snode.rpc_client()
+    absent = [m for m in target if not rpc_client.bdev_get(m)]
+    if absent:
+        return (f"JM raid member(s) {absent} of node {snode.get_id()} are not present; the "
+                f"raid is rebuilt once they are back or their devices are migrated out")
+    return ""
+
+
 def reshape_jm_raid(node_id: str) -> list[str]:
     """Rebuild the JM raid of a node over the devices it has now, empty, and
     return the new member list.
@@ -1540,18 +1561,12 @@ def reshape_jm_raid(node_id: str) -> list[str]:
     down; calling again finishes the rebuild."""
     db_controller = DBController()
     snode = db_controller.get_storage_node_by_id(node_id)
-    if snode.status != StorageNode.STATUS_ONLINE:
-        raise JMReshapeNotReady(f"node {node_id} is {snode.status}")
+    reason = jm_raid_reshape_not_ready(snode)
+    if reason:
+        raise JMReshapeNotReady(reason)
     target = jm_raid_target_members(snode)
-    if not target:
-        raise JMReshapeNotReady(f"node {node_id} has no JM raid over its devices to rebuild")
     jm = snode.jm_device
     rpc_client = snode.rpc_client()
-    absent = [m for m in target if not rpc_client.bdev_get(m)]
-    if absent:
-        raise JMReshapeNotReady(
-            f"JM raid member(s) {absent} of node {node_id} are not present; the raid is "
-            f"rebuilt once they are back or their devices are migrated out")
 
     layout = jm_raid.layout_of_record(jm.jm_nvme_bdev_list, jm.raid_bdev, jm.jm_leg_bdevs)
     logger.info("Rebuilding the JM raid of node %s: members %s -> %s (%s)",
