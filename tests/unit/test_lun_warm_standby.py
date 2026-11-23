@@ -12,6 +12,7 @@
   - plumbing: cluster flag, monitor driver.
 """
 
+import os
 import time
 import unittest
 from unittest.mock import MagicMock, patch
@@ -464,18 +465,19 @@ class TestWarmStandbyPlumbing(unittest.TestCase):
 
     def test_cluster_flag_needs_multi_attach(self):
         self.assertFalse(Cluster().multi_attach_warm_standby)
-        with patch.object(constants, "MULTI_ATTACH_WARM_STANDBY_ALLOWED", True):
-            with self.assertRaises(ValueError):
-                cluster_ops._validate_warm_standby(False, True)
-            cluster_ops._validate_warm_standby(True, True)
+        with self.assertRaises(ValueError):
+            cluster_ops._validate_warm_standby(False, True)
+        cluster_ops._validate_warm_standby(True, True)
         cluster_ops._validate_warm_standby(False, False)
 
-    def test_refused_while_disabled(self):
-        # 2026-11-20 bed: stale data after a warm takeover.
-        with patch.object(constants, "MULTI_ATTACH_WARM_STANDBY_ALLOWED", False):
-            with self.assertRaises(ValueError) as cm:
-                cluster_ops._validate_warm_standby(True, True)
-        self.assertIn("disabled", str(cm.exception))
+    def test_warm_verify_is_opt_in(self):
+        import importlib
+        with patch.dict("os.environ", {}, clear=False):
+            os.environ.pop("SIMPLYBLOCK_WARM_VERIFY", None)
+            self.assertFalse(importlib.reload(constants).MULTI_ATTACH_WARM_VERIFY)
+            os.environ["SIMPLYBLOCK_WARM_VERIFY"] = "1"
+            self.assertTrue(importlib.reload(constants).MULTI_ATTACH_WARM_VERIFY)
+        importlib.reload(constants)
 
     def test_cli_flag(self):
         import argparse

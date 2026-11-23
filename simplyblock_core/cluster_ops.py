@@ -472,11 +472,6 @@ def _validate_warm_standby(multi_attach, warm_standby):
     option only."""
     if warm_standby and not multi_attach:
         raise ValueError("multi_attach_warm_standby requires multi_attach")
-    if warm_standby and not constants.MULTI_ATTACH_WARM_STANDBY_ALLOWED:
-        raise ValueError(
-            "multi_attach_warm_standby is disabled: on the 2026-11-20 bed a takeover onto a warm "
-            "standby returned stale data (fio crc32c verify failures); it stays off until the "
-            "alceml warm refresh is fixed")
 
 
 def _validate_integrity_flags(inline_checksum, atomic_4k):

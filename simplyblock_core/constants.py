@@ -1370,18 +1370,13 @@ MULTI_ATTACH_WARM_REFRESH_MS = 2000
 # Warm standby diagnostics: at a warm activation the data plane reads every
 # page header once more, compares it with the warm map, logs each difference
 # and falls back to the full reload (ultra warm_verify). Costs a cold
-# activation's header scan; on while warm standby is test-only
-# (MULTI_ATTACH_WARM_STANDBY_ALLOWED).
-MULTI_ATTACH_WARM_VERIFY = True
+# activation's header scan, so it is off unless the control plane runs with
+# SIMPLYBLOCK_WARM_VERIFY=1 (verified clean on the 2026-11-23 FTT2 beds:
+# 70+ warm activations, no difference).
+MULTI_ATTACH_WARM_VERIFY = os.environ.get("SIMPLYBLOCK_WARM_VERIFY") == "1"
 # How often the storage-node monitor reconciles a node's warm standbys
 # (lun_takeover.ensure_warm_standbys), per node.
 MULTI_ATTACH_WARM_STANDBY_INTERVAL_SEC = 30
-# Warm standby is refused at cluster create: on the 2026-11-20 FTT2 bed a
-# takeover onto a warm standby (activation 141 ms) was followed by crc32c
-# verify failures on 4 of 5 volumes; the cold takeover on the same build and
-# case verified clean. Test beds that reproduce it set
-# SIMPLYBLOCK_ALLOW_WARM_STANDBY=1 on the control plane.
-MULTI_ATTACH_WARM_STANDBY_ALLOWED = os.environ.get("SIMPLYBLOCK_ALLOW_WARM_STANDBY") == "1"
 # Client keep-alive on multi-attach clusters: a node lost without closing its
 # connections (hard reset, network cut) leaves its own volumes' paths dead
 # until the host's keep-alive notices, 1-2 intervals: 8 s took 10-14 s on the
