@@ -77,6 +77,12 @@ class S3ProbeError(S3EvidenceError):
 #: ``S3BucketFinalizer`` in ``operator/api/v1alpha2/s3bucket_types.go``.
 S3BUCKET_FINALIZER = "storage.simplyblock.io/s3bucket"
 
+#: The ObjectStore's finalizer while an S3Bucket still references it, and the
+#: condition that names those buckets (``design-objectstore.md`` §4, the
+#: deletion paragraph).
+OBJECTSTORE_BUCKETS_FINALIZER = "storage.simplyblock.io/objectstore-buckets"
+CONDITION_BUCKETS_REMAINING = "BucketsRemaining"
+
 #: ``S3BucketOwnerAnnotation``, same file. Present only on a bucket the
 #: gateway created for a ``CreateBucket`` request, absent on a bucket created
 #: directly through the CRD.

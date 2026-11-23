@@ -140,11 +140,25 @@ class S3ObjectStoreDeletedWithBucketsK8s(_ObjectStoreBase):
     cannot cover for want of a garbage collector, and the invariant each of
     dev's two plans assigns to the other.
 
-    The design does not state which of two behaviours is correct, so this case
-    *records* which one happened and fails only on the outcomes that are
-    unambiguously wrong: a bucket left `Ready` with no gateway, or an orphaned
-    PVC. If neither behaviour is specified, that is the finding.
+    `design-objectstore` decides it: the delete is held. The request succeeds
+    and sets `deletionTimestamp`, but the finalizer
+    `storage.simplyblock.io/objectstore-buckets` stays until no `S3Bucket`
+    references the store. Meanwhile the phase is unchanged, `BucketsRemaining`
+    is `True` and names the buckets, the owned Deployment and Service are not
+    collected, and the gateway keeps serving. A new bucket against the
+    terminating store degrades with `ObjectStoreNotFound`. Once the last
+    bucket goes, so do the store and everything it owns.
     """
+
+    #: How long the held delete is watched. Long enough for several
+    #: reconciles and for a garbage collector that was going to act to have
+    #: acted.
+    HOLD_SECONDS = 180
+
+    #: How long the store and its owned objects get to disappear once the
+    #: last bucket is gone. The design says one reconcile; the garbage
+    #: collector follows on its own schedule.
+    RELEASE_TIMEOUT = 300
 
     def run(self):
         self.logger.info("=== TC-S3-002 ObjectStore deleted with live buckets ===")
@@ -173,86 +187,160 @@ class S3ObjectStoreDeletedWithBucketsK8s(_ObjectStoreBase):
                 supress_logs=True)
             owned[kind] = sorted((out or "").split())
         self.logger.info("[TC-S3-002] owned before delete: %s", owned)
+        for kind in ("deployment", "service"):
+            if not owned[kind]:
+                raise s3.S3ProbeError(
+                    f"[TC-S3-002] found no {kind} owned by ObjectStore "
+                    f"{self.STORE} before the delete, so the case could not "
+                    f"tell a collected one from one that never existed")
+        phase_before = s3.phase_of(s3.objectstore(self.k8s_utils, self.STORE))
 
         self.k8s_utils._exec_kubectl(
             f"kubectl delete objectstore {self.STORE} -n {self.ns} "
             f"--wait=false --ignore-not-found")
 
-        # Five minutes, sampling, so the report can say what happened over the
-        # window rather than only at its end.
+        # ── the delete is held ──────────────────────────────────────────
+        # Sampled over a window rather than checked once: a finalizer that
+        # is released a minute later is the same defect as none at all.
         timeline = []
-        deadline = time.time() + 300
-        while time.time() < deadline:
+        t0 = time.time()
+        while True:
             store = s3.objectstore(self.k8s_utils, self.STORE)
+            meta = store.get("metadata") or {}
+            cond = s3.condition(store, s3.CONDITION_BUCKETS_REMAINING)
+            gateways = s3.gateway_pods(self.k8s_utils, self.STORE)
             row = {
-                "t": round(time.time() - (deadline - 300)),
+                "t": round(time.time() - t0),
                 "store_present": bool(store),
+                "deleting": bool(meta.get("deletionTimestamp")),
+                "finalizers": meta.get("finalizers") or [],
                 "store_phase": s3.phase_of(store),
+                "buckets_remaining": cond.get("status"),
                 "buckets": {n: s3.phase_of(s3.s3bucket(self.k8s_utils, n))
                             for n in names},
-                "gateway_pods": len(s3.gateway_pods(self.k8s_utils, self.STORE)),
+                "ready_gateways": len([p for p in gateways if p[3]]),
+                "owned_left": {k: [i for i in v if self.k8s_utils
+                                   .get_resource_json(k, i)]
+                               for k, v in owned.items()},
             }
             if not timeline or row != {**timeline[-1], "t": row["t"]}:
                 timeline.append(row)
+                self.logger.info("[TC-S3-002] %s", row)
+            self._assert_held(row, cond, owned, phase_before, names)
+            if time.time() - t0 >= self.HOLD_SECONDS:
+                break
             time.sleep(15)
 
-        store_gone = not s3.objectstore(self.k8s_utils, self.STORE)
-        final = {n: s3.s3bucket(self.k8s_utils, n) for n in names}
-        gateways = s3.gateway_pods(self.k8s_utils, self.STORE)
-
-        if store_gone:
-            outcome = "delete proceeded"
-            # The serious failure: a bucket still claiming Ready with nothing
-            # to serve it. Degraded is a defensible answer; Ready is not.
-            for n, obj in final.items():
-                if s3.phase_of(obj) == "Ready" and not gateways:
-                    raise s3.S3EvidenceError(
-                        f"[TC-S3-002] S3Bucket/{n} is still Ready after its "
-                        f"ObjectStore was deleted and every gateway pod is "
-                        f"gone. Nothing serves it, and nothing says so.")
-            reasons = {n: [ln.split()[0] for ln in s3.events_for(
-                self.k8s_utils, "S3Bucket", n) if ln.split()] for n in final}
-            self.logger.info("[TC-S3-002] bucket events after delete: %s", reasons)
-            # The live half of I-04: owned objects actually collected.
-            still = {}
-            for kind, items in owned.items():
-                left = [i for i in items
-                        if self.k8s_utils.get_resource_json(kind, i)]
-                if left:
-                    still[kind] = left
-            if still:
+        # The gateway is still serving, not merely still running.
+        for n in names:
+            got = pod.call(cfg, "get_object", bucket=n, key="probe.bin",
+                           size=4 * 1024 ** 2, seed=f"{n}-seed")
+            if got.get("status") != 200 or not got.get("match"):
                 raise s3.S3EvidenceError(
-                    f"[TC-S3-002] the ObjectStore is gone but objects it "
-                    f"owned were not garbage-collected: {still}. "
-                    f"ownerReferences are the only mechanism here, so this is "
-                    f"the live half of I-04 failing.")
-        else:
-            outcome = "delete held"
-            store = s3.objectstore(self.k8s_utils, self.STORE)
-            finalizers = (store.get("metadata") or {}).get("finalizers") or []
-            if not finalizers:
-                raise s3.S3EvidenceError(
-                    "[TC-S3-002] the ObjectStore delete neither completed nor "
-                    "is held by a finalizer -- it is simply stuck, which is "
-                    "neither of the two defensible behaviours.")
-            self.logger.info("[TC-S3-002] held by finalizers %s", finalizers)
+                    f"[TC-S3-002] the ObjectStore delete is held, but a GET "
+                    f"of {n}/probe.bin through its gateway fails: {got}. The "
+                    f"hold exists so the remaining buckets keep serving.")
 
-        # Whichever happened, no PVC may be orphaned.
+        # ── a new bucket against the terminating store ──────────────────
+        late = "tc002-late"
+        self.make_bucket(late, wait=False)
+        late_obj, _ = s3.wait_phase(
+            self.k8s_utils, "s3bucket", late, "Degraded", timeout=300,
+            forbid="Ready")
+        reasons = [c.get("reason") for c in
+                   ((late_obj.get("status") or {}).get("conditions") or [])]
+        events = s3.events_for(self.k8s_utils, "S3Bucket", late)
+        if (s3.EVENT_OBJECTSTORE_NOT_FOUND not in reasons
+                and not any(ln.split()[0] == s3.EVENT_OBJECTSTORE_NOT_FOUND
+                            for ln in events)):
+            raise s3.S3EvidenceError(
+                f"[TC-S3-002] S3Bucket/{late}, created against an ObjectStore "
+                f"being deleted, is Degraded but neither a condition nor an "
+                f"event says {s3.EVENT_OBJECTSTORE_NOT_FOUND}: condition "
+                f"reasons {reasons}, events {events[-5:]}")
+        self.k8s_utils.delete_resource("s3bucket", late)
+        s3.wait_gone(self.k8s_utils, "s3bucket", late, timeout=600)
+        self.buckets = [b for b in self.buckets if b[0] != late]
+
+        # ── the last bucket goes, and the store with it ─────────────────
+        for n in names:
+            self.k8s_utils.delete_resource("s3bucket", n)
+        for n in names:
+            s3.wait_gone(self.k8s_utils, "s3bucket", n, timeout=600)
+        self.buckets = [b for b in self.buckets if b[0] not in names]
+
+        s3.wait_gone(self.k8s_utils, "objectstore", self.STORE,
+                     timeout=self.RELEASE_TIMEOUT)
+        self.stores = [st for st in self.stores if st[0] != self.STORE]
+        deadline = time.time() + self.RELEASE_TIMEOUT
+        still = {}
+        while time.time() < deadline:
+            still = {k: left for k, v in owned.items()
+                     if (left := [i for i in v if self.k8s_utils
+                                  .get_resource_json(k, i)])}
+            if not still:
+                break
+            time.sleep(10)
+        if still:
+            raise s3.S3EvidenceError(
+                f"[TC-S3-002] the ObjectStore is gone but objects it owned "
+                f"were not garbage-collected within {self.RELEASE_TIMEOUT}s: "
+                f"{still}. ownerReferences are the only mechanism here, so "
+                f"this is the live half of I-04 failing.")
+
+        # No PVC may outlive its bucket.
         orphans = [p for p in pvcs.values()
-                   if self.k8s_utils.get_resource_json("pvc", p)
-                   and not s3.s3bucket(self.k8s_utils,
-                                       next(n for n, q in pvcs.items() if q == p))]
+                   if self.k8s_utils.get_resource_json("pvc", p)]
         if orphans:
             raise s3.S3EvidenceError(
                 f"[TC-S3-002] PVC(s) {orphans} survive with no S3Bucket "
                 f"describing them")
 
         self.record("tc002_objectstore_delete", {
-            "outcome": outcome, "owned_before": owned,
+            "owned_before": owned,
+            "phase_before": phase_before,
             "timeline": timeline,
-            "final_phases": {n: s3.phase_of(o) for n, o in final.items()},
+            "late_bucket_reasons": reasons,
         })
-        self.logger.info("[TC-S3-002] PASS -- %s", outcome)
+        self.logger.info("[TC-S3-002] PASS -- delete held for %ds, then "
+                         "released with the last bucket", self.HOLD_SECONDS)
+
+    def _assert_held(self, row, cond, owned, phase_before, names):
+        """Fail on the first sample that breaks the held-delete contract."""
+        problems = []
+        if not row["store_present"]:
+            problems.append("the ObjectStore is gone")
+        else:
+            if not row["deleting"]:
+                problems.append("metadata.deletionTimestamp is not set")
+            if s3.OBJECTSTORE_BUCKETS_FINALIZER not in row["finalizers"]:
+                problems.append(
+                    f"finalizer {s3.OBJECTSTORE_BUCKETS_FINALIZER} is absent "
+                    f"(finalizers {row['finalizers']})")
+            if row["store_phase"] != phase_before:
+                problems.append(
+                    f"phase moved {phase_before} -> {row['store_phase']}")
+            missing = [n for n in names if n not in (cond.get("message") or "")]
+            if cond.get("status") != "True" or missing:
+                problems.append(
+                    f"condition {s3.CONDITION_BUCKETS_REMAINING} is "
+                    f"{cond or 'absent'}, expected status True naming {names}")
+        for kind in ("deployment", "service"):
+            if owned[kind] and row["owned_left"].get(kind) != owned[kind]:
+                problems.append(
+                    f"owned {kind} {owned[kind]} was collected "
+                    f"(left: {row['owned_left'].get(kind)})")
+        if not row["ready_gateways"]:
+            problems.append("no gateway pod is Ready")
+        not_ready = {n: ph for n, ph in row["buckets"].items() if ph != "Ready"}
+        if not_ready:
+            problems.append(f"buckets no longer Ready: {not_ready}")
+        if problems:
+            raise s3.S3EvidenceError(
+                f"[TC-S3-002] {row['t']}s after deleting ObjectStore "
+                f"{self.STORE} with buckets {names} still referencing it, "
+                f"the delete is not held as the design requires: "
+                + "; ".join(problems))
 
 
 class S3BucketCapacityExhaustionK8s(_ObjectStoreBase):
