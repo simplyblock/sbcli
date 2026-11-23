@@ -117,8 +117,9 @@ class JobSchedule(BaseModel):
     # ``phase`` once the rebuild has started: "rebuild" while the JM stack is
     # down or being built, "resync" while the empty JM is brought up to date,
     # then with ``ready_polls`` (consecutive polls that found every journal in
-    # sync), ``sync_calls`` (synchronisations started for a journal the new JM
-    # did not hold) and ``members`` (the new member list). One open task per node
+    # sync), ``sync_calls`` (cycles that started a journal synchronisation),
+    # ``synced`` (the LVS whose journal was synchronised to the new JM at least
+    # once) and ``members`` (the new member list). One open task per node
     # (tasks_controller.add_jm_raid_reshape_task).
     FN_JM_RAID_RESHAPE = "jm_raid_reshape"
 

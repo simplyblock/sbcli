@@ -33,6 +33,8 @@ from tests.integration.task_driver import drive
 
 CLUSTER = "7d2c1a4e-0000-4000-8000-000000000001"
 NODES = [f"7d2c1a4e-0000-4000-8000-00000000010{i}" for i in (1, 2, 3)]
+# Every node leads its own LVS, whose journal group is its index + 1.
+ALL_SYNCED = sorted((node_id, index + 1) for index, node_id in enumerate(NODES))
 ONLINE = NVMeDevice.STATUS_ONLINE
 MIGRATED = NVMeDevice.STATUS_FAILED_AND_MIGRATED
 
@@ -141,6 +143,15 @@ class Env:
 
     def drive(self, task_id) -> JobSchedule:
         return drive(tasks_runner_restart.SPEC, self.task(task_id))
+
+    def run_to_done(self, task_id, cycles=12) -> JobSchedule:
+        """Drive the task until it is done; fails when it is not after ``cycles``."""
+        for _ in range(cycles):
+            task = self.drive(task_id)
+            if task.status == JobSchedule.STATUS_DONE:
+                return task
+        raise AssertionError(f"task not done after {cycles} cycles: {task.status} "
+                             f"{task.function_params} {task.function_result}")
 
 
 def _seed_node(db, index, devices=4, legacy=False):
@@ -267,9 +278,7 @@ def test_nothing_is_queued_for_a_journal_on_a_dedicated_device(env):
 def test_a_finished_task_does_not_stand_in_for_the_next_change(env):
     env.set_device(0, 1, MIGRATED)
     first = env.queue()
-    for _ in range(tasks_runner_restart.JM_RESHAPE_READY_POLLS):
-        env.drive(first)
-    assert env.task(first).status == JobSchedule.STATUS_DONE
+    env.run_to_done(first)
 
     env.set_device(0, 2, NVMeDevice.STATUS_FAILED)
     device_controller.device_set_failed_and_migrated(_device_id(1, 2))
@@ -302,12 +311,17 @@ def test_the_raid_is_rebuilt_over_the_remaining_devices_and_the_task_ends_in_syn
     assert task.status == JobSchedule.STATUS_RUNNING
     assert task.function_params["phase"] == "resync"
     assert task.function_params["members"] == remaining
+    # Every journal the new JM is a copy of was synchronised on its leader,
+    # although every status said it was there already.
+    assert sorted(env.synced) == ALL_SYNCED
+    assert task.function_params["synced"] == ["LVS_1", "LVS_2", "LVS_3"]
 
     for _ in range(tasks_runner_restart.JM_RESHAPE_READY_POLLS - 1):
-        task = env.drive(task_id)
+        assert env.drive(task_id).status == JobSchedule.STATUS_RUNNING
+    task = env.drive(task_id)
     assert task.status == JobSchedule.STATUS_DONE
     assert "journals in sync" in task.function_result
-    assert env.synced == []
+    assert sorted(env.synced) == ALL_SYNCED            # each once
     assert len(_raids_built(env)) == 2                 # built once
 
 
@@ -324,8 +338,7 @@ def test_shrinking_to_two_devices_is_a_plain_mirror_and_to_one_no_raid(env):
     env.set_device(0, 0, MIGRATED)
     env.set_device(0, 1, MIGRATED)
     task_id = env.queue()
-    for _ in range(tasks_runner_restart.JM_RESHAPE_READY_POLLS):
-        env.drive(task_id)
+    env.run_to_done(task_id)
     node = env.node()
     assert node.jm_device.jm_nvme_bdev_list == ["nvme_2n1p1", "nvme_3n1p1"]
     assert node.jm_device.jm_leg_bdevs == ["nvme_2n1p1", "nvme_3n1p1"]
@@ -334,8 +347,7 @@ def test_shrinking_to_two_devices_is_a_plain_mirror_and_to_one_no_raid(env):
     env.created.clear()
     env.set_device(0, 2, MIGRATED)
     task_id = env.queue()
-    for _ in range(tasks_runner_restart.JM_RESHAPE_READY_POLLS):
-        task = env.drive(task_id)
+    task = env.run_to_done(task_id)
     node = env.node()
     assert task.status == JobSchedule.STATUS_DONE
     assert node.jm_device.jm_nvme_bdev_list == ["nvme_3n1p1"]
@@ -389,34 +401,49 @@ def test_a_legacy_mirror_is_rebuilt_as_a_legacy_mirror(env):
 
 # -- the resync --------------------------------------------------------------
 
-def test_a_journal_the_new_jm_does_not_hold_is_synchronised_on_its_leader(env):
-    """Lab, 2026-11-23: the leader reported every JM of its journal ready
-    while its own rebuilt JM did not hold that journal."""
+def test_every_journal_is_synchronised_even_when_the_jm_says_it_holds_it(env):
+    """Lab, 2026-11-23: after a rebuild the leader reported its own JM ready
+    and the JM reported the journal as held, nothing had been replicated to
+    it, and a restart of the node found the journal not on its disks."""
     env.set_device(0, 1, MIGRATED)
-    env.journals_missing[NODES[0]] = {1}
-    task_id = env.queue()
 
-    task = env.drive(task_id)
+    task = env.run_to_done(env.queue())
 
-    assert env.synced == [(NODES[0], 1)]
-    assert task.status == JobSchedule.STATUS_RUNNING
+    assert sorted(env.synced) == ALL_SYNCED
     assert task.function_params["sync_calls"] == 1
+
+
+def test_a_journal_the_jm_does_not_hold_is_synchronised_again(env):
+    """Lab, 2026-11-23, first run: the leader reported every JM of its journal
+    ready while its own rebuilt JM did not hold that journal."""
+    env.set_device(0, 1, MIGRATED)
+    task_id = env.queue()
+    env.sync_works = False
+    env.journals_missing[NODES[0]] = {1}
+
+    task = env.drive(task_id)                           # every journal once
+    assert sorted(env.synced) == ALL_SYNCED
+    task = env.drive(task_id)                           # the missing one again
+    assert env.synced.count((NODES[0], 1)) == 2
+    assert len(env.synced) == 4
+    assert task.status == JobSchedule.STATUS_RUNNING
+    assert task.function_params["sync_calls"] == 2
     assert task.function_params["ready_polls"] == 0
 
-    for _ in range(tasks_runner_restart.JM_RESHAPE_READY_POLLS):
-        task = env.drive(task_id)
-    assert task.status == JobSchedule.STATUS_DONE
-    assert env.synced == [(NODES[0], 1)]               # once was enough
+    env.sync_works = True
+    task = env.run_to_done(task_id)
+    assert env.synced.count((NODES[0], 1)) == 3
+    assert len(env.synced) == 5                         # the others were not repeated
 
 
 def test_the_sync_goes_to_the_node_that_leads_the_lvs(env):
     env.set_device(0, 1, MIGRATED)
-    env.journals_missing[NODES[0]] = {1}
     env.leaders["LVS_1"] = NODES[1]                     # failed over to its secondary
 
     env.drive(env.queue())
 
-    assert env.synced == [(NODES[1], 1)]
+    assert (NODES[1], 1) in env.synced
+    assert (NODES[0], 1) not in env.synced
 
 
 def test_no_sync_without_a_confirmed_leader(env):
@@ -424,28 +451,41 @@ def test_no_sync_without_a_confirmed_leader(env):
     env.set_device(0, 1, MIGRATED)
     task_id = env.queue()
     env.drive(task_id)
+    assert sorted(env.synced) == ALL_SYNCED
     env.journals_missing[NODES[0]] = {1}
     del env.leaders["LVS_1"]
 
     task = env.drive(task_id)
 
-    assert env.synced == []
+    assert sorted(env.synced) == ALL_SYNCED             # nothing more was started
     assert task.status == JobSchedule.STATUS_RUNNING
     assert "no leader found" in task.function_result
 
 
-def test_replication_that_runs_is_waited_for_not_started_again(env):
+def test_a_journal_being_replicated_is_synchronised_once_that_is_over(env):
+    """A JM reached over the network is brought up to date by the journal
+    coordinator when it reconnects; a second writer is not started on top."""
     env.set_device(0, 1, MIGRATED)
     task_id = env.queue()
-    env.drive(task_id)
-    env.journals_missing[NODES[0]] = {1}
-    env.replicating.add(1)
+    original = device_controller.reshape_jm_raid
 
+    def _reshape_then_replicate(node_id):
+        members = original(node_id)
+        env.replicating.add(2)                          # starts as the new JM connects
+        return members
+
+    with patch.object(device_controller, "reshape_jm_raid", side_effect=_reshape_then_replicate):
+        task = env.drive(task_id)
+
+    assert sorted(env.synced) == [(NODES[0], 1), (NODES[2], 3)]
     task = env.drive(task_id)
-
-    assert env.synced == []
+    assert sorted(env.synced) == [(NODES[0], 1), (NODES[2], 3)]
     assert task.status == JobSchedule.STATUS_RUNNING
-    assert task.function_params["ready_polls"] == 0
+    assert "LVS_2" in task.function_result
+
+    env.replicating.clear()
+    task = env.run_to_done(task_id)
+    assert sorted(env.synced) == ALL_SYNCED
 
 
 def test_a_journal_that_never_arrives_costs_retries(env):
@@ -573,9 +613,7 @@ def test_one_node_at_a_time(env):
     assert env.node(1).jm_device.jm_nvme_bdev_list == _members(4)
     assert _raids_built(env, 1) == []
 
-    for _ in range(tasks_runner_restart.JM_RESHAPE_READY_POLLS - 1):
-        env.drive(first)
-    assert env.task(first).status == JobSchedule.STATUS_DONE
+    env.run_to_done(first)
 
     assert env.drive(second).function_params["phase"] == "resync"
     assert env.node(1).jm_device.jm_nvme_bdev_list == ["nvme_0n1p1", "nvme_2n1p1", "nvme_3n1p1"]

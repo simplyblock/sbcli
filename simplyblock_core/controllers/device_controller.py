@@ -1646,10 +1646,9 @@ def jm_resync_pending(snode: StorageNode, require_held: bool = True) -> list[str
 
     In sync means the LVS leader reports every JM of the journal ready and no
     replication running, and, unless ``require_held`` is off, that the JM of
-    ``snode`` holds the journal. The second is asked of the JM itself because
-    the first does not tell: after a JM was rebuilt empty the leader reported
-    it ready while it did not hold the journal of the node's own LVS at all
-    (lab, 2026-11-23). A journal whose state cannot be established counts as
+    ``snode`` reports the journal as held. Both are necessary and neither is
+    proof that a rebuilt JM was brought up to date: see start_jm_resync, which
+    is what makes it so. A journal whose state cannot be established counts as
     pending: an unknown answer is not "in sync"."""
     pending = []
     for journal in _jm_journals(snode):
@@ -1662,29 +1661,38 @@ def jm_resync_pending(snode: StorageNode, require_held: bool = True) -> list[str
     return pending
 
 
-def start_jm_resync(snode: StorageNode) -> list[str]:
-    """Start the synchronisation of every journal the JM of ``snode`` should
-    hold and does not, and return the LVS names it was started for.
+def start_jm_resync(snode: StorageNode, synced=()) -> list[str]:
+    """Start the synchronisation of the journals the rebuilt JM of ``snode``
+    is a copy of, on their LVS leaders, and return the LVS names it was
+    started for.
 
-    The journal coordinator brings a JM it reaches over the network up to
-    date by itself when the JM reconnects. It does not do so for the leader's
-    own local JM: rebuilt empty under it, that JM stayed without the journal
-    until jc_explicit_synchronization was called on the leader, which then
-    replicated it within seconds (lab, 2026-11-23).
+    Every journal is synchronised explicitly once after a rebuild (``synced``
+    names the ones already done), and again whenever the JM reports that it
+    does not hold it. The journal coordinator brings a JM it reaches over the
+    network up to date by itself when the JM reconnects; it does not do so
+    for the leader's own local JM, and neither status RPC tells: after a
+    rebuild the leader reported that JM ready (jc_get_jm_status) and the JM
+    reported the journal as held (bdev_jm_get_status) while nothing had been
+    replicated to it, and a restart of the node then found the journal not on
+    its disks (lab, 2026-11-23). jc_explicit_synchronization on the leader
+    replicates it within seconds, and that copy reads back after a restart.
 
     Only ever on the confirmed leader of the LVS: explicit synchronisation
     makes the calling node's journal coordinator the journal writer, and on a
     follower that takes the leadership away from the real leader
     (storage_node_ops.resync_solo_lvs_on_leaders). A journal with replication
-    already running, or whose state is unknown, is left alone."""
+    already running, or whose state is unknown, is left for a later call."""
+    synced = set(synced)
     started = []
     for journal in _jm_journals(snode):
-        if journal["error"] or journal["busy"] or journal["held"]:
+        if journal["error"] or journal["busy"]:
+            continue
+        if journal["held"] and journal["lvs"] in synced:
             continue
         leader = journal["leader"]
-        logger.info("Journal of %s (jm_vuid %s) is not on the JM of node %s: starting its "
-                    "synchronisation on the LVS leader %s",
-                    journal["lvs"], journal["jm_vuid"], snode.get_id(), leader.get_id())
+        logger.info("Synchronising the journal of %s (jm_vuid %s) to the JM of node %s on the "
+                    "LVS leader %s (held by the JM: %s)", journal["lvs"], journal["jm_vuid"],
+                    snode.get_id(), leader.get_id(), journal["held"])
         try:
             leader.rpc_client(timeout=10, retry=0).jc_explicit_synchronization(journal["jm_vuid"])
         except RPCException as e:

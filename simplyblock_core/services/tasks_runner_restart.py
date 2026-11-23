@@ -338,18 +338,24 @@ def task_runner_jm_reshape(task):
         time.sleep(5)
 
     node = db.get_storage_node_by_id(task.node_id)
-    pending = device_controller.jm_resync_pending(node)
-    if pending:
-        # A journal the JM does not hold and nobody replicates is started on
-        # its LVS leader; the journal coordinator does not do that by itself
-        # for the leader's own JM.
-        started = device_controller.start_jm_resync(node)
-        sync_calls = int(task.function_params.get("sync_calls", 0)) + (1 if started else 0)
-        if started or task.function_params.get("ready_polls"):
-            checkpoint(task, ready_polls=0, sync_calls=sync_calls)
-        if started and sync_calls > JM_RESHAPE_MAX_SYNC_CALLS:
+    # Every journal the new JM is a copy of is synchronised on its LVS leader
+    # once, and again while the JM does not hold it: the journal coordinator
+    # does not bring the leader's own JM up to date by itself, and no status
+    # says so (device_controller.start_jm_resync).
+    synced = list(task.function_params.get("synced", []))
+    started = device_controller.start_jm_resync(node, synced)
+    if started:
+        sync_calls = int(task.function_params.get("sync_calls", 0)) + 1
+        checkpoint(task, ready_polls=0, sync_calls=sync_calls,
+                   synced=sorted(set(synced) | set(started)))
+        if sync_calls > JM_RESHAPE_MAX_SYNC_CALLS:
             raise TaskRetry(f"journal of {started} still not on the rebuilt JM after "
                             f"{sync_calls - 1} synchronisations")
+        raise TaskProgress(f"journal synchronisation started for {started}")
+    pending = device_controller.jm_resync_pending(node)
+    if pending:
+        if task.function_params.get("ready_polls"):
+            checkpoint(task, ready_polls=0)
         raise TaskProgress(f"journal resync running: {'; '.join(pending)}")
     polls = int(task.function_params.get("ready_polls", 0)) + 1
     if polls < JM_RESHAPE_READY_POLLS:
