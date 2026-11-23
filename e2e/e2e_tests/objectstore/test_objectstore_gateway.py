@@ -709,33 +709,68 @@ class S3GatewayPodKilledK8s(_ObjectStoreBase):
 
         # ── TC-S3-021: kill one pod ─────────────────────────────────────
         pods = s3.gateway_pods(self.k8s_utils, self.STORE)
+        existing = {p[0] for p in pods}
         victim, victim_node, _, _ = pods[0]
+        delivered_before = s3.delivered_nodes(s3.s3bucket(self.k8s_utils, name))
         self.k8s_utils._exec_kubectl(
             f"kubectl delete pod {victim} -n {self.ns} --wait=false")
 
+        # Any new Ready pod is the replacement, wherever it landed. M-01 does
+        # not ask for the same node, and the gateway Deployment could not
+        # honor it: required pod anti-affinity on hostname and no
+        # nodeSelector, so while the victim is terminating its node is the
+        # one place the replacement may not go.
         deadline = time.time() + 600
         replacement = None
         while time.time() < deadline:
             rows = [p for p in s3.gateway_pods(self.k8s_utils, self.STORE)
-                    if p[0] != victim and p[3] and p[1] == victim_node]
+                    if p[0] not in existing and p[3]]
             if rows:
                 replacement = rows[0]
                 break
             time.sleep(5)
         if not replacement:
+            self._log_gateway_placement()
             raise s3.S3EvidenceError(
-                f"[TC-S3-021] no replacement gateway pod became Ready on "
-                f"{victim_node} within 10 minutes")
+                f"[TC-S3-021] no replacement for gateway pod {victim} (on "
+                f"{victim_node}) became Ready within 10 minutes")
+        new_node = replacement[1]
+        same_node = new_node in delivered_before
+        self.logger.info(
+            "[TC-S3-021] replacement %s on %s; bucket was delivered to %s",
+            replacement[0], new_node, delivered_before)
+
+        if not same_node:
+            # A node the bucket never reached needs a delivery before the pod
+            # can serve it. That delivery is the operator's job, so wait for
+            # the bucket's own status to name the node.
+            deadline = time.time() + 300
+            while time.time() < deadline:
+                if new_node in s3.delivered_nodes(
+                        s3.s3bucket(self.k8s_utils, name)):
+                    break
+                time.sleep(5)
+            else:
+                self._log_gateway_placement()
+                raise s3.S3EvidenceError(
+                    f"[TC-S3-021] the replacement pod {replacement[0]} landed "
+                    f"on {new_node}, which the bucket was not delivered to, "
+                    f"and 5 minutes later status.mountDeliveredNodes still "
+                    f"does not name it: "
+                    f"{s3.delivered_nodes(s3.s3bucket(self.k8s_utils, name))}")
 
         got = client.call(self.pod_cfg(replacement[2]), "get_object",
                           bucket=name, key="seed.bin", size=16 * 1024 ** 2,
                           seed="tc021")
         if got.get("status") != 200 or not got.get("match"):
+            self._log_gateway_placement()
             raise s3.S3EvidenceError(
-                f"[TC-S3-021] the replacement pod {replacement[0]} cannot "
-                f"serve a bucket that was already delivered to its node: "
-                f"{got}. M-01's claim is that the delivery is targeted at the "
-                f"node, not the pod, so no re-delivery is needed.")
+                f"[TC-S3-021] the replacement pod {replacement[0]} on "
+                f"{new_node} cannot serve a bucket "
+                + ("that was already delivered to its node: "
+                   if same_node else "the operator reports delivered there: ")
+                + f"{got}. M-01's claim is that the delivery is targeted at "
+                f"the node, not the pod.")
 
         after = s3.scrape_operator_metrics(self.k8s_utils)
         deliveries_after = s3.metric_total(
@@ -743,6 +778,14 @@ class S3GatewayPodKilledK8s(_ObjectStoreBase):
         redelivered = deliveries_after - deliveries_before
         self.logger.info("[TC-S3-021] DeliverBucket calls across the kill: %s",
                          redelivered)
+        # "No re-delivery" is M-01's claim only for a pod that comes back on a
+        # node that already had the bucket. A new node needs one.
+        if same_node and redelivered:
+            self.logger.error(
+                "[TC-S3-021] FINDING: the replacement came back on %s, which "
+                "already had the bucket, and the operator still made %s "
+                "DeliverBucket call(s). M-01 says the delivery is per node.",
+                new_node, redelivered)
 
         # ── TC-S3-022: a rolling update, under traffic ──────────────────
         # Traffic during the roll, so the question is "what does a client
@@ -801,6 +844,8 @@ class S3GatewayPodKilledK8s(_ObjectStoreBase):
         self.record("tc021_pod_kill_and_roll", {
             "replicas": replicas,
             "killed_pod": victim, "node": victim_node,
+            "replacement_pod": replacement[0], "replacement_node": new_node,
+            "replacement_on_delivered_node": same_node,
             "deliver_calls_across_kill": redelivered,
             "roll_seconds": round(roll_seconds, 1),
             "reads_ok": oks, "reads_failed": len(errors),
@@ -813,3 +858,9 @@ class S3GatewayPodKilledK8s(_ObjectStoreBase):
                 "A multi-replica roll should be invisible to a client.",
                 replicas, len(errors), errors[:10])
         self.logger.info("[TC-S3-021/022] PASS")
+
+    def _log_gateway_placement(self):
+        """Log where every gateway pod is, so a placement failure is visible."""
+        self.k8s_utils._exec_kubectl(
+            f"kubectl get pods -n {self.ns} -l {s3.GATEWAY_LABEL}={self.STORE} "
+            f"-o wide")
