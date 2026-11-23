@@ -607,3 +607,40 @@ class TestSwitchPathsSkipsLostNodes(unittest.TestCase):
         release.set()
         self.assertEqual(added, [])
         self.assertLess(took, 2)
+
+    def test_a_standby_that_stops_answering_is_found_lost_by_the_switch(self):
+        # The LUN watchdog runs in another process: the switch probes the
+        # standby itself (2026-11-23 ma-ws6).
+        import threading
+        from simplyblock_core.models.nvme_device import NVMeDevice as _Dev
+
+        release = threading.Event()
+
+        def node(nid):
+            rpc = MagicMock()
+            rpc.bdev_nvme_attach_controller.side_effect = lambda *a, **k: release.wait(5) or True
+            n = MagicMock()
+            n.get_id.return_value = nid
+            n.status = StorageNode.STATUS_ONLINE
+            n.rpc_client.return_value = rpc
+            return n
+        db = MagicMock()
+        db.get_storage_nodes_by_cluster_id.return_value = [node("q1"), node("q2")]
+        dev = _Dev()
+        dev.uuid = "d3"
+        dev.alceml_bdev = "alceml_d3"
+        dev.nvmf_ip = "10.0.0.9"
+        standby = MagicMock()
+        standby.get_id.return_value = "standby-y"
+        standby.data_nics = []
+        standby.rpc_client.return_value.get_version.side_effect = ConnectionError("gone")
+        t0 = time.monotonic()
+        with patch("simplyblock_core.distr_controller.send_dev_status_event"), \
+                patch.object(lun_takeover, "_transport", return_value="TCP"):
+            added = lun_takeover._switch_paths(db, "c1", dev, standby, None, ([], None, "TCP"),
+                                               since=t0)
+        took = time.monotonic() - t0
+        release.set()
+        self.assertEqual(added, [])
+        self.assertLess(took, 2.5)
+        self.assertTrue(lun_takeover.node_lost_since("standby-y", t0))

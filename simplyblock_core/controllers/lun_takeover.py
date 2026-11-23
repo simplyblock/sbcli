@@ -98,6 +98,29 @@ def note_node_lost(node_id):
         _lost_at[node_id] = time.monotonic()
 
 
+STANDBY_WATCH_INTERVAL_SEC = 0.5
+STANDBY_WATCH_FAILURES = 2
+
+
+def _watch_standby(standby, stop):
+    """Until ``stop`` is set: probe the standby's SPDK every
+    STANDBY_WATCH_INTERVAL_SEC; after STANDBY_WATCH_FAILURES failures in a row
+    record it lost (note_node_lost). The LUN watchdog runs in another process
+    (2026-11-23 warm bed ma-ws6: its verdict, 5 s before the takeover gave up
+    on the standby, never reached the takeover)."""
+    failures = 0
+    while not stop.wait(STANDBY_WATCH_INTERVAL_SEC):
+        if _reachable(standby):
+            failures = 0
+            continue
+        failures += 1
+        if failures >= STANDBY_WATCH_FAILURES:
+            logger.warning("LUN takeover: standby %s does not answer (%d probes); "
+                           "treated as lost", standby.get_id(), failures)
+            note_node_lost(standby.get_id())
+            return
+
+
 def node_lost_since(node_id, since) -> bool:
     """Whether ``node_id`` was declared lost at or after ``since``."""
     with _lost_guard:
@@ -1011,6 +1034,10 @@ def _switch_paths(db, cluster_id, dev, standby, failed, failed_paths, since=None
     # dead export (2026-11-23 warm bed ma-ws5: 4.4 s), and the takeover moves
     # on from that standby.
     standby_id = getattr(standby, "get_id", lambda: None)()
+    stop_watch = threading.Event()
+    if since is not None and standby_id and hasattr(standby, "rpc_client"):
+        threading.Thread(target=_watch_standby, args=(standby, stop_watch), daemon=True,
+                         name=f"watch-{standby_id[:8]}").start()
     pool = ThreadPoolExecutor(max_workers=min(16, len(nodes)),
                               thread_name_prefix=f"paths-{dev.get_id()[:8]}")
     try:
@@ -1028,6 +1055,7 @@ def _switch_paths(db, cluster_id, dev, standby, failed, failed_paths, since=None
                             dev.get_id(), sorted(futs[f].get_id() for f in pending))
                 break
     finally:
+        stop_watch.set()
         pool.shutdown(wait=False)
     return [futs[f].get_id() for f in futs if f.done() and not f.cancelled()
             and f.exception() is None and f.result()]
