@@ -301,6 +301,10 @@ class S3OperatorRestartK8s(_ObjectStoreBase):
     memory, which is the whole reason that field exists.
     """
 
+    #: How long the PVC, PV, and NFSExport get to disappear after the bucket
+    #: has. The PV goes last and asynchronously, through csi-provisioner.
+    RELEASE_TIMEOUT = 120
+
     def run(self):
         self.logger.info("=== TC-S3-015/016 operator restart ===")
         self.make_storage_class()
@@ -374,18 +378,22 @@ class S3OperatorRestartK8s(_ObjectStoreBase):
         s3.wait_gone(self.k8s_utils, "s3bucket", victim, timeout=900)
         self.buckets = [b for b in self.buckets if b[0] != victim]
 
+        # The S3Bucket's finalizer waits for its own objects, not for what
+        # they release in turn: the PV has reclaim policy Delete, and
+        # csi-provisioner removes it on its own schedule after the PVC is gone.
+        # A single look right after the finalizer released is a race, and in
+        # run 45100042373 the PV was gone 0.8s after that look. Each one gets
+        # a window instead; one that outlives it is a leak.
         leaked = []
-        if self.k8s_utils.get_resource_json("pvc", vpvc):
-            leaked.append(f"PVC {vpvc}")
-        if vpv and self.k8s_utils.get_resource_json("pv", vpv):
-            leaked.append(f"PV {vpv}")
-        if vexport and self.k8s_utils.get_resource_json("nfsexport", vexport):
-            leaked.append(f"NFSExport {vexport}")
+        for kind, obj in (("pvc", vpvc), ("pv", vpv), ("nfsexport", vexport)):
+            if obj and not self._gone(kind, obj, timeout=self.RELEASE_TIMEOUT):
+                leaked.append(f"{kind} {obj}")
         if leaked:
             raise s3.S3EvidenceError(
                 f"[TC-S3-016] the operator was restarted mid-delete and the "
-                f"S3Bucket finalized, but {', '.join(leaked)} survive. The "
-                f"finalizer's whole purpose is that this cannot happen.")
+                f"S3Bucket finalized, but {', '.join(leaked)} still exist "
+                f"{self.RELEASE_TIMEOUT}s later. The finalizer's whole purpose "
+                f"is that this cannot happen.")
 
         # The withdrawal has to have happened on every node the bucket was
         # delivered to, or a mount is left that nothing describes.
@@ -417,53 +425,78 @@ class S3OperatorRestartK8s(_ObjectStoreBase):
         })
         self.logger.info("[TC-S3-015/016] PASS")
 
-    def _restart_operator(self):
-        """Delete the operator pod(s) and wait for a replacement to be Ready."""
+    def _gone(self, kind, name, timeout):
+        """True once *kind*/*name* no longer exists, False if it outlives *timeout*."""
+        deadline = time.time() + timeout
+        while self.k8s_utils.get_resource_json(kind, name):
+            if time.time() >= deadline:
+                return False
+            time.sleep(5)
+        return True
+
+    def _operator_selector(self):
+        """The label selector of the operator's pods.
+
+        The chart's label first. If no pod carries it, the selector is read
+        off the `simplyblock-operator` Deployment itself -- by exact name, so
+        that a different operator in the same namespace can never be taken for
+        this one: run 45100042373 restarted `mongodb-kubernetes-operator`
+        twice, because its name contains "operator", and passed TC-S3-015 on
+        a kill that never happened.
+        """
+        if self._operator_pods(s3.OPERATOR_SELECTOR):
+            return s3.OPERATOR_SELECTOR
+        dep = self.k8s_utils.get_resource_json(
+            "deployment", s3.OPERATOR_DEPLOYMENT, self.ns)
+        labels = (((dep.get("spec") or {}).get("selector") or {})
+                  .get("matchLabels") or {})
+        if not labels:
+            raise s3.S3ProbeError(
+                f"[TC-S3-015] no pod in {self.ns} matches "
+                f"{s3.OPERATOR_SELECTOR} and there is no Deployment "
+                f"{s3.OPERATOR_DEPLOYMENT} to read a selector from; the case "
+                f"cannot kill what it cannot name")
+        return ",".join(f"{k}={v}" for k, v in sorted(labels.items()))
+
+    def _operator_pods(self, selector):
+        """``[(name, uid, ready)]`` for the pods *selector* matches."""
         out, _ = self.k8s_utils._exec_kubectl(
-            f"kubectl get pods -n {self.ns} -l control-plane=controller-manager "
-            f"-o jsonpath='{{range .items[*]}}{{.metadata.name}} {{end}}' "
+            f"kubectl get pods -n {self.ns} -l {selector} "
+            f"-o jsonpath='{{range .items[*]}}{{.metadata.name}}:"
+            f"{{.metadata.uid}}:{{.status.containerStatuses[0].ready}} {{end}}' "
             f"2>/dev/null || true", supress_logs=True)
-        pods = (out or "").split()
-        if not pods:
-            # The operator is not always labelled the same way across charts;
-            # fall back to the deployment name rather than silently skipping
-            # the kill, which would make the case pass for no reason.
-            out, _ = self.k8s_utils._exec_kubectl(
-                f"kubectl get deploy -n {self.ns} "
-                f"-o jsonpath='{{range .items[*]}}{{.metadata.name}} {{end}}' "
-                f"2>/dev/null || true", supress_logs=True)
-            target = next((d for d in (out or "").split()
-                           if "operator" in d), "")
-            if not target:
-                raise s3.S3ProbeError(
-                    "[TC-S3-015] cannot find the operator pod or Deployment; "
-                    "the case cannot kill what it cannot name")
-            self.k8s_utils._exec_kubectl(
-                f"kubectl rollout restart deploy/{target} -n {self.ns}")
-            self.k8s_utils._exec_kubectl(
-                f"kubectl rollout status deploy/{target} -n {self.ns} "
-                f"--timeout=300s || true")
-            return [target]
+        rows = [r.split(":") for r in (out or "").split()]
+        return [(r[0], r[1], r[2] == "true") for r in rows if len(r) == 3]
+
+    def _restart_operator(self):
+        """Delete the operator pod(s) and wait for a replacement to be Ready.
+
+        The replacement is told apart by UID, not by name or by readiness: a
+        pod that was never deleted is Ready too, so only a UID that did not
+        exist before the kill proves the restart happened.
+        """
+        selector = self._operator_selector()
+        before = self._operator_pods(selector)
+        if not before:
+            raise s3.S3ProbeError(
+                f"[TC-S3-015] the operator Deployment selects {selector}, "
+                f"but no pod in {self.ns} matches it")
+        old_uids = {uid for _, uid, _ in before}
+        pods = [name for name, _, _ in before]
 
         for p in pods:
             self.k8s_utils._exec_kubectl(
                 f"kubectl delete pod {p} -n {self.ns} --wait=false")
         deadline = time.time() + 300
+        rows = before
         while time.time() < deadline:
-            out, _ = self.k8s_utils._exec_kubectl(
-                f"kubectl get pods -n {self.ns} "
-                f"-l control-plane=controller-manager "
-                f"-o jsonpath='{{range .items[*]}}{{.metadata.name}}:"
-                f"{{.status.containerStatuses[0].ready}} {{end}}' "
-                f"2>/dev/null || true", supress_logs=True)
-            rows = [r.split(":") for r in (out or "").split() if ":" in r]
-            fresh = [r for r in rows if r[0] not in pods and r[1] == "true"]
-            if fresh:
+            rows = self._operator_pods(selector)
+            if any(uid not in old_uids and ready for _, uid, ready in rows):
                 return pods
             time.sleep(5)
         raise s3.S3ProbeError(
-            "[TC-S3-015] the operator did not come back Ready within 5 "
-            "minutes of being killed")
+            f"[TC-S3-015] no operator pod with a new UID became Ready within "
+            f"5 minutes of deleting {pods}; pods now {rows}")
 
 
 class S3RBACFullCycleK8s(_ObjectStoreBase):
@@ -505,7 +538,7 @@ class S3RBACFullCycleK8s(_ObjectStoreBase):
         # non-critical path (events, say) completes the cycle and still means
         # the shipped role is wrong.
         out, _ = self.k8s_utils._exec_kubectl(
-            f"kubectl logs -n {self.ns} -l control-plane=controller-manager "
+            f"kubectl logs -n {self.ns} -l {s3.OPERATOR_SELECTOR} "
             f"--since-time={since} --tail=-1 --all-containers 2>/dev/null "
             f"| grep -iE 'forbidden|cannot (get|list|watch|create|update|"
             f"patch|delete)|RBAC' | head -40 || true", supress_logs=True)

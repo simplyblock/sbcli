@@ -83,6 +83,14 @@ S3BUCKET_OWNER_ANNOTATION = "storage.simplyblock.io/s3-owner"
 #: (``objectstore_types.go``, the type's own doc comment).
 GATEWAY_LABEL = "storage.simplyblock.io/objectstore"
 
+#: The operator's own Deployment and the label its pods carry, from the
+#: operator chart's ``templates/simplyblock-operator.yaml``. Not
+#: ``control-plane=controller-manager``: that is kubebuilder's scaffold label,
+#: which the chart does not use for the operator, and which the csi-addons and
+#: ramen controllers in the same chart do carry.
+OPERATOR_DEPLOYMENT = "simplyblock-operator"
+OPERATOR_SELECTOR = "app=simplyblock-operator"
+
 #: ``S3BucketPhase`` / ``ObjectStorePhase`` enums. ``Deleting`` exists only on
 #: a bucket.
 BUCKET_PHASES = ("Pending", "Provisioning", "Ready", "Degraded", "Deleting")
