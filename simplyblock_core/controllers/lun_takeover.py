@@ -817,6 +817,20 @@ def _activate_warm_standby(db, cluster, owner, dev, standby, failed, path, expor
             logger.warning("LUN takeover: QoS weights not set on %s: %s", sid, e)
         return True
     except TakeoverError as e:
+        if isinstance(e, StandbyUnreachable) or not _reachable(standby):
+            # The standby died during the takeover (2026-11-23 FTT2 warm bed,
+            # hard reset + network cut 3 s apart: the warm standby chosen was
+            # the second node lost). A cold open there, and the cleanup calls
+            # to it, only waited out timeouts (36 s) and failed, while the
+            # watchdog's takeover from it was refused as "already running";
+            # the 1+0 cluster suspended. The record names the standby now, so
+            # end here: the watchdog takes the LUN over from it at once, to a
+            # live node (which preempts the reservation with its own key).
+            msg = (f"LUN takeover of device {device_id}: warm standby {alceml} on {sid} did not "
+                   f"activate and the node no longer answers ({e}); the LUN is taken over from it next")
+            logger.warning(msg)
+            _event(owner.cluster_id, dev, msg, EventObj.LEVEL_WARN)
+            return False
         msg = (f"LUN takeover of device {device_id}: warm standby {alceml} on {sid} did not "
                f"activate ({e}); fencing node {failed.get_id()} at the array and opening the LUN cold")
         logger.warning(msg)

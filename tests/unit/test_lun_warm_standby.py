@@ -12,6 +12,7 @@
   - plumbing: cluster flag, monitor driver.
 """
 
+import time
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -391,6 +392,38 @@ class TestWarmTakeover(_WarmCase):
         with patch.object(constants, "MULTI_ATTACH_ACTIVATION_WAIT_SEC", 0.2):
             self.assertEqual(self.run_takeover(db), lun_takeover.TAKEN_OVER)
         self.assertEqual(self.dev(db).serving_node(), "node-c")
+
+    def test_warm_standby_lost_during_activation_is_left_to_the_next_takeover(self):
+        # 2026-11-23 bed: the warm standby chosen was the second node lost; the
+        # cold open on it and the cleanup calls waited out timeouts, and the
+        # cluster suspended. Now: no cold open, no device unavailable;
+        # the record names the dead standby, whose takeover moves the LUN on.
+        db, _, b = self._with_standby()
+        c = db.nodes["node-c"]
+
+        def role(_name):
+            if b.spdk.ops("attach"):    # dies right after the paths were switched to it
+                b.spdk.down = True
+                raise ConnectionError("gone")
+            return _standby_role(_name)
+        _role(b.spdk, role)
+        t0 = time.monotonic()
+        self.assertEqual(self.run_takeover(db), lun_takeover.FAILED)
+        self.assertLess(time.monotonic() - t0, 5)
+        self.assertEqual(b.spdk.ops("bdev_alceml_create"), [])
+        self.m_unavailable.assert_not_called()
+        self.assertTrue(any("no longer answers" in e["message"] for e in self.events))
+        dev = self.dev(db)
+        self.assertEqual(dev.serving_node(), "node-b")
+        self.assertIn("node-a", dev.fenced_node_ids)
+        # The watchdog's takeover from the dead standby: to node-c (cold, by
+        # reservation).
+        db.nodes["node-b"].status = StorageNode.STATUS_OFFLINE
+        _role(c.spdk, lambda _n: {"role": "active", "state": "active"})
+        self.assertEqual(self.run_takeover(db, failed="node-b"), lun_takeover.TAKEN_OVER)
+        dev = self.dev(db)
+        self.assertEqual(dev.serving_node(), "node-c")
+        self.assertIn("node-b", dev.fenced_node_ids)
 
     def test_without_the_flag_an_existing_standby_is_not_reused(self):
         # Flag off: the regular path (wait for the reservation before the export).
