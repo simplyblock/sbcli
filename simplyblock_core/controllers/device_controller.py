@@ -1399,6 +1399,216 @@ def clear_rebuilt_jm_legs(snode: StorageNode, rpc_client: RPCClient) -> None:
             _set_jm_leg_stale(db_controller, snode.get_id(), leg, False)
 
 
+class JMReshapeNotReady(Exception):
+    """The JM raid of a node cannot be rebuilt over its current devices now.
+    Nothing was changed; a later attempt may find the node ready."""
+
+
+class JMReshapeError(Exception):
+    """Rebuilding the JM raid of a node failed after its old JM stack was
+    taken down. The node has no journal of its own until a retry succeeds."""
+
+
+def _devices_of_jm_member(snode: StorageNode, member: str) -> list[NVMeDevice]:
+    """The data devices that share their physical device with the JM raid
+    member ``member``: the inverse of _jm_raid_member_of_device.
+
+    On an lblk node that is the data partition recorded next to the journal
+    partition (StorageNode.lblk_devices); on an NVMe drive every data
+    partition of the member's controller."""
+    for entry in snode.lblk_devices or []:
+        if (entry.get("journal_raid") and entry.get("serial")
+                and utils.aio_bdev_name_for_serial(entry["serial"]) == member):
+            return [d for d in snode.nvme_devices if d.serial_number == entry.get("data_serial")]
+    return [d for d in snode.nvme_devices
+            if d.bdev_type != "aio" and _on_controller(member, d.nvme_controller)]
+
+
+def _jm_members_in_service(snode: StorageNode) -> list[str]:
+    """The journal partition of every device of the node that serves data
+    (ONLINE), in the order of the node's device records.
+
+    An lblk device carries one when the configure split it
+    (utils.split_lblk_journal_raid) and the node record knows the pair. An
+    NVMe drive carries one as its first partition when the node cuts its
+    drives into a journal and data partitions."""
+    members: list[str] = []
+    online = {d.serial_number for d in snode.nvme_devices if d.status == NVMeDevice.STATUS_ONLINE}
+    for entry in snode.lblk_devices or []:
+        if entry.get("journal_raid") and entry.get("serial") and entry.get("data_serial") in online:
+            members.append(utils.aio_bdev_name_for_serial(entry["serial"]))
+    if snode.num_partitions_per_dev and snode.jm_percent:
+        for dev in snode.nvme_devices:
+            if dev.status != NVMeDevice.STATUS_ONLINE or dev.bdev_type == "aio" or not dev.is_partition:
+                continue
+            base, sep, number = dev.nvme_bdev.rpartition("p")
+            if not sep or not number.isdigit() or number == "1":
+                continue
+            member = f"{base}p1"
+            if member not in members:
+                members.append(member)
+    return members
+
+
+def jm_raid_target_members(snode: StorageNode) -> list[str]:
+    """The members the JM raid of ``snode`` consists of once it follows the
+    node's devices; empty for a node whose journal is not a raid over its
+    devices, or that has no device left to build one on.
+
+    A member leaves when every device on its physical device was migrated
+    out after a failure (FAILED_AND_MIGRATED): that device is gone for good.
+    A member joins when a device that serves data carries a journal partition
+    the raid does not use. A device that is only missing -- removed,
+    unavailable, not found by a restart -- keeps its member: the raid runs
+    without it and rebuilds it when it returns
+    (storage_node_ops._create_jm_stack_on_raid)."""
+    jm = snode.jm_device
+    if not jm or not jm.jm_nvme_bdev_list:
+        return []
+    current = list(jm.jm_nvme_bdev_list)
+    gone = []
+    for member in current:
+        devices = _devices_of_jm_member(snode, member)
+        if devices and all(d.status == NVMeDevice.STATUS_FAILED_AND_MIGRATED for d in devices):
+            gone.append(member)
+    return jm_raid.reshaped_members(current, gone, _jm_members_in_service(snode))
+
+
+def jm_raid_reshape_needed(snode: StorageNode) -> bool:
+    """Whether the JM raid of ``snode`` is built over other members than the
+    node's devices call for (jm_raid_target_members)."""
+    target = jm_raid_target_members(snode)
+    return bool(target) and target != list(snode.jm_device.jm_nvme_bdev_list)
+
+
+def queue_jm_raid_reshape(node_id: str) -> None:
+    """Queue the rebuild of the node's JM raid when a device change left it
+    built over the wrong members. The task runs when the cluster is quiet and
+    takes one node at a time (tasks_runner_restart.task_runner_jm_reshape)."""
+    db_controller = DBController()
+    try:
+        snode = db_controller.get_storage_node_by_id(node_id)
+    except KeyError:
+        return
+    if jm_raid_reshape_needed(snode):
+        logger.info("JM raid of node %s no longer matches its devices: queueing a rebuild over %s",
+                    node_id, jm_raid_target_members(snode))
+        tasks_controller.add_jm_raid_reshape_task(snode.cluster_id, node_id)
+
+
+def _delete_jm_stack(snode: StorageNode, rpc_client: RPCClient) -> None:
+    """Take down the node's whole JM stack, from the nvmf subsystem to the
+    raid0 legs, deleting what is there and skipping what is not, so that a
+    second call after a failure half way finishes the job.
+
+    The legs are deleted with the top raid: bdev_raid_create answers with the
+    bdev that already has the name, so a leg left behind would be reused with
+    its old members by the build that follows."""
+    jm = snode.jm_device
+    if snode.enable_ha_jm and jm.nvmf_nqn and rpc_client.subsystem_get(jm.nvmf_nqn):
+        rpc_client.subsystem_delete(jm.nvmf_nqn)
+    if jm.pt_bdev and rpc_client.bdev_get(jm.pt_bdev):
+        rpc_client.bdev_PT_NoExcl_delete(jm.pt_bdev)
+    if jm.jm_bdev and rpc_client.bdev_get(jm.jm_bdev):
+        rpc_client.bdev_jm_delete(jm.jm_bdev, safe_removal=snode.enable_ha_jm)
+    if jm.alceml_bdev and rpc_client.bdev_get(jm.alceml_bdev):
+        rpc_client.bdev_alceml_delete(jm.alceml_bdev)
+    raids = [r.get("name", "") for r in rpc_client.bdev_raid_get_bdevs(category="all") or []]
+    # Shortest name first: the top raid1 goes before the legs it sits on.
+    for name in sorted((n for n in raids if jm_raid.is_jm_raid_bdev(n, snode.get_id())), key=len):
+        rpc_client.bdev_raid_delete(name)
+
+
+def reshape_jm_raid(node_id: str) -> list[str]:
+    """Rebuild the JM raid of a node over the devices it has now, empty, and
+    return the new member list.
+
+    The raid cannot grow or lose a member in place: a raid0 leg has no way to
+    take one in or give one up, and the raid carries no superblock. So the
+    journal of the node is stopped, the raid is created anew over the members
+    jm_raid_target_members names, the journal storage is formatted on it and
+    the JM started again. The journal coordinator of the LVS leader then
+    brings the empty JM up to date from the node's other journal copies by
+    itself (jm_resync_pending tells when it is done). Until then the node
+    relies on those copies, so the caller rebuilds one node at a time and only
+    on a cluster whose journals are all in sync.
+
+    Raises JMReshapeNotReady, before anything is touched, when the node is not
+    online, has no JM raid over its devices or a member it needs is not
+    there. Raises JMReshapeError or an RPCException once the old stack is
+    down; calling again finishes the rebuild."""
+    db_controller = DBController()
+    snode = db_controller.get_storage_node_by_id(node_id)
+    if snode.status != StorageNode.STATUS_ONLINE:
+        raise JMReshapeNotReady(f"node {node_id} is {snode.status}")
+    target = jm_raid_target_members(snode)
+    if not target:
+        raise JMReshapeNotReady(f"node {node_id} has no JM raid over its devices to rebuild")
+    jm = snode.jm_device
+    rpc_client = snode.rpc_client()
+    absent = [m for m in target if not rpc_client.bdev_get(m)]
+    if absent:
+        raise JMReshapeNotReady(
+            f"JM raid member(s) {absent} of node {node_id} are not present; the raid is "
+            f"rebuilt once they are back or their devices are migrated out")
+
+    layout = jm_raid.layout_of_record(jm.jm_nvme_bdev_list, jm.raid_bdev, jm.jm_leg_bdevs)
+    logger.info("Rebuilding the JM raid of node %s: members %s -> %s (%s)",
+                node_id, jm.jm_nvme_bdev_list, target, layout)
+    set_jm_device_state(jm.get_id(), JMDevice.STATUS_UNAVAILABLE)
+    _delete_jm_stack(snode, rpc_client)
+    new_jm = storage_node_ops._create_jm_stack_on_raid(
+        rpc_client, target, snode, after_restart=False, layout=layout)
+    if not new_jm:
+        raise JMReshapeError(f"failed to build the JM stack of node {node_id} over {target}")
+    db_controller.atomic_update(
+        db_controller.get_storage_node_by_id(node_id),
+        lambda n, jm_new=new_jm: setattr(n, "jm_device", jm_new))
+    # Makes every online node connect to the JM under its new subsystem.
+    set_jm_device_state(new_jm.get_id(), JMDevice.STATUS_ONLINE)
+    return target
+
+
+def jm_resync_pending(snode: StorageNode) -> list[str]:
+    """The journals the JM of ``snode`` is a copy of that are not known to be
+    in sync, each with the reason; empty when all of them are.
+
+    The JM of a node holds the journal of the node's own LVS and of every LVS
+    whose owner picked it as a remote copy (StorageNode.jm_ids). The journal
+    coordinator of an LVS runs its synchronisation on the node that leads the
+    LVS, so that node is the one asked (jc_get_jm_status: False for a JM that
+    is not ready or has replication running). A journal whose leader cannot
+    be found or asked counts as pending: an unknown answer is not "in sync"."""
+    from simplyblock_core.controllers import lvol_controller
+
+    db_controller = DBController()
+    nodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
+    by_id = {n.get_id(): n for n in nodes}
+    jm_id = snode.jm_device.get_id() if snode.jm_device else ""
+    pending = []
+    for owner in nodes:
+        if not owner.lvstore or owner.status == StorageNode.STATUS_REMOVED:
+            continue
+        if owner.get_id() != snode.get_id() and jm_id not in owner.jm_ids:
+            continue
+        hosts = [owner] + [by_id[i] for i in (owner.secondary_node_id, owner.tertiary_node_id)
+                           if i in by_id]
+        leader = next((h for h in hosts if h.status == StorageNode.STATUS_ONLINE
+                       and lvol_controller.is_node_leader(h, owner.lvstore)), None)
+        if leader is None:
+            pending.append(f"{owner.lvstore}: no leader found")
+            continue
+        try:
+            status = leader.rpc_client(timeout=10, retry=1).jc_get_jm_status(owner.jm_vuid)
+        except RPCException as e:
+            pending.append(f"{owner.lvstore}: {e}")
+            continue
+        busy = sorted(name for name, ready in (status or {}).items() if ready is False)
+        if busy or not status:
+            pending.append(f"{owner.lvstore}: {busy or 'no JM reported'}")
+    return pending
+
+
 def remove_from_jm_device(device_id, jm_bdev):
     db_controller = DBController()
 
@@ -1711,6 +1921,8 @@ def add_device(device_id, add_migration_task=True):
             distr_controller.send_cluster_map_add_device(device_obj, node)
     if add_migration_task:
         tasks_controller.add_new_device_mig_task(device_id)
+    # A device that brings a journal partition extends the node's JM raid.
+    queue_jm_raid_reshape(snode.get_id())
     return device_id
 
 
@@ -1725,6 +1937,8 @@ def device_set_failed_and_migrated(device_id):
         if node.status == StorageNode.STATUS_ONLINE:
             rpc_client = node.rpc_client()
             rpc_client.distr_replace_id_in_map_prob(dev.cluster_device_order, -1)
+    # The device is gone for good, and its journal partition with it.
+    queue_jm_raid_reshape(dev.node_id)
     return True
 
 

@@ -99,7 +99,7 @@ class TestBuildResolvesGeometry:
 
     def test_it_plans_with_the_resolved_layout_not_the_default(self):
         src = self._src()
-        assert "plan_topology(jm_nvme_bdevs, layout=layout)" in src
+        assert "plan_topology(jm_nvme_bdevs, layout=layout, legs=recorded_legs)" in src
 
     def test_legacy_level_builds_one_raid1_over_all_members(self):
         src = self._src()

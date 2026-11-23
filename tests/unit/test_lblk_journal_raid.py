@@ -45,27 +45,12 @@ def _inv(name, size, dtype="part"):
 
 class TestMemberSize(unittest.TestCase):
 
-    def test_member_size_follows_the_raid_geometry(self):
-        self.assertEqual(jm_raid.member_size_for_usable(9 * GIB, 1), 9 * GIB)
-        self.assertEqual(jm_raid.member_size_for_usable(9 * GIB, 2), 9 * GIB)
-        self.assertEqual(jm_raid.member_size_for_usable(9 * GIB, 3), 9 * GIB)
-        self.assertEqual(jm_raid.member_size_for_usable(9 * GIB, 4), 9 * GIB // 2)
-        self.assertEqual(jm_raid.member_size_for_usable(9 * GIB, 5), 9 * GIB // 2)
-        self.assertEqual(jm_raid.member_size_for_usable(10, 6), 4)  # rounded up
-
-    def test_no_members_refused(self):
-        with self.assertRaises(ValueError):
-            jm_raid.member_size_for_usable(GIB, 0)
-
-    def test_planned_raid_is_at_least_as_large_as_asked(self):
-        # The raid1 is as large as its smaller raid0 leg.
-        usable = 7 * GIB + 13
-        for count in range(2, 12):
-            member = jm_raid.member_size_for_usable(usable, count)
+    def test_usable_members_is_the_smallest_leg(self):
+        # The raid1 is as large as its smallest raid0 leg.
+        for count, usable in {2: 1, 3: 1, 4: 2, 5: 2, 8: 4, 9: 3, 10: 3, 12: 4, 13: 3}.items():
             legs = jm_raid.plan_topology([f"m{i}" for i in range(count)])["legs"]
-            smaller_leg = min(len(leg) for leg in legs) * member
-            self.assertGreaterEqual(smaller_leg, usable, count)
-            self.assertLess(smaller_leg - usable, min(len(leg) for leg in legs), count)
+            self.assertEqual(jm_raid.usable_members(legs), usable, count)
+        self.assertEqual(jm_raid.usable_members([]), 1)   # a single device, no raid
 
     def test_legs_left_when_a_member_is_missing(self):
         self.assertEqual(jm_raid.mountable_top_legs(["l0", "l1"], [], ["l1"]), ["l0", "l1"])
@@ -81,14 +66,17 @@ class TestMemberSize(unittest.TestCase):
         self.assertFalse(jm_raid.runs_on_single_leg("raid_jm_n", ["a", "b"], ["a", "b"]))
         self.assertFalse(jm_raid.runs_on_single_leg("a", ["a"], []))       # single-drive JM
 
-    def test_three_devices_of_150_200_100_at_two_percent(self):
-        # 2% of 450G is a 9G journal; the mirror's smaller leg is one member.
+    def test_member_is_a_share_of_the_smallest_device(self):
+        # 3% of the 100G device, whatever the others hold.
         sizes = [150 * GIB, 200 * GIB, 100 * GIB]
-        self.assertEqual(utils.lblk_journal_raid_member_size(sizes, jm_percent=2), 9 * GIB)
+        self.assertEqual(utils.lblk_journal_raid_member_size(sizes), 3 * GIB)
+        self.assertEqual(utils.lblk_journal_raid_member_size(sizes, jm_percent=5), 5 * GIB)
 
-    def test_four_devices_halve_the_member(self):
-        self.assertEqual(
-            utils.lblk_journal_raid_member_size([100 * GIB] * 4, jm_percent=3), 6 * GIB)
+    def test_member_does_not_depend_on_the_number_of_devices(self):
+        """A device that joins the node later is split to the size the others
+        have, so the size must not change with the count."""
+        sizes = {utils.lblk_journal_raid_member_size([100 * GIB] * count) for count in range(2, 14)}
+        self.assertEqual(sizes, {3 * GIB})
 
     def test_journal_floor(self):
         self.assertEqual(utils.lblk_journal_raid_member_size([10 * GIB, 10 * GIB]),
@@ -97,11 +85,12 @@ class TestMemberSize(unittest.TestCase):
     def test_member_is_a_whole_number_of_mib(self):
         member = utils.lblk_journal_raid_member_size([100 * GIB + 7, 100 * GIB + 5, 300 * GIB])
         self.assertEqual(member % MIB, 0)
-        self.assertGreaterEqual(member, (500 * GIB + 12) * 3 // 100)
+        self.assertGreaterEqual(member, (100 * GIB + 5) * 3 // 100)
+        self.assertLess(member - (100 * GIB + 5) * 3 // 100, MIB)
 
-    def test_member_larger_than_half_the_smallest_device_refused(self):
+    def test_floor_larger_than_half_the_smallest_device_refused(self):
         with self.assertRaises(ValueError) as ctx:
-            utils.lblk_journal_raid_member_size([10 * GIB, 1000 * GIB, 1000 * GIB])
+            utils.lblk_journal_raid_member_size([3 * GIB, 1000 * GIB, 1000 * GIB])
         self.assertIn("smallest", str(ctx.exception))
 
 
@@ -295,6 +284,17 @@ class TestMembersAmongDevices(unittest.TestCase):
         new_devices = storage_node_ops._reconcile_discovered_devices(node, discovered)
         self.assertEqual([d.serial_number for d in new_devices], ["NEW"])
         self.assertEqual(sorted(d.serial_number for d in node.nvme_devices), ["D0", "D1", "NEW"])
+
+    def test_restart_does_not_take_a_partition_that_left_the_raid_for_a_new_device(self):
+        """The journal partition of a device that was migrated out leaves the
+        raid (device_controller.reshape_jm_raid) and can still be on the host.
+        It is journal space of the node, not a device to offer for data."""
+        node = _raid_node(3)
+        node.jm_device.jm_nvme_bdev_list = node.jm_device.jm_nvme_bdev_list[:2]
+        discovered = [_aio(s) for s in ("J0", "D0", "J1", "D1", "J2", "D2")]
+        new_devices = storage_node_ops._reconcile_discovered_devices(node, discovered)
+        self.assertEqual(new_devices, [])
+        self.assertEqual(sorted(d.serial_number for d in node.nvme_devices), ["D0", "D1", "D2"])
 
 
 class TestRestartWithMissingMember(unittest.TestCase):

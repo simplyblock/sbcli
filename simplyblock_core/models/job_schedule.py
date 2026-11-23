@@ -110,6 +110,16 @@ class JobSchedule(BaseModel):
     # from the fence) and, once the steps are done, ``fenced`` (True). One
     # active task per site (tasks_controller.add_sync_site_fence_task).
     FN_SYNC_SITE_FENCE = "sync_site_fence"
+    # Rebuilds the JM raid of ``node_id`` over the devices the node has now,
+    # after a device was migrated out for good or one was added
+    # (device_controller.reshape_jm_raid). Runs on the restart runner, which
+    # keeps it apart from a restart of the same node. function_params carries
+    # ``phase`` once the rebuild has started: "rebuild" while the JM stack is
+    # down or being built, "resync" while the empty JM is brought up to date,
+    # then with ``ready_polls`` (consecutive polls that found every journal in
+    # sync) and ``members`` (the new member list). One open task per node
+    # (tasks_controller.add_jm_raid_reshape_task).
+    FN_JM_RAID_RESHAPE = "jm_raid_reshape"
 
     canceled: bool = False
     cluster_id: str = ""

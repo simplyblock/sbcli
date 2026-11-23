@@ -6,17 +6,23 @@ mirror across the JM partition of *every* drive, so one journal record cost N
 physical writes per node — and at FTT=2 the journal is replicated to 4 JMs, so
 a 10-drive node meant ~40 device writes per record.
 
-To cap that at 2× per node (independent of drive count) without hitting SPDK's
-``raid5f`` full-stripe-write limitation, the JM uses a **RAID 0+1** layout:
+To cap that without hitting SPDK's ``raid5f`` full-stripe-write limitation (the
+JM's storage writes single blocks, raid5f takes whole stripes only), the JM
+uses a **RAID 0+1** layout over groups of at most GROUP_MAX_DEVICES devices:
 
-    1 device   -> no raid (single-device / test-only node)
-    2 devices  -> raid1 over two single-device legs            (a 2-way mirror)
-    > 2 devices-> split drives into two ±1 balanced groups,
-                  raid0 over each group, raid1 over the two raid0 legs
+    1 device     -> no raid (single-device / test-only node)
+    2 devices    -> raid1 over two single-device legs          (a 2-way mirror)
+    3-8 devices  -> two ±1 balanced groups, raid0 over each,
+                    raid1 over the two raid0 legs
+    9-12 devices -> three such groups, raid1 over three raid0 legs
+    and so on: one more leg for every GROUP_MAX_DEVICES devices.
 
-The top RAID1 is always exactly 2-wide, so every drive lifecycle event reduces
-to "rebuild the affected leg's raid0 and let RAID1 resync"; only when *both*
-legs are lost does the journal (JC) layer resync the records from peer JMs.
+One journal record costs one device write per leg. A device that is only
+missing costs the leg it sits in, and the JM runs on the others; the leg is
+rebuilt from them when the device is back. A device that leaves for good, or
+a new one, changes the member list: the raid is then built anew, empty, over
+the new list, and the journal (JC) layer resyncs the records from the node's
+other journal copies (device_controller.reshape_jm_raid).
 
 This module is pure logic (no RPC, no DB) so the decisions are unit-testable.
 The orchestration that issues the bdev_raid RPCs lives in storage_node_ops.
@@ -47,17 +53,31 @@ LAYOUT_LEGACY = "legacy_nway"   # journals built by the pre-RAID0+1 N-way mirror
 LAYOUT_RAID01 = "raid01"        # journals built by the RAID 0+1 planner
 
 
-def split_two_groups(items: list) -> tuple[list, list]:
-    """Split ``items`` into two groups whose sizes differ by at most one.
+#: Most devices one raid0 leg stripes over. A node with more devices gets more
+#: legs, not wider ones: a leg is lost with any one of its devices.
+GROUP_MAX_DEVICES = 4
 
-    The first group gets the extra element when the count is odd, so e.g.
-    3->(2,1), 4->(2,2), 5->(3,2), 6->(3,3).
+
+def split_groups(items: list) -> list[list]:
+    """Split ``items`` into the fewest groups of at most GROUP_MAX_DEVICES,
+    but at least two, whose sizes differ by at most one.
+
+    The first groups get the extra elements, so e.g. 3->(2,1), 4->(2,2),
+    5->(3,2), 8->(4,4), 9->(3,3,3), 10->(4,3,3), 12->(4,4,4), 13->(4,3,3,3).
+    Up to eight items this is the split into two halves every RAID 0+1 JM was
+    built with before the groups were capped.
     """
-    half = (len(items) + 1) // 2
-    return list(items[:half]), list(items[half:])
+    count = max(2, -(-len(items) // GROUP_MAX_DEVICES))
+    base, extra = divmod(len(items), count)
+    groups, start = [], 0
+    for index in range(count):
+        size = base + (1 if index < extra else 0)
+        groups.append(list(items[start:start + size]))
+        start += size
+    return groups
 
 
-def plan_topology(members: list[str], layout: str = LAYOUT_RAID01) -> dict:
+def plan_topology(members: list[str], layout: str = LAYOUT_RAID01, legs=None) -> dict:
     """Decide the JM RAID topology for the given base bdevs.
 
     ``layout`` selects the geometry and MUST match the one the JM's storage was
@@ -69,10 +89,17 @@ def plan_topology(members: list[str], layout: str = LAYOUT_RAID01) -> dict:
                           pre-RAID0+1 layout that clusters upgraded from an
                           older release were built with).
 
+    ``legs`` are the leg member lists the JM was built with, when a record
+    of them exists. A JM that holds a journal is rebuilt with exactly those:
+    the split of a member list is a rule that can change (it did, when the
+    groups were capped at GROUP_MAX_DEVICES), the bytes on the drives cannot.
+    They are used when they cover ``members`` exactly, and ignored otherwise
+    (a record of another member list says nothing about this one).
+
     Returns:
         {'level': RAID_NONE,    'base': <bdev>, 'legs': []}                 1 member
         {'level': RAID_1_NWAY,  'base': None,   'members': [all]}           legacy, >=2
-        {'level': RAID_0PLUS1,  'base': None,   'legs': [groupA, groupB]}   raid01, >=2
+        {'level': RAID_0PLUS1,  'base': None,   'legs': [group, group, ...]} raid01, >=2
 
     Raises ValueError if there are no members.
     """
@@ -83,73 +110,51 @@ def plan_topology(members: list[str], layout: str = LAYOUT_RAID01) -> dict:
         return {"level": RAID_NONE, "base": members[0], "legs": []}
     if layout == LAYOUT_LEGACY:
         return {"level": RAID_1_NWAY, "base": None, "members": list(members)}
-    a, b = split_two_groups(members)
-    return {"level": RAID_0PLUS1, "base": None, "legs": [a, b]}
+    recorded = [list(leg) for leg in legs or [] if leg]
+    if len(recorded) >= 2 and [m for leg in recorded for m in leg] == list(members):
+        return {"level": RAID_0PLUS1, "base": None, "legs": recorded}
+    return {"level": RAID_0PLUS1, "base": None, "legs": split_groups(members)}
 
 
-def member_size_for_usable(usable_bytes: int, member_count: int) -> int:
-    """Size every member must have for a RAID 0+1 JM of ``usable_bytes``.
+def layout_of_record(members: list[str], raid_bdev: str, leg_bdevs: list[str]) -> str:
+    """The layout a JM record was built under, read from its shape.
 
-    The members are all of one size (a raid uses each member only up to the
-    size of its smallest one). The top raid1 is as large as its smaller leg,
-    and that leg stripes ``member_count // 2`` members, so the usable size is
-    ``member_size * (member_count // 2)``: 2 members of S give S, 3 give S (the
-    third one's S is unused), 4 give 2S, 5 give 2S. A single member is the
-    journal itself.
+    Recorded legs mean RAID 0+1. A raid over two or more members without
+    recorded legs is the legacy N-way mirror, whose build path never recorded
+    any. A single member is no raid at all and belongs to neither: it is read
+    as RAID 0+1, the layout it grows into when the node gets a second device.
     """
-    if member_count < 1:
-        raise ValueError("cannot size a JM RAID over zero devices")
-    width = max(1, member_count // 2)
-    return -(-int(usable_bytes) // width)
+    if leg_bdevs or len(members) < 2 or not raid_bdev:
+        return LAYOUT_RAID01
+    return LAYOUT_LEGACY
 
 
-def is_balanced(legs: list[list]) -> bool:
-    """True if the two legs' member counts differ by at most one."""
-    return abs(len(legs[0]) - len(legs[1])) <= 1
+def reshaped_members(current: list[str], gone, added) -> list[str]:
+    """The member list of a JM raid after its node lost the devices of
+    ``gone`` for good and gained those of ``added``.
 
-
-def smaller_leg_index(legs: list[list]) -> int:
-    """Index of the leg a new device should join (the smaller one; ties -> 0)."""
-    return 0 if len(legs[0]) <= len(legs[1]) else 1
-
-
-def plan_reconfigure(legs: list[list], *, failed=None, added=None) -> dict:
-    """Plan the leg rebuild(s) for a drive lifecycle event.
-
-    Args:
-        legs: current two legs, each a list of member bdev names.
-        failed: a member (or list of members) permanently removed/failed. Each
-            is dropped from whichever leg holds it, and that leg is rebuilt.
-        added: a new (or re-inserted) member bdev. It joins the smaller leg,
-            which is then rebuilt. A re-inserted drive that's no longer in any
-            leg is handled here too — it's simply "added".
-
-    Returns:
-        {'rebuild': [sorted leg indices to destroy+recreate],
-         'legs':    [new leg membership lists]}
-
-    RAID0 cannot grow or drop a member in place, so any membership change means
-    destroying and recreating that leg's raid0 (then RAID1 resyncs it from the
-    surviving leg). A leg that loses its last member becomes empty — the caller
-    runs the array degraded on the surviving leg until a drive is available.
+    The members that stay keep their order and the new ones follow, so the
+    list does not depend on the order the changes were noticed in. The raid
+    over the result is built empty (device_controller.reshape_jm_raid), so no
+    member has to keep the position it was written in.
     """
-    new = [list(legs[0]), list(legs[1])]
-    rebuild = set()
+    gone = set(gone)
+    kept = [m for m in current if m not in gone]
+    return kept + [m for m in dict.fromkeys(added) if m not in kept and m not in gone]
 
-    if failed is not None:
-        failed_list = failed if isinstance(failed, (list, tuple, set)) else [failed]
-        for dev in failed_list:
-            for i in (0, 1):
-                if dev in new[i]:
-                    new[i].remove(dev)
-                    rebuild.add(i)
 
-    if added is not None:
-        i = smaller_leg_index(new)
-        new[i].append(added)
-        rebuild.add(i)
+def is_jm_raid_bdev(name: str, node_id: str) -> bool:
+    """Whether the raid bdev ``name`` is part of the JM raid of ``node_id``:
+    the top raid1 or one of its raid0 legs (_create_jm_stack_on_raid names
+    them raid_jm_<node> and raid_jm_<node>_l<index>)."""
+    top = f"raid_jm_{node_id}"
+    return name == top or name.startswith(f"{top}_l")
 
-    return {"rebuild": sorted(rebuild), "legs": new}
+
+def usable_members(legs: list[list]) -> int:
+    """How many members' worth of space a RAID 0+1 JM over ``legs`` can use:
+    the top raid1 is as large as its smallest leg."""
+    return min(len(leg) for leg in legs) if legs else 1
 
 
 def leg_of(member: str, leg_bdevs: list[str], leg_members: list[list[str]]) -> str:
