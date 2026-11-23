@@ -25,26 +25,52 @@ class S3OpenBaoSealedK8s(_ObjectStoreBase):
         OpenBao re-seals whenever its pod restarts, and only a rerun of this
         script unseals it.
 
-    Single replica, pebbledb, unseal key in `Secret/openbao-init`. The
-    interesting question is not whether a sealed Bao breaks IAM -- it must --
-    but *how*: a clean 5xx is survivable, a hang is not, and an operation that
-    half-succeeds with the wrong identity is the one that matters.
+    Single replica, pebbledb, unseal keys in `Secret/openbao-unseal-keys`.
+    The interesting question is not whether a sealed Bao breaks IAM -- it
+    must -- but *how*: a clean 5xx is survivable, a hang is not, and an
+    operation that half-succeeds with the wrong identity is the one that
+    matters.
+
+    The lane also runs `Deployment/openbao-unsealer`, which re-unseals within
+    seconds of a seal. Left running, it would send this case down its
+    auto-unseal exit and the sealed state would never be tested, so it is
+    scaled to zero for the case and restored afterwards.
     """
 
     BAO_NS = "vault"
     BAO_POD = "openbao-0"
+    UNSEALER = "openbao-unsealer"
 
     def run(self):
         self.logger.info("=== TC-S3-006 OpenBao sealed mid-run ===")
+        out, _ = self.k8s_utils._exec_kubectl(
+            f"kubectl get deployment {self.UNSEALER} -n {self.BAO_NS} "
+            f"-o jsonpath='{{.spec.replicas}}' 2>/dev/null || true",
+            supress_logs=True)
+        unsealer_replicas = (out or "").strip()
+        if unsealer_replicas:
+            self.k8s_utils._exec_kubectl(
+                f"kubectl scale deployment {self.UNSEALER} -n {self.BAO_NS} "
+                f"--replicas=0")
+        try:
+            self._run_sealed()
+        finally:
+            if unsealer_replicas:
+                self.k8s_utils._exec_kubectl(
+                    f"kubectl scale deployment {self.UNSEALER} "
+                    f"-n {self.BAO_NS} --replicas={unsealer_replicas}")
+
+    def _run_sealed(self):
         probe = s3.BaoUnsealer(self.k8s_utils, namespace=self.BAO_NS,
                                pod=self.BAO_POD)
         state = probe.sealed()
         if state is None:
             raise s3.S3ProbeError(
                 f"[TC-S3-006] cannot read OpenBao's seal state from "
-                f"{self.BAO_NS}/{self.BAO_POD}. This case needs Vault-backed "
-                f"IAM deployed; without it the gateway serves the root "
-                f"account alone and there is nothing to seal.")
+                f"{self.BAO_NS}/{self.BAO_POD} ({probe.last_status}). This "
+                f"case needs Vault-backed IAM deployed; without it the "
+                f"gateway serves the root account alone and there is nothing "
+                f"to seal.")
         if state and not probe.unseal():
             raise s3.S3ProbeError(
                 "[TC-S3-006] OpenBao is sealed at the start and could not be "
@@ -88,9 +114,10 @@ class S3OpenBaoSealedK8s(_ObjectStoreBase):
             time.sleep(5)
         else:
             self.logger.warning(
-                "[TC-S3-006] OpenBao came back unsealed -- auto-unseal is "
-                "configured on this cluster, which makes the whole scenario "
-                "moot. Recording that rather than forcing it.")
+                "[TC-S3-006] OpenBao came back unsealed with %s scaled to "
+                "zero -- auto-unseal is configured on this cluster, which "
+                "makes the whole scenario moot. Recording that rather than "
+                "forcing it. Last status: %s", self.UNSEALER, probe.last_status)
             self.record("tc006_openbao", {"auto_unseal": True})
             return
         sealed_at = time.time()

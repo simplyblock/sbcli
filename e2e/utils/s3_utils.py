@@ -839,59 +839,78 @@ class BaoUnsealer(threading.Thread):
     """
 
     def __init__(self, k8s, namespace="vault", pod="openbao-0",
-                 secret="openbao-init", interval=15):
+                 secret="openbao-unseal-keys", interval=15):
         super().__init__(daemon=True, name="bao-unsealer")
         self.k8s = k8s
         self.namespace = namespace
         self.pod = pod
         self.secret = secret
         self.interval = interval
+        #: Where ``bao`` in the server pod connects. ``setup-kms.sh`` uses the
+        #: same address: it is a SAN on the server certificate, verified
+        #: against the ``BAO_CACERT`` the chart sets in the pod. The chart's
+        #: own default, ``https://127.0.0.1:8200``, is not a SAN, so every
+        #: call against it fails TLS verification.
+        self.addr = f"https://openbao.{namespace}:8200/"
         self._stop = threading.Event()
         #: ``[(iso_time, event)]`` -- every seal observed and every unseal
         #: performed, so a case can report the window rather than just the fact.
         self.events = []
         self.unseal_count = 0
+        #: Raw stdout and stderr of the last ``bao status``, kept so a seal
+        #: state that cannot be read can say why.
+        self.last_status = ""
         self.logger = logger
 
     # -- state --------------------------------------------------------
 
+    def _bao(self, args, timeout=30):
+        """Run ``bao <args>`` in the server pod. Returns ``(stdout, stderr)``.
+
+        Through ``_exec_kubectl`` rather than ``exec_in_pod_container``: that
+        one discards stderr and the exit status, which is what made a seal
+        state that could not be read undiagnosable.
+        """
+        out, err = self.k8s._exec_kubectl(
+            f"kubectl exec -n {self.namespace} {self.pod} -- "
+            f"env BAO_ADDR={self.addr} bao {args}",
+            supress_logs=True, timeout=timeout)
+        return out or "", err or ""
+
     def sealed(self):
-        out = self.k8s.exec_in_pod_container(
-            self.pod, "", "bao status -format=json 2>/dev/null || "
-                          "vault status -format=json 2>/dev/null || true",
-            namespace=self.namespace, timeout=30)
-        for line in (out or "").splitlines():
-            try:
-                return bool(json.loads(line).get("sealed"))
-            except Exception:
-                continue
-        return None             # unknown: pod not up, or no CLI in it
+        """True or False, or None when the state cannot be read.
+
+        ``bao status`` exits 2 for a sealed server and still prints the
+        status, so the output is parsed whatever the exit status. It is one
+        indented JSON document spread over many lines, parsed as a whole.
+        """
+        out, err = self._bao("status -format=json")
+        self.last_status = f"stdout={out.strip()[:400]!r} stderr={err.strip()[:400]!r}"
+        start, end = out.find("{"), out.rfind("}")
+        if start < 0 or end < start:
+            return None         # pod not up, or bao could not reach the server
+        try:
+            return bool(json.loads(out[start:end + 1])["sealed"])
+        except (ValueError, KeyError):
+            return None
 
     def unseal_keys(self):
+        """The unseal keys, in order, from the lane's Secret.
+
+        The workflow writes the first three keys of ``bao operator init`` as
+        ``KEY1``..``KEY3``, the threshold the init default asks for.
+        """
         out, _ = self.k8s._exec_kubectl(
             f"kubectl get secret {self.secret} -n {self.namespace} -o json "
             f"2>/dev/null || true", supress_logs=True)
         try:
             data = json.loads((out or "{}").strip() or "{}").get("data") or {}
-        except Exception:
+        except ValueError:
             return []
         import base64
-        keys = []
-        for k, v in sorted(data.items()):
-            if "unseal" in k.lower() or "key" in k.lower():
-                try:
-                    text = base64.b64decode(v).decode().strip()
-                except Exception:
-                    continue
-                # The init Secret has been seen holding either the raw key or
-                # the whole `bao operator init` JSON. Take both shapes.
-                try:
-                    blob = json.loads(text)
-                    keys.extend(blob.get("unseal_keys_b64")
-                                or blob.get("keys_base64") or blob.get("keys") or [])
-                except Exception:
-                    keys.append(text)
-        return [k for k in keys if k]
+        numbered = sorted((int(k[3:]), v) for k, v in data.items()
+                          if re.fullmatch(r"KEY\d+", k))
+        return [base64.b64decode(v).decode().strip() for _, v in numbered]
 
     def unseal(self):
         keys = self.unseal_keys()
@@ -901,17 +920,14 @@ class BaoUnsealer(threading.Thread):
                 self.namespace, self.secret)
             return False
         for key in keys[:5]:
-            self.k8s.exec_in_pod_container(
-                self.pod, "",
-                f"bao operator unseal {shlex.quote(key)} >/dev/null 2>&1 || "
-                f"vault operator unseal {shlex.quote(key)} >/dev/null 2>&1 || true",
-                namespace=self.namespace, timeout=45)
+            self._bao(f"operator unseal {shlex.quote(key)}", timeout=45)
             if self.sealed() is False:
                 self.unseal_count += 1
                 self.events.append((time.strftime("%Y-%m-%d %H:%M:%S"), "unsealed"))
                 self.logger.info("[bao] unsealed (%d so far)", self.unseal_count)
                 return True
-        self.logger.warning("[bao] still sealed after trying %d key(s)", len(keys[:5]))
+        self.logger.warning("[bao] still sealed after trying %d key(s): %s",
+                            len(keys[:5]), self.last_status)
         return False
 
     # -- thread -------------------------------------------------------
