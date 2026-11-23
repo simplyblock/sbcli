@@ -9,7 +9,7 @@ from simplyblock_core import constants
 from simplyblock_core.arbitration import arbiter as arb
 from simplyblock_core.models.arbitration import ArbitrationEvent, ClusterArbitration
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.rpc_client import RPCHTTPError, RPCRemoteError
+from simplyblock_core.rpc_client import RPCConnectionError, RPCHTTPError, RPCRemoteError
 
 A, B, CL = "node-a", "node-b", "cl-1"
 
@@ -42,7 +42,7 @@ class FakeRPC:
             if err:
                 raise err
             if name == "supports_two_node_arbitration":
-                return True
+                return self.node.arbitration_rpcs
             if name == "jc_ha_status":
                 if self.node.ha is None:
                     raise RuntimeError("no status in this test")
@@ -68,6 +68,8 @@ class Node:
         #: event-driven view stays), else {jm_vuid: (state, remote_jm_health)}
         self.ha = None
         self.instance, self.seq, self.arbitration = "i-" + nid, 0, True
+        #: the node's answer to the capability probe
+        self.arbitration_rpcs = True
 
     def ha_status(self):
         return {"instance": self.instance, "seq": self.seq, "arbitration": self.arbitration,
@@ -542,3 +544,29 @@ def test_ha_status_without_a_preferred_field_is_reconciled(env):
     assert "preferred" not in status
     a.tick_cluster(CL, [nodes[A], nodes[B]])
     assert a.signals[A].lvs_state == {3: "solo"}
+
+
+def test_probe_error_leaves_the_node_undecided_until_it_answers(env):
+    # A node probed while its SPDK still starts (cluster111, 2026-11-23): the
+    # error is not an answer, the node is arbitrated once it answers.
+    a, db, nodes, clock, _ = env
+    nodes[B].errors["supports_two_node_arbitration"] = RPCConnectionError("Could not reach remote")
+    a.renew_all()
+    a.tick_cluster(CL, [nodes[A], nodes[B]])
+    assert B not in a.capable
+    assert not calls(nodes[B], "jc_lease_renew") and not calls(nodes[B], "jc_set_dual_node")
+    del nodes[B].errors["supports_two_node_arbitration"]
+    a.renew_all()
+    a.tick_cluster(CL, [nodes[A], nodes[B]])
+    assert a.capable[B] is True
+    assert calls(nodes[B], "jc_lease_renew") and calls(nodes[B], "jc_set_dual_node")
+
+
+def test_probe_answer_is_kept(env):
+    a, db, nodes, clock, _ = env
+    nodes[B].arbitration_rpcs = False
+    a.renew_all()
+    a.renew_all()
+    assert a.capable[B] is False
+    assert len(calls(nodes[B], "supports_two_node_arbitration")) == 1
+    assert not calls(nodes[B], "jc_lease_renew")

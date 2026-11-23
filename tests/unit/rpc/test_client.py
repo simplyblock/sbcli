@@ -7,8 +7,10 @@ from unittest.mock import MagicMock, patch
 
 from pydantic import SecretStr
 
+from simplyblock_core import constants
 from simplyblock_core.rpc_client import (
     RPCClient,
+    RPCConnectionError,
     RPCErrorCode,
     RPCException,
     RPCRemoteError,
@@ -483,6 +485,26 @@ class TestBdevLvolS3MergeStat(unittest.TestCase):
 
         self.assertEqual(result["transfer_state"], "In progress")
         mock_req.assert_called_once_with("bdev_lvol_s3_merge_stat", s3_id=1, old_s3_id=2)
+
+
+class TestSupportsTwoNodeArbitration(unittest.TestCase):
+
+    @patch.object(RPCClient, "_request")
+    def test_true_when_every_rpc_is_exposed(self, mock_req):
+        mock_req.return_value = [*constants.TWO_NODE_ARBITRATION_RPCS, "bdev_get_bdevs"]
+        self.assertTrue(_make_client().supports_two_node_arbitration())
+
+    @patch.object(RPCClient, "_request")
+    def test_false_when_one_rpc_is_missing(self, mock_req):
+        mock_req.return_value = list(constants.TWO_NODE_ARBITRATION_RPCS[1:])
+        self.assertFalse(_make_client().supports_two_node_arbitration())
+
+    @patch.object(RPCClient, "_request")
+    def test_error_propagates(self, mock_req):
+        # Not an answer: the caller tells "unreachable" from "not capable".
+        mock_req.side_effect = RPCConnectionError("Could not reach remote")
+        with self.assertRaises(RPCConnectionError):
+            _make_client().supports_two_node_arbitration()
 
 
 if __name__ == "__main__":
