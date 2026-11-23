@@ -3043,6 +3043,21 @@ def check_node(snode):
         readmit_devices_after_node_online(snode.get_id())
 
 
+#: Device states a node's return to ONLINE does not touch. ONLINE needs
+#: nothing. REMOVED, FAILED and FAILED_AND_MIGRATED were decided by an operator
+#: or by the failure handling, not by the outage the node came back from, and
+#: have paths of their own back into the cluster (device restart, failure
+#: migration, new-device-from-failed). NEW is not part of the cluster yet: it
+#: has no place in the cluster map to be re-admitted to.
+_NOT_READMITTED = (
+    NVMeDevice.STATUS_ONLINE,
+    NVMeDevice.STATUS_REMOVED,
+    NVMeDevice.STATUS_FAILED,
+    NVMeDevice.STATUS_FAILED_AND_MIGRATED,
+    NVMeDevice.STATUS_NEW,
+)
+
+
 def readmit_devices_after_node_online(node_id):
     """Re-admit a recovered node's devices right after it was set ONLINE.
 
@@ -3057,16 +3072,14 @@ def readmit_devices_after_node_online(node_id):
     device left unavailable here counts toward affected_nodes forever, and a
     later unrelated dual outage then suspends the whole cluster (incidents
     2026-07-02, x3). So: now that the node IS online (guard passes), re-admit
-    its devices. REMOVED is terminal; FAILED transitions are owned by the
-    explicit device-restart / failure-migration paths.
+    its devices -- those the outage made unavailable, not the ones in a state
+    somebody decided on (_NOT_READMITTED).
     """
     try:
         fresh = db.get_storage_node_by_id(node_id)
         readmitted = 0
         for dev in fresh.nvme_devices:
-            if dev.status in (NVMeDevice.STATUS_ONLINE,
-                              NVMeDevice.STATUS_REMOVED,
-                              NVMeDevice.STATUS_FAILED):
+            if dev.status in _NOT_READMITTED:
                 continue
             logger.info(
                 f"Re-admitting device {dev.get_id()} (was {dev.status}) "

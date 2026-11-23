@@ -245,6 +245,21 @@ def device_set_state(device_id, state, cause=CAUSE_OTHER, connect_peers=True):
             f"node bring-up owns device re-online")
         return False
 
+    # Failed-and-migrated is final: the device's data was moved elsewhere and
+    # its place in the cluster was given up. Nothing brings that record back --
+    # a replacement enters the cluster as a new device (new_device_from_failed
+    # adds a new record and leaves this one as it is). Every other writer is
+    # refused here, whatever its cause: the node monitor re-admitting a
+    # recovered node's devices set three migrated-out devices ONLINE, SPDK
+    # could open none of them, and with one more node restarting the cluster
+    # was suspended (lab, 2026-11-23).
+    if (device.status == NVMeDevice.STATUS_FAILED_AND_MIGRATED
+            and state != NVMeDevice.STATUS_FAILED_AND_MIGRATED):
+        logger.error(
+            f"Device {device_id} is failed_and_migrated; rejecting transition "
+            f"to {state} (cause={cause})")
+        return False
+
     # Failed is a terminal state. The only allowed exits are:
     #   STATUS_FAILED → STATUS_FAILED_AND_MIGRATED  (failure data migration)
     #   STATUS_FAILED → STATUS_ONLINE               (explicit device restart)
