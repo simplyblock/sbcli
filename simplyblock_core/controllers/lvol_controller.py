@@ -1606,9 +1606,11 @@ def _create_bdev_stack(lvol, snode, is_primary=True):
                         if not ret:
                             raise
                 else:
-                    ret = rpc_client.bdev_lvol_register(
-                        lvol.lvol_bdev, lvol.lvs_name, lvol.lvol_uuid, lvol.blobid,
-                        qos_controller.wire_priority_class(snode.cluster_id, lvol.lvol_priority_class))
+                    from simplyblock_core.controllers.lvol_register import register_lvol
+                    ret = register_lvol(
+                        rpc_client, lvol.lvol_bdev, lvol.lvs_name, lvol.lvol_uuid, lvol.blobid,
+                        qos_controller.wire_priority_class(snode.cluster_id, lvol.lvol_priority_class),
+                        cluster_id=snode.cluster_id, node_label=snode.get_id())
 
             elif type == "bdev_lvol_clone":
                 if is_primary:

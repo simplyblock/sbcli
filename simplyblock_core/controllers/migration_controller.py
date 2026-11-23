@@ -50,6 +50,7 @@ from simplyblock_core.controllers import (
     tasks_controller,
 )
 from simplyblock_core.controllers.host_auth import _reapply_allowed_hosts
+from simplyblock_core.controllers.lvol_register import register_lvol
 from simplyblock_core.controllers.migration_bdev_ops import (
     delete_bdev_blocking as _delete_bdev_blocking,
 )
@@ -1394,10 +1395,11 @@ def _create_migration_impl(lvol_id, target_node_id, ctrl_loss_tmo, host_nqn,
                         f"create_migration: {composite} already on secondary "
                         f"{_pre_sec_node.get_id()} — skipping bdev_lvol_register")
                 elif _tgt_blobid is not None and _tgt_uuid is not None:
-                    ret_sec = _sec_rpc_reg.bdev_lvol_register(
-                        bdev_short, tgt_node.lvstore, _tgt_uuid, _tgt_blobid,
+                    ret_sec = register_lvol(
+                        _sec_rpc_reg, bdev_short, tgt_node.lvstore, _tgt_uuid, _tgt_blobid,
                         qos_controller.wire_priority_class(
-                            tgt_node.cluster_id, lvol.lvol_priority_class))
+                            tgt_node.cluster_id, lvol.lvol_priority_class),
+                        cluster_id=tgt_node.cluster_id, node_label=_pre_sec_node.get_id())
                     if ret_sec:
                         undo.replicas["secondary"] = (_sec_rpc_reg, _pre_sec_node)
                         _sec_rpc_reg.bdev_lvol_set_migration_flag(composite)
@@ -1426,10 +1428,11 @@ def _create_migration_impl(lvol_id, target_node_id, ctrl_loss_tmo, host_nqn,
                         f"create_migration: {composite} already on tertiary "
                         f"{_pre_ter_node.get_id()} — skipping bdev_lvol_register")
                 elif _tgt_blobid is not None and _tgt_uuid is not None:
-                    ret_ter = _ter_rpc_reg.bdev_lvol_register(
-                        bdev_short, tgt_node.lvstore, _tgt_uuid, _tgt_blobid,
+                    ret_ter = register_lvol(
+                        _ter_rpc_reg, bdev_short, tgt_node.lvstore, _tgt_uuid, _tgt_blobid,
                         qos_controller.wire_priority_class(
-                            tgt_node.cluster_id, lvol.lvol_priority_class))
+                            tgt_node.cluster_id, lvol.lvol_priority_class),
+                        cluster_id=tgt_node.cluster_id, node_label=_pre_ter_node.get_id())
                     if ret_ter:
                         undo.replicas["tertiary"] = (_ter_rpc_reg, _pre_ter_node)
                         _ter_rpc_reg.bdev_lvol_set_migration_flag(composite)

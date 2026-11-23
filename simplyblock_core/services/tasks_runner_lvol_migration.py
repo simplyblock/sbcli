@@ -108,6 +108,7 @@ from simplyblock_core.controllers import (
     tasks_events,
 )
 from simplyblock_core.controllers.host_auth import _reapply_allowed_hosts
+from simplyblock_core.controllers.lvol_register import register_lvol
 from simplyblock_core.controllers.migration_bdev_ops import (
     delete_bdev_blocking as _delete_bdev_blocking,
 )
@@ -1060,9 +1061,9 @@ def _setup_snap_transfer(snap, snap_index, src_node, tgt_node,
             logger.info(f"{label} already has {tgt_composite}; skipping registration")
             return True
         try:
-            return bool(rpc.bdev_lvol_register(
-                snap_short, tgt_node.lvstore, snap_uuid_on_tgt, snap_blobid,
-                _priority_class))
+            return bool(register_lvol(
+                rpc, snap_short, tgt_node.lvstore, snap_uuid_on_tgt, snap_blobid,
+                _priority_class, cluster_id=tgt_node.cluster_id, node_label=label))
         except RPCException:
             return False
 
