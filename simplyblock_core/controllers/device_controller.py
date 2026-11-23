@@ -1528,8 +1528,9 @@ def reshape_jm_raid(node_id: str) -> list[str]:
     journal of the node is stopped, the raid is created anew over the members
     jm_raid_target_members names, the journal storage is formatted on it and
     the JM started again. The journal coordinator of the LVS leader then
-    brings the empty JM up to date from the node's other journal copies by
-    itself (jm_resync_pending tells when it is done). Until then the node
+    brings the empty JM up to date from the node's other journal copies, by
+    itself where it reaches the JM over the network and when told to for its
+    own local JM (start_jm_resync; jm_resync_pending tells when it is done). Until then the node
     relies on those copies, so the caller rebuilds one node at a time and only
     on a cluster whose journals are all in sync.
 
@@ -1569,44 +1570,114 @@ def reshape_jm_raid(node_id: str) -> list[str]:
     return target
 
 
-def jm_resync_pending(snode: StorageNode) -> list[str]:
-    """The journals the JM of ``snode`` is a copy of that are not known to be
-    in sync, each with the reason; empty when all of them are.
+def _jm_journals(snode: StorageNode) -> list[dict]:
+    """The journals the JM of ``snode`` is a copy of, each with what is known
+    about its synchronisation.
 
     The JM of a node holds the journal of the node's own LVS and of every LVS
     whose owner picked it as a remote copy (StorageNode.jm_ids). The journal
     coordinator of an LVS runs its synchronisation on the node that leads the
-    LVS, so that node is the one asked (jc_get_jm_status: False for a JM that
-    is not ready or has replication running). A journal whose leader cannot
-    be found or asked counts as pending: an unknown answer is not "in sync"."""
+    LVS, so that node is the one asked. Per journal:
+
+      lvs, jm_vuid  the LVS and its journal group
+      leader        the node leading the LVS, or None when none is found
+      busy          the JMs the leader reports as not ready or replicating
+                    (jc_get_jm_status), None when the leader cannot be asked
+                    or names no JM at all
+      held          whether the JM of ``snode`` holds the journal
+                    (bdev_jm_get_status on its node), None when it cannot be
+                    asked
+      error         why leader, busy or held is unknown, or ""
+    """
     from simplyblock_core.controllers import lvol_controller
 
     db_controller = DBController()
     nodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
     by_id = {n.get_id(): n for n in nodes}
     jm_id = snode.jm_device.get_id() if snode.jm_device else ""
-    pending = []
+    journals = []
     for owner in nodes:
         if not owner.lvstore or owner.status == StorageNode.STATUS_REMOVED:
             continue
         if owner.get_id() != snode.get_id() and jm_id not in owner.jm_ids:
             continue
+        journal: dict = {"lvs": owner.lvstore, "jm_vuid": owner.jm_vuid, "leader": None,
+                         "busy": None, "held": None, "error": ""}
+        journals.append(journal)
         hosts = [owner] + [by_id[i] for i in (owner.secondary_node_id, owner.tertiary_node_id)
                            if i in by_id]
-        leader = next((h for h in hosts if h.status == StorageNode.STATUS_ONLINE
-                       and lvol_controller.is_node_leader(h, owner.lvstore)), None)
-        if leader is None:
-            pending.append(f"{owner.lvstore}: no leader found")
+        journal["leader"] = next((h for h in hosts if h.status == StorageNode.STATUS_ONLINE
+                                  and lvol_controller.is_node_leader(h, owner.lvstore)), None)
+        if journal["leader"] is None:
+            journal["error"] = "no leader found"
             continue
         try:
-            status = leader.rpc_client(timeout=10, retry=1).jc_get_jm_status(owner.jm_vuid)
+            status = journal["leader"].rpc_client(timeout=10, retry=1).jc_get_jm_status(owner.jm_vuid)
+            held = snode.rpc_client(timeout=10, retry=1).bdev_jm_get_status(owner.jm_vuid)
         except RPCException as e:
-            pending.append(f"{owner.lvstore}: {e}")
+            journal["error"] = str(e)
             continue
-        busy = sorted(name for name, ready in (status or {}).items() if ready is False)
-        if busy or not status:
-            pending.append(f"{owner.lvstore}: {busy or 'no JM reported'}")
+        if not status:
+            journal["error"] = "no JM reported"
+            continue
+        journal["busy"] = sorted(name for name, ready in status.items() if ready is False)
+        journal["held"] = bool(held) and held.get("res", 0) > 0
+    return journals
+
+
+def jm_resync_pending(snode: StorageNode, require_held: bool = True) -> list[str]:
+    """The journals the JM of ``snode`` is a copy of that are not known to be
+    in sync, each with the reason; empty when all of them are.
+
+    In sync means the LVS leader reports every JM of the journal ready and no
+    replication running, and, unless ``require_held`` is off, that the JM of
+    ``snode`` holds the journal. The second is asked of the JM itself because
+    the first does not tell: after a JM was rebuilt empty the leader reported
+    it ready while it did not hold the journal of the node's own LVS at all
+    (lab, 2026-11-23). A journal whose state cannot be established counts as
+    pending: an unknown answer is not "in sync"."""
+    pending = []
+    for journal in _jm_journals(snode):
+        if journal["error"]:
+            pending.append(f"{journal['lvs']}: {journal['error']}")
+        elif journal["busy"]:
+            pending.append(f"{journal['lvs']}: {journal['busy']}")
+        elif require_held and not journal["held"]:
+            pending.append(f"{journal['lvs']}: not on the JM of node {snode.get_id()}")
     return pending
+
+
+def start_jm_resync(snode: StorageNode) -> list[str]:
+    """Start the synchronisation of every journal the JM of ``snode`` should
+    hold and does not, and return the LVS names it was started for.
+
+    The journal coordinator brings a JM it reaches over the network up to
+    date by itself when the JM reconnects. It does not do so for the leader's
+    own local JM: rebuilt empty under it, that JM stayed without the journal
+    until jc_explicit_synchronization was called on the leader, which then
+    replicated it within seconds (lab, 2026-11-23).
+
+    Only ever on the confirmed leader of the LVS: explicit synchronisation
+    makes the calling node's journal coordinator the journal writer, and on a
+    follower that takes the leadership away from the real leader
+    (storage_node_ops.resync_solo_lvs_on_leaders). A journal with replication
+    already running, or whose state is unknown, is left alone."""
+    started = []
+    for journal in _jm_journals(snode):
+        if journal["error"] or journal["busy"] or journal["held"]:
+            continue
+        leader = journal["leader"]
+        logger.info("Journal of %s (jm_vuid %s) is not on the JM of node %s: starting its "
+                    "synchronisation on the LVS leader %s",
+                    journal["lvs"], journal["jm_vuid"], snode.get_id(), leader.get_id())
+        try:
+            leader.rpc_client(timeout=10, retry=0).jc_explicit_synchronization(journal["jm_vuid"])
+        except RPCException as e:
+            logger.warning("jc_explicit_synchronization %s on leader %s failed: %s",
+                           journal["jm_vuid"], leader.get_id(), e)
+            continue
+        started.append(journal["lvs"])
+    return started
 
 
 def remove_from_jm_device(device_id, jm_bdev):

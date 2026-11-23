@@ -256,6 +256,9 @@ def task_runner(task):
 # coordinator starts its replication a few seconds after the new JM connects,
 # and a poll that lands before that reads "in sync" too.
 JM_RESHAPE_READY_POLLS = 3
+# Synchronisations started for a journal that is not on the rebuilt JM before
+# the task counts further ones as failures (a retry each, up to its ceiling).
+JM_RESHAPE_MAX_SYNC_CALLS = 10
 
 
 def _jm_reshape_blocker(task, node) -> str:
@@ -277,7 +280,9 @@ def _jm_reshape_blocker(task, node) -> str:
     for other in tasks_controller.get_active_jm_raid_reshape_tasks(task.cluster_id):
         if other.uuid != task.uuid and other.function_params.get("phase"):
             return f"the JM raid of node {other.node_id} is being rebuilt"
-    pending = device_controller.jm_resync_pending(node)
+    # Whether the JM holds every journal is not asked here: one that does not
+    # is the very thing the rebuild repairs.
+    pending = device_controller.jm_resync_pending(node, require_held=False)
     if pending:
         return f"journal not in sync: {'; '.join(pending)}"
     return ""
@@ -291,7 +296,9 @@ def task_runner_jm_reshape(task):
     dies in between carries on where it was: not started (every precondition
     is checked, nothing was touched), "rebuild" (the old JM stack is being or
     was taken down; the build is repeated until it succeeds), "resync" (the
-    new JM is up; polled until every journal it belongs to is in sync)."""
+    new JM is up; polled until it holds every journal it belongs to and all
+    of them are in sync, starting the synchronisation where it did not start
+    by itself)."""
     try:
         node = db.get_storage_node_by_id(task.node_id)
     except KeyError:
@@ -332,8 +339,16 @@ def task_runner_jm_reshape(task):
     node = db.get_storage_node_by_id(task.node_id)
     pending = device_controller.jm_resync_pending(node)
     if pending:
-        if task.function_params.get("ready_polls"):
-            checkpoint(task, ready_polls=0)
+        # A journal the JM does not hold and nobody replicates is started on
+        # its LVS leader; the journal coordinator does not do that by itself
+        # for the leader's own JM.
+        started = device_controller.start_jm_resync(node)
+        sync_calls = int(task.function_params.get("sync_calls", 0)) + (1 if started else 0)
+        if started or task.function_params.get("ready_polls"):
+            checkpoint(task, ready_polls=0, sync_calls=sync_calls)
+        if started and sync_calls > JM_RESHAPE_MAX_SYNC_CALLS:
+            raise TaskRetry(f"journal of {started} still not on the rebuilt JM after "
+                            f"{sync_calls - 1} synchronisations")
         raise TaskProgress(f"journal resync running: {'; '.join(pending)}")
     polls = int(task.function_params.get("ready_polls", 0)) + 1
     if polls < JM_RESHAPE_READY_POLLS:

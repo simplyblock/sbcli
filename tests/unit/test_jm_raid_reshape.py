@@ -575,10 +575,13 @@ class TestResyncPending(unittest.TestCase):
         node.jm_device = jm
         return node
 
-    def _pending(self, nodes, leaders, statuses):
-        """``leaders``: lvstore -> id of the node that leads it. ``statuses``:
-        (node id, jm_vuid) -> jc_get_jm_status answer, or an exception."""
-        asked = []
+    def _call(self, func, nodes, leaders, statuses, not_held=(), **kwargs):
+        """Run ``func`` for nodes[0]. ``leaders``: lvstore -> id of the node
+        that leads it. ``statuses``: (node id, jm_vuid) -> jc_get_jm_status
+        answer, or an exception. ``not_held``: the jm_vuids whose journal the
+        JM of nodes[0] does not hold. Returns (result, the jc_get_jm_status
+        calls, the jc_explicit_synchronization calls)."""
+        asked, synced = [], []
 
         def rpc_for(node):
             rpc = MagicMock()
@@ -589,7 +592,17 @@ class TestResyncPending(unittest.TestCase):
                 if isinstance(answer, Exception):
                     raise answer
                 return answer
+
+            def held(jm_vuid):
+                assert node.get_id() == nodes[0].get_id(), "asked of the JM's own node"
+                if jm_vuid in not_held:
+                    return {"res": -1, "njournals": 2}
+                return {"res": 1, "njournals": 3, "jm_vuid": jm_vuid, "total_records": 14}
+
             rpc.jc_get_jm_status.side_effect = status
+            rpc.bdev_jm_get_status.side_effect = held
+            rpc.jc_explicit_synchronization.side_effect = \
+                lambda jm_vuid: synced.append((node.get_id(), jm_vuid))
             return rpc
 
         from simplyblock_core.controllers import lvol_controller
@@ -599,8 +612,74 @@ class TestResyncPending(unittest.TestCase):
                 patch.object(lvol_controller, "is_node_leader",
                              side_effect=lambda node, lvs: leaders.get(lvs) == node.get_id()):
             db_cls.return_value.get_storage_nodes_by_cluster_id.return_value = nodes
-            pending = device_controller.jm_resync_pending(nodes[0])
+            result = func(nodes[0], **kwargs)
+        return result, asked, synced
+
+    def _pending(self, nodes, leaders, statuses, **kwargs):
+        pending, asked, _ = self._call(device_controller.jm_resync_pending, nodes, leaders,
+                                       statuses, **kwargs)
         return pending, asked
+
+    def test_ready_everywhere_but_not_on_the_jm_is_pending(self):
+        """The lab case: the JM was rebuilt empty, the leader reported every
+        JM of the journal ready, and the JM did not hold the journal."""
+        n1 = self._node("n1", "LVS_1", 1)
+        pending, _ = self._pending([n1], {"LVS_1": "n1"}, {("n1", 1): {"jm_n1": True}},
+                                   not_held={1})
+        self.assertEqual(len(pending), 1)
+        self.assertIn("not on the JM", pending[0])
+
+    def test_before_the_rebuild_a_journal_the_jm_lacks_does_not_hold_it_up(self):
+        n1 = self._node("n1", "LVS_1", 1)
+        pending, _ = self._pending([n1], {"LVS_1": "n1"}, {("n1", 1): {"jm_n1": True}},
+                                   not_held={1}, require_held=False)
+        self.assertEqual(pending, [])
+
+    def test_the_sync_is_started_on_the_leader_for_a_journal_the_jm_lacks(self):
+        n1 = self._node("n1", "LVS_1", 1, jm_ids=["jm-n2"], sec="n2")
+        n2 = self._node("n2", "LVS_2", 2, jm_ids=["jm-n1"], sec="n1")
+        started, _, synced = self._call(
+            device_controller.start_jm_resync, [n1, n2], {"LVS_1": "n1", "LVS_2": "n2"},
+            {("n1", 1): {"jm_n1": True}, ("n2", 2): {"jm_n2": True}}, not_held={1})
+        self.assertEqual(started, ["LVS_1"])
+        self.assertEqual(synced, [("n1", 1)])       # the journal it holds is left alone
+
+    def test_the_sync_goes_to_the_leader_even_when_that_is_another_node(self):
+        n1 = self._node("n1", "LVS_1", 1, sec="n2")
+        n2 = self._node("n2", "", 0)
+        started, _, synced = self._call(
+            device_controller.start_jm_resync, [n1, n2], {"LVS_1": "n2"},
+            {("n2", 1): {"jm_n1": True}}, not_held={1})
+        self.assertEqual((started, synced), (["LVS_1"], [("n2", 1)]))
+
+    def test_no_sync_is_started_without_a_confirmed_leader(self):
+        """On a follower an explicit synchronisation takes the leadership
+        away from the real leader."""
+        n1 = self._node("n1", "LVS_1", 1, sec="n2")
+        n2 = self._node("n2", "", 0)
+        started, _, synced = self._call(device_controller.start_jm_resync, [n1, n2], {}, {},
+                                        not_held={1})
+        self.assertEqual((started, synced), ([], []))
+
+    def test_no_sync_is_started_while_replication_runs_or_the_state_is_unknown(self):
+        n1 = self._node("n1", "LVS_1", 1)
+        for answer in ({"jm_n1": False}, {}, RPCException("down")):
+            started, _, synced = self._call(device_controller.start_jm_resync, [n1],
+                                            {"LVS_1": "n1"}, {("n1", 1): answer}, not_held={1})
+            self.assertEqual((started, synced), ([], []), answer)
+
+    def test_a_failed_sync_call_is_not_reported_as_started(self):
+        n1 = self._node("n1", "LVS_1", 1)
+        from simplyblock_core.controllers import lvol_controller
+        rpc = MagicMock()
+        rpc.jc_get_jm_status.return_value = {"jm_n1": True}
+        rpc.bdev_jm_get_status.return_value = {"res": -1}
+        rpc.jc_explicit_synchronization.side_effect = RPCException("refused")
+        with patch.object(device_controller, "DBController") as db_cls, \
+                patch.object(StorageNode, "rpc_client", return_value=rpc), \
+                patch.object(lvol_controller, "is_node_leader", return_value=True):
+            db_cls.return_value.get_storage_nodes_by_cluster_id.return_value = [n1]
+            self.assertEqual(device_controller.start_jm_resync(n1), [])
 
     def test_in_sync_when_every_leader_reports_every_jm_ready(self):
         n1 = self._node("n1", "LVS_1", 1, jm_ids=["jm-n2"], sec="n2")
@@ -690,6 +769,7 @@ def runner(monkeypatch):
     dc.JMReshapeError = device_controller.JMReshapeError
     dc.jm_raid_reshape_needed.return_value = True
     dc.jm_resync_pending.return_value = []
+    dc.start_jm_resync.return_value = []
     dc.reshape_jm_raid.return_value = ["a", "b"]
     monkeypatch.setattr(module, "device_controller", dc)
 
@@ -809,6 +889,48 @@ def test_resync_is_polled_until_the_journals_stay_in_sync(runner):
     assert "journals in sync" in task.function_result
     # Built once; every later cycle only polled.
     runner.dc.reshape_jm_raid.assert_called_once()
+
+
+def test_the_precondition_does_not_ask_whether_the_jm_holds_its_journals(runner):
+    with pytest.raises(TaskProgress):
+        runner.task_runner_jm_reshape(_task())
+    assert runner.dc.jm_resync_pending.call_args_list[0].kwargs == {"require_held": False}
+    assert runner.dc.jm_resync_pending.call_args_list[1].kwargs == {}
+
+
+def test_a_journal_the_rebuilt_jm_lacks_is_synchronised_on_its_leader(runner):
+    """The lab case: nothing replicates and the journal is not on the JM."""
+    task = _task(phase="resync", members=["a", "b"], ready_polls=0)
+    runner.dc.jm_resync_pending.return_value = ["LVS_1: not on the JM of node n1"]
+    runner.dc.start_jm_resync.return_value = ["LVS_1"]
+    with pytest.raises(TaskProgress):
+        runner.task_runner_jm_reshape(task)
+    runner.dc.start_jm_resync.assert_called_once()
+    assert task.function_params["sync_calls"] == 1
+
+    # Replication runs now: nothing more is started, and nothing is counted.
+    runner.dc.jm_resync_pending.return_value = ["LVS_1: ['jm_n1']"]
+    runner.dc.start_jm_resync.return_value = []
+    with pytest.raises(TaskProgress):
+        runner.task_runner_jm_reshape(task)
+    assert task.function_params["sync_calls"] == 1
+
+    runner.dc.jm_resync_pending.return_value = []
+    for _ in range(runner.JM_RESHAPE_READY_POLLS - 1):
+        with pytest.raises(TaskProgress):
+            runner.task_runner_jm_reshape(task)
+    runner.task_runner_jm_reshape(task)
+    assert "journals in sync" in task.function_result
+    runner.dc.reshape_jm_raid.assert_not_called()
+
+
+def test_a_journal_that_never_arrives_costs_retries_not_an_endless_wait(runner):
+    task = _task(phase="resync", members=["a", "b"], sync_calls=runner.JM_RESHAPE_MAX_SYNC_CALLS)
+    runner.dc.jm_resync_pending.return_value = ["LVS_1: not on the JM of node n1"]
+    runner.dc.start_jm_resync.return_value = ["LVS_1"]
+    with pytest.raises(TaskRetry) as exc:
+        runner.task_runner_jm_reshape(task)
+    assert "still not on the rebuilt JM" in str(exc.value)
 
 
 def test_a_poll_that_finds_replication_again_starts_the_count_over(runner):
