@@ -58,7 +58,7 @@ import socket
 import threading
 import time
 import uuid as uuid_mod
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait
 
 from simplyblock_core import array, constants, multi_attach, utils
 from simplyblock_core.controllers import events_controller as ec
@@ -84,6 +84,24 @@ _local_locks: dict[str, threading.Lock] = {}
 _fences_in_flight: set = set()
 _fences_guard = threading.Lock()
 _local_locks_guard = threading.Lock()
+# node id -> time.monotonic() of the last takeover request naming it failed
+# (the watchdog's verdict), also when that request found a takeover of the LUN
+# running. A takeover in flight stops waiting on such a node: its path switch
+# and a warm activation there (2026-11-23 warm bed: the warm standby chosen
+# was the second node lost; 8 s of the takeover went to waiting on it).
+_lost_at: dict = {}
+_lost_guard = threading.Lock()
+
+
+def note_node_lost(node_id):
+    with _lost_guard:
+        _lost_at[node_id] = time.monotonic()
+
+
+def node_lost_since(node_id, since) -> bool:
+    """Whether ``node_id`` was declared lost at or after ``since``."""
+    with _lost_guard:
+        return _lost_at.get(node_id, -1.0) >= since
 
 
 #: Outcomes of :func:`take_over_lun_outcome`.
@@ -91,6 +109,9 @@ TAKEN_OVER = "taken_over"          # served by a live node other than the failed
 IN_PROGRESS = "in_progress"        # another takeover of this LUN is running
 NO_STANDBY = "no_standby"          # fenced, but no standby can read the LUN: hold
 FAILED = "failed"                  # not taken over (no plugin, fence, export, ...)
+# Internal: the warm standby that now serves the LUN was lost during the
+# takeover; the takeover is redone from it at once, under the same lock.
+_RETAKE_FROM = "retake_from:"
 
 
 class TakeoverError(Exception):
@@ -189,6 +210,7 @@ def take_over_lun_outcome(device_id, failed_node_id, reason="", *, deadline_sec=
         logger.error("LUN takeover of %s refused: not a multi-attach device", device_id)
         return FAILED
 
+    note_node_lost(failed_node_id)
     local = _local_lock(device_id)
     if not local.acquire(blocking=False):
         logger.info("LUN takeover of %s already running in this process", device_id)
@@ -205,7 +227,15 @@ def take_over_lun_outcome(device_id, failed_node_id, reason="", *, deadline_sec=
             logger.info("LUN takeover of %s already running (%s)", device_id, holder)
             return IN_PROGRESS
         try:
-            return _take_over_locked(db, cluster, device_id, failed_node_id, reason, deadline)
+            for _ in range(3):
+                outcome = _take_over_locked(db, cluster, device_id, failed_node_id, reason, deadline)
+                if not outcome.startswith(_RETAKE_FROM):
+                    return outcome
+                failed_node_id = outcome[len(_RETAKE_FROM):]
+                reason = "the warm standby serving it was lost during the takeover"
+                deadline = time.monotonic() + (deadline_sec if deadline_sec is not None
+                                               else constants.MULTI_ATTACH_TAKEOVER_DEADLINE_SEC)
+            return FAILED
         finally:
             try:
                 db.release_lun_takeover_lock(device_id, token)
@@ -216,6 +246,7 @@ def take_over_lun_outcome(device_id, failed_node_id, reason="", *, deadline_sec=
 
 
 def _take_over_locked(db, cluster, device_id, failed_node_id, reason, deadline) -> str:
+    t_start = time.monotonic()
     owner = db.get_storage_node_by_id(db.get_storage_device_by_id(device_id).node_id)
     dev = _device_on_owner(owner, device_id)
     if dev is None:
@@ -338,10 +369,14 @@ def _take_over_locked(db, cluster, device_id, failed_node_id, reason, deadline) 
     dev = _device_on_owner(db.get_storage_node_by_id(owner.get_id()), device_id) or dev
     # 6 + 7 (design steps 5 and 7). New path on every ONLINE node, old one off.
     added = _switch_paths(db, cluster_id, dev, standby, failed,
-                          _failed_paths(failed, old_ips, old_port))
-    if export.get("warm") and not _activate_warm_standby(
-            db, cluster, owner, dev, standby, failed, path, export, deadline):
-        return FAILED
+                          _failed_paths(failed, old_ips, old_port), since=t_start)
+    if export.get("warm"):
+        activated = _activate_warm_standby(db, cluster, owner, dev, standby, failed, path,
+                                           export, deadline, t_start)
+        if activated is None:
+            return _RETAKE_FROM + standby.get_id()
+        if not activated:
+            return FAILED
 
     if dev.status != NVMeDevice.STATUS_ONLINE:
         # The hold had expired and the device was marked unavailable; it is
@@ -456,13 +491,16 @@ def fence_in_flight(device_id, node_id) -> bool:
         return (device_id, node_id) in _fences_in_flight
 
 
-def _wait_active(rpc, alceml, deadline):
+def _wait_active(rpc, alceml, deadline, node_id=None, since=None):
     """Wait until ``alceml`` (created with a reservation key, not standby)
-    holds the reservation and serves. Raises TakeoverError."""
+    holds the reservation and serves. Raises TakeoverError (StandbyUnreachable
+    when its node stops answering, or is declared lost after ``since``)."""
     limit = min(deadline, time.monotonic() + constants.MULTI_ATTACH_ACTIVATION_WAIT_SEC)
     last = None
     unreachable = 0
     while True:
+        if node_id is not None and since is not None and node_lost_since(node_id, since):
+            raise StandbyUnreachable(f"alceml {alceml}: node {node_id} was declared lost")
         try:
             last = rpc.alceml_get_role(alceml) or {}
             unreachable = 0
@@ -799,16 +837,21 @@ def _teardown(rpc, sid, created):
             logger.warning("LUN takeover cleanup on %s: %s %s not removed: %s", sid, kind, name, e)
 
 
-def _activate_warm_standby(db, cluster, owner, dev, standby, failed, path, export, deadline) -> bool:
+def _activate_warm_standby(db, cluster, owner, dev, standby, failed, path, export, deadline,
+                           since=None):
     """After the paths were switched to a reused warm standby: wait until the
     peers' I/O has activated it. If it does not, fence the failed node at the
     array, tear the export down and redo it cold (alceml opened active with
     the key, as without warm standby); the NQN and IPs stay, so the peers'
     paths already point there. Returns False (device set unavailable, event
-    raised) only when the cold export failed as well."""
+    raised) only when the cold export failed as well, and None when the
+    standby itself was lost (the caller takes the LUN over from it at once)."""
     sid, device_id, alceml = standby.get_id(), dev.get_id(), export["alceml"]
     try:
-        _wait_active(standby.rpc_client(timeout=1, retry=0), alceml, deadline)
+        if since is not None and node_lost_since(sid, since):
+            raise StandbyUnreachable(f"node {sid} was declared lost")
+        _wait_active(standby.rpc_client(timeout=1, retry=0), alceml, deadline,
+                     node_id=sid, since=since)
         try:
             from simplyblock_core.controllers import qos_controller
             standby.rpc_client(timeout=_remaining(deadline, 10)).alceml_set_qos_weights(
@@ -824,13 +867,13 @@ def _activate_warm_standby(db, cluster, owner, dev, standby, failed, path, expor
             # to it, only waited out timeouts (36 s) and failed, while the
             # watchdog's takeover from it was refused as "already running";
             # the 1+0 cluster suspended. The record names the standby now, so
-            # end here: the watchdog takes the LUN over from it at once, to a
-            # live node (which preempts the reservation with its own key).
+            # end here: the LUN is taken over from it at once, to a live node
+            # (which preempts the reservation with its own key).
             msg = (f"LUN takeover of device {device_id}: warm standby {alceml} on {sid} did not "
                    f"activate and the node no longer answers ({e}); the LUN is taken over from it next")
             logger.warning(msg)
             _event(owner.cluster_id, dev, msg, EventObj.LEVEL_WARN)
-            return False
+            return None
         msg = (f"LUN takeover of device {device_id}: warm standby {alceml} on {sid} did not "
                f"activate ({e}); fencing node {failed.get_id()} at the array and opening the LUN cold")
         logger.warning(msg)
@@ -901,7 +944,7 @@ def _failed_paths(failed, old_ips, old_port):
     return ips, old_port or failed.nvmf_port, _transport(failed) or "TCP"
 
 
-def _switch_paths(db, cluster_id, dev, standby, failed, failed_paths) -> list:
+def _switch_paths(db, cluster_id, dev, standby, failed, failed_paths, since=None) -> list:
     """Add the standby's export as a path of ``remote_alceml_<uuid>`` on every
     ONLINE node, then detach the failed node's path there; on all nodes in
     parallel. Returns the ids of the nodes that have the new path."""
@@ -962,10 +1005,24 @@ def _switch_paths(db, cluster_id, dev, standby, failed, failed_paths) -> list:
     if not nodes:
         return []
     # All nodes at once: the held I/O of each resumes when its path is added.
-    with ThreadPoolExecutor(max_workers=min(16, len(nodes)),
-                            thread_name_prefix=f"paths-{dev.get_id()[:8]}") as pool:
-        results = list(pool.map(_one, nodes))
-    return [n.get_id() for n, ok in zip(nodes, results) if ok]
+    # A node declared lost meanwhile is not waited for (its calls only time
+    # out); its worker finishes in the background.
+    pool = ThreadPoolExecutor(max_workers=min(16, len(nodes)),
+                              thread_name_prefix=f"paths-{dev.get_id()[:8]}")
+    try:
+        futs = {pool.submit(_one, n): n for n in nodes}
+        pending = set(futs)
+        while pending:
+            done, pending = wait(pending, timeout=0.1)
+            if since is not None and pending and all(
+                    node_lost_since(futs[f].get_id(), since) for f in pending):
+                logger.info("LUN takeover: paths of %s: not waiting for lost node(s) %s",
+                            dev.get_id(), sorted(futs[f].get_id() for f in pending))
+                break
+    finally:
+        pool.shutdown(wait=False)
+    return [futs[f].get_id() for f in futs if f.done() and not f.cancelled()
+            and f.exception() is None and f.result()]
 
 
 def retire_stale_local_stack(node) -> list:
