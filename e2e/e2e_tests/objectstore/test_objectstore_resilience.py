@@ -237,17 +237,24 @@ class S3BucketProvisioningLatencyK8s(_ObjectStoreBase):
         warm_median = warm_sorted[len(warm_sorted) // 2]
 
         # ── E-07: the histogram records both, distinguishably ───────────
+        # A scrape that fails raises S3ProbeError naming the HTTP status, so
+        # everything below reads a real /metrics body: an empty family here
+        # is the operator's, not the harness's.
         text = s3.scrape_operator_metrics(self.k8s_utils)
         hist = s3.histogram_quantiles(text, s3.METRIC_PROVISIONING_SECONDS)
         phases = s3.metric_samples(text, s3.METRIC_BUCKET_PHASE)
         self.logger.info("[TC-S3-014] histogram: %s", hist)
 
         if not hist:
+            families = sorted({ln.split()[2] for ln in text.splitlines()
+                               if ln.startswith("# TYPE simplyblock_")})
             raise s3.S3EvidenceError(
-                f"[TC-S3-014] {s3.METRIC_PROVISIONING_SECONDS} has no samples "
-                f"after {1 + self.WARM_COUNT} buckets reached Ready. The "
-                f"metric is the only answer Open Question 4 has, and E-07 "
-                f"exists to prove it records real values.")
+                f"[TC-S3-014] the operator's /metrics was scraped, but "
+                f"{s3.METRIC_PROVISIONING_SECONDS} has no samples after "
+                f"{1 + self.WARM_COUNT} buckets reached Ready. The metric is "
+                f"the only answer Open Question 4 has, and E-07 exists to "
+                f"prove it records real values. simplyblock families "
+                f"exposed: {families}")
         if hist.get("count", 0) < 1 + self.WARM_COUNT:
             raise s3.S3EvidenceError(
                 f"[TC-S3-014] the histogram counted {hist.get('count')} "
@@ -256,8 +263,20 @@ class S3BucketProvisioningLatencyK8s(_ObjectStoreBase):
 
         # A bucket stuck outside Ready is the cheapest detector there is, so
         # the gauge is checked here too while every bucket is known-Ready.
-        not_ready = [(lbl, v) for lbl, v in phases
-                     if v == 1 and lbl.get("phase") not in ("Ready", "")]
+        # The operator rebuilds it on a timer rather than on each reconcile,
+        # so a bucket that turned Ready seconds ago still reads its old phase
+        # until the next rebuild: re-scrape for two rebuilds before calling a
+        # phase stuck. Run 2026-11-23 on cluster91 read tc014-warm-3 as
+        # Pending 8s after it was Ready, one scrape and no retry.
+        deadline = time.time() + 2 * s3.PHASE_COLLECT_INTERVAL
+        while True:
+            not_ready = [(lbl, v) for lbl, v in phases
+                         if v == 1 and lbl.get("phase") not in ("Ready", "")]
+            if not not_ready or time.time() >= deadline:
+                break
+            time.sleep(5)
+            phases = s3.metric_samples(
+                s3.scrape_operator_metrics(self.k8s_utils), s3.METRIC_BUCKET_PHASE)
         if not_ready:
             raise s3.S3EvidenceError(
                 f"[TC-S3-014] {s3.METRIC_BUCKET_PHASE} reports buckets outside "

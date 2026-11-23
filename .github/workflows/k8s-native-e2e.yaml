@@ -1442,6 +1442,7 @@ jobs:
             --set csiConfig.simplybk.ip="http://simplyblock-webappapi.simplyblock:5000" \
             --set prometheus.server.persistentVolume.storageClass=${SC_NAME} \
             --set controlplane.observability.enabled=true \
+            --set operatorMetrics.enabled=true \
             --set opensearch.persistence.storageClass=${SC_NAME} \
             --set controlplane.observability.minio.storageClass=${SC_NAME} \
             $TLS_FLAGS $CSI_FLAGS

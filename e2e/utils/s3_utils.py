@@ -41,8 +41,13 @@ comparison happens where the bytes are.
 import json
 import re
 import shlex
+import socket
+import ssl
+import subprocess
 import threading
 import time
+import urllib.error
+import urllib.request
 
 from logger_config import setup_logger
 
@@ -119,6 +124,12 @@ METRIC_BUCKET_PHASE = "simplyblock_objectstore_bucket_phase_state"
 METRIC_DELIVERY_CALLS = "simplyblock_objectstore_mount_delivery_calls_total"
 METRIC_STORE_PHASE = "simplyblock_objectstore_phase_state"
 METRIC_READY_REPLICAS = "simplyblock_objectstore_ready_replicas_count"
+
+#: Seconds between the operator's rebuilds of the two phase gauges, so a
+#: phase reads up to this stale. Mirrors ``DefaultCollectInterval`` in the
+#: operator's ``internal/controllers/objectstore/collector.go``; the two must
+#: move together.
+PHASE_COLLECT_INTERVAL = 30
 
 
 # ── The in-pod S3 client ─────────────────────────────────────────────────
@@ -589,32 +600,154 @@ def service_host(store, namespace):
 
 # ── Operator metrics ─────────────────────────────────────────────────────
 
-def scrape_operator_metrics(k8s, namespace=None, selector="control-plane=controller-manager"):
+#: The operator pod's container port for the manager's controller-runtime
+#: secure metrics endpoint (self-signed certificate). The operator chart
+#: declares it only when installed with ``operatorMetrics.enabled=true`` (off
+#: by default), and puts no Service in front of it: the metrics belong to one
+#: pod. Addressed by name so the chart's ``operatorMetrics.port`` can change.
+#: The chart always creates the ClusterRole that grants GET on the
+#: ``/metrics`` nonResourceURL. The endpoint authenticates the bearer token
+#: and authorizes it against that URL, so an anonymous scrape is refused.
+OPERATOR_METRICS_PORT = "metrics"
+OPERATOR_METRICS_READER_ROLE = "simplyblock-operator-metrics-reader"
+
+#: The identity this suite scrapes as. Created on first use and left in
+#: place: it holds no permission beyond reading ``/metrics``.
+METRICS_SCRAPER_SA = "e2e-metrics-scraper"
+
+
+def ensure_metrics_scraper(k8s, namespace):
+    """Apply the scraper's ServiceAccount and its binding. Idempotent."""
+    k8s.apply_yaml(
+        f"apiVersion: v1\n"
+        f"kind: ServiceAccount\n"
+        f"metadata:\n"
+        f"  name: {METRICS_SCRAPER_SA}\n"
+        f"  namespace: {namespace}\n",
+        namespace=namespace)
+    k8s.apply_yaml_cluster_scoped(
+        f"apiVersion: rbac.authorization.k8s.io/v1\n"
+        f"kind: ClusterRoleBinding\n"
+        f"metadata:\n"
+        f"  name: {METRICS_SCRAPER_SA}-{namespace}\n"
+        f"roleRef:\n"
+        f"  apiGroup: rbac.authorization.k8s.io\n"
+        f"  kind: ClusterRole\n"
+        f"  name: {OPERATOR_METRICS_READER_ROLE}\n"
+        f"subjects:\n"
+        f"- kind: ServiceAccount\n"
+        f"  name: {METRICS_SCRAPER_SA}\n"
+        f"  namespace: {namespace}\n")
+
+
+def scrape_operator_metrics(k8s, namespace=None):
     """Raw Prometheus text from the operator's ``/metrics``.
 
-    Scraped from inside the operator pod rather than through a Service: the
-    endpoint is commonly protected by kube-rbac-proxy, and ``curl`` from the
-    pod's own localhost skips a layer that has nothing to do with what is
-    being measured.
+    Fetched from the test host through a port-forward to the operator pod's
+    :data:`OPERATOR_METRICS_PORT`, with a bearer token for
+    :data:`METRICS_SCRAPER_SA`. Not from inside the operator pod: its image
+    is ubi-minimal and has no ``curl``, and the endpoint wants a token that
+    pod's own identity is not authorized to present.
+
+    Raises :class:`S3ProbeError` when the scrape itself fails, naming the
+    HTTP status or the transport error, and when there is not exactly one
+    live operator pod: the samples are that pod's own, so picking one of
+    several would read an arbitrary replica. An empty result is never returned,
+    so a caller can tell "the scrape failed" from "the metric family has no
+    samples".
     """
     ns = namespace or k8s.namespace
-    out, _ = k8s._exec_kubectl(
-        f"kubectl get pods -n {ns} -l {selector} "
-        f"-o jsonpath='{{.items[0].metadata.name}}' 2>/dev/null || true",
+    if not k8s.use_local_kubectl:
+        raise S3ProbeError(
+            "operator metrics scrape needs a local kubectl (K8S_LOCAL_KUBECTL=1) "
+            "to port-forward from the test host")
+    target = f"pod/{_operator_pod(k8s, ns)}"
+    ensure_metrics_scraper(k8s, ns)
+    token, err = k8s._exec_kubectl(
+        f"kubectl create token {METRICS_SCRAPER_SA} -n {ns} --duration=10m",
         supress_logs=True)
-    pod = (out or "").strip()
-    if not pod:
-        return ""
-    for port in (8080, 8443):
-        scheme = "http" if port == 8080 else "https -k"
-        text = k8s.exec_in_pod_container(
-            pod, "", f"curl -s {'-k ' if port == 8443 else ''}"
-                     f"{'https' if port == 8443 else 'http'}://127.0.0.1:{port}/metrics",
-            namespace=ns, timeout=60)
-        del scheme
-        if METRIC_BUCKET_PHASE in text or "go_goroutines" in text:
-            return text
-    return ""
+    token = (token or "").strip()
+    if not token:
+        raise S3ProbeError(
+            f"operator metrics scrape failed: no token for "
+            f"{ns}/{METRICS_SCRAPER_SA}: {(err or '').strip()[:300]}")
+
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+    proc = subprocess.Popen(
+        ["kubectl", "port-forward", "-n", ns,
+         target, f"{port}:{OPERATOR_METRICS_PORT}"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    try:
+        _wait_listening(proc, port, target, timeout=15)
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        req = urllib.request.Request(
+            f"https://127.0.0.1:{port}/metrics",
+            headers={"Authorization": f"Bearer {token}"})
+        try:
+            with urllib.request.urlopen(req, context=ctx, timeout=60) as resp:
+                text = resp.read().decode(errors="replace")
+        except urllib.error.HTTPError as exc:
+            raise S3ProbeError(
+                f"operator metrics scrape failed: HTTP {exc.code} {exc.reason} "
+                f"from {target}: "
+                f"{exc.read()[:300]!r}") from exc
+        except (urllib.error.URLError, OSError) as exc:
+            raise S3ProbeError(
+                f"operator metrics scrape failed: "
+                f"{getattr(exc, 'reason', exc)} from {target}") from exc
+    finally:
+        proc.kill()
+        proc.wait(timeout=10)
+    if not text.strip():
+        raise S3ProbeError(
+            f"operator metrics scrape failed: {target} "
+            f"answered 200 with an empty body")
+    return text
+
+
+def _operator_pod(k8s, namespace):
+    """Name of the one operator pod that is running and not being deleted."""
+    out, err = k8s._exec_kubectl(
+        f"kubectl get pods -n {namespace} -l {OPERATOR_SELECTOR} -o json",
+        supress_logs=True)
+    try:
+        items = json.loads(out or "")["items"]
+    except (ValueError, KeyError) as exc:
+        raise S3ProbeError(
+            f"operator metrics scrape failed: cannot list {OPERATOR_SELECTOR} "
+            f"pods in {namespace}: {(err or out or '').strip()[:300]}") from exc
+    live = [p["metadata"]["name"] for p in items
+            if p.get("status", {}).get("phase") == "Running"
+            and not p["metadata"].get("deletionTimestamp")]
+    if len(live) != 1:
+        raise S3ProbeError(
+            f"operator metrics scrape failed: expected one running "
+            f"{OPERATOR_SELECTOR} pod in {namespace}, found {len(live)}: {live}")
+    return live[0]
+
+
+def _wait_listening(proc, port, target, timeout):
+    """Return once *port* accepts a connection; raise if *proc* dies or times out."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            raise S3ProbeError(
+                f"operator metrics scrape failed: port-forward to "
+                f"{target} exited: "
+                f"{(proc.stderr.read() or '').strip()[:300]}")
+        try:
+            socket.create_connection(("127.0.0.1", port), timeout=0.5).close()
+            return
+        except OSError:
+            time.sleep(0.25)
+    raise S3ProbeError(
+        f"operator metrics scrape failed: port-forward to "
+        f"{target} was not listening within {timeout}s")
 
 
 def metric_samples(text, name):
