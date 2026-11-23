@@ -1006,7 +1006,11 @@ def _switch_paths(db, cluster_id, dev, standby, failed, failed_paths, since=None
         return []
     # All nodes at once: the held I/O of each resumes when its path is added.
     # A node declared lost meanwhile is not waited for (its calls only time
-    # out); its worker finishes in the background.
+    # out); its worker finishes in the background. Nor is anyone once the
+    # standby itself is declared lost: every peer's attach then waits on the
+    # dead export (2026-11-23 warm bed ma-ws5: 4.4 s), and the takeover moves
+    # on from that standby.
+    standby_id = getattr(standby, "get_id", lambda: None)()
     pool = ThreadPoolExecutor(max_workers=min(16, len(nodes)),
                               thread_name_prefix=f"paths-{dev.get_id()[:8]}")
     try:
@@ -1014,6 +1018,10 @@ def _switch_paths(db, cluster_id, dev, standby, failed, failed_paths, since=None
         pending = set(futs)
         while pending:
             done, pending = wait(pending, timeout=0.1)
+            if since is not None and pending and standby_id and node_lost_since(standby_id, since):
+                logger.info("LUN takeover: paths of %s: standby %s was declared lost; not waiting "
+                            "for %d node(s)", dev.get_id(), standby_id, len(pending))
+                break
             if since is not None and pending and all(
                     node_lost_since(futs[f].get_id(), since) for f in pending):
                 logger.info("LUN takeover: paths of %s: not waiting for lost node(s) %s",

@@ -573,3 +573,37 @@ class TestSwitchPathsSkipsLostNodes(unittest.TestCase):
         release.set()
         self.assertEqual(added, ["node-fast"])
         self.assertLess(took, 2)
+
+    def test_peers_attaching_to_a_lost_standby_are_not_waited_for(self):
+        import threading
+        from types import SimpleNamespace
+        from simplyblock_core.models.nvme_device import NVMeDevice as _Dev
+
+        release = threading.Event()
+
+        def node(nid):
+            rpc = MagicMock()
+            # Every peer's attach waits on the dead export.
+            rpc.bdev_nvme_attach_controller.side_effect = lambda *a, **k: release.wait(5) or True
+            n = MagicMock()
+            n.get_id.return_value = nid
+            n.status = StorageNode.STATUS_ONLINE
+            n.rpc_client.return_value = rpc
+            return n
+        db = MagicMock()
+        db.get_storage_nodes_by_cluster_id.return_value = [node("p1"), node("p2")]
+        dev = _Dev()
+        dev.uuid = "d2"
+        dev.alceml_bdev = "alceml_d2"
+        dev.nvmf_ip = "10.0.0.9"
+        standby = SimpleNamespace(data_nics=[], get_id=lambda: "standby-x")
+        t0 = time.monotonic()
+        threading.Timer(0.3, lambda: lun_takeover.note_node_lost("standby-x")).start()
+        with patch("simplyblock_core.distr_controller.send_dev_status_event"), \
+                patch.object(lun_takeover, "_transport", return_value="TCP"):
+            added = lun_takeover._switch_paths(db, "c1", dev, standby, None, ([], None, "TCP"),
+                                               since=t0)
+        took = time.monotonic() - t0
+        release.set()
+        self.assertEqual(added, [])
+        self.assertLess(took, 2)
