@@ -12936,6 +12936,106 @@ def reconcile_lvs_leadership(cluster_id, nodes, skip_jm_vuids=(), confirmed=(),
     return restored, leaderless
 
 
+def healthy_lvs_leadership_state(owner_id, lvs_name=None):
+    """``(state, members, why)`` for the LVS of ``owner_id`` (its primary).
+
+    ``state`` is ``"leaderless"`` only when the LVS is leaderless but HEALTHY:
+    the cluster is active or degraded, the owner is an ONLINE primary whose
+    health check has not failed and whose lvstore is not in a restart window,
+    every member is ONLINE, every member answers ``get_lvstore``, and none
+    reports leadership. ``members`` (primary first) is then the set to recover
+    over. Otherwise ``"led"`` (``members``: the members reporting leadership)
+    or ``"skip"``
+    (``why`` says what does not hold): an offline or restarting member is the
+    node monitor's offline takeover and the restart's business, a member that
+    cannot be asked is a POSSIBLE leader.
+
+    Not on sync-replication clusters (the passive triplet must stay
+    leaderless; the active one is the promote's) nor on two-node arbitrated
+    ones (the arbiter reconciles there: reconcile_lvs_leadership).
+
+    ``lvs_name``: the LVS the caller means; when ``owner_id`` is not its
+    primary (a volume's recorded node), the primary is looked up by name."""
+    db = DBController()
+    try:
+        owner = db.get_storage_node_by_id(owner_id)
+    except KeyError:
+        return "skip", [], f"node {owner_id} unknown"
+    if lvs_name and owner.lvstore != lvs_name:
+        primary = next((n for n in db.get_storage_nodes_by_cluster_id(owner.cluster_id)
+                        if n.lvstore == lvs_name and not n.is_secondary_node), None)
+        if primary is None:
+            return "skip", [], f"no primary of {lvs_name} found"
+        owner = primary
+    lvs_name = owner.lvstore
+    if not lvs_name or owner.is_secondary_node or not owner.jm_vuid:
+        return "skip", [], f"{owner.get_id()} holds no primary lvstore"
+    if _sync_site(owner):
+        return "skip", [], f"{lvs_name}: sync-replication cluster"
+    if _cluster_two_node_arbitrated(owner.cluster_id, db=db):
+        return "skip", [], f"{lvs_name}: two-node arbitrated cluster (the arbiter reconciles)"
+    cluster = db.get_cluster_by_id(owner.cluster_id)
+    if cluster.status not in (Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED):
+        return "skip", [], f"{lvs_name}: cluster is {cluster.status}"
+    if owner.health_check is False or owner.lvstore_status == "in_creation":
+        return "skip", [], (f"{lvs_name}: primary {owner.get_id()} health_check="
+                            f"{owner.health_check} lvstore_status={owner.lvstore_status}")
+    members = [owner]
+    for nid in (owner.secondary_node_id, owner.tertiary_node_id):
+        if not nid:
+            continue
+        try:
+            members.append(db.get_storage_node_by_id(nid))
+        except KeyError:
+            return "skip", [], f"{lvs_name}: member {nid} unknown"
+    not_online = [f"{m.get_id()[:8]} {m.status}" for m in members
+                  if m.status != StorageNode.STATUS_ONLINE]
+    if not_online:
+        return "skip", [], f"{lvs_name}: member(s) not online: {', '.join(not_online)}"
+    leaders, unknown = _lvs_leader_probe(members, lvs_name)
+    if leaders:
+        return "led", leaders, f"{lvs_name} led by {leaders[0].get_id()}"
+    if unknown:
+        return "skip", [], f"{lvs_name}: a member could not be asked for its leadership"
+    return "leaderless", members, f"{lvs_name}: no member of {len(members)} reports leadership"
+
+
+def restore_healthy_lvs_leadership(owner_id, lvs_name=None, reason=""):
+    """Give a leader back to an LVS that is leaderless while all its members
+    are online and healthy (healthy_lvs_leadership_state); ``(leader, why)``.
+
+    bf32 2026-11-21 (R6, target LVS_7 and LVS_10): with two of five nodes'
+    SPDK gone, a write to each LVS failed and its primary SPDK dropped the
+    leadership itself (spdk_lvs_queued_failed_IO, "Leadership state changed
+    internally to false"). It takes it back only on the next IO it receives,
+    and a replication target receives none -- replication waits for a leader
+    before it sends. The restarts that followed rebuilt the other members as
+    non-leaders "behind" the demoted primaries without asking whether they
+    led, and nothing else restores the leadership of a healthy LVS: both
+    stayed leaderless for 76 min with every member online.
+
+    The grant is the guarded leaderless recovery the object paths use
+    (_recover_leaderless_lvs: single-flight lock with cooldown, no restart /
+    port-allow task on a member, JM quorum on the taker, every other member
+    proven non-leader twice, blob-md reload before set_leader, grant verified),
+    with the primary as the taker. Nothing is granted when any member is not
+    online or cannot be asked."""
+    state, members, why = healthy_lvs_leadership_state(owner_id, lvs_name)
+    if state == "led":
+        return members[0], why
+    if state != "leaderless":
+        return None, why
+    owner = members[0]
+    logger.warning("LVS %s is leaderless with every member online (%s)%s -- restoring "
+                   "leadership on its primary %s through the guarded leaderless recovery",
+                   owner.lvstore, ", ".join(m.get_id()[:8] for m in members),
+                   f" [{reason}]" if reason else "", owner.get_id())
+    taker = _recover_leaderless_lvs(owner.cluster_id, members, owner.lvstore, owner)
+    if taker is None:
+        return None, f"{owner.lvstore}: guarded leaderless recovery granted nothing (see its log)"
+    return taker, f"{owner.lvstore}: leadership restored on {taker.get_id()}"
+
+
 def resync_solo_lvs_on_leaders(snode):
     """After a peer returns: start the journal resync of every LVS its
     surviving peer ran alone, on that LVS's LEADER only.

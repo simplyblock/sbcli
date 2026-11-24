@@ -1974,6 +1974,84 @@ def _set_node_devices_unavailable(node, reason):
             device_controller.device_set_unavailable(dev.get_id())
 
 
+#: lvstore key -> monotonic time of the last healthy-leaderless probe.
+_healthy_leaderless_checked: dict[tuple, float] = {}
+#: lvstore key -> monotonic time it was first seen leaderless with every
+#: member online (cleared by any other observation).
+_healthy_leaderless_since: dict[tuple, float] = {}
+#: lvstore keys whose recovery runs right now (a background thread each).
+_healthy_leaderless_running: set = set()
+_healthy_leaderless_lock = threading.Lock()
+HEALTHY_LEADERLESS_CHECK_INTERVAL_SEC = 30
+HEALTHY_LEADERLESS_CONFIRM_SEC = 60
+
+
+def _restore_leadership_if_leaderless(snode):
+    """Give the own lvstore of ONLINE primary ``snode`` its leader back when it
+    has none while every member is online and healthy.
+
+    Leadership is placed by the restart, creation and activation flows, and
+    the offline takeover (_take_over_leaderless_lvstores) covers a DOWN
+    member; nothing covered a leaderless lvstore whose members are all up.
+    bf32 2026-11-21 (R6): with two of five nodes' SPDK gone, a write to LVS_7
+    and LVS_10 failed and each primary's SPDK dropped the leadership itself
+    (it takes it back only on the next IO, and both were replication targets
+    without client IO). The restarts of the other members then rebuilt them
+    as non-leaders behind the demoted primaries, and the lvstores stayed
+    leaderless for 76 min with every member online.
+
+    Probed at most every HEALTHY_LEADERLESS_CHECK_INTERVAL_SEC by the
+    primary's own monitor thread (one lvstore, three get_lvstore RPCs); acted
+    on only after it was seen leaderless for HEALTHY_LEADERLESS_CONFIRM_SEC,
+    so a hand-off in flight is not mistaken for a lost leader. The grant is
+    storage_node_ops.restore_healthy_lvs_leadership (the guarded
+    reload-then-grant of _recover_leaderless_lvs, which also refuses while a
+    restart or port-allow task is active on a member), run on a background
+    thread: it waits out a safety window and must not stall this node's
+    liveness checks. Not on sync-replication or two-node arbitrated clusters
+    (healthy_lvs_leadership_state)."""
+    if not snode.lvstore or snode.is_secondary_node:
+        return
+    key = (snode.cluster_id, snode.lvstore)
+    now = time.monotonic()
+    if now - _healthy_leaderless_checked.get(key, -1e9) < HEALTHY_LEADERLESS_CHECK_INTERVAL_SEC:
+        return
+    _healthy_leaderless_checked[key] = now
+    with _healthy_leaderless_lock:
+        if key in _healthy_leaderless_running:
+            return
+    state, _, why = storage_node_ops.healthy_lvs_leadership_state(snode.get_id())
+    if state != "leaderless":
+        _healthy_leaderless_since.pop(key, None)
+        return
+    since = _healthy_leaderless_since.setdefault(key, now)
+    if now - since < HEALTHY_LEADERLESS_CONFIRM_SEC:
+        logger.warning("%s; restoring its leadership if it stays so for %ss",
+                       why, HEALTHY_LEADERLESS_CONFIRM_SEC)
+        return
+    with _healthy_leaderless_lock:
+        if key in _healthy_leaderless_running:
+            return
+        _healthy_leaderless_running.add(key)
+
+    def _run():
+        try:
+            leader, result = storage_node_ops.restore_healthy_lvs_leadership(
+                snode.get_id(), reason=f"leaderless for {int(time.monotonic() - since)}s, "
+                                       f"seen by the node monitor")
+            logger.info("Leadership recovery of %s: %s", snode.lvstore, result)
+            if leader is not None:
+                _healthy_leaderless_since.pop(key, None)
+        except Exception as e:                              # noqa: BLE001
+            logger.error("Leadership recovery of %s failed: %s", snode.lvstore, e)
+        finally:
+            with _healthy_leaderless_lock:
+                _healthy_leaderless_running.discard(key)
+
+    threading.Thread(target=_run, daemon=True,
+                     name=f"lvs-leadership-{snode.lvstore}").start()
+
+
 def _ana_failover_rearm(node_id) -> None:
     """Forget the one-shot marker so the next offline episode re-triggers."""
     _ana_failover_applied.discard(node_id)
@@ -3262,6 +3340,14 @@ def check_node(snode):
         storage_node_ops.set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE)
         readmit_devices_after_node_online(snode.get_id())
         _retire_taken_over_luns(snode)
+        return
+
+    if snode.status == StorageNode.STATUS_ONLINE:
+        try:
+            _restore_leadership_if_leaderless(snode)
+        except Exception as e:                              # noqa: BLE001
+            logger.error("Leadership check of %s on %s failed: %s",
+                         snode.lvstore, snode.get_id(), e)
 
 
 def _retire_taken_over_luns(snode):

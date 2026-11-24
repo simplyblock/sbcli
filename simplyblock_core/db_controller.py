@@ -923,6 +923,46 @@ class DBController(metaclass=Singleton):
         return fdb.transactional(DBController._ensure_sync_resync_task_tx)(
             self, self.kv_store, task, lvs_name, JobSchedule.active_indexes(self.kv_store))
 
+    # repl_snap_task/<cluster_id>/<snapshot_id> -> db key of the snapshot's
+    # replication task. Read and written in the transaction that creates the
+    # task, so two creators of the same snapshot's task conflict and the retry
+    # finds the first one's (bed bf32 2026-11-21).
+    REPL_SNAP_TASK_PREFIX = "repl_snap_task"
+
+    def _repl_snap_task_key(self, cluster_id, snapshot_id):
+        return f"{self.REPL_SNAP_TASK_PREFIX}/{cluster_id}/{snapshot_id}".encode()
+
+    def _ensure_snapshot_replication_task_tx(self, tr, task, index_list):
+        claim_key = self._repl_snap_task_key(
+            task.cluster_id, task.function_params["snapshot_id"])
+        raw = tr.get(claim_key).wait()
+        if raw is not None and raw.present():
+            current = BaseModel._read_record(tr, bytes(raw), JobSchedule)
+            if (current is not None and current.status != JobSchedule.STATUS_DONE
+                    and not current.canceled):
+                return current.uuid, False
+        task.updated_at = str(datetime.datetime.now(datetime.UTC))
+        self._put_tx(tr, task, index_list)
+        tr[claim_key] = task.get_db_id().encode()
+        return task.uuid, True
+
+    def ensure_snapshot_replication_task(self, task: JobSchedule) -> tuple[str, bool]:
+        """Create ``task`` (an FN_SNAPSHOT_REPLICATION task) unless its
+        snapshot already has one that is neither done nor canceled -- checked
+        and written in ONE transaction with the snapshot's claim key, so
+        concurrent callers never create two tasks for one snapshot.
+
+        bed bf32 (2026-11-21): two replication workers enqueued the same chain
+        ancestor 100 ms apart; each saw no task in its scan and each wrote
+        one. The two tasks then ran side by side: one created the landing
+        volume while the other deleted it as "half-created", leaving a stale
+        registration on the secondaries that later crashed SPDK.
+
+        Returns ``(uuid of the snapshot's active task, whether it is task)``.
+        """
+        return self._transact(DBController._ensure_snapshot_replication_task_tx,
+                              task, JobSchedule.active_indexes(self.kv_store))
+
     def _finish_sync_resync_tx(self, tr, task_key, lvs_name, seq_limit, result, duration_sec,
                                task_indexes):
         task = BaseModel._read_record(tr, task_key, JobSchedule)

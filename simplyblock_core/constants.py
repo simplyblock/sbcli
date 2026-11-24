@@ -734,6 +734,41 @@ REPL_CUTOVER_FREEZE_MAX_ROUND_SEC = (REPL_CUTOVER_FINAL_STEP_LIMIT_SEC
 # released, the volume replicates on its ordinary cadence, and the endgame is
 # retried after this long (the abandon burns one attempt of the task's budget).
 REPL_CUTOVER_ENDGAME_BACKOFF_SEC = 300
+# --- a migration must not fill its source cluster (bed bf29, 2026-11-20) ---
+# Five endgames of one source cluster at once, under sustained overwrite, took
+# a shrink snapshot every 15-30 s each; every one pinned what the client
+# overwrote after it, and their deletions fell behind: 41% -> 99% in 16 min.
+# See simplyblock_core/migration_space.py. These hold back only the
+# migration's own snapshots -- never client IO or client volume creation.
+#
+# Cutover endgames (shrink-round phase) running at once per SOURCE cluster.
+# The others replicate on their ordinary cadence while they wait for a slot.
+REPL_CUTOVER_MAX_ENDGAMES_PER_CLUSTER = 1
+# An endgame takes its next round snapshot only once none of the volume's
+# snapshots is still in deletion -- for at most this long per wait: a deletion
+# that is stuck (no leader, a clone in deletion) must not stall the endgame
+# into its shrink deadline on its own. The free-space check still applies.
+REPL_ENDGAME_DELETION_WAIT_MAX_SEC = 300
+# A migration snapshot needs this many times the bytes written to the volume
+# since its last snapshot free on the source (the snapshot pins them, and the
+# client overwrites about as much again while the round transfers) ...
+REPL_MIGRATION_HEADROOM_FACTOR = 2
+# ... and never less than this share of the cluster (other volumes' writes,
+# and the capacity record being up to a collector interval old).
+REPL_MIGRATION_MIN_FREE_PCT = 5
+# A cluster capacity record older than this is no reading (the collector
+# writes one every DEV_STAT_COLLECTOR_INTERVAL_SEC).
+REPL_MIGRATION_CAPACITY_STALE_SEC = 120
+# Without a usable capacity reading a migration snapshot waits this long, then
+# goes ahead without the check (logged): a broken stats collector must not
+# stop migrations for good.
+REPL_MIGRATION_CAPACITY_UNKNOWN_WAIT_SEC = 120
+# A cutover endgame whose target node is down before its clone exists cannot
+# progress, and holds its volume out of ordinary replication while it waits
+# (bed bf29 R3b: RPO 1280 s). After this long it is given up -- no attempt
+# burned, no back-off -- and the volume replicates on its cadence until the
+# target is back.
+REPL_CUTOVER_TARGET_DOWN_GRACE_SEC = 60
 # --- cutover source throttle ----------------------------------------------
 # A round converges to overhead / (1 - W/T): with the application writing at
 # W and the delta transferring at T, no number of rounds gets under the
@@ -919,6 +954,14 @@ REPL_MERGE_ALERT_EVERY_SEC = 600.0
 # leader within about a minute of its primary going down (crashed or shut
 # down); a wait beyond this means no member could be proven safe to lead.
 REPL_TARGET_LEADERLESS_ALERT_SEC = 180
+# A transfer that has waited this long for a target lvstore whose members are
+# ALL online asks the control plane's guarded leaderless recovery
+# (storage_node_ops.restore_healthy_lvs_leadership) to give it a leader, then
+# at most every REPL_TARGET_LEADERLESS_RECOVER_EVERY_SEC. A primary SPDK that
+# dropped the leadership itself takes it back only on IO, and a target gets
+# none while replication waits (bf32 2026-11-21: LVS_7/LVS_10, 76 min).
+REPL_TARGET_LEADERLESS_RECOVER_SEC = 60
+REPL_TARGET_LEADERLESS_RECOVER_EVERY_SEC = 120
 # Pass interval of the snapshot replication runner while any transfer or
 # merge is in flight; TASK_EXEC_INTERVAL_SEC when idle. Not sub-second: each
 # pass reads the task table (see test_transfer_completion_latency).
@@ -934,6 +977,13 @@ REPL_ACTIVE_PASS_SEC = 1.0
 REPL_RUNNER_WORKERS = int(os.getenv("REPL_RUNNER_WORKERS", "8"))
 # Pause before a task that returned a failure is dispatched again.
 REPL_RUNNER_RETRY_PAUSE_SEC = 3.0
+# An in_creation landing volume (REP_*) whose create is not running in this
+# runner and that no other live task of its snapshot may be creating is taken
+# for a dead attempt's leftover and deleted only after this long. Landing
+# creates take up to ~50 s on a loaded target (bed bf13); bed bf32 (2026-11-21)
+# deleted one 2 s into its create, which left a stale registration on the
+# secondaries.
+REPL_LANDING_ABANDON_SEC = int(os.getenv("REPL_LANDING_ABANDON_SEC", "600"))
 # Requests a replication transfer keeps in flight. A full transfer sends one
 # whole cluster per request (16 x 2 MiB = 32 MiB in flight); a delta
 # (allow_partial) sends at most 64 KiB per request, so it needs a deeper window
@@ -1577,11 +1627,16 @@ TWO_NODE_LEASE_RENEW_MS = 250
 TWO_NODE_LEASE_MARGIN_MS = 500
 TWO_NODE_STABLE_FOR_S = 30
 TWO_NODE_WAIT_TIMEOUT_MS = 20000
+#: jc_wait_events max events per answer (contract section 3.7).
+TWO_NODE_COLLECTOR_MAX_EVENTS = 256
+#: How often the collector re-reads cluster/node topology to start or stop
+#: per-node collector threads.
+TWO_NODE_COLLECTOR_RECONCILE_S = 5
 TWO_NODE_VERDICT_HISTORY = 50
 #: Arbiter decision loop period (events are folded and decided every tick).
 TWO_NODE_DECISION_TICK_MS = 100
 #: With no cluster that has ``two_node_arbitration`` on, the arbiter (and the
-#: Go event collector) re-scan the cluster list only this often instead of every
+#: event collector) re-scan the cluster list only this often instead of every
 #: tick, so deployments without two-node clusters carry almost no FDB load.
 TWO_NODE_IDLE_RESCAN_S = 30
 #: How often the arbiter re-reads each node's ``jc_ha_status`` and replaces its

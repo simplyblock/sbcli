@@ -6,6 +6,7 @@ from datetime import datetime
 from simplyblock_core import (
     constants,
     db_controller,
+    migration_space,
     migration_turn,
     replication_spare,
     utils,
@@ -910,6 +911,39 @@ def _cutover_endgame_lvol_ids(cluster_id):
     return ids
 
 
+# Per volume: since when its source capacity could not be read, and the
+# volumes whose cadence currently waits for space (one event per wait).
+_space_unknown_since: dict = {}
+_space_low: set = set()
+
+
+def _migration_space_hold(lvol, cluster_id, now_ts):
+    """Why the cadence snapshot of a migration-mode volume must wait for free
+    space on its source cluster, or "" (rule 3 of
+    simplyblock_core/migration_space.py, bed bf29 2026-11-20). Only a
+    migration's own snapshots wait: a volume replicating for DR is not
+    affected, and neither is any client write."""
+    if getattr(lvol, "replication_mode", "") != "migration":
+        return ""
+    vid = lvol.get_id()
+    why, since = migration_space.space_hold(
+        db, lvol, cluster_id, _space_unknown_since.get(vid, 0), now_ts)
+    if since:
+        _space_unknown_since[vid] = since
+    else:
+        _space_unknown_since.pop(vid, None)
+    if why:
+        if vid not in _space_low:
+            _space_low.add(vid)
+            migration_space.space_low_event(lvol, why)
+        return why
+    if vid in _space_low:
+        _space_low.discard(vid)
+        logger.info("Cadence snapshots of migrating lvol %s resume: source space "
+                    "recovered", vid)
+    return ""
+
+
 def take_due_internal_snapshots(cluster_id, now_ts):
     """Create an internal snapshot for every replicated volume whose interval
     has elapsed. The snapshot's creation auto-enqueues a replication task.
@@ -1022,6 +1056,14 @@ def take_due_internal_snapshots(cluster_id, now_ts):
                     break
             if held:
                 continue
+            for lv in members:
+                held = _migration_space_hold(lv, cluster_id, now_ts)
+                if held:
+                    logger.warning("Skipping group snapshot for group %s: %s",
+                                   group_id, held)
+                    break
+            if held:
+                continue
             group = db.get_consistency_group_by_id(group_id)
             # A group is pinned to one LVS: one lookup defers it as a whole.
             if sync and _cadence_waits_for_leader(group.node_id, group.lvs_name, leaderless):
@@ -1062,6 +1104,10 @@ def take_due_internal_snapshots(cluster_id, now_ts):
             if held:
                 logger.warning("Skipping internal replication snapshot for lvol %s: "
                                "replication held: %s", lvol.get_id(), held)
+                continue
+            held = _migration_space_hold(lvol, cluster_id, now_ts)
+            if held:
+                logger.warning("Skipping internal replication snapshot: %s", held)
                 continue
             name = f"repl_internal_{lvol.get_id()[:8]}_{now_ts}"
             logger.info(f"Taking internal replication snapshot for lvol {lvol.get_id()}: {name}")

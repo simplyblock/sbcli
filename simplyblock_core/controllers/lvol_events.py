@@ -199,3 +199,26 @@ def replication_target_leaderless(lvol, lvs_name, waited_s, why, caused_by=ec.CA
                  f"{lvs_name} has had no leader for {int(waited_s)}s ({why})"),
         node_id=lvol.get_id(),
         event_level=EventObj.LEVEL_ERROR)
+
+
+def migration_space_low(lvol, reason, caused_by=ec.CAUSED_BY_MONITOR):
+    """A migration snapshot of *lvol* waits for free space on its source
+    cluster (simplyblock_core/migration_space.py). Warning level: client IO
+    is not affected, only the migration's own snapshots wait. Raised once per
+    wait, when it starts."""
+    from simplyblock_core.models.events import EventObj
+    try:
+        cluster_id = DBController().get_pool_by_id(lvol.pool_uuid).cluster_id
+    except Exception as e:
+        logger.error(f"No cluster could be resolved for lvol {lvol.get_id()}; event not logged: {e}")
+        return
+    ec.log_event_cluster(
+        cluster_id=cluster_id,
+        domain=ec.DOMAIN_CLUSTER,
+        event=ec.EVENT_REPLICATION_STALLED,
+        db_object=lvol,
+        caused_by=caused_by,
+        message=(f"Migration of LVol {lvol.get_id()} is waiting for free space on its "
+                 f"source cluster: {reason}"),
+        node_id=lvol.get_id(),
+        event_level=EventObj.LEVEL_WARN)
