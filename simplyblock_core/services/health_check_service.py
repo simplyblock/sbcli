@@ -12,6 +12,7 @@ from simplyblock_core import (
 )
 from simplyblock_core.controllers import (
     array_controller,
+    control_plane_controller,
     device_controller,
     device_events,
     health_controller,
@@ -665,6 +666,7 @@ def check_node(snode):
 
 def loop_for_node(snode):
     while True:
+        control_plane_controller.wait_until_services_enabled("health-check-service/node")
         try:
             # Refresh so we see status transitions since the last iteration
             # — the adaptive interval below keys off node.status.
@@ -691,6 +693,7 @@ threads_maps: dict[str, threading.Thread] = {}
 def main():
     logger.info("Starting health check service")
     while True:
+        control_plane_controller.wait_until_services_enabled("health-check-service")
         try:
             db.get_clusters()
         except Exception as e:

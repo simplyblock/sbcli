@@ -18,6 +18,7 @@ from simplyblock_core import (
 from simplyblock_core.controllers import (
     activation_gate,
     cluster_events,
+    control_plane_controller,
     device_controller,
     health_controller,
     port_release_budget,
@@ -3528,6 +3529,7 @@ def _start_housekeeping():
 def loop_for_node(snode):
     # Not catching errors: Failures should propagate to avoid cross-loop failures from sticking
     while True:
+        control_plane_controller.wait_until_services_enabled("storage-node-monitor/node")
         check_node(snode)
         logger.info(f"Sleeping for {constants.NODE_MONITOR_INTERVAL_SEC} seconds")
         time.sleep(constants.NODE_MONITOR_INTERVAL_SEC)
@@ -3568,6 +3570,7 @@ def main():
     lun_watchdog.start(_start_lun_takeover)
 
     while True:
+        control_plane_controller.wait_until_services_enabled("storage-node-monitor")
         clusters = db.get_clusters()
         for cluster in clusters:
             cluster_id = cluster.get_id()

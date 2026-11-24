@@ -10,6 +10,7 @@ from simplyblock_core import (
 )
 from simplyblock_core.controllers import (
     cluster_events,
+    control_plane_controller,
     fdb_backup_controller,
     mgmt_events,
 )
@@ -68,6 +69,7 @@ def check_api_metrics(cluster):
 def main():
     logger.info("Starting capacity monitoring service...")
     while True:
+        control_plane_controller.wait_until_services_enabled("cap-monitor")
         try:
             db.get_clusters()
         except Exception as e:

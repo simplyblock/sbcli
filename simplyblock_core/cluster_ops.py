@@ -418,18 +418,22 @@ def _validate_sync_replication(sync_replication, ha_type, is_single_node) -> Non
         raise ValueError("sync replication cannot be used on a single-node cluster")
 
 
-def _validate_leader_site(sync_replication, leader_site) -> None:
+def _validate_leader_site(sync_replication, leader_site, stretched_control_plane=False) -> None:
     """The leader site of a stretched cluster (Cluster.leader_site) exists
-    only on a sync-replication cluster. No node exists at create, so the site
-    is not checked against node sites here (sync_replication_controller.
-    check_leader_site does that when it is moved).
+    only on a sync-replication cluster or one with a stretched control
+    plane. No node exists at create, so the site is not checked against node
+    sites here (sync_replication_controller.check_leader_site does that when
+    it is moved).
 
     Raises:
-        SyncReplicationSiteError: a leader site was given without sync replication.
+        SyncReplicationSiteError: a leader site was given without sync
+            replication or a stretched control plane.
     """
-    if leader_site and not sync_replication:
+    if leader_site and not sync_replication and not stretched_control_plane:
         raise SyncReplicationSiteError(
-            "leader_site is only allowed together with sync_replication")
+            "leader_site is only allowed together with sync_replication or stretched_control_plane")
+
+
 #: Erasure-coding scheme a multi-attach (array LUN) cluster runs: the array
 #: already protects every LUN, so simplyblock adds no parity.
 MULTI_ATTACH_SCHEME = (1, 0)
@@ -474,6 +478,28 @@ def _validate_warm_standby(multi_attach, warm_standby):
         raise ValueError("multi_attach_warm_standby requires multi_attach")
 
 
+def _validate_stretched_control_plane_params(stretched_control_plane, sync_replication, enable_failure_domain,
+                                             distr_ndcs, distr_npcs, ha_type, is_single_node, leader_site, site):
+    """The deploy-time rules of a stretched control plane
+    (docs/stretched-control-plane.md): one of the three supported data-plane
+    schemes, and the creating control plane's site named.
+
+    Raises:
+        ValueError: the scheme is unsupported, or ``site`` is missing.
+        SyncReplicationSiteError: a leader site without a stretched cluster.
+    """
+    from simplyblock_core.controllers import control_plane_controller
+    control_plane_controller.validate_stretched_control_plane(
+        stretched_control_plane=stretched_control_plane, sync_replication=sync_replication,
+        enable_failure_domain=enable_failure_domain, distr_ndcs=distr_ndcs, distr_npcs=distr_npcs,
+        ha_type=ha_type, is_single_node=is_single_node)
+    _validate_leader_site(sync_replication, leader_site, stretched_control_plane)
+    if stretched_control_plane and not site:
+        raise ValueError("a stretched control plane needs the site of this control plane (--site)")
+    if site and not stretched_control_plane:
+        raise ValueError("--site on cluster create is only allowed with --stretched-control-plane")
+
+
 def _validate_integrity_flags(inline_checksum, atomic_4k):
     """atomic_4k only lifts the data plane's 4K gate on fallback-mode
     checksums, so without inline_checksum it is a setting that does nothing."""
@@ -505,6 +531,10 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    multi_attach=False,
                    ftt=None,
                    multi_attach_warm_standby=False,
+                   stretched_control_plane=False,
+                   leader_site="",
+                   site="",
+                   site_api_endpoint="",
 ) -> str:
     distr_ndcs, distr_npcs, max_fault_tolerance = _resolve_multi_attach(
         multi_attach, ftt, raid_devices, ha_type, is_single_node,
@@ -515,6 +545,11 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     _validate_integrity_flags(inline_checksum, atomic_4k)
 
     _validate_sync_replication(sync_replication, ha_type, is_single_node)
+    if stretched_control_plane and not leader_site:
+        leader_site = site  # the creating control plane leads until an operator moves it
+    _validate_stretched_control_plane_params(
+        stretched_control_plane, sync_replication, enable_failure_domain, distr_ndcs, distr_npcs,
+        ha_type, is_single_node, leader_site, site)
 
     if max_fault_tolerance > 1:
         if ha_type != "ha":
@@ -667,6 +702,10 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.enable_failure_domain = enable_failure_domain
     cluster.lvol_geometry_enabled = lvol_geometry_enabled
     cluster.sync_replication = bool(sync_replication)
+    cluster.stretched_control_plane = bool(stretched_control_plane)
+    cluster.leader_site = leader_site or ""
+    if site and site_api_endpoint:
+        cluster.site_api_endpoints[site] = site_api_endpoint
     validate_spdk_sizing(max_subsys, hugepages_mem, spdk_vcpu_count)
     cluster.max_subsys = max_subsys or 0
     cluster.hugepages_mem = hugepages_mem or 0
@@ -771,7 +810,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     for line in index_ops.build_indices(log=logger.info):
         logger.info(line)
 
-    mgmt_node_ops.add_mgmt_node(dev_ip, mode, cluster.uuid)
+    mgmt_node_ops.add_mgmt_node(dev_ip, mode, cluster.uuid, site=site)
 
     logger.info("New Cluster has been created")
     logger.info(cluster.uuid)
@@ -845,6 +884,9 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
                 spdk_proxy_service=constants.K8S_SPDK_PROXY_SERVICE,
                 spdk_proxy_tls_secret=constants.K8S_SPDK_PROXY_TLS_SECRET,
                 node_label_suffix="",
+                stretched_control_plane=False,
+                site="",
+                site_api_endpoint="",
                 container_image_prefix: str | None = None,
 ) -> str:
     """Thin wrapper around _add_cluster_impl() that serializes create calls
@@ -888,6 +930,9 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
         spdk_proxy_service=spdk_proxy_service,
         spdk_proxy_tls_secret=spdk_proxy_tls_secret,
         node_label_suffix=node_label_suffix,
+        stretched_control_plane=stretched_control_plane,
+        site=site,
+        site_api_endpoint=site_api_endpoint,
         container_image_prefix=container_image_prefix,
     )
     if not name:
@@ -931,6 +976,9 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
                 spdk_proxy_service=constants.K8S_SPDK_PROXY_SERVICE,
                 spdk_proxy_tls_secret=constants.K8S_SPDK_PROXY_TLS_SECRET,
                 node_label_suffix="",
+                stretched_control_plane=False,
+                site="",
+                site_api_endpoint="",
                 container_image_prefix: str | None = None,
 ) -> str:
     _validate_integrity_flags(inline_checksum, atomic_4k)
@@ -949,7 +997,11 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
         raise ValueError("Unsupported erasure coding scheme")
 
     _validate_sync_replication(sync_replication, ha_type, is_single_node)
-    _validate_leader_site(sync_replication, leader_site)
+    if stretched_control_plane and not leader_site:
+        leader_site = site  # the creating control plane leads until an operator moves it
+    _validate_stretched_control_plane_params(
+        stretched_control_plane, sync_replication, enable_failure_domain, distr_ndcs, distr_npcs,
+        ha_type, is_single_node, leader_site, site)
 
     if max_fault_tolerance > 1:
         if ha_type != "ha":
@@ -995,6 +1047,9 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
     cluster.lvol_geometry_enabled = lvol_geometry_enabled
     cluster.sync_replication = bool(sync_replication)
     cluster.leader_site = leader_site or ""
+    cluster.stretched_control_plane = bool(stretched_control_plane)
+    if site and site_api_endpoint:
+        cluster.site_api_endpoints[site] = site_api_endpoint
     cluster.device_mode = _validated_device_mode(device_mode)
 
     if clusters:
@@ -1026,7 +1081,7 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
             raise ValueError("monitoring_secret is required")
         cluster.grafana_endpoint = constants.GRAFANA_K8S_ENDPOINT
 
-        mgmt_node_ops.add_mgmt_node("0.0.0.0", "kubernetes", cluster.uuid)
+        mgmt_node_ops.add_mgmt_node("0.0.0.0", "kubernetes", cluster.uuid, site=site)
 
         if not cluster.disable_monitoring:
             _set_max_result_window(constants.OS_K8S_ENDPOINT)
@@ -1967,7 +2022,8 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False, site_activ
                 # stranding another node's secondary/tertiary with none at all.
                 # This also subsumes the plain "at least two domains" floor.
                 domain_count_violation = fd_planner.fd_activation_domain_count_violation(
-                    cluster.distr_npcs, len(fd_host_counts), ndcs=cluster.distr_ndcs)
+                    cluster.distr_npcs, len(fd_host_counts), ndcs=cluster.distr_ndcs,
+                    site_bound=bool(cluster.stretched_control_plane and not cluster.sync_replication))
                 if domain_count_violation:
                     _fd_fail(_on_site(domain_count_violation))
                 if len(set(fd_host_counts.values())) != 1:

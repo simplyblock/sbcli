@@ -12,6 +12,7 @@ from simplyblock_core import (
     utils,
 )
 from simplyblock_core.controllers import (
+    control_plane_controller,
     lvol_controller,
     replication_delta,
     replication_snapshot_retire,
@@ -1135,6 +1136,7 @@ def sweep_spare_landing_volumes(cluster_id, now_ts):
 def main():
     logger.info("Starting LVol monitor...")
     while True:
+        control_plane_controller.wait_until_services_enabled("snapshot-monitor")
         try:
             db.get_clusters()
         except Exception as e:
