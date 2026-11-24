@@ -492,6 +492,29 @@ class BackupTestBase(TestClusterBase):
             f"backup delete failed: {err}"
         self.logger.info(f"backup delete {lvol_id}: {(out or '').strip()}")
 
+    def _wait_for_backups_deleted(self, lvol_name: str,
+                                  timeout: int = _BACKUP_COMPLETE_TIMEOUT) -> None:
+        """Poll until no backup remains for *lvol_name*.
+
+        ``_delete_backups`` only claims the backups and queues the task that
+        actually removes their records (FN_BACKUP_DELETE_CHAIN) -- the delete
+        is async from here, and record removal happens whenever the task
+        runner next picks the task up. A fixed sleep is not a safe upper
+        bound on that (retries, a slower runner cycle), so this polls instead.
+        """
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            remaining = [b for b in self._list_backups()
+                        if lvol_name in " ".join(str(v) for v in b.values())]
+            if not remaining:
+                return
+            sleep_n_sec(_POLL_INTERVAL)
+        remaining = [b for b in self._list_backups()
+                    if lvol_name in " ".join(str(v) for v in b.values())]
+        raise TimeoutError(
+            f"backups for {lvol_name} did not finish deleting within "
+            f"{timeout}s: {remaining}")
+
     # ── snapshot/backup helpers ───────────────────────────────────────────────
 
     def _create_snapshot(self, lvol_id: str, name: str, backup: bool = False) -> str:
@@ -2673,7 +2696,7 @@ class TestBackupRetentionMergeAfterDelete(BackupTestBase):
         # ── TC-BCK-201: delete all backups for this lvol ──────────────────
         self.logger.info(f"TC-BCK-201: deleting all backups for {lvol_id}")
         self._delete_backups(lvol_id)
-        sleep_n_sec(10)
+        self._wait_for_backups_deleted(lvol_name)
 
         backups_after = self._list_backups()
         lvol_backups = [

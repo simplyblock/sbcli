@@ -159,19 +159,23 @@ def _manifest_state(bucket, backup):
 
 
 def _delete_tasks(db, backup_id=None):
+    """Open FN_BACKUP_DELETE tasks: the single task type that covers both
+    the direct-delete and fold-into-successor cases (D5/D8) -- which one a
+    given task drives is read off the backup's own status at execution time,
+    not from a separate task type."""
     tasks = [t for t in db.get_job_tasks_by_function(CLUSTER, JobSchedule.FN_BACKUP_DELETE)
             if t.status != JobSchedule.STATUS_DONE and not t.canceled]
     if backup_id is None:
         return tasks
-    return [t for t in tasks if backup_id in (t.function_params or {}).get("backup_ids", [])]
+    return [t for t in tasks if (t.function_params or {}).get("backup_id") == backup_id]
 
 
-def _merge_tasks(db, old_backup_id=None):
-    tasks = [t for t in db.get_job_tasks_by_function(CLUSTER, JobSchedule.FN_BACKUP_MERGE)
+def _chain_delete_tasks(db, lvol_id=None):
+    tasks = [t for t in db.get_job_tasks_by_function(CLUSTER, JobSchedule.FN_BACKUP_DELETE_CHAIN)
             if t.status != JobSchedule.STATUS_DONE and not t.canceled]
-    if old_backup_id is None:
+    if lvol_id is None:
         return tasks
-    return [t for t in tasks if (t.function_params or {}).get("old_backup_id") == old_backup_id]
+    return [t for t in tasks if (t.function_params or {}).get("lvol_id") == lvol_id]
 
 
 def _restore_task(db, chain_s3_ids):
@@ -208,6 +212,36 @@ def test_resuming_an_already_deleting_backup_requeues_without_reclaiming(db, buc
     assert {t.uuid for t in _delete_tasks(db, leaf.uuid)} == first_tasks
 
 
+def test_resuming_a_broken_backup_requeues_its_delete_task(db, bucket):
+    """F2 of docs/reviews/backup-deletion-review.md: once F1 lands, a stuck
+    backup can be BROKEN (data already gone, just never got its task
+    re-queued -- a crash between the claim and the enqueue), not only
+    DELETING. delete_backup's resume branch has to recognize that too, or a
+    manual re-invocation does not actually recover it."""
+    leaf = _backup(db, bucket, "leaf")
+    leaf.status = Backup.STATUS_BROKEN
+    leaf.write_to_db(db.kv_store)
+
+    backup_controller.delete_backup(leaf.uuid)
+
+    assert _status(db, leaf) == Backup.STATUS_BROKEN
+    assert _delete_tasks(db, leaf.uuid)
+
+
+def test_resuming_delete_backups_with_broken_members_requeues_the_chain_task(db, bucket):
+    """delete_backups needs the same BROKEN-tolerant resume as delete_backup
+    (F2): a crash between claim_backup_chain_op's commit and the chain-delete
+    task's own enqueue leaves every member DELETING/BROKEN with no task."""
+    leaf = _backup(db, bucket, "leaf")
+    leaf.status = Backup.STATUS_BROKEN
+    leaf.write_to_db(db.kv_store)
+
+    ok, err = backup_controller.delete_backups(LVOL)
+
+    assert ok, err
+    assert _chain_delete_tasks(db, LVOL)
+
+
 def test_a_backup_with_a_completed_successor_is_merged(db, bucket):
     base = _backup(db, bucket, "base")
     nxt = _backup(db, bucket, "next", prev="base")
@@ -216,7 +250,7 @@ def test_a_backup_with_a_completed_successor_is_merged(db, bucket):
 
     assert _status(db, base) == Backup.STATUS_MERGING
     assert _status(db, nxt) == Backup.STATUS_COMPLETED
-    assert _merge_tasks(db, base.uuid)
+    assert _delete_tasks(db, base.uuid)
 
 
 def test_a_backup_with_an_incomplete_successor_is_refused(db, bucket):
@@ -304,7 +338,6 @@ def test_a_backup_claimed_for_delete_refuses_a_concurrent_merge_claim(db, bucket
     already sitting in new_status (resuming the identical claim) -- not a
     target held in the OTHER status by a genuinely different operation."""
     base = _backup(db, bucket, "base")
-    _backup(db, bucket, "next", prev="base")
 
     ok, reason = db.claim_backup_chain_op(LVOL, [base.uuid], Backup.STATUS_DELETING)
     assert ok, reason
@@ -314,6 +347,77 @@ def test_a_backup_claimed_for_delete_refuses_a_concurrent_merge_claim(db, bucket
     assert not ok
     assert base.uuid in reason
     assert _status(db, base) == Backup.STATUS_DELETING
+
+
+def test_claim_for_delete_refuses_when_a_live_dependent_exists(db, bucket):
+    """F11 of docs/reviews/backup-deletion-review.md: "safe to delete
+    directly instead of merging" means no live backup chains against this
+    one. That precondition used to be checked once, in plain Python, by the
+    caller, before the atomic claim -- leaving a window where a concurrent
+    backup_lvol could pick the target as its new prev_backup_id between that
+    read and the claim committing. The check now lives inside
+    claim_backup_chain_op's own transaction, so claiming base here -- with
+    "next" already chaining against it -- is refused outright, whether or
+    not the caller thought to check first."""
+    base = _backup(db, bucket, "base")
+    _backup(db, bucket, "next", prev="base")
+
+    ok, reason = db.claim_backup_chain_op(LVOL, [base.uuid], Backup.STATUS_DELETING)
+
+    assert not ok
+    assert "live dependent" in reason
+    assert _status(db, base) == Backup.STATUS_COMPLETED
+
+
+def test_claim_for_delete_ignores_a_failed_dependent(db, bucket):
+    """D7: a FAILED dependent was never restorable (no manifest, nothing to
+    protect), so it does not block a direct delete."""
+    base = _backup(db, bucket, "base")
+    _backup(db, bucket, "next", prev="base", status=Backup.STATUS_FAILED)
+
+    ok, reason = db.claim_backup_chain_op(LVOL, [base.uuid], Backup.STATUS_DELETING)
+
+    assert ok, reason
+
+
+def test_claim_for_merge_is_unaffected_by_the_dependents_check(db, bucket):
+    """A MERGING claim WANTS a live dependent -- it is the backup being
+    folded into. The dependents check applies only to STATUS_DELETING."""
+    base = _backup(db, bucket, "base")
+    _backup(db, bucket, "next", prev="base")
+
+    ok, reason = db.claim_backup_chain_op(LVOL, [base.uuid], Backup.STATUS_MERGING)
+
+    assert ok, reason
+
+
+def test_claim_failure_reverts_every_marked_manifest_and_record(db, bucket, monkeypatch):
+    """F3: _revert_backup_claim must revert the manifest, not just the FDB
+    record. Claiming [b1, b2]: b1's manifest is marked DELETING, then
+    marking b2's throws (simulating e.g. S3 throttling) -- both records must
+    revert to COMPLETED AND b1's manifest, already flipped, must revert to
+    ACTIVE rather than being left permanently disagreeing with the record."""
+    b1 = _backup(db, bucket, "b1")
+    b2 = _backup(db, bucket, "b2", prev="b1")
+
+    real_mark_deleting = backup_controller.mark_manifest_deleting
+    calls = []
+
+    def flaky(backup):
+        calls.append(backup.uuid)
+        if len(calls) == 2:
+            raise backup_manifest.ManifestError("simulated S3 throttling")
+        real_mark_deleting(backup)
+    monkeypatch.setattr(backup_controller, "mark_manifest_deleting", flaky)
+
+    ok, err = backup_controller.delete_backups(LVOL)
+
+    assert not ok, "the claim must not silently half-succeed"
+    assert _status(db, b1) == Backup.STATUS_COMPLETED
+    assert _status(db, b2) == Backup.STATUS_COMPLETED
+    assert _manifest_state(bucket, b1) == BackupManifestState.ACTIVE
+    assert _manifest_state(bucket, b2) == BackupManifestState.ACTIVE
+    assert not _chain_delete_tasks(db, LVOL)
 
 
 def test_a_chain_read_by_an_active_restore_refuses_a_delete(db, bucket):
@@ -383,7 +487,7 @@ def test_delete_backups_claims_completed_backups_and_removes_failed_ones_directl
     assert ok, err
     assert _status(db, completed) == Backup.STATUS_DELETING
     assert _manifest_state(bucket, completed) == BackupManifestState.DELETING
-    assert _delete_tasks(db, completed.uuid)
+    assert _chain_delete_tasks(db, LVOL)
     assert not _exists(db, failed)
 
 
@@ -406,13 +510,12 @@ def _seed_data_objects(bucket, backup):
 
 
 class TestDeleteTask:
-    """``FN_BACKUP_DELETE`` (``tasks_runner_backup._run_delete``): the task
-    ``backup_controller.delete_backup``/``delete_backups`` queue after
-    claiming a backup, which removes its S3 objects itself -- there is no
-    data-plane RPC for this and none is planned. A backup with a successor is
-    never reached here: that goes through a merge instead
-    (``trigger_merge``/``_run_merge``), which is where the data plane stays
-    involved.
+    """``FN_BACKUP_DELETE`` (``tasks_runner_backup._run_backup_delete``): the
+    task ``backup_controller.delete_backup`` queues after claiming a backup
+    that nothing chains against, which removes its S3 objects itself --
+    there is no data-plane RPC for this and none is planned. A backup with a
+    successor is folded into it instead, by the same task's MERGING branch
+    (``_run_merge_fold``), which is where the data plane stays involved.
     """
 
     def _task(self, db, backup_id):
@@ -424,7 +527,7 @@ class TestDeleteTask:
         _seed_data_objects(bucket, leaf)
         backup_controller.delete_backup(leaf.uuid)
 
-        runner._run_delete(self._task(db, leaf.uuid))
+        runner._run_backup_delete(self._task(db, leaf.uuid))
 
         assert not any(k.startswith(f"{leaf.s3_id}/") for k in bucket.objects)
         assert backup_manifest.manifest_key(UUID(leaf.uuid)) not in bucket.objects
@@ -440,7 +543,7 @@ class TestDeleteTask:
         task = self._task(db, leaf.uuid)
         db.atomic_update(leaf, lambda b: setattr(b, "status", Backup.STATUS_COMPLETED))
 
-        runner._run_delete(task)
+        runner._run_backup_delete(task)
 
         assert _status(db, leaf) == Backup.STATUS_COMPLETED
 
@@ -457,8 +560,45 @@ class TestDeleteTask:
         monkeypatch.setattr(bucket, "get_paginator", unreachable)
 
         with pytest.raises(TaskRetry):
-            runner._run_delete(self._task(db, leaf.uuid))
+            runner._run_backup_delete(self._task(db, leaf.uuid))
 
         assert _status(db, leaf) == Backup.STATUS_DELETING
         assert _manifest_state(bucket, leaf) == BackupManifestState.DELETING
         assert any(k.startswith(f"{leaf.s3_id}/") for k in bucket.objects)
+
+    def test_a_crash_after_s3_delete_leaves_it_broken_and_self_heals(self, db, bucket, monkeypatch):
+        """F1 of docs/reviews/backup-deletion-review.md: the delete loop
+        removes S3 objects BEFORE touching manifests/records, so a crash in
+        between must never be observable as "safely COMPLETED" -- the next
+        pass (here, a second call with the manifest write failing once more)
+        has to find BROKEN and retry the manifest/record cleanup, not
+        re-attempt the S3 delete (already confirmed empty) nor claim success
+        silently."""
+        from simplyblock_core.services import tasks_runner_backup as runner
+        from simplyblock_core.services.task_runner_base import TaskRetry
+        leaf = _backup(db, bucket, "leaf")
+        _seed_data_objects(bucket, leaf)
+        backup_controller.delete_backup(leaf.uuid)
+        task = self._task(db, leaf.uuid)
+
+        # Simulate the crash: S3 data removed, but the manifest/record
+        # cleanup that follows never ran (the process died first).
+        real_delete_manifest = backup_controller.delete_manifest
+
+        def fail_once(backup):
+            monkeypatch.setattr(backup_controller, "delete_manifest", real_delete_manifest)
+            raise backup_manifest.ManifestError("simulated crash")
+        monkeypatch.setattr(backup_controller, "delete_manifest", fail_once)
+
+        with pytest.raises(TaskRetry):
+            runner._run_backup_delete(task)
+
+        assert _status(db, leaf) == Backup.STATUS_BROKEN
+        assert _manifest_state(bucket, leaf) == BackupManifestState.BROKEN
+        assert not any(k.startswith(f"{leaf.s3_id}/") for k in bucket.objects), \
+            "S3 data must already be gone -- BROKEN means confirmed deleted"
+
+        # Re-drive: must resume at the manifest/record cleanup, not re-delete.
+        runner._run_backup_delete(self._task(db, leaf.uuid))
+
+        assert not _exists(db, leaf)

@@ -666,7 +666,10 @@ def _retire_members(db, group_backup) -> bool:
             retired = False
             continue
         chain = db.get_backups_by_lvol_id(member.lvol_id)
-        successor = backup_chain.SuccessorIndex.of_lvol(chain).successor_of(member.uuid)
+        # A FAILED successor does not count (D7 of
+        # docs/reviews/backup-deletion-review.md): it was never restorable,
+        # so it protects nothing a direct delete would destroy.
+        successor = backup_chain.SuccessorIndex.of_lvol(chain).live_successor_of(member.uuid)
         busy = (member.status in (Backup.STATUS_PENDING, Backup.STATUS_IN_PROGRESS)
                 or any(b.status == Backup.STATUS_MERGING for b in chain))
         if successor is None and not busy:
@@ -745,7 +748,9 @@ def retire_orphaned_member_backups(lvol_ids, db=None):
         # Oldest first: the base of the chain is the one whose merge unblocks
         # the next, and a leaf is only a leaf once nothing is below it.
         for old in sorted(orphans, key=lambda b: (b.created_at, b.uuid)):
-            successor = successors.successor_of(old.uuid)
+            # A FAILED successor does not count (D7): see the matching note
+            # in _retire_members above.
+            successor = successors.live_successor_of(old.uuid)
             if successor is None:
                 try:
                     backup_controller.delete_backup(old.uuid)

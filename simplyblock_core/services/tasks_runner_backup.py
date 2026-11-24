@@ -1,13 +1,22 @@
 """
 tasks_runner_backup.py - background task runner for S3 backup operations.
 
-Handles three task types:
+Handles:
   - FN_BACKUP: perform an S3 backup from a snapshot
   - FN_BACKUP_RESTORE: restore a backup chain into a new lvol
-  - FN_BACKUP_MERGE: merge two backups to shorten the chain
+  - FN_BACKUP_DELETE: delete (or fold into its successor) ONE backup that has
+    been claimed for removal -- the runner decides which, at execution time,
+    from the backup's current status and chain (see ``_run_backup_delete``;
+    D5/D8 of docs/reviews/backup-deletion-review.md). Replaces what used to be
+    two task types, FN_BACKUP_DELETE (a list of ids) and FN_BACKUP_MERGE.
+  - FN_BACKUP_DELETE_CHAIN: delete every backup of one volume, always directly
+    (never a merge).
 
-All three are multi-cycle: a task issues its RPC, defers, and polls the data
-plane's transfer state on later cycles until it reaches a terminal state.
+FN_BACKUP, FN_BACKUP_RESTORE and the fold-into-successor path of
+FN_BACKUP_DELETE are multi-cycle: a task issues its RPC, defers, and polls the
+data plane's transfer state on later cycles until it reaches a terminal
+state. The direct-delete paths of FN_BACKUP_DELETE/FN_BACKUP_DELETE_CHAIN are
+single-cycle: a plain S3 delete has nothing to poll.
 """
 import errno
 import time
@@ -17,6 +26,7 @@ from simplyblock_core.controllers import backup_events, tasks_controller
 from simplyblock_core.controllers.backup import controller as backup_controller
 from simplyblock_core.controllers.backup import device as backup_device
 from simplyblock_core.controllers.backup import group_backup
+from simplyblock_core.controllers.backup.chain import SuccessorIndex
 from simplyblock_core.controllers.backup.manifest import ManifestError
 from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.models.backup import Backup, GroupBackup
@@ -326,15 +336,55 @@ def _run_restore(task):
     raise TaskDefer("Restore in progress")
 
 
-def _run_merge(task):
-    keep_backup_id = task.function_params.get("keep_backup_id")
-    old_backup_id = task.function_params.get("old_backup_id")
+def _retire_backup(backup: Backup) -> None:
+    """The shared final step for a BROKEN backup -- a direct delete whose S3
+    data is confirmed gone: (re-)mark its manifest BROKEN (idempotent, so a
+    crash between the record write and this self-heals on retry), remove the
+    manifest, clean up its KMS keys and record, and emit the deleted event.
+
+    Not used for a successful merge's old backup, which goes to MERGED
+    instead and is retired by ``_run_merge_fold`` directly -- its own
+    manifest work (survivor rewritten, old one deleted) differs enough that
+    sharing this helper would not simplify it.
+    """
+    try:
+        backup_controller.mark_manifest_broken(backup)
+    except (ManifestError, PreconditionError) as e:
+        raise TaskRetry(f"Data retired, manifest mark-broken failed: {e}")
 
     try:
-        keep_backup = db.get_backup_by_id(keep_backup_id)
-        old_backup = db.get_backup_by_id(old_backup_id)
-    except KeyError as e:
-        raise TaskAbort(str(e))
+        backup_controller.delete_manifest(backup)
+    except (ManifestError, PreconditionError) as e:
+        # The data is already gone and is not reversible, so the task cannot
+        # be aborted here -- retry the manifest/record cleanup.
+        raise TaskRetry(f"Delete done, manifest cleanup failed: {e}")
+
+    backup_controller.cleanup_backup_kms_keys([backup])
+    backup_events.backup_deleted(backup.cluster_id, backup.node_id, backup)
+    backup.remove(db.kv_store)
+
+
+def _run_merge_fold(task, old_backup: Backup) -> None:
+    """The fold-into-successor path of ``_run_backup_delete``: merge
+    ``old_backup`` into its live successor via the data plane's
+    ``bdev_lvol_s3_merge``, mirroring what used to be the standalone
+    FN_BACKUP_MERGE task.
+
+    The successor is re-resolved here, fresh, rather than trusted from
+    whatever ``trigger_merge`` saw when it queued this task (D5/D8): nothing
+    can actually make it disagree (claim_backup_chain_op's mutual exclusion
+    keeps a successor from being independently claimed while ``old_backup``
+    is MERGING), but re-deriving it is the one choke point the review settled
+    on, shared with every other "does something live chain against this
+    backup" decision.
+    """
+    successor = SuccessorIndex.of_lvol(
+        db.get_backups_by_lvol_id(old_backup.lvol_id)).live_successor_of(old_backup.uuid)
+    if successor is None:
+        raise TaskAbort(
+            f"backup {old_backup.uuid} is MERGING but nothing live chains "
+            "against it any more")
+    keep_backup = successor
 
     snode = _online_node(keep_backup.node_id)
     rpc_client = snode.rpc_client(timeout=30)
@@ -392,17 +442,28 @@ def _run_merge(task):
             raise TaskRetry(f"Merge done, manifest update failed: {e}")
 
         set_result(task, "Merge completed")
-        logger.info(f"Merge completed: {old_backup_id} merged into {keep_backup_id}")
+        logger.info(f"Merge completed: {old_backup.uuid} merged into {keep_backup.uuid}")
         return
 
     if state == "Failed":
         # Terminal, not retried: XFER_STATE_FAILED can be reached after the
         # data plane has already started deleting old_backup's S3 objects
         # (its DELETE state runs near the end of the merge), so retrying the
-        # identical merge isn't known to be safe from here.
-        if old_backup.status == Backup.STATUS_MERGING:
-            old_backup.status = Backup.STATUS_COMPLETED
-            old_backup.write_to_db()
+        # identical merge isn't known to be safe from here, and reverting to
+        # COMPLETED would claim data that may already be gone is still there
+        # (D4). merge_started is always True by the time this state is seen
+        # (it gates every call that could reach the stat poll above), so the
+        # data plane may have already removed old_backup's objects -- mark it
+        # BROKEN, matching the direct-delete path's own confirmed-gone state,
+        # and leave it for a later delete_backup/delete_backups to retire.
+        old_backup.status = Backup.STATUS_BROKEN
+        old_backup.write_to_db()
+        try:
+            backup_controller.mark_manifest_broken(old_backup)
+        except (ManifestError, PreconditionError) as e:
+            logger.error(
+                "Backup %s marked BROKEN after a failed merge, but its "
+                "manifest could not be marked broken: %s", old_backup.uuid, e)
         raise TaskAbort("Merge failed on data plane")
 
     if state == "No process":
@@ -414,64 +475,106 @@ def _run_merge(task):
     raise TaskDefer("Merge in progress")
 
 
-def _run_delete(task):
-    """Delete the backups named by ``function_params["backup_ids"]``: remove
-    their S3 objects, then their manifests, then their records -- the reverse
-    of the order ``backup_controller._start_backup_delete`` claimed them in
-    (record marked DELETING, then manifest marked DELETING, then this task).
+def _run_backup_delete(task):
+    """Delete, or fold into its successor, the backup named by
+    ``function_params["backup_id"]`` -- whichever the claim that queued this
+    task settled on: MERGING means a live successor to fold into
+    (``_run_merge_fold``); DELETING/BROKEN means a direct S3 delete, nothing
+    chains against it.
 
-    A backup already gone, or no longer DELETING, is skipped: a prior cycle
-    of this same task already retired it, or (the group-backup path) a
-    different caller did.
+    DELETING: remove its S3 objects, mark it BROKEN (data confirmed gone),
+    then retire it (manifest + record) -- the reverse of the order
+    ``backup_controller._start_backup_delete`` claimed it in (record marked
+    DELETING, then manifest marked DELETING, then this task). BROKEN: resume
+    at the retire step -- a prior cycle already removed the S3 objects (D3/F1:
+    no automated reconciler; this is what re-drives it).
 
-    No data-plane RPC: there is no ``bdev_lvol_s3_delete`` and none is
-    planned, so the control plane removes the objects itself, the same way it
-    removes a manifest. This handler is only ever reached for a backup nothing
-    chains against -- one with a successor is folded into it by
-    ``_run_merge`` instead, which is where the data plane stays involved
-    (``bdev_lvol_s3_merge``). Single-cycle like the RPC path it replaces: S3
-    delete is synchronous from the caller's side, with nothing to poll.
+    No data-plane RPC for the direct-delete path: there is no
+    ``bdev_lvol_s3_delete`` and none is planned, so the control plane removes
+    the objects itself, the same way it removes a manifest.
+
+    A backup already gone, or in neither status this handler acts on, is
+    skipped: a prior cycle of this same task (or the group-backup path, or a
+    covering FN_BACKUP_DELETE_CHAIN) already retired it.
     """
-    backup_ids = task.function_params.get("backup_ids") or []
-    if not backup_ids:
-        raise TaskAbort("Missing backup_ids")
+    backup_id = task.function_params.get("backup_id")
+    if not backup_id:
+        raise TaskAbort("Missing backup_id")
 
-    backups = []
-    for backup_id in backup_ids:
-        try:
-            backup = db.get_backup_by_id(backup_id)
-        except KeyError:
-            continue
-        if backup.status != Backup.STATUS_DELETING:
-            continue
-        backups.append(backup)
-
-    if not backups:
+    try:
+        backup = db.get_backup_by_id(backup_id)
+    except KeyError:
         set_result(task, "Nothing left to delete")
         return
 
-    for backup in backups:
+    if backup.status == Backup.STATUS_MERGING:
+        _run_merge_fold(task, backup)
+        return
+
+    if backup.status not in (Backup.STATUS_DELETING, Backup.STATUS_BROKEN):
+        set_result(task, "Nothing left to delete")
+        return
+
+    if backup.status == Backup.STATUS_DELETING:
+        # Re-assert: a live dependent must still be absent at execution time,
+        # not just at claim time (claim_backup_chain_op's own in-transaction
+        # check already refuses a claim where one exists, so this can only
+        # trip on a bug there -- defer rather than destroy data a live
+        # successor needs).
+        successor = SuccessorIndex.of_lvol(
+            db.get_backups_by_lvol_id(backup.lvol_id)).live_successor_of(backup.uuid)
+        if successor is not None:
+            raise TaskDefer(
+                f"backup {backup.uuid} now has a live dependent "
+                f"{successor.uuid}; deferring")
+
         try:
-            backup_controller.delete_backup_data(backup)
+            backup_controller._delete_backup_data(backup)
         except (ManifestError, PreconditionError) as e:
             raise TaskRetry(f"S3 data delete failed: {e}")
 
-    # The data is confirmed gone: metadata follows data on the way out, the
-    # reverse of how the claim marked intent before any of this ran.
-    for backup in backups:
-        try:
-            backup_controller.delete_manifest(backup)
-        except (ManifestError, PreconditionError) as e:
-            # The S3 delete already happened and is not reversible, so the
-            # task cannot be aborted here -- retry the manifest/record cleanup.
-            raise TaskRetry(f"Delete done, manifest cleanup failed: {e}")
+        backup.status = Backup.STATUS_BROKEN
+        backup.write_to_db()
 
-        backup_controller.cleanup_backup_kms_keys([backup])
-        backup_events.backup_deleted(backup.cluster_id, backup.node_id, backup)
-        backup.remove(db.kv_store)
+    _retire_backup(backup)
+    set_result(task, "Backup deleted")
+    logger.info(f"Deleted backup: {backup_id}")
+
+
+def _run_backup_delete_chain(task):
+    """Delete every backup of ``function_params["lvol_id"]`` that this chain's
+    claim marked DELETING/BROKEN: always a direct S3 delete, never a merge --
+    ``backup_controller.delete_backups``' own invariant is that nothing
+    outside the call survives to chain against any of its targets.
+
+    Re-reads the volume's backups at execution time rather than carrying an
+    explicit id list, so a retry always acts on the current claimed set.
+    """
+    lvol_id = task.function_params.get("lvol_id")
+    if not lvol_id:
+        raise TaskAbort("Missing lvol_id")
+
+    targets = [b for b in db.get_backups_by_lvol_id(lvol_id)
+              if b.status in (Backup.STATUS_DELETING, Backup.STATUS_BROKEN)]
+    if not targets:
+        set_result(task, "Nothing left to delete")
+        return
+
+    for backup in targets:
+        if backup.status != Backup.STATUS_DELETING:
+            continue
+        try:
+            backup_controller._delete_backup_data(backup)
+        except (ManifestError, PreconditionError) as e:
+            raise TaskRetry(f"S3 data delete failed: {e}")
+        backup.status = Backup.STATUS_BROKEN
+        backup.write_to_db()
+
+    for backup in targets:
+        _retire_backup(backup)
 
     set_result(task, "Backups deleted")
-    logger.info(f"Deleted backups: {', '.join(b.uuid for b in backups)}")
+    logger.info(f"Deleted backups: {', '.join(b.uuid for b in targets)}")
 
 
 def _run_group_backup_commit(task):
@@ -505,7 +608,7 @@ def _run_group_backup_delete(task):
     record.
 
     Does no data-plane RPC of its own: a member's merge is its own
-    FN_BACKUP_MERGE task, which this waits on. Defers while a member is still
+    FN_BACKUP_DELETE task, which this waits on. Defers while a member is still
     being retired, and treats a manifest or member failure as retryable; a task
     that ends unfinished settles the group backup in :func:`finalize_resource`.
     """
@@ -527,8 +630,8 @@ def _run_group_backup_delete(task):
 _HANDLERS = {
     JobSchedule.FN_BACKUP: _run_backup,
     JobSchedule.FN_BACKUP_RESTORE: _run_restore,
-    JobSchedule.FN_BACKUP_MERGE: _run_merge,
-    JobSchedule.FN_BACKUP_DELETE: _run_delete,
+    JobSchedule.FN_BACKUP_DELETE: _run_backup_delete,
+    JobSchedule.FN_BACKUP_DELETE_CHAIN: _run_backup_delete_chain,
     JobSchedule.FN_GROUP_BACKUP_COMMIT: _run_group_backup_commit,
     JobSchedule.FN_GROUP_BACKUP_DELETE: _run_group_backup_delete,
 }
@@ -588,19 +691,6 @@ def finalize_resource(task):
             # touch. The scrub still has to land, so it commits directly.
             db.atomic_update(task, _scrub_s3_config)
 
-    elif task.function_name == JobSchedule.FN_BACKUP_MERGE:
-        old_backup_id = task.function_params.get("old_backup_id")
-        if not old_backup_id:
-            return
-        try:
-            old_backup = db.get_backup_by_id(old_backup_id)
-        except KeyError:
-            return
-        if old_backup.status == Backup.STATUS_MERGING:
-            # Merge did not finish; leave the old backup intact.
-            old_backup.status = Backup.STATUS_COMPLETED
-            old_backup.write_to_db()
-
     elif task.function_name == JobSchedule.FN_GROUP_BACKUP_COMMIT:
         group_backup_id = task.function_params.get("group_backup_id")
         if not group_backup_id:
@@ -620,17 +710,64 @@ def finalize_resource(task):
             gb.write_to_db()
 
     elif task.function_name == JobSchedule.FN_BACKUP_DELETE:
-        # The delete did not finish (timeout, retry ceiling, abort,
-        # cancellation): every backup this task still finds DELETING had its
-        # S3 objects left untouched -- the delete either never ran or never
-        # confirmed success, and _run_delete only removes a manifest/record
-        # after it has -- so each is reverted to COMPLETED, record and
-        # manifest both, the same way an unfinished merge leaves its old
-        # backup intact.
-        for backup_id in task.function_params.get("backup_ids") or []:
-            try:
-                backup = db.get_backup_by_id(backup_id)
-            except KeyError:
+        # The delete/merge did not finish (timeout, retry ceiling, abort,
+        # cancellation). What to do depends on which path it was on and how
+        # far it got -- BROKEN is left exactly as _run_backup_delete would
+        # (S3 data confirmed gone; do not revert). DELETING had its S3
+        # objects left untouched (the direct-delete path only reaches BROKEN
+        # once it has confirmed removal), so it reverts to COMPLETED, record
+        # and manifest both. MERGING is the D4/F5 case: before
+        # ``merge_started`` nothing reached the data plane and reverting to
+        # COMPLETED is still safe; once it is set the data plane may already
+        # have removed the old backup's objects (its DELETE state runs near
+        # the end of a merge), so it is marked BROKEN instead, never reverted.
+        backup_id = task.function_params.get("backup_id")
+        if not backup_id:
+            return
+        try:
+            backup = db.get_backup_by_id(backup_id)
+        except KeyError:
+            return
+
+        if backup.status == Backup.STATUS_BROKEN:
+            return
+
+        if backup.status == Backup.STATUS_MERGING:
+            if task.function_params.get("merge_started", False):
+                backup.status = Backup.STATUS_BROKEN
+                backup.write_to_db()
+                try:
+                    backup_controller.mark_manifest_broken(backup)
+                except (ManifestError, PreconditionError, KeyError) as e:
+                    logger.error(
+                        f"Backup {backup.uuid} marked BROKEN after an "
+                        f"unfinished merge, but its manifest could not be "
+                        f"marked broken: {e}")
+            else:
+                backup.status = Backup.STATUS_COMPLETED
+                backup.write_to_db()
+            return
+
+        if backup.status != Backup.STATUS_DELETING:
+            return
+        try:
+            backup_controller.revert_manifest_deleting(backup)
+        except (ManifestError, PreconditionError, KeyError) as e:
+            logger.error(
+                f"Backup {backup.uuid} reverted to COMPLETED, but its "
+                f"manifest could not be marked active and still says "
+                f"deleting: {e}")
+        backup.status = Backup.STATUS_COMPLETED
+        backup.write_to_db()
+
+    elif task.function_name == JobSchedule.FN_BACKUP_DELETE_CHAIN:
+        # Same DELETING -> revert / BROKEN -> leave shape as FN_BACKUP_DELETE,
+        # applied to every backup of the volume this chain-delete claimed.
+        lvol_id = task.function_params.get("lvol_id")
+        if not lvol_id:
+            return
+        for backup in db.get_backups_by_lvol_id(lvol_id):
+            if backup.status == Backup.STATUS_BROKEN:
                 continue
             if backup.status != Backup.STATUS_DELETING:
                 continue
@@ -666,11 +803,12 @@ SPEC = RunnerSpec(
 #: runner's tasks too, and process_task terminates what it is handed (timeout,
 #: max retry): without this filter it closed snapshot-replication tasks with
 #: "max retry reached (8/8)" and would end any other task older than the
-#: backup timeout (2026-09-29).
-BACKUP_FUNCTIONS = (JobSchedule.FN_BACKUP, JobSchedule.FN_BACKUP_RESTORE,
-                    JobSchedule.FN_BACKUP_MERGE, JobSchedule.FN_BACKUP_DELETE,
-                    JobSchedule.FN_GROUP_BACKUP_COMMIT,
-                    JobSchedule.FN_GROUP_BACKUP_DELETE)
+#: backup timeout (2026-09-29). The one definition lives on JobSchedule
+#: itself (JobSchedule.BACKUP_FUNCTIONS) so this and
+#: cluster_expansion.preconditions.EXPANSION_BLOCKING_TASK_FNS can't drift
+#: apart the way EXPANSION_BLOCKING_TASK_FNS once did (F4 of
+#: docs/reviews/backup-deletion-review.md).
+BACKUP_FUNCTIONS = JobSchedule.BACKUP_FUNCTIONS
 
 
 def main():

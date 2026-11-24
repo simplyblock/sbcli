@@ -1641,7 +1641,10 @@ BACKUP_MERGE_SERVICE_INTERVAL_SEC = 60
 #: starts a fresh attempt (backup.controller.ensure_snapshot_chain_backed_up).
 #: Restore and merge have no such fallback -- a restore that gives up leaves
 #: a volume stuck, and a merge mid-delete cannot be retried at all (see
-#: tasks_runner_backup._run_merge) -- so they keep the longer ceiling.
+#: tasks_runner_backup._run_merge_fold) -- so they keep the longer ceiling
+#: (BACKUP_MAX_RETRIES), which add_backup_delete_task also uses for the same
+#: reason now that one task type (FN_BACKUP_DELETE) covers both the merge
+#: fold-in and the direct delete.
 BACKUP_TASK_MAX_RETRIES = 5
 
 #: Longest backup chain the control plane will accept.

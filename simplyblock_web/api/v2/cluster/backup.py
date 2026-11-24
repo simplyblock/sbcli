@@ -297,6 +297,10 @@ def delete_backup(cluster: Cluster, backup: BackupResource) -> Response:
     the same request once a successor exists."""
     try:
         backup_controller.delete_backup(backup.uuid)
+    except KeyError as e:
+        # The backup was deleted by a concurrent request between this
+        # endpoint's own dependency resolving it and the call above.
+        raise HTTPException(404, str(e)) from e
     except PreconditionError as e:
         raise HTTPException(409, str(e)) from e
     return Response(status_code=202)

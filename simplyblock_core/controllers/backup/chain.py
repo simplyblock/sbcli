@@ -371,3 +371,20 @@ class SuccessorIndex:
         """The backup that is a delta against *backup_id*, or ``None`` if
         nothing in this index chains against it."""
         return self._by_prev.get(backup_id)
+
+    def live_successor_of(self, backup_id: str) -> Backup | None:
+        """The backup that blocks *backup_id* from being deleted directly: its
+        successor, unless that successor is FAILED.
+
+        A FAILED successor uploaded nothing restorable and has no manifest --
+        it was never restorable and so protects nothing a direct delete could
+        destroy. Used wherever "does something live still chain against this
+        backup" decides between a direct delete and folding into a successor
+        (``claim_backup_chain_op``'s in-transaction check, ``delete_backup``,
+        and the retirement paths in ``group_backup``), so the rule is applied
+        the same way everywhere instead of redecided per call site.
+        """
+        successor = self.successor_of(backup_id)
+        if successor is not None and successor.status == Backup.STATUS_FAILED:
+            return None
+        return successor

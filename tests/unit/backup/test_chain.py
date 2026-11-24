@@ -313,6 +313,29 @@ class TestSuccessorIndex:
             SuccessorIndex.of_lvol([base, fork_a, fork_b])
 
 
+class TestLiveSuccessorOf:
+    """D7 of docs/reviews/backup-deletion-review.md: a FAILED successor was
+    never restorable (no manifest, nothing to protect), so it does not block
+    a direct delete the way a live one does."""
+
+    def test_a_completed_successor_is_live(self):
+        base = _record("base")
+        nxt = _record("next", prev="base", status=Backup.STATUS_COMPLETED)
+        index = SuccessorIndex.of_lvol([base, nxt])
+        successor = index.live_successor_of(str(_id("base")))
+        assert successor is not None and successor.uuid == str(_id("next"))
+
+    def test_a_failed_successor_does_not_count(self):
+        base = _record("base")
+        nxt = _record("next", prev="base", status=Backup.STATUS_FAILED)
+        index = SuccessorIndex.of_lvol([base, nxt])
+        assert index.live_successor_of(str(_id("base"))) is None
+
+    def test_no_successor_at_all_is_none(self):
+        index = SuccessorIndex.of_lvol(_line_of_records(2))
+        assert index.live_successor_of(str(_id("b-1"))) is None
+
+
 class TestS3Ids:
 
     def test_newest_first(self):

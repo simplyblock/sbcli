@@ -172,6 +172,27 @@ def test_a_deleting_backup_with_an_active_manifest_fails_and_repairs(db, bucket)
     assert backup_manifest.read(_config(), UUID(b.uuid)).state == BackupManifestState.DELETING
 
 
+def test_a_broken_backup_with_an_active_manifest_fails_and_repairs(db, bucket):
+    """F1 of docs/reviews/backup-deletion-review.md: BROKEN is the explicit
+    "data confirmed deleted, retirement not yet finished" state -- a record
+    stuck there with a manifest still saying ACTIVE is exactly the silent
+    data-loss case this check exists to catch."""
+    b = _backup(db, "leaf", status=Backup.STATUS_BROKEN)
+    backup_manifest.write(_config(), _manifest(b.uuid, state=BackupManifestState.ACTIVE, s3_id=b.s3_id))
+
+    assert backup_controller.check_backups(cluster_id=CLUSTER) is False
+
+    assert backup_controller.check_backups(cluster_id=CLUSTER, repair=True) is True
+    assert backup_manifest.read(_config(), UUID(b.uuid)).state == BackupManifestState.BROKEN
+
+
+def test_a_consistent_broken_backup_passes(db, bucket):
+    b = _backup(db, "leaf", status=Backup.STATUS_BROKEN)
+    backup_manifest.write(_config(), _manifest(b.uuid, state=BackupManifestState.BROKEN, s3_id=b.s3_id))
+
+    assert backup_controller.check_backups(cluster_id=CLUSTER) is True
+
+
 def test_an_orphaned_manifest_fails_and_is_never_repaired(db, bucket):
     # A manifest with no backing record at all -- s3_id matches nothing.
     backup_manifest.write(_config(), _manifest(_uuid("ghost")))

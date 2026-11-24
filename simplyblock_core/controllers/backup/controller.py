@@ -383,7 +383,7 @@ def delete_manifest(backup: Backup) -> None:
     backup_manifest.delete(_config_for(backup), UUID(backup.uuid))
 
 
-def delete_backup_data(backup: Backup) -> None:
+def _delete_backup_data(backup: Backup) -> None:
     """Remove a backup's S3 data objects directly, with no data-plane RPC.
 
     There is no data-plane RPC for this and none is planned -- a bucket's data
@@ -422,6 +422,18 @@ def revert_manifest_deleting(backup: Backup) -> None:
         PreconditionError: the backup's bucket is not the cluster's own.
     """
     backup_manifest.mark_active(_config_for(backup), UUID(backup.uuid))
+
+
+def mark_manifest_broken(backup: Backup) -> None:
+    """Mark a backup's manifest BROKEN: its S3 data is confirmed gone, but the
+    manifest/record cleanup that follows has not finished. See
+    ``manifest.mark_broken``.
+
+    Raises:
+        ManifestError: the manifest could not be read or rewritten.
+        PreconditionError: the backup's bucket is not the cluster's own.
+    """
+    backup_manifest.mark_broken(_config_for(backup), UUID(backup.uuid))
 
 
 def _blob_parent_id(snapshot: SnapShot) -> str | None:
@@ -972,12 +984,10 @@ def restore_backup(backup_id: str, lvol_name: str, pool_id_or_name: str,
     # The bdev name the data plane expects (e.g. LVS_7744/LVOL_12345)
     bdev_name = f"{lvol.lvs_name}/{lvol.lvol_bdev}"
 
-    if not tasks_controller.add_backup_restore_task(
-            backup.lvol_id, pool.cluster_id, lvol.node_id, backup_id, bdev_name,
-            chain.s3_ids_newest_first(), lvol_id=lvol_id,
-            s3_config=s3_config.model_dump(exclude_none=True) if s3_config is not None else None):
-        raise PreconditionError(
-            "Failed to create restore task: the source chain is being merged or deleted")
+    tasks_controller.add_backup_restore_task(
+        backup.lvol_id, pool.cluster_id, lvol.node_id, backup_id, bdev_name,
+        chain.s3_ids_newest_first(), lvol_id=lvol_id,
+        s3_config=s3_config.model_dump(exclude_none=True) if s3_config is not None else None)
 
     return lvol_id
 
@@ -1001,11 +1011,17 @@ def cleanup_backup_kms_keys(backups):
 
 def _revert_backup_claim(backup_id: str) -> None:
     """Undo a claim made by :func:`_start_backup_delete`/``trigger_merge`` that
-    did not get as far as anything irreversible: put the backup back to
-    COMPLETED.
+    did not get as far as anything irreversible: revert its manifest back to
+    ACTIVE (if the claim got that far before failing) and put the record back
+    to COMPLETED.
 
     A no-op if the backup is gone (improbable here -- nothing between the
     claim and this has removed it) or has moved past DELETING on its own.
+    Reverting the manifest is best-effort: ``revert_manifest_deleting`` is a
+    no-op if the manifest was never actually marked DELETING (the claim
+    failed on an earlier target in the same batch), so calling it
+    unconditionally for every reverted id costs nothing for those and closes
+    the gap for the one(s) whose manifest genuinely needs it.
     """
     try:
         fresh = db_controller.get_backup_by_id(backup_id)
@@ -1013,13 +1029,19 @@ def _revert_backup_claim(backup_id: str) -> None:
         return
     if fresh.status != Backup.STATUS_DELETING:
         return
+    try:
+        revert_manifest_deleting(fresh)
+    except (backup_manifest.ManifestError, PreconditionError, KeyError) as e:
+        logger.error(
+            "Backup %s claim reverted to COMPLETED, but its manifest could "
+            "not be marked active and may still say deleting: %s",
+            backup_id, e)
     db_controller.atomic_update(fresh, lambda b: setattr(b, "status", Backup.STATUS_COMPLETED))
 
 
-def _start_backup_delete(backups: list[Backup]):
-    """Claim every backup in ``backups`` -- all COMPLETED, all belonging to one
-    volume's chain -- for deletion, mark their manifests DELETING, and queue
-    the task that removes their S3 objects.
+def _claim_for_delete(lvol_id: str, backups: list[Backup]) -> tuple[bool, str | None]:
+    """Claim every backup in ``backups`` -- all COMPLETED, all belonging to
+    ``lvol_id``'s chain -- for deletion and mark their manifests DELETING.
 
     All-or-nothing: the chain claim (``DBController.claim_backup_chain_op``)
     is one transaction already, and if marking any manifest afterwards fails,
@@ -1028,13 +1050,11 @@ def _start_backup_delete(backups: list[Backup]):
     ACTIVE manifest, or a manifest DELETING with no FDB record to match it
     (the manifest write only happens after the claim, never before).
 
-    Returns ``(True, None)`` once the delete task is queued (or an equivalent
-    one already was -- ``add_backup_delete_task`` dedupes), or
+    Returns ``(True, None)`` once every target is claimed and marked, or
     ``(False, reason)``.
     """
     if not backups:
         return True, None
-    lvol_id = backups[0].lvol_id
     ids = [b.uuid for b in backups]
 
     ok, reason = db_controller.claim_backup_chain_op(lvol_id, ids, Backup.STATUS_DELETING)
@@ -1053,7 +1073,46 @@ def _start_backup_delete(backups: list[Backup]):
             _revert_backup_claim(backup_id)
         return False, str(e)
 
-    tasks_controller.add_backup_delete_task(backups[0].cluster_id, backups[0].node_id, ids)
+    return True, None
+
+
+def _start_backup_delete(backup: Backup):
+    """Claim one COMPLETED backup -- nothing chains against it -- for direct
+    deletion, mark its manifest DELETING, and queue the task that removes its
+    S3 objects (D5/D8: ``FN_BACKUP_DELETE``, keyed by this backup's id alone;
+    the runner decides tip-delete vs. fold-into-successor afresh, so this is
+    also what ``trigger_merge`` queues when a successor exists instead).
+
+    Returns ``(True, None)`` once the task is queued (or an equivalent one
+    already was -- ``add_backup_delete_task`` dedupes), or ``(False, reason)``.
+    """
+    ok, reason = _claim_for_delete(backup.lvol_id, [backup])
+    if not ok:
+        return False, reason
+
+    tasks_controller.add_backup_delete_task(
+        backup.cluster_id, backup.node_id, backup.lvol_id, backup.uuid)
+    return True, None
+
+
+def _start_backup_delete_chain(lvol_id: str, backups: list[Backup]):
+    """Claim every backup in ``backups`` -- all COMPLETED, all of
+    ``lvol_id``'s chain -- for deletion, mark their manifests DELETING, and
+    queue the single task that removes every one of their S3 objects
+    (``FN_BACKUP_DELETE_CHAIN``, keyed by ``lvol_id`` alone).
+
+    Returns ``(True, None)`` once the task is queued (or an equivalent one
+    already was -- ``add_backup_delete_chain_task`` dedupes), or
+    ``(False, reason)``.
+    """
+    if not backups:
+        return True, None
+    ok, reason = _claim_for_delete(lvol_id, backups)
+    if not ok:
+        return False, reason
+
+    tasks_controller.add_backup_delete_chain_task(
+        backups[0].cluster_id, backups[0].node_id, lvol_id)
     return True, None
 
 
@@ -1067,7 +1126,9 @@ def delete_backups(lvol_id):
     backup a running upload's own ``prev_backup_id`` depends on -- or if any
     is a live member of a group backup, or already MERGING (someone else's
     merge of a backup this call would otherwise also claim). A backup already
-    DELETING is tolerated: this call resuming one that did not finish.
+    DELETING or BROKEN is tolerated: this call resuming a chain-delete that
+    claimed it but did not finish queuing its task (the process died in
+    between -- see F2 of docs/reviews/backup-deletion-review.md).
 
     Returns (success, error_message).
     """
@@ -1099,15 +1160,26 @@ def delete_backups(lvol_id):
                            "group backup instead")
 
     completed = [b for b in backups if b.status == Backup.STATUS_COMPLETED]
-    if completed:
-        ok, reason = _start_backup_delete(completed)
+    resuming = [b for b in backups
+               if b.status in (Backup.STATUS_DELETING, Backup.STATUS_BROKEN)]
+
+    if resuming:
+        # A prior call's chain claim already covers these (and, by
+        # claim_backup_chain_op's blocking rule, anything still COMPLETED
+        # could not be newly claimed alongside them anyway) -- re-queue the
+        # one task that retires the whole chain rather than re-claiming.
+        first = resuming[0]
+        tasks_controller.add_backup_delete_chain_task(
+            first.cluster_id, first.node_id, lvol_id)
+    elif completed:
+        ok, reason = _start_backup_delete_chain(lvol_id, completed)
         if not ok:
             return False, f"Cannot delete backups of volume {lvol_id}: {reason}"
 
     # A FAILED backup uploaded nothing restorable and has no manifest: remove
     # its record directly. COMPLETED backups are left for the task just
-    # queued above to retire; a backup already DELETING is being retired by
-    # that task or an earlier one.
+    # queued above to retire; a backup already DELETING/BROKEN is being
+    # retired by that task or an earlier one.
     for b in backups:
         if b.status != Backup.STATUS_FAILED:
             continue
@@ -1146,12 +1218,14 @@ def delete_backup(backup_id):
                 f"backup {backup.uuid} is a member of group backup "
                 f"{backup.group_backup_id}; delete the group backup instead")
 
-    if backup.status == Backup.STATUS_DELETING:
-        # Resuming a delete that claimed this backup but did not finish
-        # queuing its task (the process died in between): re-queue rather
-        # than re-claim, which would see this backup's own DELETING status
-        # among its siblings and refuse itself.
-        tasks_controller.add_backup_delete_task(backup.cluster_id, backup.node_id, [backup.uuid])
+    if backup.status in (Backup.STATUS_DELETING, Backup.STATUS_BROKEN):
+        # Resuming a delete (or a merge whose fold-in broke this backup, see
+        # D4/F5) that claimed this backup but did not finish queuing its
+        # task (the process died in between): re-queue rather than
+        # re-claim, which would see this backup's own status among its
+        # siblings and refuse itself.
+        tasks_controller.add_backup_delete_task(
+            backup.cluster_id, backup.node_id, backup.lvol_id, backup.uuid)
         return
 
     if backup.status == Backup.STATUS_FAILED:
@@ -1163,8 +1237,10 @@ def delete_backup(backup_id):
         backup.remove(db_controller.kv_store)
         return
 
+    # A FAILED successor does not count (D7): it was never restorable, so it
+    # protects nothing a direct delete would destroy.
     successor = SuccessorIndex.of_lvol(
-        db_controller.get_backups_by_lvol_id(backup.lvol_id)).successor_of(backup.uuid)
+        db_controller.get_backups_by_lvol_id(backup.lvol_id)).live_successor_of(backup.uuid)
     if successor is not None:
         if successor.status != Backup.STATUS_COMPLETED:
             raise PreconditionError(
@@ -1178,7 +1254,7 @@ def delete_backup(backup_id):
     if backup.status != Backup.STATUS_COMPLETED:
         raise PreconditionError(f"backup {backup.uuid} is {backup.status}, not completed")
 
-    ok, reason = _start_backup_delete([backup])
+    ok, reason = _start_backup_delete(backup)
     if not ok:
         raise PreconditionError(f"Cannot delete backup {backup.uuid}: {reason}")
 
@@ -1425,12 +1501,26 @@ def import_from_bucket(config: BackupConfig, cluster_id=None) -> int:
 
 #: Backup statuses whose manifest this function checks, and whose manifest
 #: --repair can re-derive from the record. MERGED and MERGING are excluded:
-#: the merge path does not mark a manifest state at all (it writes the
-#: survivor's and deletes the old one only once the merge itself is done),
-#: so neither a MERGED backup's manifest existing nor its absence is a
-#: reliable signal here -- that is a gap in the merge path itself, not one
-#: this check can resolve by rewriting anything.
-_MANIFEST_CHECKED_STATUSES = (Backup.STATUS_COMPLETED, Backup.STATUS_DELETING)
+#: the merge path does not mark a manifest state at all while it is still
+#: running (it writes the survivor's and deletes the old one only once the
+#: merge itself is done), so neither a MERGED backup's manifest existing nor
+#: its absence is a reliable signal here -- that is a gap in the merge path
+#: itself, not one this check can resolve by rewriting anything. BROKEN is
+#: included: a backup reaches it either from DELETING (its S3 data confirmed
+#: gone, tip-delete) or from MERGING on an abnormal termination past
+#: merge_started (same confirmation, fold-into-successor) -- either way its
+#: manifest must say BROKEN too, and a record stuck there with an ACTIVE
+#: manifest is exactly the silent data-loss case this check exists to catch.
+_MANIFEST_CHECKED_STATUSES = (
+    Backup.STATUS_COMPLETED, Backup.STATUS_DELETING, Backup.STATUS_BROKEN)
+
+#: The manifest state a checked record's status implies. COMPLETED is not
+#: here: it is the default (ACTIVE) every other checked status is compared
+#: against the absence of.
+_EXPECTED_MANIFEST_STATE = {
+    Backup.STATUS_DELETING: backup_manifest.BackupManifestState.DELETING,
+    Backup.STATUS_BROKEN: backup_manifest.BackupManifestState.BROKEN,
+}
 
 
 def check_backups(cluster_id=None, repair=False) -> bool:
@@ -1489,9 +1579,8 @@ def check_backups(cluster_id=None, repair=False) -> bool:
             except ValueError:
                 continue
 
-            expected_state = (backup_manifest.BackupManifestState.DELETING
-                              if backup.status == Backup.STATUS_DELETING
-                              else backup_manifest.BackupManifestState.ACTIVE)
+            expected_state = _EXPECTED_MANIFEST_STATE.get(
+                backup.status, backup_manifest.BackupManifestState.ACTIVE)
             manifest = backup_manifest.read_if_present(config, UUID(backup.uuid))
 
             if manifest is None:
@@ -1548,11 +1637,12 @@ def check_backups(cluster_id=None, repair=False) -> bool:
 
 def _rewrite_manifest_from_record(backup: Backup) -> bool:
     """Rewrite ``backup``'s manifest from its FDB record: ACTIVE, then
-    DELETING again if that is what the record says. Two steps because
-    ``write_manifest`` always writes ACTIVE (it is what a freshly completed
-    backup's manifest has never not been), and only a second, explicit mark
-    turns that into DELETING -- the same two calls ``_start_backup_delete``
-    itself would have made, in the same order.
+    DELETING or BROKEN again if that is what the record says. Two steps
+    because ``write_manifest`` always writes ACTIVE (it is what a freshly
+    completed backup's manifest has never not been), and only a second,
+    explicit mark turns that into DELETING/BROKEN -- the same calls
+    ``_start_backup_delete``/the delete task itself would have made, in the
+    same order.
 
     Never raises: a record this cannot rebuild from (an unreadable location,
     a missing encryption descriptor, an unreachable bucket) is one
@@ -1563,6 +1653,8 @@ def _rewrite_manifest_from_record(backup: Backup) -> bool:
         write_manifest(backup)
         if backup.status == Backup.STATUS_DELETING:
             mark_manifest_deleting(backup)
+        elif backup.status == Backup.STATUS_BROKEN:
+            mark_manifest_broken(backup)
     except (ValueError, backup_manifest.ManifestError, PreconditionError, KeyError) as e:
         logger.error("Could not rewrite the manifest of backup %s from its "
                     "record: %s", backup.uuid, e)
@@ -1572,7 +1664,8 @@ def _rewrite_manifest_from_record(backup: Backup) -> bool:
 
 def trigger_merge(keep_backup, old_backup):
     """Merge ``old_backup`` into ``keep_backup``, its successor in one volume's
-    chain: claim the chain, mark the old one merging, and queue the merge task.
+    chain: claim the chain, mark the old one merging, and queue the task that
+    drives the fold.
 
     Both must be completed, and the chain must not already be claimed by
     another merge, delete, or an active restore
@@ -1584,10 +1677,17 @@ def trigger_merge(keep_backup, old_backup):
     successor are the same operation up to this point, so both go through
     here rather than duplicating the claim.
 
-    Returns ``(True, None)`` once the merge task is queued, or
-    ``(False, reason)`` if nothing happened. The scheduled callers above
-    treat ``False`` as "try again next cycle" and ignore the reason;
-    ``delete_backup`` surfaces it to its own caller.
+    ``keep_backup`` is not threaded through to the task (D5/D8): the queued
+    ``FN_BACKUP_DELETE`` task is keyed only by ``old_backup``'s id, and its
+    runner re-resolves the live successor to merge into at execution time --
+    the one choke point that decides tip-delete vs. fold-into-successor, so a
+    second concurrent call for the same ``old_backup`` dedupes against this
+    one instead of queuing an independent second merge.
+
+    Returns ``(True, None)`` once the task is queued, or ``(False, reason)``
+    if nothing happened. The scheduled callers above treat ``False`` as "try
+    again next cycle" and ignore the reason; ``delete_backup`` surfaces it to
+    its own caller.
     """
     if old_backup.status != Backup.STATUS_COMPLETED:
         return False, f"backup {old_backup.uuid} is {old_backup.status}, not completed"
@@ -1599,9 +1699,6 @@ def trigger_merge(keep_backup, old_backup):
     if not ok:
         return False, reason
 
-    tasks_controller.add_backup_merge_task(
-        keep_backup.cluster_id,
-        keep_backup.node_id,
-        keep_backup.uuid,
-        old_backup.uuid)
+    tasks_controller.add_backup_delete_task(
+        old_backup.cluster_id, old_backup.node_id, old_backup.lvol_id, old_backup.uuid)
     return True, None

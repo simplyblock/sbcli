@@ -20,6 +20,7 @@ from simplyblock_core.controllers import (
     device_controller,
     tasks_events,
 )
+from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lock import DbLock, DbLockBusyError
@@ -1572,7 +1573,7 @@ def add_group_backup_delete_task(group_backup):
     one is already open for it.
 
     Like the commit task it does no data-plane RPC of its own (a member's merge
-    is its own FN_BACKUP_MERGE task), so it carries no node. Returns the task
+    is its own FN_BACKUP_DELETE task), so it carries no node. Returns the task
     id, or False when one is already open.
     """
     for task in db.get_job_tasks_by_function(group_backup.cluster_id,
@@ -1632,8 +1633,8 @@ def add_backup_restore_task(source_lvol_id, cluster_id, node_id, backup_id, lvol
             a terminal state. Unset, the restore reads through the device the
             node already has for the cluster's own bucket.
 
-    Returns the task uuid, or ``False`` if the source chain is being merged
-    or deleted.
+    Raises:
+        PreconditionError: the source chain is being merged or deleted.
     """
     task, reason = db.create_backup_restore_task_if_chain_clear(
         source_lvol_id, cluster_id, node_id,
@@ -1647,26 +1648,45 @@ def add_backup_restore_task(source_lvol_id, cluster_id, node_id, backup_id, lvol
         max_retry=constants.BACKUP_MAX_RETRIES,
     )
     if task is None:
-        logger.info(f"Cannot create restore task: {reason}")
-        return False
+        raise PreconditionError(reason)
     tasks_events.task_create(task)
     return task.uuid
 
 
-def add_backup_delete_task(cluster_id, node_id, backup_ids):
-    """Create the task that deletes one or more backups of the same volume
-    that nothing chains against, unless an open task already covers them.
+def add_backup_delete_task(cluster_id, node_id, lvol_id, backup_id):
+    """Create the task that deletes (or folds into its successor) one backup
+    that has been claimed for removal, unless an open task already covers it.
 
-    The targets are already DELETING by the time this is called --
-    ``backup_controller.delete_backup``/``delete_backups`` claim them via
-    ``DBController.claim_backup_chain_op`` first -- so, like
-    ``add_backup_merge_task``, this needs no transactional join of its own:
-    there is no gap between a check and this task existing left to close.
+    The target is already DELETING or MERGING by the time this is called --
+    ``backup_controller._start_backup_delete``/``trigger_merge`` claim it via
+    ``DBController.claim_backup_chain_op`` first -- so this needs no
+    transactional join of its own: there is no gap between a check and this
+    task existing left to close. One task per ``backup_id`` covers both the
+    direct-delete and fold-into-successor cases: the runner decides which, at
+    execution time, from the backup's current status and chain (see
+    ``tasks_runner_backup._run_backup_delete``).
+
+    ``lvol_id`` names only the volume this backup belongs to, so an open
+    ``FN_BACKUP_DELETE_CHAIN`` task already covering it can be found without a
+    lookup. Skipped -- not an error, just nothing further to queue -- when one
+    is open: that task retires every backup of the volume, this one included.
+
+    max_retry is ``BACKUP_MAX_RETRIES``, the longer ceiling restore and the
+    former standalone merge task used -- not ``BACKUP_TASK_MAX_RETRIES`` (the
+    chain-delete task's own, shorter one): a fold-into-successor that gives up
+    mid-merge cannot be cleanly retried from scratch, the same reasoning
+    ``BACKUP_TASK_MAX_RETRIES``'s docstring gives for merge. Since this task
+    covers that case too now (D5/D8), it keeps that ceiling for both branches.
     """
-    wanted = set(backup_ids)
+    for task in db.get_job_tasks_by_function(cluster_id, JobSchedule.FN_BACKUP_DELETE_CHAIN):
+        if (not task.canceled and task.status != JobSchedule.STATUS_DONE
+                and (task.function_params or {}).get("lvol_id") == lvol_id):
+            logger.info(f"Chain-delete task found for this backup's volume, "
+                        f"skip adding new task: {task.uuid}")
+            return False
     for task in db.get_job_tasks_by_function(cluster_id, JobSchedule.FN_BACKUP_DELETE):
         if (not task.canceled and task.status != JobSchedule.STATUS_DONE
-                and wanted <= set((task.function_params or {}).get("backup_ids") or [])):
+                and (task.function_params or {}).get("backup_id") == backup_id):
             logger.info(f"Task found, skip adding new task: {task.uuid}")
             return False
     return _add_task(
@@ -1674,24 +1694,33 @@ def add_backup_delete_task(cluster_id, node_id, backup_ids):
         cluster_id,
         node_id,
         "",
-        max_retry=constants.BACKUP_TASK_MAX_RETRIES,
+        max_retry=constants.BACKUP_MAX_RETRIES,
         function_params={
-            "backup_ids": list(backup_ids),
+            "backup_id": backup_id,
         },
     )
 
 
-def add_backup_merge_task(cluster_id, node_id, keep_backup_id, old_backup_id):
-    """Create the task that merges two S3 backups."""
+def add_backup_delete_chain_task(cluster_id, node_id, lvol_id):
+    """Create the task that deletes every backup of one volume -- a direct S3
+    delete, never a merge: nothing outside the volume's own chain survives to
+    chain against any of its members -- unless an open task already covers it.
+
+    Dedup: at most one open task per ``lvol_id``.
+    """
+    for task in db.get_job_tasks_by_function(cluster_id, JobSchedule.FN_BACKUP_DELETE_CHAIN):
+        if (not task.canceled and task.status != JobSchedule.STATUS_DONE
+                and (task.function_params or {}).get("lvol_id") == lvol_id):
+            logger.info(f"Task found, skip adding new task: {task.uuid}")
+            return False
     return _add_task(
-        JobSchedule.FN_BACKUP_MERGE,
+        JobSchedule.FN_BACKUP_DELETE_CHAIN,
         cluster_id,
         node_id,
         "",
-        max_retry=constants.BACKUP_MAX_RETRIES,
+        max_retry=constants.BACKUP_TASK_MAX_RETRIES,
         function_params={
-            "keep_backup_id": keep_backup_id,
-            "old_backup_id": old_backup_id,
+            "lvol_id": lvol_id,
         },
     )
 

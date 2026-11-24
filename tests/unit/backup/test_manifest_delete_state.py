@@ -131,6 +131,28 @@ def test_mark_active_is_a_noop_if_the_manifest_is_already_gone(bucket):
     assert bucket.objects == {}
 
 
+def test_mark_broken_rewrites_a_deleting_manifest(bucket):
+    _store(BackupManifestState.DELETING)
+
+    backup_manifest.mark_broken(CONFIG, BACKUP)
+
+    assert backup_manifest.read(CONFIG, BACKUP).state == BackupManifestState.BROKEN
+
+
+def test_mark_broken_is_a_noop_if_already_broken(bucket):
+    _store(BackupManifestState.BROKEN)
+
+    backup_manifest.mark_broken(CONFIG, BACKUP)
+
+    assert backup_manifest.read(CONFIG, BACKUP).state == BackupManifestState.BROKEN
+
+
+def test_mark_broken_is_a_noop_if_the_manifest_is_already_gone(bucket):
+    backup_manifest.mark_broken(CONFIG, BACKUP)
+
+    assert bucket.objects == {}
+
+
 def test_a_bucket_that_cannot_be_read_is_a_manifest_error(monkeypatch):
     b = _Bucket(fail=True)
     monkeypatch.setattr(backup_manifest, "s3_client", lambda config: b)

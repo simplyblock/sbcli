@@ -55,6 +55,14 @@ FD_MIN_HOSTS_PER_DOMAIN = 2
 #: expansion may start. An open instance of any of these means data or
 #: roles are moving somewhere in the cluster — re-wiring sec/tert on top
 #: of that races the mover.
+#:
+#: The backup family is read off JobSchedule.BACKUP_FUNCTIONS rather than
+#: named here one by one: a hand-listed subset drifts stale the moment a new
+#: backup task function is added (it already had, twice, before this was
+#: fixed -- FN_BACKUP_DELETE and the group-backup commit/delete tasks were
+#: all missing). An in-flight instance of any of them -- actively touching S3
+#: objects and manifests -- must be invisible to expansion no more than a
+#: migration or restart is.
 EXPANSION_BLOCKING_TASK_FNS = frozenset({
     JobSchedule.FN_DEV_MIG,
     JobSchedule.FN_NEW_DEV_MIG,
@@ -64,9 +72,7 @@ EXPANSION_BLOCKING_TASK_FNS = frozenset({
     JobSchedule.FN_BALANCING_AFTER_DEV_EXPANSION,
     JobSchedule.FN_LVOL_MIG,
     JobSchedule.FN_NODE_RESTART,
-    JobSchedule.FN_BACKUP,
-    JobSchedule.FN_BACKUP_RESTORE,
-    JobSchedule.FN_BACKUP_MERGE,
+    *JobSchedule.BACKUP_FUNCTIONS,
 })
 
 #: Task families that block only when they target an impacted donor node.

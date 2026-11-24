@@ -1597,6 +1597,31 @@ class DBController(metaclass=Singleton):
             return False, (f"backup(s) {', '.join(missing)} not found in volume "
                            f"{lvol_id}'s chain")
 
+        # A direct delete (new_status DELETING) must have no live dependent,
+        # checked here -- inside the same transaction that reads every
+        # sibling and claims the target(s) -- rather than by a caller's
+        # earlier, non-transactional read. Without this, a concurrent
+        # backup_lvol can pick a target as its new prev_backup_id between
+        # that earlier read and this claim committing, and the claim would
+        # go on to delete data the new backup's chain now depends on. A
+        # STATUS_MERGING claim is exempt: it WANTS a live dependent -- that
+        # dependent is the backup the target is being folded into. Mirrors
+        # chain.SuccessorIndex.live_successor_of's rule (a FAILED dependent
+        # was never restorable and protects nothing) without importing the
+        # controllers layer from here.
+        if new_status == Backup.STATUS_DELETING:
+            for target_id in target_ids:
+                dependent = next(
+                    (b for b in siblings.values()
+                     if b.prev_backup_id == target_id
+                     and b.uuid not in target_set
+                     and b.status != Backup.STATUS_FAILED),
+                    None)
+                if dependent is not None:
+                    return False, (
+                        f"backup {target_id} now has a live dependent "
+                        f"{dependent.uuid}; it cannot be deleted directly")
+
         index_list = Backup.active_indexes(tr)
         for target_id in target_ids:
             target = siblings[target_id]
@@ -1621,9 +1646,15 @@ class DBController(metaclass=Singleton):
         ``MERGING``/``DELETING`` under a status other than ``new_status`` --
         whether or not it is one of ``target_ids`` -- or if any backup in the
         chain (target or not) is named by an active restore's own chain
-        (``JobSchedule.restore_chain_s3_id``). On success, every id in
-        ``target_ids`` is flipped to ``new_status`` and ``(True, None)`` is
-        returned.
+        (``JobSchedule.restore_chain_s3_id``). For ``new_status=STATUS_DELETING``
+        (a direct delete, never a merge), also refuses if any target now has a
+        live dependent outside ``target_ids`` -- checked fresh, in this same
+        transaction, immediately before claiming, which is what closes the gap
+        a caller's own earlier, non-transactional dependents check leaves open
+        (a target claimed here, directly deleting its data, destroys a backup
+        a concurrently-created dependent needs). A FAILED dependent does not
+        count: it was never restorable. On success, every id in ``target_ids``
+        is flipped to ``new_status`` and ``(True, None)`` is returned.
 
         Idempotent by design, not exclusive between identical claims: a target
         already in ``new_status`` -- this call resuming one that claimed it

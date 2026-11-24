@@ -993,7 +993,7 @@ class TestEvaluatePolicy(unittest.TestCase):
         lvol = MagicMock()
         evaluate_policy(lvol)
 
-        mock_tasks.add_backup_merge_task.assert_not_called()
+        mock_tasks.add_backup_delete_task.assert_not_called()
 
     @patch("simplyblock_core.controllers.backup.controller.tasks_controller")
     @patch("simplyblock_core.controllers.backup.policy.db_controller")
@@ -1019,7 +1019,7 @@ class TestEvaluatePolicy(unittest.TestCase):
         lvol = MagicMock()
         evaluate_policy(lvol)
 
-        mock_tasks.add_backup_merge_task.assert_called_once()
+        mock_tasks.add_backup_delete_task.assert_called_once()
 
     @patch("simplyblock_core.controllers.backup.controller.tasks_controller")
     @patch("simplyblock_core.controllers.backup.policy.db_controller")
@@ -1036,7 +1036,7 @@ class TestEvaluatePolicy(unittest.TestCase):
         lvol = MagicMock()
         evaluate_policy(lvol)
 
-        mock_tasks.add_backup_merge_task.assert_not_called()
+        mock_tasks.add_backup_delete_task.assert_not_called()
 
     @patch("simplyblock_core.controllers.backup.controller.tasks_controller")
     @patch("simplyblock_core.controllers.backup.policy.db_controller")
@@ -1057,7 +1057,7 @@ class TestEvaluatePolicy(unittest.TestCase):
         lvol = MagicMock()
         evaluate_policy(lvol)
 
-        mock_tasks.add_backup_merge_task.assert_called_once()
+        mock_tasks.add_backup_delete_task.assert_called_once()
 
     @patch("simplyblock_core.controllers.backup.controller.tasks_controller")
     @patch("simplyblock_core.controllers.backup.policy.db_controller")
@@ -1079,7 +1079,7 @@ class TestEvaluatePolicy(unittest.TestCase):
         lvol = MagicMock()
         evaluate_policy(lvol)
 
-        mock_tasks.add_backup_merge_task.assert_called_once()
+        mock_tasks.add_backup_delete_task.assert_called_once()
 
     @patch("simplyblock_core.controllers.backup.controller.tasks_controller")
     @patch("simplyblock_core.controllers.backup.policy.db_controller")
@@ -1102,7 +1102,7 @@ class TestEvaluatePolicy(unittest.TestCase):
         lvol = MagicMock()
         evaluate_policy(lvol)
 
-        mock_tasks.add_backup_merge_task.assert_called_once()
+        mock_tasks.add_backup_delete_task.assert_called_once()
 
     @patch("simplyblock_core.controllers.backup.controller.tasks_controller")
     @patch("simplyblock_core.controllers.backup.policy.db_controller")
@@ -1116,7 +1116,7 @@ class TestEvaluatePolicy(unittest.TestCase):
         lvol = MagicMock()
         evaluate_policy(lvol)
 
-        mock_tasks.add_backup_merge_task.assert_not_called()
+        mock_tasks.add_backup_delete_task.assert_not_called()
 
 
 # ===========================================================================
@@ -1152,8 +1152,11 @@ class TestJobScheduleBackupConstants(unittest.TestCase):
     def test_fn_backup_restore(self):
         self.assertEqual(JobSchedule.FN_BACKUP_RESTORE, "s3_backup_restore")
 
-    def test_fn_backup_merge(self):
-        self.assertEqual(JobSchedule.FN_BACKUP_MERGE, "s3_backup_merge")
+    def test_fn_backup_delete(self):
+        self.assertEqual(JobSchedule.FN_BACKUP_DELETE, "s3_backup_delete")
+
+    def test_fn_backup_delete_chain(self):
+        self.assertEqual(JobSchedule.FN_BACKUP_DELETE_CHAIN, "s3_backup_delete_chain")
 
 
 # ===========================================================================
@@ -1339,7 +1342,7 @@ class TestTriggerMerge(unittest.TestCase):
 
         self.assertTrue(ok, reason)
         self.assertEqual(db.get_backup_by_id("old").status, Backup.STATUS_MERGING)
-        mock_tasks.add_backup_merge_task.assert_called_once()
+        mock_tasks.add_backup_delete_task.assert_called_once()
 
     @patch("simplyblock_core.controllers.backup.controller.tasks_controller")
     def test_skip_if_not_completed(self, mock_tasks):
@@ -1349,7 +1352,7 @@ class TestTriggerMerge(unittest.TestCase):
 
         trigger_merge(keep, old)
 
-        mock_tasks.add_backup_merge_task.assert_not_called()
+        mock_tasks.add_backup_delete_task.assert_not_called()
 
 
 if __name__ == '__main__':

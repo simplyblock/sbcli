@@ -202,9 +202,13 @@ class TestFailures:
             _restore()
 
     def test_task_creation_failure_is_a_precondition_error(self, db, add_lvol_ha, tasks):
-        tasks.add_backup_restore_task.return_value = False
+        # add_backup_restore_task itself raises PreconditionError now (D6 of
+        # docs/reviews/backup-deletion-review.md) -- restore_backup no longer
+        # wraps a False return in its own, generic message.
+        tasks.add_backup_restore_task.side_effect = PreconditionError(
+            "the source chain is being merged or deleted")
 
-        with pytest.raises(PreconditionError, match="Failed to create restore task"):
+        with pytest.raises(PreconditionError, match="source chain is being merged or deleted"):
             _restore()
 
 

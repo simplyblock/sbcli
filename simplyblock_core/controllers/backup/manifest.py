@@ -287,9 +287,15 @@ class BackupManifestState(StrEnum):
     ``import_group_backup_from_bucket`` already applies to a non-``COMMITTED``
     group manifest. A manifest written before deletes marked it reads as
     ``active``, which is what it was.
+
+    ``broken`` is the confirmed-gone state: the data plane (a merge) or the
+    control plane (a direct delete) has removed this backup's objects, but the
+    manifest/record cleanup that follows has not finished. Mirrors
+    ``Backup.STATUS_BROKEN`` and :class:`GroupManifestState`'s own ``broken``.
     """
     ACTIVE = "active"
     DELETING = "deleting"
+    BROKEN = "broken"
 
 
 class BackupManifest(BaseModel):
@@ -563,6 +569,23 @@ def mark_active(config: BackupConfig, backup_id: UUID) -> None:
     manifest = read_if_present(config, backup_id)
     if manifest is not None and manifest.state != BackupManifestState.ACTIVE:
         write(config, manifest.model_copy(update={"state": BackupManifestState.ACTIVE}))
+
+
+def mark_broken(config: BackupConfig, backup_id: UUID) -> None:
+    """Mark a backup's manifest BROKEN: its S3 data is confirmed gone, but the
+    manifest/record cleanup that follows has not finished. See
+    ``Backup.STATUS_BROKEN``.
+
+    A no-op if the manifest already says so (a cleanup resuming after a
+    restart or retry), or if it is already gone (cleanup got as far as
+    removing the manifest before being abandoned).
+
+    Raises:
+        ManifestError: the manifest could not be read or rewritten.
+    """
+    manifest = read_if_present(config, backup_id)
+    if manifest is not None and manifest.state != BackupManifestState.BROKEN:
+        write(config, manifest.model_copy(update={"state": BackupManifestState.BROKEN}))
 
 
 def _parse(body: bytes, key: str) -> BackupManifest:
