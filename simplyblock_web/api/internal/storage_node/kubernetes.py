@@ -5,6 +5,7 @@ import time
 import traceback
 from typing import Annotated
 
+import urllib3
 import yaml
 from flask_openapi3 import APIBlueprint
 from jinja2 import Environment, PackageLoader
@@ -13,6 +14,8 @@ from pydantic import BaseModel, Field
 from tenacity import (
     RetryError,
     Retrying,
+    before_sleep_log,
+    retry_if_exception_type,
     retry_if_result,
     stop_after_attempt,
     wait_fixed,
@@ -1177,7 +1180,13 @@ def spdk_process_start(body: SPDKParams):
     total_mem_mib = core_utils.convert_size(core_utils.parse_size(body.total_mem), 'MB') if body.total_mem else ""
 
     first_six_cluster_id = core_utils.first_six_chars(body.cluster_id)
-    if _is_pod_up(body.rpc_port, first_six_cluster_id) or _is_pod_present(body.rpc_port, first_six_cluster_id):
+    try:
+        spdk_pod_exists = _is_pod_present(body.rpc_port, first_six_cluster_id)
+    except SPDKPodLookupError as e:
+        # Whether an SPDK pod of this node already runs is not known, and
+        # starting a second one beside it is what the removal below prevents.
+        return utils.get_response(False, f"SPDK not started: {e}")
+    if spdk_pod_exists:
         logger.info("SPDK pod found, removing...")
         query = utils.RPCPortParams(rpc_port=body.rpc_port, cluster_id=body.cluster_id)
         spdk_process_kill(query)
@@ -1568,44 +1577,73 @@ def spdk_process_cleanup(query: utils.RPCPortParams):
     return spdk_process_kill(query)
 
 
-def _is_pod_up(rpc_port, cluster_id):
-    k8s_core_v1 = core_utils.get_k8s_core_client()
+class SPDKPodLookupError(Exception):
+    """The Kubernetes API could not be asked about this node's SPDK pod.
+
+    It says nothing about the pod. The control plane reads "SPDK is not
+    running" as a fact: it sets the node offline, restarts it, and lets a peer
+    take its leadership. An API server that does not answer is not that fact.
+    """
+
+
+#: What a Kubernetes API call fails with while the API server cannot be asked:
+#: an HTTP status (503 while it starts), or a refused, reset or timed-out
+#: connection.
+_K8S_API_ERRORS = (ApiException, urllib3.exceptions.HTTPError, OSError)
+
+#: One lookup is at most three calls of two seconds, half a second apart: under
+#: the ten seconds the monitor gives the agent, so the agent's answer is the
+#: one the monitor reads.
+_POD_LOOKUP_ATTEMPTS = 3
+_POD_LOOKUP_WAIT_SEC = 0.5
+_POD_LOOKUP_TIMEOUT_SEC = 2
+
+
+def _spdk_pods(rpc_port, cluster_id):
+    """The pods of this node's SPDK, as the Kubernetes API has them.
+
+    Raises SPDKPodLookupError when the API cannot be asked. This used to be
+    answered as "no such pod": while one K3s server restarted, the agents got
+    `API error: (503)`, reported their running SPDK as not running, and the
+    monitor set the storage nodes offline, which suspended the cluster and
+    restarted all three of them (2026-11-16)."""
     pod_name = f"snode-spdk-pod-{rpc_port}-{cluster_id}"
-    container_name = "spdk-container"
     try:
-        resp = k8s_core_v1.list_namespaced_pod(node_utils_k8s.get_namespace())
-        for pod in resp.items:
-            if pod.metadata.name.startswith(pod_name):
-                if pod.status.phase == "Running":
-                    cs = next((c for c in pod.status.container_statuses if c.name == container_name),None)
-                    if cs is None:
-                        logger.error(f"Container '{container_name}' not found in pod '{pod_name}'")
-                        return False
-                    if cs.state.running:
-                        return True
-    except ApiException as e:
-        logger.error(f"API error: {e}")
-        return False
-    except Exception as e:
-        logger.error(f"Unexpected error: {e}")
-        return False
+        for attempt in Retrying(
+                retry=retry_if_exception_type(_K8S_API_ERRORS),
+                stop=stop_after_attempt(_POD_LOOKUP_ATTEMPTS),
+                wait=wait_fixed(_POD_LOOKUP_WAIT_SEC),
+                before_sleep=before_sleep_log(logger, logging.WARNING),
+                reraise=True):
+            with attempt:
+                resp = core_utils.get_k8s_core_client().list_namespaced_pod(
+                    node_utils_k8s.get_namespace(), _request_timeout=_POD_LOOKUP_TIMEOUT_SEC)
+    except _K8S_API_ERRORS as e:
+        raise SPDKPodLookupError(
+            f"the Kubernetes API did not answer for pod {pod_name}: {e}") from e
+    return [pod for pod in resp.items if pod.metadata.name.startswith(pod_name)]
+
+
+def _is_pod_up(rpc_port, cluster_id):
+    """Whether this node's SPDK container runs. Raises SPDKPodLookupError when
+    the Kubernetes API cannot be asked."""
+    container_name = "spdk-container"
+    for pod in _spdk_pods(rpc_port, cluster_id):
+        if pod.status.phase != "Running":
+            continue
+        cs = next((c for c in pod.status.container_statuses or [] if c.name == container_name), None)
+        if cs is None:
+            logger.error(f"Container '{container_name}' not found in pod '{pod.metadata.name}'")
+            return False
+        if cs.state.running:
+            return True
     return False
 
+
 def _is_pod_present(rpc_port, cluster_id):
-    k8s_core_v1 = core_utils.get_k8s_core_client()
-    pod_name = f"snode-spdk-pod-{rpc_port}-{cluster_id}"
-    try:
-        resp = k8s_core_v1.list_namespaced_pod(node_utils_k8s.get_namespace())
-        for pod in resp.items:
-            if pod.metadata.name.startswith(pod_name):
-                return True
-    except ApiException as e:
-        logger.error(f"API error while checking pod presence: {e}")
-        return False
-    except Exception as e:
-        logger.error(f"Unexpected error while checking pod presence: {e}")
-        return False
-    return False
+    """Whether a pod of this node's SPDK exists, running or not. Raises
+    SPDKPodLookupError when the Kubernetes API cannot be asked."""
+    return bool(_spdk_pods(rpc_port, cluster_id))
 
 
 @api.get('/spdk_process_is_up', responses={
@@ -1618,7 +1656,14 @@ def spdk_process_is_up(query: utils.RPCPortParams):
         return utils.get_response(False, "param required: cluster_id")
 
     first_six_cluster_id = core_utils.first_six_chars(query.cluster_id)
-    if _is_pod_up(query.rpc_port, first_six_cluster_id):
+    try:
+        is_up = _is_pod_up(query.rpc_port, first_six_cluster_id)
+    except SPDKPodLookupError as e:
+        # Not an answer: the caller gets a failed request, which every caller
+        # already reads as "unknown", the way it reads an agent it cannot reach.
+        logger.error(f"SPDK liveness is unknown: {e}")
+        return utils.get_response(False, f"SPDK liveness is unknown: {e}", http_code=503)
+    if is_up:
         return utils.get_response(True)
     else:
         return utils.get_response(False, "SPDK container is not running")
