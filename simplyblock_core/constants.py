@@ -129,6 +129,29 @@ LBLK_PCI_ALLOWED_PLACEHOLDER = "0000:00:00.0"
 # Queue-depth sampling period enabled on every AIO base bdev so
 # bdev_get_iostat reports queue_depth (feeds the hung-IO watchdog).
 AIO_QD_SAMPLING_PERIOD_US = 100000  # 100 ms
+# Block size of the AIO base bdev of a NEW lblk device. 512e devices (512
+# logical / 4096 physical, e.g. EBS and most array LUNs) would otherwise get
+# 512-byte bdevs, which costs read-modify-write cycles in the device. The
+# logical block size is used only when 4096 is not possible (see
+# utils.choose_aio_block_size). An existing device always keeps the block
+# size it was formatted with (NVMeDevice.aio_block_size): alceml's on-disk
+# layout depends on it.
+AIO_DEFAULT_BLOCK_SIZE = 4096
+# I/O engine of an lblk device's base bdev (NVMeDevice.lblk_io_engine).
+# SPDK's bdev_aio submits every I/O on a block device with RWF_NOWAIT so
+# io_submit never blocks the reactor. device-mapper honours RWF_NOWAIT only
+# when every target in the table does; dm-multipath does not, so every AIO
+# submit to a multipath map fails with EOPNOTSUPP. Device-mapper devices are
+# therefore served by SPDK's io_uring bdev (bdev_uring_create), everything
+# else (whole disks, sd/nvme partitions, md arrays) by bdev_aio. The bdev
+# NAME (aio_<serial>) and NVMeDevice.bdev_type "aio" are the same for both.
+LBLK_IO_ENGINE_AIO = "aio"
+LBLK_IO_ENGINE_URING = "uring"
+LBLK_IO_ENGINES = (LBLK_IO_ENGINE_AIO, LBLK_IO_ENGINE_URING)
+# lsblk TYPE values of device-mapper nodes (multipath map, LVM volume,
+# dm-crypt, other dm). A partition mapped from a multipath map (kpartx) has
+# TYPE "part" but a dm-* kernel name.
+LBLK_DM_TYPES = ("mpath", "lvm", "crypt", "dm")
 # Hung-IO watchdog: consecutive device_monitor polls (DEV_MONITOR_INTERVAL_SEC
 # apart) with queue_depth > 0 and zero completion progress before the device
 # is declared stalled (3 x 10s = 30s — deliberately above kernel SCSI/NVMe
