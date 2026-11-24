@@ -1706,13 +1706,34 @@ def add_backup_delete_chain_task(cluster_id, node_id, lvol_id):
     delete, never a merge: nothing outside the volume's own chain survives to
     chain against any of its members -- unless an open task already covers it.
 
-    Dedup: at most one open task per ``lvol_id``.
+    Dedup: at most one open task per ``lvol_id``. This task is about to own
+    every backup of the volume, so it also supersedes any open single-backup
+    ``FN_BACKUP_DELETE`` task on one of its members -- cancels it rather than
+    leaving both to independently delete/retire the same backup (closes F3 of
+    docs/reviews/backup-deletion-review-round2.md). ``add_backup_delete_task``
+    already covers the opposite direction: it yields when a covering
+    ``FN_BACKUP_DELETE_CHAIN`` already exists.
     """
     for task in db.get_job_tasks_by_function(cluster_id, JobSchedule.FN_BACKUP_DELETE_CHAIN):
         if (not task.canceled and task.status != JobSchedule.STATUS_DONE
                 and (task.function_params or {}).get("lvol_id") == lvol_id):
             logger.info(f"Task found, skip adding new task: {task.uuid}")
             return False
+
+    def _guard(fresh):
+        if fresh.status == JobSchedule.STATUS_DONE:
+            return False
+        return _flag_canceled(fresh)
+
+    member_ids = {b.uuid for b in db.get_backups_by_lvol_id(lvol_id)}
+    for task in db.get_job_tasks_by_function(cluster_id, JobSchedule.FN_BACKUP_DELETE):
+        if (not task.canceled and task.status != JobSchedule.STATUS_DONE
+                and (task.function_params or {}).get("backup_id") in member_ids
+                and _cancel_atomically(task, _guard) is not None):
+            logger.info(
+                f"Canceled single-backup delete task {task.uuid}, "
+                f"superseded by chain delete of volume {lvol_id}")
+
     return _add_task(
         JobSchedule.FN_BACKUP_DELETE_CHAIN,
         cluster_id,

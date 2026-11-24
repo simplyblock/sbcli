@@ -1040,37 +1040,52 @@ def _revert_backup_claim(backup_id: str) -> None:
 
 
 def _claim_for_delete(lvol_id: str, backups: list[Backup]) -> tuple[bool, str | None]:
-    """Claim every backup in ``backups`` -- all COMPLETED, all belonging to
-    ``lvol_id``'s chain -- for deletion and mark their manifests DELETING.
+    """Claim every backup in ``backups`` -- all belonging to ``lvol_id``'s
+    chain -- for deletion.
 
-    All-or-nothing: the chain claim (``DBController.claim_backup_chain_op``)
-    is one transaction already, and if marking any manifest afterwards fails,
-    every claim just taken is reverted back to COMPLETED before this returns
-    -- so a partial failure here never leaves a backup DELETING with an
-    ACTIVE manifest, or a manifest DELETING with no FDB record to match it
-    (the manifest write only happens after the claim, never before).
+    ``backups`` may mix freshly COMPLETED targets with ones already
+    DELETING/BROKEN (a resume of an earlier call that claimed them but did
+    not finish): ``DBController.claim_backup_chain_op`` is idempotent on a
+    target already in the claimed status and exempts it from its own
+    blocking-sibling check, which is what lets a resume and a fresh claim of
+    the rest of the chain happen in the one call. Only the COMPLETED ones
+    have their manifest marked DELETING here -- a resumed DELETING/BROKEN
+    target's manifest is already in the right state (or, for BROKEN, already
+    past it) and marking it again would be a regression, not a no-op, for
+    the BROKEN case.
 
-    Returns ``(True, None)`` once every target is claimed and marked, or
-    ``(False, reason)``.
+    All-or-nothing for the COMPLETED ones: the chain claim is one
+    transaction already, and if marking any of their manifests afterwards
+    fails, every one of their claims just taken is reverted back to
+    COMPLETED before this returns -- so a partial failure here never leaves
+    a freshly-claimed backup DELETING with an ACTIVE manifest, or a manifest
+    DELETING with no FDB record to match it (the manifest write only happens
+    after the claim, never before). A target that was already resuming
+    before this call is untouched by the revert: it was not this call's to
+    undo.
+
+    Returns ``(True, None)`` once every target is claimed and every
+    COMPLETED one marked, or ``(False, reason)``.
     """
     if not backups:
         return True, None
     ids = [b.uuid for b in backups]
+    freshly_completed = [b for b in backups if b.status == Backup.STATUS_COMPLETED]
 
     ok, reason = db_controller.claim_backup_chain_op(lvol_id, ids, Backup.STATUS_DELETING)
     if not ok:
         return False, reason
 
     try:
-        for b in backups:
+        for b in freshly_completed:
             mark_manifest_deleting(b)
     except (backup_manifest.ManifestError, PreconditionError, ValueError, KeyError) as e:
         # KeyError: _config_for's own cluster lookup, inside
         # mark_manifest_deleting. Everything here ran after the claim already
-        # committed, so every target is reverted -- there is nothing partial
-        # to distinguish.
-        for backup_id in ids:
-            _revert_backup_claim(backup_id)
+        # committed, so every target just claimed by this call is reverted --
+        # there is nothing partial to distinguish among them.
+        for b in freshly_completed:
+            _revert_backup_claim(b.uuid)
         return False, str(e)
 
     return True, None
@@ -1096,10 +1111,11 @@ def _start_backup_delete(backup: Backup):
 
 
 def _start_backup_delete_chain(lvol_id: str, backups: list[Backup]):
-    """Claim every backup in ``backups`` -- all COMPLETED, all of
-    ``lvol_id``'s chain -- for deletion, mark their manifests DELETING, and
-    queue the single task that removes every one of their S3 objects
-    (``FN_BACKUP_DELETE_CHAIN``, keyed by ``lvol_id`` alone).
+    """Claim every backup in ``backups`` -- COMPLETED ones freshly, any
+    already DELETING/BROKEN idempotently (a resume) -- for deletion, mark
+    the manifest of each freshly-claimed one DELETING, and queue the single
+    task that removes every one of their S3 objects (``FN_BACKUP_DELETE_CHAIN``,
+    keyed by ``lvol_id`` alone).
 
     Returns ``(True, None)`` once the task is queued (or an equivalent one
     already was -- ``add_backup_delete_chain_task`` dedupes), or
@@ -1159,20 +1175,21 @@ def delete_backups(lvol_id):
                            f"{b.group_backup_id}, which still exists; delete the "
                            "group backup instead")
 
-    completed = [b for b in backups if b.status == Backup.STATUS_COMPLETED]
-    resuming = [b for b in backups
-               if b.status in (Backup.STATUS_DELETING, Backup.STATUS_BROKEN)]
-
-    if resuming:
-        # A prior call's chain claim already covers these (and, by
-        # claim_backup_chain_op's blocking rule, anything still COMPLETED
-        # could not be newly claimed alongside them anyway) -- re-queue the
-        # one task that retires the whole chain rather than re-claiming.
-        first = resuming[0]
-        tasks_controller.add_backup_delete_chain_task(
-            first.cluster_id, first.node_id, lvol_id)
-    elif completed:
-        ok, reason = _start_backup_delete_chain(lvol_id, completed)
+    # Every backup this call must see DELETING by the time it returns:
+    # freshly COMPLETED ones, plus any already DELETING/BROKEN from an
+    # earlier call that claimed them but did not finish queuing its task
+    # (the process died in between -- see F2 of
+    # docs/reviews/backup-deletion-review.md). Claiming them together in
+    # one call -- rather than skipping the fresh ones whenever a resume is
+    # also present -- is what closes F1 of
+    # docs/reviews/backup-deletion-review-round2.md: claim_backup_chain_op
+    # already tolerates a resumed target sitting in the chain, it was just
+    # never given the rest of the chain to claim alongside it.
+    targets = [b for b in backups
+              if b.status in (Backup.STATUS_COMPLETED, Backup.STATUS_DELETING,
+                              Backup.STATUS_BROKEN)]
+    if targets:
+        ok, reason = _start_backup_delete_chain(lvol_id, targets)
         if not ok:
             return False, f"Cannot delete backups of volume {lvol_id}: {reason}"
 

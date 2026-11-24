@@ -475,6 +475,24 @@ def _run_merge_fold(task, old_backup: Backup) -> None:
     raise TaskDefer("Merge in progress")
 
 
+def _set_backup_status(backup: Backup, status: str) -> Backup | None:
+    """Compare-and-set a claimed backup's status, returning the freshly
+    committed record.
+
+    Use this instead of ``backup.status = x; backup.write_to_db()`` anywhere
+    a backup already claimed by a delete/delete-chain task has its status
+    advanced or reverted: a task superseded and canceled mid-run (see
+    ``tasks_controller.add_backup_delete_chain_task``) can still be writing
+    the same record when the superseding task's own revert/retire runs --
+    ``atomic_update`` is the one primitive that conflicts on that instead of
+    silently clobbering it (closes F4 of
+    docs/reviews/backup-deletion-review-round2.md; see
+    simplyblock_core/AGENTS.md on ``atomic_update`` as the only safe
+    compare-and-set for state touched by more than one task/process).
+    """
+    return db.atomic_update(backup, lambda b: setattr(b, "status", status))
+
+
 def _run_backup_delete(task):
     """Delete, or fold into its successor, the backup named by
     ``function_params["backup_id"]`` -- whichever the claim that queued this
@@ -533,8 +551,11 @@ def _run_backup_delete(task):
         except (ManifestError, PreconditionError) as e:
             raise TaskRetry(f"S3 data delete failed: {e}")
 
-        backup.status = Backup.STATUS_BROKEN
-        backup.write_to_db()
+        fresh = _set_backup_status(backup, Backup.STATUS_BROKEN)
+        if fresh is None:
+            set_result(task, "Nothing left to delete")
+            return
+        backup = fresh
 
     _retire_backup(backup)
     set_result(task, "Backup deleted")
@@ -560,17 +581,20 @@ def _run_backup_delete_chain(task):
         set_result(task, "Nothing left to delete")
         return
 
+    broken = []
     for backup in targets:
         if backup.status != Backup.STATUS_DELETING:
+            broken.append(backup)
             continue
         try:
             backup_controller._delete_backup_data(backup)
         except (ManifestError, PreconditionError) as e:
             raise TaskRetry(f"S3 data delete failed: {e}")
-        backup.status = Backup.STATUS_BROKEN
-        backup.write_to_db()
+        fresh = _set_backup_status(backup, Backup.STATUS_BROKEN)
+        if fresh is not None:
+            broken.append(fresh)
 
-    for backup in targets:
+    for backup in broken:
         _retire_backup(backup)
 
     set_result(task, "Backups deleted")
@@ -734,8 +758,7 @@ def finalize_resource(task):
 
         if backup.status == Backup.STATUS_MERGING:
             if task.function_params.get("merge_started", False):
-                backup.status = Backup.STATUS_BROKEN
-                backup.write_to_db()
+                _set_backup_status(backup, Backup.STATUS_BROKEN)
                 try:
                     backup_controller.mark_manifest_broken(backup)
                 except (ManifestError, PreconditionError, KeyError) as e:
@@ -744,8 +767,7 @@ def finalize_resource(task):
                         f"unfinished merge, but its manifest could not be "
                         f"marked broken: {e}")
             else:
-                backup.status = Backup.STATUS_COMPLETED
-                backup.write_to_db()
+                _set_backup_status(backup, Backup.STATUS_COMPLETED)
             return
 
         if backup.status != Backup.STATUS_DELETING:
@@ -757,8 +779,7 @@ def finalize_resource(task):
                 f"Backup {backup.uuid} reverted to COMPLETED, but its "
                 f"manifest could not be marked active and still says "
                 f"deleting: {e}")
-        backup.status = Backup.STATUS_COMPLETED
-        backup.write_to_db()
+        _set_backup_status(backup, Backup.STATUS_COMPLETED)
 
     elif task.function_name == JobSchedule.FN_BACKUP_DELETE_CHAIN:
         # Same DELETING -> revert / BROKEN -> leave shape as FN_BACKUP_DELETE,
@@ -778,8 +799,7 @@ def finalize_resource(task):
                     f"Backup {backup.uuid} reverted to COMPLETED, but its "
                     f"manifest could not be marked active and still says "
                     f"deleting: {e}")
-            backup.status = Backup.STATUS_COMPLETED
-            backup.write_to_db()
+            _set_backup_status(backup, Backup.STATUS_COMPLETED)
 
     elif task.function_name == JobSchedule.FN_GROUP_BACKUP_DELETE:
         group_backup_id = task.function_params.get("group_backup_id")

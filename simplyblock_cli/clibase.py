@@ -1934,9 +1934,11 @@ class CLIWrapperBase:
         try:
             backup_controller.delete_backup(args.backup_id)
         except KeyError:
-            return f"Delete failed: backup {args.backup_id} not found"
+            print(f"Delete failed: backup {args.backup_id} not found")
+            return False
         except PreconditionError as e:
-            return f"Delete failed: {e}"
+            print(f"Delete failed: {e}")
+            return False
         return f"Backup {args.backup_id} is being deleted"
 
     def backup__restore(self, sub_command, args):

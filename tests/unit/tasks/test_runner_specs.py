@@ -231,6 +231,16 @@ def backup_runner(monkeypatch):
     monkeypatch.setattr(runner, "backup_controller", MagicMock())
     monkeypatch.setattr(Backup, "write_to_db", MagicMock())
     runner.db.get_cluster_by_id.return_value.backup_timeout_seconds = 14400
+
+    def _atomic_update(obj, mutate):
+        # _set_backup_status commits through atomic_update rather than
+        # mutating the object it is given directly -- without this, its
+        # mutate_fn is never invoked and every assertion on a backup's status
+        # after a handler/finalize_resource call would pass vacuously.
+        mutate(obj)
+        return obj
+    runner.db.atomic_update.side_effect = _atomic_update
+
     return runner
 
 
