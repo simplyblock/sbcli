@@ -49,7 +49,7 @@ class StorageNode(BaseNodeObject):
     #: A restart's full writes from a copy loaded before an unfence restored
     #: fenced_node_ids, and the reintegrated node stayed fenced for good
     #: (2026-11-20 FTT2 bed, net cut + SPDK kill of the owner).
-    LUN_OWNERSHIP_FIELDS = ("serving_node_id", "fenced_node_ids", "array_attached_node_ids")
+    LUN_OWNERSHIP_FIELDS = ("serving_node_id", "served_since", "fenced_node_ids", "array_attached_node_ids")
 
     def needs_full_write_merge(self) -> bool:
         """Only nodes with multi-attach devices pay the stored-record read

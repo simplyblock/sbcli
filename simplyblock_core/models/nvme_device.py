@@ -148,6 +148,9 @@ class NVMeDevice(BaseModel):
     #: Node whose alceml currently serves the LUN; "" means the owner
     #: (``node_id``).
     serving_node_id: str = ""
+    #: Epoch ms the serving node last took the LUN over (lun_takeover);
+    #: 0 before any takeover.
+    served_since: int = 0
     #: node_id -> {"path": by-id path of the LUN on that node, "bdev": the
     #: base bdev name there}. The owner's entry, plus the LVS secondary and
     #: tertiary once an array-managed LUN is attached to them (bdev "").

@@ -1382,6 +1382,10 @@ MULTI_ATTACH_WARM_STANDBY_INTERVAL_SEC = 30
 # until the host's keep-alive notices, 1-2 intervals: 8 s took 10-14 s on the
 # bed. 3 s bounds that to 3-6 s.
 MULTI_ATTACH_CLIENT_KEEP_ALIVE_TO = 3
+# A multi-attach device's I/O error event raised this long after a takeover
+# of its LUN is taken as the old path's failure, not the device's
+# (main_distr_event_collector): the takeover switches every node's path.
+MULTI_ATTACH_TAKEOVER_PATH_ERROR_GRACE_MS = 15000
 # Fast loss detection of a node serving LUNs (services/lun_watchdog). With
 # 1+0 every volume waits on a lost node's LUN until its takeover, so the
 # takeover starts from this probe, not from the node's status: the OFFLINE

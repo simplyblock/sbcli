@@ -291,6 +291,19 @@ def process_device_event(event, logger):
             event.status = 'skipped:multi_attach_remote_path'
             return
 
+        if multi_attach.in_takeover_window(device_obj, getattr(event, "date", 0)):
+            # Served by this node now, but only since a takeover moments ago:
+            # the error is from the I/O that was still on the old serving
+            # node's path (2026-11-24 FTT1 bed: the LUN went back to its home
+            # node; the home node's old-path read error then set the device
+            # unavailable cluster-wide, EIO on 3 of 4 volumes).
+            logger.info(f"Multi-attach device {device_obj.get_id()}: {event.message} from "
+                        f"{event_node_obj.get_id()} raised within "
+                        f"{constants.MULTI_ATTACH_TAKEOVER_PATH_ERROR_GRACE_MS} ms of its takeover; "
+                        f"left to the takeover")
+            event.status = 'skipped:multi_attach_takeover_path'
+            return
+
         if device_obj.is_connection_in_progress_to_node(event_node_obj.get_id()):
             logger.warning("Connection attempt was found from node to device, sleeping 5 seconds")
             time.sleep(5)

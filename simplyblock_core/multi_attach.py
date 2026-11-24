@@ -265,6 +265,17 @@ def served_elsewhere(device, node_id) -> bool:
     return is_multi_attach(device) and device.serving_node() != node_id
 
 
+def in_takeover_window(device, event_ms) -> bool:
+    """An I/O error event of ``device`` raised up to
+    MULTI_ATTACH_TAKEOVER_PATH_ERROR_GRACE_MS after its last takeover: the
+    nodes' I/O was still failing on the old serving node's path while the
+    takeover recorded and switched the new one."""
+    since = int(getattr(device, "served_since", 0) or 0)
+    if not (is_multi_attach(device) and since and event_ms):
+        return False
+    return int(event_ms) <= since + constants.MULTI_ATTACH_TAKEOVER_PATH_ERROR_GRACE_MS
+
+
 def fenced_from(device, node_id) -> bool:
     """A takeover fenced ``node_id`` from the LUN of ``device`` at the array
     and nothing unfenced it since."""

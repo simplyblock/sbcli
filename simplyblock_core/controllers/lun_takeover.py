@@ -938,6 +938,7 @@ def _record_serving(db, owner, device_id, failed_node_id, standby, path, export)
         if d is None or d.serving_node() not in (failed_node_id, standby_id):
             return False
         d.serving_node_id = "" if standby_id == d.node_id else standby_id
+        d.served_since = int(time.time() * 1000)
         paths = dict(d.node_paths or {})
         paths[standby_id] = {"path": path, "bdev": export["base"]}
         d.node_paths = paths
