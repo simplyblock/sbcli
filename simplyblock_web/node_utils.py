@@ -580,6 +580,7 @@ def scan_for_new_luns() -> dict:
     which no connection made earlier reaches. Returns ``{"scanned": [...]}``,
     with ``connect-all <entry>`` for each discovery entry run."""
     import glob as _glob
+    remove_dead_nvme_controllers()
     scanned: list[str] = _connect_nvme_discovery_entries()
     for path in sorted(_glob.glob("/sys/class/scsi_host/host*/scan")):
         try:
@@ -633,6 +634,46 @@ def _controller_dead(disk_name: str) -> bool:
     return bool(disk_name) and _read_sysfs(f"/sys/block/{disk_name}/device/state") == "dead"
 
 
+def remove_dead_nvme_controllers() -> list[str]:
+    """Remove from the PCI bus every NVMe controller the kernel gave up on
+    (state ``dead``), then make the live controllers rescan their namespaces.
+
+    A volume detached while the host booted leaves such a controller, and its
+    namespace head keeps the volume's block device name. When the same volume
+    is attached again, the new controller cannot register the namespace
+    ("cannot create duplicate filename /class/block/nvmeXnY") and the LUN
+    stays invisible (2026-11-24 warm FTT2 bed: a node reintegrated as standby
+    could not see the LUN; at the next dual outage it was the only standby
+    left and the takeover found none). Only PCIe controllers are removed;
+    fabric controllers are left to nvme-cli. Returns the removed PCI
+    addresses; failures are logged."""
+    import glob as _glob
+    removed: list[str] = []
+    for ctrl in sorted(_glob.glob("/sys/class/nvme/nvme*")):
+        if _read_sysfs(f"{ctrl}/state") != "dead":
+            continue
+        if _read_sysfs(f"{ctrl}/transport") not in ("pcie", ""):
+            continue
+        pci_dev = os.path.realpath(f"{ctrl}/device")
+        addr = os.path.basename(pci_dev)
+        if not os.path.exists(f"{pci_dev}/remove"):
+            continue
+        try:
+            _write_sysfs(f"{pci_dev}/remove", "1")
+            removed.append(addr)
+            logger.warning("Removed dead NVMe controller %s (PCI %s)", os.path.basename(ctrl), addr)
+        except OSError as e:
+            logger.warning("Dead NVMe controller %s (PCI %s) not removed: %s",
+                           os.path.basename(ctrl), addr, e)
+    if removed:
+        for path in sorted(_glob.glob("/sys/class/nvme/nvme*/rescan_controller")):
+            try:
+                _write_sysfs(path, "1")
+            except OSError as e:
+                logger.warning("NVMe rescan %s failed: %s", path, e)
+    return removed
+
+
 def find_lun_devices(wwn: str) -> list[dict]:
     """The whole disks of this host that carry LUN ``wwn`` (multi-attach array
     LUN mode): every lsblk disk whose WWN, or serial (the inventory falls back
@@ -642,12 +683,16 @@ def find_lun_devices(wwn: str) -> list[dict]:
     ``by_id_paths``, ``size`` (bytes), ``ro`` and ``has_alceml_signature`` --
     True when block 0 carries the alceml storage signature, False when it was
     read and does not, None when it could not be read (a fenced or failed
-    path). Read-only: nothing is written to the device. Several matches mean
+    path). Nothing is written to the device; dead NVMe controllers are
+    removed first (remove_dead_nvme_controllers). Several matches mean
     several host paths to the LUN; the caller chooses."""
     want = _normalize_wwn(wwn)
     if not want:
         return []
     found = []
+    if remove_dead_nvme_controllers():
+        import time as _time
+        _time.sleep(1)  # the rescanned controllers register their namespaces
     devices = get_block_devices_info()
     matched = [d for d in devices
                if d.get("type") in ("disk", "mpath")

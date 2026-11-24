@@ -583,6 +583,34 @@ class TestHelpers(unittest.TestCase):
             states["/sys/block/nvme3n1/device/state"] = "live"
             self.assertEqual(len(node_utils.find_lun_devices("vol08dcbe488933595ca")), 1)
 
+    def test_dead_nvme_controllers_are_removed_and_the_rest_rescanned(self):
+        # 2026-11-24 warm FTT2 bed: the dead controller's namespace head kept
+        # the volume's name; the reattached volume's namespace was refused.
+        import glob
+        from simplyblock_web import node_utils
+        sysfs = {"/sys/class/nvme/nvme3/state": "dead", "/sys/class/nvme/nvme3/transport": "pcie",
+                 "/sys/class/nvme/nvme2/state": "live", "/sys/class/nvme/nvme2/transport": "pcie",
+                 "/sys/class/nvme/nvme5/state": "dead", "/sys/class/nvme/nvme5/transport": "tcp"}
+        written = []
+
+        def fake_glob(pattern):
+            if pattern == "/sys/class/nvme/nvme*":
+                return ["/sys/class/nvme/nvme2", "/sys/class/nvme/nvme3", "/sys/class/nvme/nvme5"]
+            if pattern == "/sys/class/nvme/nvme*/rescan_controller":
+                return ["/sys/class/nvme/nvme2/rescan_controller"]
+            return []
+        with patch.object(glob, "glob", side_effect=fake_glob), \
+                patch.object(node_utils, "_read_sysfs", side_effect=lambda p: sysfs.get(p, "")), \
+                patch.object(node_utils.os.path, "realpath",
+                             side_effect=lambda p: "/sys/devices/pci0000:00/0000:00:1f.0"
+                             if p.startswith("/sys/class/nvme/nvme3") else "/x"), \
+                patch.object(node_utils.os.path, "exists", return_value=True), \
+                patch.object(node_utils, "_write_sysfs", side_effect=lambda p, v: written.append((p, v))):
+            removed = node_utils.remove_dead_nvme_controllers()
+        self.assertEqual(removed, ["0000:00:1f.0"])
+        self.assertEqual(written, [("/sys/devices/pci0000:00/0000:00:1f.0/remove", "1"),
+                                   ("/sys/class/nvme/nvme2/rescan_controller", "1")])
+
 
 # ------------------------------------------------------------------ monitor
 
@@ -886,6 +914,12 @@ class TestReintegrateFencedNode(_TakeoverCase):
     once it is ONLINE, holds no stack of the LUN, and its host shows no disk of
     the LUN; otherwise it stays fenced."""
 
+    def setUp(self):
+        super().setUp()
+        p = patch.object(lun_takeover, "REINTEGRATE_VISIBLE_WAIT_SEC", 0)
+        p.start()
+        self.addCleanup(p.stop)
+
     def _taken_over(self):
         db, _ = _bed()
         self.assertEqual(self.run_takeover(db), lun_takeover.TAKEN_OVER)
@@ -896,10 +930,20 @@ class TestReintegrateFencedNode(_TakeoverCase):
 
     def test_unfenced_when_host_shows_no_lun(self):
         db, a = self._taken_over()
+        # The host shows the LUN once the array presented it again.
+        a.agent.lun_info.side_effect = [([], None), ([_lun_entry()], None)]
         self.assertEqual(lun_takeover.reintegrate_fenced_node(a), [DEV_ID])
         self.assertEqual(FakeArrayPlugin.calls[-1], ("unfence", WWN, "host-node-a"))
         self.assertEqual(self.dev(db).fenced_node_ids, [])
         self.assertEqual(self.dev(db).serving_node(), "node-b")
+        self.assertFalse(any("does not show the LUN" in e["message"] for e in self.events))
+
+    def test_lun_not_visible_after_unfence_raises_an_event(self):
+        # 2026-11-24 warm FTT2 bed: the kernel refused the reattached
+        # namespace; the node counted as standby but could not take over.
+        db, a = self._taken_over()
+        self.assertEqual(lun_takeover.reintegrate_fenced_node(a), [DEV_ID])
+        self.assertTrue(any("does not show the LUN" in e["message"] for e in self.events))
 
     def test_stays_fenced_while_host_shows_lun(self):
         db, a = self._taken_over()

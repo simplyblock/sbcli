@@ -1212,7 +1212,40 @@ def reintegrate_fenced_node(node) -> list:
         if unfence_node(dev.get_id(), node_id):
             logger.info("LUN reintegrate: %s is a standby of LUN %s again", node_id, dev.lun_wwn)
             done.append(dev.get_id())
+            _check_lun_visible(node, dev)
     return done
+
+
+REINTEGRATE_VISIBLE_WAIT_SEC = 20
+
+
+def _check_lun_visible(node, dev, wait_sec=None):
+    """After the array presented the LUN to a reintegrated node again: wait
+    until its host shows the LUN (the agent's lun_info, which also clears
+    dead NVMe controllers that would block it). A standby whose host cannot
+    see the LUN is no standby (2026-11-24 warm FTT2 bed: the kernel refused
+    the reattached namespace; at the next dual outage that node was the only
+    standby left and the takeover found none): raise an event. Returns
+    whether the LUN is visible."""
+    wait = REINTEGRATE_VISIBLE_WAIT_SEC if wait_sec is None else wait_sec
+    end = time.monotonic() + wait
+    last = None
+    while True:
+        try:
+            result, err = node.client(timeout=10, retry=0, connect_retry=0).lun_info(dev.lun_wwn)
+            last = err or result
+            if not err and isinstance(result, list) and result:
+                return True
+        except Exception as e:                              # noqa: BLE001
+            last = str(e)
+        if time.monotonic() >= end:
+            break
+        time.sleep(2)
+    msg = (f"Node {node.get_id()} is a standby of LUN {dev.lun_wwn} (device {dev.get_id()}) again, "
+           f"but its host does not show the LUN after {wait} s ({last}); it cannot take it over")
+    logger.warning(msg)
+    _event(node.cluster_id, dev, msg, EventObj.LEVEL_WARN)
+    return False
 
 
 def _holds_stack(rpc, dev):
