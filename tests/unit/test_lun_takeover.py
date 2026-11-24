@@ -587,6 +587,7 @@ class TestHelpers(unittest.TestCase):
         # 2026-11-24 warm FTT2 bed: the dead controller's namespace head kept
         # the volume's name; the reattached volume's namespace was refused.
         import glob
+
         from simplyblock_web import node_utils
         sysfs = {"/sys/class/nvme/nvme3/state": "dead", "/sys/class/nvme/nvme3/transport": "pcie",
                  "/sys/class/nvme/nvme2/state": "live", "/sys/class/nvme/nvme2/transport": "pcie",

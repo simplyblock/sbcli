@@ -542,6 +542,7 @@ class TestSwitchPathsSkipsLostNodes(unittest.TestCase):
     def test_a_node_declared_lost_is_not_waited_for(self):
         import threading
         from types import SimpleNamespace
+
         from simplyblock_core.models.nvme_device import NVMeDevice as _Dev
 
         release = threading.Event()
@@ -579,6 +580,7 @@ class TestSwitchPathsSkipsLostNodes(unittest.TestCase):
     def test_peers_attaching_to_a_lost_standby_are_not_waited_for(self):
         import threading
         from types import SimpleNamespace
+
         from simplyblock_core.models.nvme_device import NVMeDevice as _Dev
 
         release = threading.Event()
@@ -614,6 +616,7 @@ class TestSwitchPathsSkipsLostNodes(unittest.TestCase):
         # The LUN watchdog runs in another process: the switch probes the
         # standby itself (2026-11-23 ma-ws6).
         import threading
+
         from simplyblock_core.models.nvme_device import NVMeDevice as _Dev
 
         release = threading.Event()

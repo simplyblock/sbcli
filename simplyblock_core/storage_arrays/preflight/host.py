@@ -90,6 +90,8 @@ def tls_probe(host: str, port: int, cafile: str | None, verify: bool, timeout: f
     """The endpoint's certificate and whether it verifies as configured."""
     out: dict[str, Any] = {}
     ctx = ssl.create_default_context(cafile=cafile) if verify else ssl._create_unverified_context()
+    # Never offer TLS 1.0/1.1 to an array endpoint, verified or not.
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     if verify:
         ctx.check_hostname = True
     try:
