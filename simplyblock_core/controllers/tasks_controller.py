@@ -433,6 +433,16 @@ def _add_task(function_name, cluster_id, node_id, device_id,
         task_obj.function_params = function_params
     task_obj.max_retry = max_retry
     task_obj.status = JobSchedule.STATUS_NEW
+    if function_name == JobSchedule.FN_SNAPSHOT_REPLICATION:
+        # The scan above is a check-then-write: two replication workers
+        # enqueueing the same chain ancestor 100 ms apart both passed it and
+        # wrote two tasks for one snapshot (bed bf32 2026-11-21). The write
+        # itself is the atomic claim.
+        active_id, created = db.ensure_snapshot_replication_task(task_obj)
+        if not created:
+            logger.info(f"Task found, skip adding new task: {active_id}")
+            return False
+        return task_obj.uuid
     task_obj.write_to_db(db.kv_store)
     if send_to_cluster_log:
         tasks_events.task_create(task_obj)

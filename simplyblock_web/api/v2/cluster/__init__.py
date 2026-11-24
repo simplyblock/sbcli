@@ -5,7 +5,6 @@ from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field, computed_field, model_validator
-from pydantic.networks import AnyUrl, UrlConstraints
 from sse_starlette import EventSourceResponse
 
 from simplyblock_core import cluster_ops, constants
@@ -19,7 +18,6 @@ from simplyblock_core.controllers import (
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.exceptions import ReachabilityAddressError
 from simplyblock_core.models.cluster import Cluster as ClusterModel
-from simplyblock_core.models.cluster import HashicorpVaultSettings as ModelVaultSettings
 
 from .. import util as util
 from .._dependencies import Cluster
@@ -27,6 +25,7 @@ from .._dtos import (
     BackupConfigDTO,
     ClusterDTO,
     ClusterLogEntryDTO,
+    KMSSettingsDTO,
     NodeReachabilityDTO,
     UnresolvedBackupConfigDTO,
 )
@@ -61,13 +60,6 @@ class _UpdateParams(BaseModel):
     restart: bool = Field(False)
 
 
-class HashicorpVaultSettings(BaseModel):
-    base_url: Annotated[AnyUrl, UrlConstraints(allowed_schemes=["https"])] | None = None
-    transit_mount: str = "simplyblock/transit"
-    kv_mount: str = "simplyblock/kv"
-    cert_role: str = "simplyblock-webappapi"
-
-
 class ClusterParams(BaseModel):
     name: str = ""
     blk_size: Literal[512, 4096] = 512
@@ -96,8 +88,9 @@ class ClusterParams(BaseModel):
     rpc_base_port: int = 8080
     snode_api_port: int = 50001
     backup_config: UnresolvedBackupConfigDTO | None = None
-    hashicorp_vault_settings: HashicorpVaultSettings | None = None
+    kms_settings: KMSSettingsDTO | None = None
     enable_failure_domain: bool = False
+    lvol_geometry_enabled: bool = True
     sync_replication: bool = False
     #: Stretched sync replication: the site whose operator leads the cluster
     #: (Cluster.leader_site); only with sync_replication or a stretched
@@ -113,6 +106,9 @@ class ClusterParams(BaseModel):
     stretched_control_plane: bool = False
     site: str = ""
     site_api_endpoint: str = ""
+    # None (dropped by exclude_none below) inherits the prefix of a cluster
+    # already on this control plane; "" opts the new cluster out.
+    container_image_prefix: str | None = None
     # max_subsys and spdk_vcpu_count are capacity decisions with real
     # consequences if silently defaulted (max_subsys=0 means the product
     # ceiling; spdk_vcpu_count=0 means no cluster-wide core requirement at
@@ -179,10 +175,10 @@ def list(watch: WatchParam = False) -> Union[builtins.list[ClusterDTO], EventSou
 def add(request: Request, parameters: ClusterParams, response_format: util.CreationResponseFormatParameter = "full"):
     try:
         params = parameters.model_dump(exclude_none=True)
-        if "hashicorp_vault_settings" in params:
-            params["hashicorp_vault_settings"] = ModelVaultSettings(params["hashicorp_vault_settings"])
         if parameters.backup_config is not None:
             params["backup_config"] = parameters.backup_config.model_dump(exclude_none=True)
+        if parameters.kms_settings is not None:
+            params["kms_settings"] = parameters.kms_settings.model_dump(exclude_none=True)
         with util.sync_http_errors():
             cluster_id_or_false = cluster_ops.add_cluster(**params)
     except ValueError as e:
@@ -418,29 +414,39 @@ def rebalance_cluster( cluster: Cluster) -> Response:
     return Response(status_code=204)
 
 
-class DeviceRebalanceDTO(BaseModel):
-    weights_updated: bool
-    started: bool
-    reason: str
+class DeviceGrowthEntryDTO(BaseModel):
+    device_id: str
+    old_size: int
+    new_size: int
+    backend_size: int
+    unused_size: int
+    placement_size: int
 
 
 class DeviceGrowthDTO(BaseModel):
-    devices: builtins.list[dict]
+    grown: bool
+    factor: float
+    devices: builtins.list[DeviceGrowthEntryDTO]
     errors: dict[str, str]
-    uniform: bool
-    rebalance: DeviceRebalanceDTO | None = None
+    reason: str
+    shrunk: builtins.list[str] = []
 
 
 @instance_api.post('/grow-devices', name='clusters:grow_devices', response_model=DeviceGrowthDTO)
-def grow_devices(cluster: Cluster, rebalance: bool = True) -> DeviceGrowthDTO:
-    """Grow every online lblk data device of the cluster to the size of its
-    block device, one device at a time. Used after the LUNs of the cluster
-    were grown on the storage array. If they have grown unevenly, the device
-    weights are set to the new sizes and the cluster is rebalanced, unless
-    ``rebalance`` is false."""
+def grow_devices(cluster: Cluster) -> DeviceGrowthDTO:
+    """Grow all lblk data devices of the cluster online by the same factor.
+
+    Every block device is rescanned (for example, after its LUN was grown on
+    the storage array), and every device grows by the smallest growth factor
+    of all of them; the rest of a larger block device stays unused
+    (`unused_size`). If one block device did not grow, nothing grows
+    (`grown` false, `reason`). Device weights and data placement never change.
+    A block device smaller than its device is refused, listed in `shrunk`
+    and `errors`, and raises the device_shrunk alert.
+    """
     if cluster.device_mode != constants.DEVICE_MODE_LBLK:
         raise HTTPException(409, 'Online device growth needs a cluster in lblk device mode')
-    return DeviceGrowthDTO(**device_controller.grow_cluster_devices(cluster.get_id(), rebalance=rebalance))
+    return DeviceGrowthDTO(**device_controller.grow_cluster_devices(cluster.get_id()))
 
 
 instance_api.include_router(alert_api, prefix='/alerts')

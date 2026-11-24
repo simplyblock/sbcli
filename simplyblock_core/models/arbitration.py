@@ -119,7 +119,7 @@ class ClusterArbitration(BaseModel):
 
 
 class ArbitrationEvent(BaseModel):
-    """One HA event from a node, queued by the Go collector for the arbiter.
+    """One HA event from a node, queued by the event collector for the arbiter.
 
     Key ``{cluster_id}/{node_id}/{instance}/{seq:020d}``: a prefix read per
     cluster returns them in order per node, and a redelivered event (at-least-

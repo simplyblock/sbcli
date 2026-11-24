@@ -24,7 +24,7 @@ services:
   # has nowhere to connect, so it must be up before anything that logs
   # through it -- the FDB servers included. It needs no database.
   HAProxy:
-    image: haproxytech/haproxy-debian:latest
+    image: "${IMAGE_PREFIX}haproxytech/haproxy-debian:latest"
     deploy:
       mode: global
       placement:
@@ -45,7 +45,7 @@ services:
 
   fdb-server:
     <<: *service-base
-    image: foundationdb/foundationdb:7.3.63
+    image: "${IMAGE_PREFIX}foundationdb/foundationdb:7.3.63"
     networks:
       - hostnet
     environment:
@@ -68,7 +68,7 @@ services:
 
   fdb-server1:
     <<: *service-base
-    image: foundationdb/foundationdb:7.3.63
+    image: "${IMAGE_PREFIX}foundationdb/foundationdb:7.3.63"
     networks:
       - hostnet
     environment:
@@ -85,7 +85,7 @@ services:
 
   fdb-server2:
     <<: *service-base
-    image: foundationdb/foundationdb:7.3.63
+    image: "${IMAGE_PREFIX}foundationdb/foundationdb:7.3.63"
     networks:
       - hostnet
     environment:
@@ -102,7 +102,7 @@ services:
 
   fdb-server3:
     <<: *service-base
-    image: foundationdb/foundationdb:7.3.63
+    image: "${IMAGE_PREFIX}foundationdb/foundationdb:7.3.63"
     networks:
       - hostnet
     environment:
@@ -119,7 +119,7 @@ services:
 
   fdb-server4:
     <<: *service-base
-    image: foundationdb/foundationdb:7.3.63
+    image: "${IMAGE_PREFIX}foundationdb/foundationdb:7.3.63"
     networks:
       - hostnet
     environment:
@@ -137,7 +137,7 @@ services:
 
   fdb-backup-agent:
     <<: *service-base
-    image: foundationdb/foundationdb:7.3.63
+    image: "${IMAGE_PREFIX}foundationdb/foundationdb:7.3.63"
     entrypoint: "/usr/bin/backup_agent -C  /etc/foundationdb/fdb.cluster"
     networks:
       - hostnet

@@ -3,6 +3,7 @@ import builtins
 import contextlib
 import copy
 import json
+import logging
 import os
 import re
 import shlex
@@ -21,7 +22,14 @@ import requests
 import yaml
 from docker.errors import DockerException
 from kubernetes import client as k8s_client
-from pydantic import SecretStr
+from pydantic import SecretStr, TypeAdapter
+from tenacity import (
+    Retrying,
+    before_sleep_log,
+    retry_if_exception_type,
+    stop_after_delay,
+    wait_fixed,
+)
 
 import docker
 from simplyblock_core import (
@@ -50,15 +58,17 @@ from simplyblock_core.controllers.cluster_expansion.planner import (
 )
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.exceptions import (
+    MonitoringConfigError,
     SyncReplicationSiteError,
     reject_on_sync_replication,
 )
+from simplyblock_core.kms import KMSSettings
 from simplyblock_core.models import indices
 from simplyblock_core.models.backup_config import UnresolvedBackupConfig
 from simplyblock_core.models.cluster import (
     Cluster,
     DeployConfig,
-    HashicorpVaultSettings,
+    normalize_image_prefix,
 )
 from simplyblock_core.models.events import EventObj
 from simplyblock_core.models.job_schedule import JobSchedule
@@ -119,51 +129,92 @@ async def watch_events(cluster_id):
         yield batch
 
 
-def _create_update_user(cluster_id, grafana_url, grafana_secret: SecretStr, user_secret: SecretStr, update_secret=False):
-    session = requests.session()
+#: Per-request bound on a Grafana API call.
+GRAFANA_REQUEST_TIMEOUT_SEC = 10
+#: How long Grafana may stay unreachable (still starting, or the proxy in
+#: front of it) before a user sync gives up.
+GRAFANA_READY_TIMEOUT_SEC = 60
+
+
+class _GrafanaUnavailable(Exception):
+    """Grafana could not answer: a connection failure, a timeout or a 5xx.
+    Transient, unlike a 4xx, which no retry changes."""
+
+
+def _grafana_request(session: requests.Session, method: str, url: str, **kwargs) -> requests.Response:
+    try:
+        response = session.request(method, url, timeout=GRAFANA_REQUEST_TIMEOUT_SEC, **kwargs)
+    except (requests.ConnectionError, requests.Timeout) as e:
+        raise _GrafanaUnavailable(f"{method} {url}: {e}") from e
+    if response.status_code >= 500:
+        raise _GrafanaUnavailable(f"{method} {url}: HTTP {response.status_code}")
+    return response
+
+
+def _sync_grafana_user(cluster_id, grafana_url, grafana_secret: SecretStr, user_secret: SecretStr) -> None:
+    """Make Grafana's user for the cluster exist, with ``user_secret`` as its password.
+
+    Idempotent: the user is created when the lookup does not find it and has
+    its password reset otherwise, so a run that failed half-way, or a cluster
+    whose user was never created, converges on a re-run. Raises
+    MonitoringConfigError when Grafana refuses the change or stays
+    unreachable for GRAFANA_READY_TIMEOUT_SEC.
+    """
+    session = requests.Session()
     session.auth = ("admin", grafana_secret.get_secret_value())
-    headers = {
-        'X-Requested-By': '',
-        'Content-Type': 'application/json',
-    }
-    retries = 5
-    if update_secret:
-        url = f"{grafana_url}/api/users/lookup?loginOrEmail={cluster_id}"
-        response = session.request("GET", url, headers=headers)
-        userid = response.json().get("id")
+    session.headers.update({'X-Requested-By': ''})
 
-        payload = json.dumps({
-            "password": user_secret.get_secret_value()
-        })
+    def sync() -> None:
+        lookup = _grafana_request(session, "GET", f"{grafana_url}/api/users/lookup",
+                                  params={"loginOrEmail": cluster_id})
+        if lookup.status_code == 404:
+            action = "create"
+            response = _grafana_request(session, "POST", f"{grafana_url}/api/admin/users", json={
+                "name": cluster_id,
+                "login": cluster_id,
+                "password": user_secret.get_secret_value(),
+            })
+        elif lookup.ok:
+            action = "update the password of"
+            response = _grafana_request(
+                session, "PUT", f"{grafana_url}/api/admin/users/{lookup.json()['id']}/password",
+                json={"password": user_secret.get_secret_value()})
+        else:
+            action, response = "look up", lookup
+        if not response.ok:
+            raise MonitoringConfigError(
+                f"Grafana at {grafana_url} refused to {action} user {cluster_id}: "
+                f"HTTP {response.status_code} {response.text[:200]}")
 
-        url = f"{grafana_url}/api/admin/users/{userid}/password"
+    try:
+        Retrying(
+            stop=stop_after_delay(GRAFANA_READY_TIMEOUT_SEC),
+            wait=wait_fixed(3),
+            retry=retry_if_exception_type(_GrafanaUnavailable),
+            before_sleep=before_sleep_log(logger, logging.WARNING),
+            reraise=True,
+        )(sync)
+    except _GrafanaUnavailable as e:
+        raise MonitoringConfigError(f"Grafana at {grafana_url} is unreachable: {e}") from e
+    logger.debug(f"Grafana user {cluster_id} in sync")
 
-        while retries > 0:
-            response = session.request("PUT", url, headers=headers, data=payload)
-            if response.status_code == 200:
-                logger.debug(f"user create/update {cluster_id} succeeded")
-                return response.status_code == 200
-            logger.debug(response.status_code)
-            logger.debug("waiting for grafana api to come up")
-            retries -= 1
-            time.sleep(3)
 
-    else:
-        payload = json.dumps({
-            "name": cluster_id,
-            "login": cluster_id,
-            "password": user_secret.get_secret_value()
-        })
-        url = f"{grafana_url}/api/admin/users"
-        while retries > 0:
-            response = session.request("POST", url, headers=headers, data=payload)
-            if response.status_code == 200:
-                logger.debug(f"user create/update {cluster_id} succeeded")
-                return response.status_code == 200
-            logger.debug(response.status_code)
-            logger.debug("waiting for grafana api to come up")
-            retries -= 1
-            time.sleep(3)
+def _add_grafana_user_or_disable_monitoring(cluster: Cluster, grafana_secret: SecretStr) -> None:
+    """Create Grafana's user for a cluster being created; on failure, create it without monitoring.
+
+    A cluster is usable without its dashboards, so an unreachable or refusing
+    Grafana does not fail the create. The cluster is marked
+    ``disable_monitoring`` instead, so nothing later (``update-secret``)
+    expects a Grafana user that does not exist. Must run before the cluster
+    record is first written.
+    """
+    try:
+        _sync_grafana_user(cluster.uuid, cluster.grafana_endpoint, grafana_secret, cluster.secret)
+    except MonitoringConfigError as e:
+        logger.warning(
+            f"Could not create the Grafana user for cluster {cluster.uuid}: {e}. "
+            f"Continuing with monitoring disabled for this cluster")
+        cluster.disable_monitoring = True
 
 
 def _add_graylog_input(cluster_ip, password: SecretStr):
@@ -412,8 +463,9 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    tls_secret, ingress_host_source, dns_name, fabric, is_single_node, client_data_nic,
                    nvmeof_tls_config=None, max_fault_tolerance=1, backup_config=None,
                    nvmf_base_port=4420, rpc_base_port=8080, snode_api_port=50001, container_image_prefix=None,
-                   hashicorp_vault_settings : HashicorpVaultSettings | None = None,
+                   kms_settings : t.Mapping[str, t.Any] | None = None,
                    enable_failure_domain=False,
+                   lvol_geometry_enabled=True,
                    device_mode=constants.DEVICE_MODE_NVME,
                    enable_hang_device=False,
                    max_subsys=0, hugepages_mem=0, spdk_vcpu_count=0,
@@ -446,8 +498,12 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         if distr_npcs < 2:
             raise ValueError("max_fault_tolerance > 1 requires distr_npcs >= 2")
 
-    if (hashicorp_vault_settings is not None) and (Settings().tls_connect != "authenticated"):
-        raise ValueError("External KMS requires mTLS authentication to be used")
+    if kms_settings is not None:
+        # Reject a configuration no backend could act on before installing
+        # anything, rather than at the set_kms_settings below.
+        TypeAdapter(KMSSettings).validate_python(kms_settings)
+        if Settings().tls_connect != "authenticated":
+            raise ValueError("External KMS requires mTLS authentication to be used")
 
     if ingress_host_source == "dns" or ingress_host_source == "loadbalancer":
         if not dns_name:
@@ -583,6 +639,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.inflight_io_threshold = inflight_io_threshold
     cluster.strict_node_anti_affinity = strict_node_anti_affinity
     cluster.enable_failure_domain = enable_failure_domain
+    cluster.lvol_geometry_enabled = lvol_geometry_enabled
     cluster.sync_replication = bool(sync_replication)
     cluster.stretched_control_plane = bool(stretched_control_plane)
     cluster.leader_site = leader_site or ""
@@ -606,8 +663,8 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.nvmf_base_port = nvmf_base_port
     cluster.rpc_base_port = rpc_base_port
     cluster.snode_api_port = snode_api_port
-    cluster.container_image_prefix = container_image_prefix or ""
-    cluster.hashicorp_vault_settings = hashicorp_vault_settings
+    cluster.container_image_prefix = normalize_image_prefix(container_image_prefix)
+    cluster.set_kms_settings(kms_settings)
     cluster.backup_local_path = os.path.join(constants.KVD_DB_BACKUP_PATH, cluster.uuid)
     cluster.cluster_vip = cluster_vip or ""
     if nvmeof_tls_config:
@@ -623,10 +680,11 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     log_level = "DEBUG" if constants.LOG_WEB_DEBUG else "INFO"
 
     def deploy_stack_phase(phase):
-        scripts.deploy_stack(cli_pass.get_secret_value(), dev_ip, constants.SIMPLY_BLOCK_DOCKER_IMAGE,
+        scripts.deploy_stack(cli_pass.get_secret_value(), dev_ip,
+                             cluster.prefixed_image(constants.SIMPLY_BLOCK_DOCKER_IMAGE),
                              cluster.secret.get_secret_value(), cluster.uuid, log_del_interval,
                              metrics_retention_period, log_level, cluster.grafana_endpoint, str(disable_monitoring),
-                             phase=phase)
+                             phase=phase, image_prefix=cluster.container_image_prefix)
 
     # Order matters: every simplyblock service exits on an unconfigured
     # database, so the database must be configured after FDB is up and before
@@ -670,7 +728,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     if not disable_monitoring:
         _set_max_result_window(os_endpoint)
         _add_graylog_input(graylog_endpoint, monitoring_secret)
-        _create_update_user(cluster.uuid, cluster.grafana_endpoint, monitoring_secret, cluster.secret)
+        _add_grafana_user_or_disable_monitoring(cluster, monitoring_secret)
 
     cluster.db_connection = db_connection  # type: ignore[assignment]
     cluster.status = Cluster.STATUS_UNREADY
@@ -719,6 +777,24 @@ def _cleanup_nvme(mount_point, nqn_value) -> None:
     logger.info(f"Removed mount point: {mount_point}")
 
 
+def _image_prefix_for_added_cluster(container_image_prefix: str | None, clusters) -> str:
+    """The registry prefix a cluster added to this control plane is stored with.
+
+    ``None`` -- the caller did not say -- inherits the prefix of a cluster
+    already here: they are served by the same management hosts, and a registry
+    those cannot reach is not reachable for the new cluster's images either. A
+    given value is taken as is, ``""`` included, which is how a caller opts the
+    new cluster out.
+    """
+    if container_image_prefix is not None:
+        return normalize_image_prefix(container_image_prefix)
+    for existing in clusters or []:
+        inherited = normalize_image_prefix(existing.container_image_prefix)
+        if inherited:
+            return inherited
+    return ""
+
+
 def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
                 distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity, qpair_count,
                 max_queue_size, inflight_io_threshold, strict_node_anti_affinity, is_single_node, name, cr_name=None,
@@ -726,8 +802,9 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
                 max_subsys=0, hugepages_mem=0, spdk_vcpu_count=0,
                 client_data_nic="", max_fault_tolerance=1, backup_config=None,
                 nvmf_base_port=4420, rpc_base_port=8080, snode_api_port=50001,
-                hashicorp_vault_settings : HashicorpVaultSettings | None = None,
+                kms_settings : t.Mapping[str, t.Any] | None = None,
                 enable_failure_domain=False,
+                lvol_geometry_enabled=True,
                 device_mode=constants.DEVICE_MODE_NVME,
                 inline_checksum=False,
                 atomic_4k=False,
@@ -742,6 +819,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
                 stretched_control_plane=False,
                 site="",
                 site_api_endpoint="",
+                container_image_prefix: str | None = None,
 ) -> str:
     """Thin wrapper around _add_cluster_impl() that serializes create calls
     for the same name behind a DbLock.
@@ -767,7 +845,8 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
         cr_name=cr_name, cr_namespace=cr_namespace, cr_plural=cr_plural, fabric=fabric,
         client_data_nic=client_data_nic, max_fault_tolerance=max_fault_tolerance, backup_config=backup_config,
         nvmf_base_port=nvmf_base_port, rpc_base_port=rpc_base_port, snode_api_port=snode_api_port,
-        hashicorp_vault_settings=hashicorp_vault_settings, enable_failure_domain=enable_failure_domain,
+        kms_settings=kms_settings, enable_failure_domain=enable_failure_domain,
+        lvol_geometry_enabled=lvol_geometry_enabled,
         device_mode=device_mode,
         inline_checksum=inline_checksum,
         atomic_4k=atomic_4k,
@@ -782,6 +861,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
         stretched_control_plane=stretched_control_plane,
         site=site,
         site_api_endpoint=site_api_endpoint,
+        container_image_prefix=container_image_prefix,
     )
     if not name:
         return _add_cluster_impl(**kwargs)
@@ -806,8 +886,9 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
                 max_subsys=0, hugepages_mem=0, spdk_vcpu_count=0,
                 client_data_nic="", max_fault_tolerance=1, backup_config=None,
                 nvmf_base_port=4420, rpc_base_port=8080, snode_api_port=50001,
-                hashicorp_vault_settings : HashicorpVaultSettings | None = None,
+                kms_settings : t.Mapping[str, t.Any] | None = None,
                 enable_failure_domain=False,
+                lvol_geometry_enabled=True,
                 device_mode=constants.DEVICE_MODE_NVME,
                 inline_checksum=False,
                 atomic_4k=False,
@@ -822,6 +903,7 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
                 stretched_control_plane=False,
                 site="",
                 site_api_endpoint="",
+                container_image_prefix: str | None = None,
 ) -> str:
     _validate_integrity_flags(inline_checksum, atomic_4k)
 
@@ -847,8 +929,12 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
         if distr_npcs < 2:
             raise ValueError("max_fault_tolerance > 1 requires distr_npcs >= 2")
 
-    if (hashicorp_vault_settings is not None) and (Settings().tls_connect != "authenticated"):
-        raise ValueError("External KMS requires mTLS authentication to be used")
+    if kms_settings is not None:
+        # Reject a configuration no backend could act on before installing
+        # anything, rather than at the set_kms_settings below.
+        TypeAdapter(KMSSettings).validate_python(kms_settings)
+        if Settings().tls_connect != "authenticated":
+            raise ValueError("External KMS requires mTLS authentication to be used")
 
     logger.info("Adding new cluster")
     cluster = Cluster()
@@ -876,6 +962,7 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
     cluster.secret = SecretStr(utils.generate_string(20))
     cluster.strict_node_anti_affinity = strict_node_anti_affinity
     cluster.enable_failure_domain = enable_failure_domain
+    cluster.lvol_geometry_enabled = lvol_geometry_enabled
     cluster.sync_replication = bool(sync_replication)
     cluster.leader_site = leader_site or ""
     cluster.stretched_control_plane = bool(stretched_control_plane)
@@ -927,7 +1014,7 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
         cfg.write_to_db()
 
     if not cluster.disable_monitoring:
-        _create_update_user(cluster.uuid, cluster.grafana_endpoint, cluster.grafana_secret, cluster.secret)
+        _add_grafana_user_or_disable_monitoring(cluster, cluster.grafana_secret)
 
     if cluster.mode == "kubernetes":
         utils.patch_prometheus_configmap(cluster.uuid, cluster.secret.get_secret_value())
@@ -974,7 +1061,8 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
     cluster.nvmf_base_port = nvmf_base_port
     cluster.rpc_base_port = rpc_base_port
     cluster.snode_api_port = snode_api_port
-    cluster.hashicorp_vault_settings = hashicorp_vault_settings
+    cluster.container_image_prefix = _image_prefix_for_added_cluster(container_image_prefix, clusters)
+    cluster.set_kms_settings(kms_settings)
     if backup_config:
         cluster.set_backup_config(backup_config)
 
@@ -2828,24 +2916,6 @@ def set_cluster_status(cl_id, status) -> None:
     cluster_events.cluster_status_change(updated, updated.status, captured['old'])
 
 
-def cluster_set_read_only(cl_id) -> None:
-    cluster = db_controller.get_cluster_by_id(cl_id)
-
-    if cluster.status == Cluster.STATUS_READONLY:
-        return
-
-    set_cluster_status(cl_id, Cluster.STATUS_READONLY)
-    st = db_controller.get_storage_nodes_by_cluster_id(cl_id)
-    for node in st:
-        if node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
-            continue
-        for dev in node.nvme_devices:
-            if dev.status == NVMeDevice.STATUS_ONLINE:
-                # dev_stat = db_controller.get_device_stats(dev, 1)
-                # if dev_stat and dev_stat[0].size_util >= cluster.cap_crit:
-                device_controller.device_set_state(dev.get_id(), NVMeDevice.STATUS_CANNOT_ALLOCATE)
-
-
 def cluster_set_active(cl_id) -> None:
     cluster = db_controller.get_cluster_by_id(cl_id)
 
@@ -3462,16 +3532,41 @@ def get_secret(cluster_id) -> str:
 
 
 def set_secret(cluster_id, secret: SecretStr) -> None:
+    """Rotate the cluster secret.
+
+    The copies outside FDB -- Grafana's user for the cluster, and the
+    Prometheus scrape config and event log alert data source that authenticate
+    with the secret -- are updated first and the record last. A failure part-way
+    leaves the old secret in force for the API, and a re-run converges: the
+    Grafana sync is idempotent and the config rotation is keyed on the stored
+    secret, so a copy already rotated is left alone.
+    """
     cluster = db_controller.get_cluster_by_id(cluster_id)
     plain = secret.get_secret_value().strip()
     if len(plain) < 20:
         raise ValueError("Secret must be at least 20 char")
+    # The API splits "<cluster-id> <secret>" on whitespace, and the monitoring
+    # configs carry the secret as a quoted YAML scalar.
+    if any(c.isspace() or c in "'\"" for c in plain):
+        raise ValueError("Secret must not contain whitespace or quotes")
+    old = cluster.secret.get_secret_value()
     secret = SecretStr(plain)
 
-    _create_update_user(cluster_id, cluster.grafana_endpoint, cluster.grafana_secret, secret, update_secret=True)
+    # A cluster created without monitoring has nothing outside FDB to update.
+    if not cluster.disable_monitoring:
+        _sync_grafana_user(cluster_id, cluster.grafana_endpoint, cluster.grafana_secret, secret)
+        if cluster.mode == "kubernetes":
+            if not utils.rotate_prometheus_configmap_secret(old, plain):
+                logger.warning(
+                    f"{utils.PROMETHEUS_CONFIGMAP} does not carry the secret of cluster {cluster_id}, "
+                    f"so Prometheus is not scraping it with that secret; left unchanged")
+        else:
+            _rotate_docker_monitoring_secret(cluster_id, old, plain)
 
-    cluster.secret = secret
-    cluster.write_to_db(db_controller.kv_store)
+    def _apply(c):
+        c.secret = secret
+
+    db_controller.atomic_update(cluster, _apply)
 
 
 def set_fabric(cluster_id, fabric) -> None:
@@ -3506,6 +3601,15 @@ def get_log_events(cluster_id, limit=EVENT_LOG_TAIL) -> builtins.list[EventObj]:
     events = db_controller.get_events(cluster_id, limit=limit, reverse=True)
     events.reverse()
     return events
+
+
+def set_lvol_geometry(cluster_id, enable) -> None:
+    """Enable or disable LVol geometry cluster-wide. Applies to lvols
+    created from now on; existing lvols keep their ndcs/npcs."""
+    db_controller.atomic_update(
+        db_controller.get_cluster_by_id(cluster_id),
+        lambda c: setattr(c, "lvol_geometry_enabled", bool(enable)))
+    logger.info(f"LVol geometry {'enabled' if enable else 'disabled'} on cluster {cluster_id}")
 
 
 def get_logs(cluster_id, limit=50, **kwargs) -> builtins.list[dict]:
@@ -3609,7 +3713,7 @@ def _grafana_provisioning_dirs(cluster_docker) -> tuple[str, str]:
     return os.path.dirname(sources[GRAFANA_DATASOURCE_TARGET]), sources[GRAFANA_ALERTING_TARGET]
 
 
-def _install_provisioning_on_all_managers(files: dict[str, str]) -> None:
+def _install_provisioning_on_all_managers(files: dict[str, str], image: str) -> None:
     """Write Grafana's provisioning files onto every management node.
 
     Grafana is constrained to node.role == manager and may be rescheduled to
@@ -3634,7 +3738,7 @@ def _install_provisioning_on_all_managers(files: dict[str, str]) -> None:
             node_docker = docker.DockerClient(
                 base_url=f"tcp://{node.docker_ip_port}", version="auto", timeout=60)
             node_docker.containers.run(
-                constants.SIMPLY_BLOCK_DOCKER_IMAGE, ["sh", "-c", script], user="root",
+                image, ["sh", "-c", script], user="root",
                 volumes=[f"{directory}:{directory}" for directory in volumes],
                 remove=True, detach=False)
             logger.info("Provisioning files written on %s", node.mgmt_ip)
@@ -3647,6 +3751,88 @@ def _install_provisioning_on_all_managers(files: dict[str, str]) -> None:
             + "; ".join(f"{ip} ({reason})" for ip, reason in failed.items())
             + ". Fix those nodes and re-run; Grafana provisions nothing on a node it cannot "
               "read them from")
+
+
+PROMETHEUS_CONFIG_TARGET = "/etc/prometheus/prometheus.yml"
+
+
+def _service_mount_source(service, target: str) -> str | None:
+    mounts = service.attrs['Spec']['TaskTemplate']['ContainerSpec'].get('Mounts') or []
+    return {mount.get('Target'): mount.get('Source') for mount in mounts}.get(target)
+
+
+def _run_on_mgmt_node(node, command: builtins.list[str], directory: str, image: str) -> bytes:
+    """Run ``command`` as root on a management node, with ``directory`` mounted.
+
+    Host paths of the monitoring stack belong to root, and the image runs as
+    USER simplyblock; see _install_provisioning_on_all_managers. ``image`` is
+    the management image as the cluster pulls it (Cluster.prefixed_image): the
+    node may hold it under no other name, and may reach no other registry.
+    """
+    node_docker = docker.DockerClient(base_url=f"tcp://{node.docker_ip_port}", version="auto", timeout=60)
+    return node_docker.containers.run(
+        image, command, user="root",
+        volumes=[f"{directory}:{directory}"], remove=True, detach=False)
+
+
+def _rotate_secret_on_all_managers(nodes, path: str, old: str, new: str, image: str) -> bool:
+    """Swap ``old`` for ``new`` in the host file ``path`` on every management node.
+
+    Each manager holds its own copy (the monitoring services are global on, or
+    reschedule among, the managers). Rewritten in place, so a single-file bind
+    mount keeps its inode. Returns whether any copy carried ``old``.
+    """
+    directory = os.path.dirname(path)
+    changed = False
+    failed = {}
+    for node in nodes:
+        try:
+            current = _run_on_mgmt_node(node, ["cat", path], directory, image).decode('utf-8')
+            rotated, count = utils.replace_secret_token(current, old, new)
+            if count:
+                encoded = base64.b64encode(rotated.encode('utf-8')).decode('ascii')
+                _run_on_mgmt_node(
+                    node, ["sh", "-c", f"echo {encoded} | base64 -d > {shlex.quote(path)}"], directory, image)
+                changed = True
+        except DockerException as e:
+            failed[node.mgmt_ip] = str(e)
+
+    if failed:
+        raise MonitoringConfigError(
+            f"Could not rotate the cluster secret in {path} on: "
+            + "; ".join(f"{ip} ({reason})" for ip, reason in failed.items())
+            + ". Fix those nodes and re-run")
+    return changed
+
+
+def _rotate_docker_monitoring_secret(cluster_id, old: str, new: str) -> None:
+    """Rotate the secret in the docker monitoring stack's config files.
+
+    Prometheus scrapes /cluster/metrics with it, and the event log alert data
+    source (present only once `cluster event-alerts` enabled it) queries the
+    API with it. A service whose file changed is restarted to load it.
+    """
+    cluster_docker = utils.get_docker_client(cluster_id)
+    nodes = db_controller.get_mgmt_nodes()
+    image = db_controller.get_cluster_by_id(cluster_id).prefixed_image(constants.SIMPLY_BLOCK_DOCKER_IMAGE)
+    for service_name, target, required in (
+            (constants.MONITORING_PROMETHEUS_SERVICE, PROMETHEUS_CONFIG_TARGET, True),
+            (constants.MONITORING_GRAFANA_SERVICE, GRAFANA_EVENT_DATASOURCE_TARGET, False)):
+        try:
+            service = cluster_docker.services.get(service_name)
+        except docker.errors.NotFound as e:
+            raise MonitoringConfigError(
+                f"Service {service_name} not found: the monitoring stack is not deployed") from e
+
+        source = _service_mount_source(service, target)
+        if not source:
+            if required:
+                raise MonitoringConfigError(f"Service {service_name} has no bind mount at {target}")
+            continue
+
+        if _rotate_secret_on_all_managers(nodes, source, old, new, image):
+            logger.info(f"Restarting {service_name} to load the rotated secret...")
+            service.force_update()
 
 
 def set_event_alerts(cluster_id, enabled=True, log_limit=None, interval=None, pending_period=None,
@@ -3688,7 +3874,7 @@ def set_event_alerts(cluster_id, enabled=True, log_limit=None, interval=None, pe
         os.path.join(alerting_dir, utils.EVENT_ALERT_RULES_FILE):
             rendered[utils.EVENT_ALERT_RULES_FILE],
         datasource_path: rendered[utils.EVENT_ALERT_DATASOURCE_FILE],
-    })
+    }, cluster.prefixed_image(constants.SIMPLY_BLOCK_DOCKER_IMAGE))
 
     # --force recreates the task, which is what makes Grafana re-read
     # provisioning; a single-file bind mount also tracks the inode it started
@@ -3844,9 +4030,7 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
     logger.info("Updating mgmt cluster")
     if cluster.mode == "docker":
         cluster_docker = utils.get_docker_client(cluster_id)
-        service_image = constants.SIMPLY_BLOCK_DOCKER_IMAGE
-        if mgmt_image:
-            service_image = mgmt_image
+        service_image = cluster.prefixed_image(mgmt_image or constants.SIMPLY_BLOCK_DOCKER_IMAGE)
         logger.info(f"Pulling image {service_image}")
         pull_docker_image_with_retry(cluster_docker, service_image)
         service_names = []
@@ -3940,7 +4124,7 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
         apps_v1 = k8s_client.AppsV1Api()
         namespace = constants.K8S_NAMESPACE
         image_parts = ["simplyblock-io/simplyblock:", "simplyblock/simplyblock:", "simply-block/simplyblock:"]
-        service_image = mgmt_image or constants.SIMPLY_BLOCK_DOCKER_IMAGE
+        service_image = cluster.prefixed_image(mgmt_image or constants.SIMPLY_BLOCK_DOCKER_IMAGE)
         deployment_names = []
         # Update Deployments
         deployments = apps_v1.list_namespaced_deployment(namespace=namespace)
@@ -4007,9 +4191,7 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
         for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
             if node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
                 node_docker = docker.DockerClient(base_url=f"tcp://{node.mgmt_ip}:2375", version="auto", timeout=60 * 5)
-                img = constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE
-                if spdk_image:
-                    img = spdk_image
+                img = cluster.prefixed_image(spdk_image or constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
                 logger.info(f"Pulling image {img}")
                 pull_docker_image_with_retry(node_docker, img)
 

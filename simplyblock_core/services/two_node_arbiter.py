@@ -5,7 +5,7 @@ Two loops in one process:
 - the lease loop renews every arbitrated node's lease every
   ``TWO_NODE_LEASE_RENEW_MS`` (its own thread, so a slow decision never delays
   a renewal);
-- the decision loop folds the events the Go collector queued in FDB, decides
+- the decision loop folds the events the event collector queued in FDB, decides
   and applies verdicts every ``TWO_NODE_DECISION_TICK_MS``.
 
 Only clusters with ``two_node_arbitration`` on and exactly two members are

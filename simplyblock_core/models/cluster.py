@@ -2,14 +2,49 @@ import os.path
 from collections.abc import Mapping
 from typing import Any, ClassVar
 
-from pydantic import SecretStr
+from pydantic import SecretStr, TypeAdapter
 
 from simplyblock_core import constants
+from simplyblock_core.kms import KMSSettings
 from simplyblock_core.models.backup_config import BackupConfig
 from simplyblock_core.models.base_model import BaseModel, default_factory
 
+_KMS_SETTINGS_ADAPTER: TypeAdapter[Any] = TypeAdapter(KMSSettings)
+
+
+def normalize_image_prefix(prefix: str | None) -> str:
+    """The registry/proxy ``prefix`` in the one form it is stored and compared in.
+
+    No surrounding whitespace and no trailing ``/``; ``""`` for none. Everything
+    that takes a prefix from outside (the CLI, the API, a cluster record) goes
+    through here, so the shell and compose side never sees another spelling.
+    """
+    return (prefix or "").strip().rstrip("/")
+
+
+def prefix_image(prefix: str | None, image: str) -> str:
+    """``image`` behind the registry/proxy ``prefix``.
+
+    The prefix is a path such as ``registry-1.docker.io``, joined
+    with exactly one ``/`` whether or not it carries a trailing slash. An empty
+    prefix leaves the image as named. Idempotent: an image already carrying the
+    prefix -- e.g. one read back from a storage node record written by an
+    earlier call -- is returned unchanged, so callers can apply it to any image
+    without tracking where it came from.
+    """
+    prefix = normalize_image_prefix(prefix)
+    if not prefix or not image or image.startswith(f"{prefix}/"):
+        return image
+    return f"{prefix}/{image}"
+
 
 class HashicorpVaultSettings(BaseModel):
+    """Superseded by ``Cluster.kms_settings`` (a validated ``KMSSettings``
+    union, see ``simplyblock_core.kms``). Kept only so a record written before
+    that change still loads: ``Cluster.get_kms_settings`` falls back to this
+    field until ``kms_settings_migration`` (``release_upgrades/``) rewrites the
+    record on that cluster's next ``cluster upgrade-complete``. Nothing writes
+    to this field any more."""
     base_url: str = ""
     transit_mount: str = "simplyblock/transit"
     kv_mount: str = "simplyblock/kv"
@@ -93,7 +128,7 @@ class Cluster(BaseModel):
 
     auth_hosts_only: bool = False
     blk_size: int = 0
-    cap_crit: int = 90
+    cap_crit: int = 98
     # ISO-8601 UTC timestamp of when the cluster last entered IN_ACTIVATION.
     # Stamped/cleared by cluster_ops.set_cluster_status and consumed by the
     # storage_node_monitor watchdog to detect and revert a wedged activation
@@ -311,6 +346,11 @@ class Cluster(BaseModel):
     # Deploy-time only — set at cluster create/add, never toggled at runtime;
     # an existing cluster must be redeployed to gain the feature.
     enable_failure_domain: bool = False
+    # LVol geometry: new lvols inherit distr_ndcs/distr_npcs (or the values
+    # passed at create). When False every new lvol is created with
+    # ndcs=npcs=0, i.e. the distrib's own layout. Toggled at runtime with
+    # `cluster set-lvol-geometry`; existing lvols keep their geometry.
+    lvol_geometry_enabled: bool = True
     # Site-level synchronous replication (two sites, one cluster). Deploy-time
     # only, like enable_failure_domain: set at cluster create, never toggled.
     # Every storage node then carries a `site`, and every LVS is replicated to
@@ -401,6 +441,12 @@ class Cluster(BaseModel):
     rpc_base_port: int = 8080
     snode_api_port: int = 50001
     container_image_prefix: str = ""
+    # Validated via get_kms_settings()/set_kms_settings() into a KMSSettings
+    # union (simplyblock_core.kms) -- stays an untyped dict on the record for
+    # the same reason backup_config does: BaseModel cannot nest a pydantic
+    # union, so validating on read/write gives the typing without an FDB
+    # migration for every create/update. Empty dict = no external KMS (LocalKMS).
+    kms_settings: dict = default_factory(dict)
     hashicorp_vault_settings: HashicorpVaultSettings | None = None
 
     # Single-node-expansion resumability cursor. Empty dict means no expansion
@@ -408,11 +454,6 @@ class Cluster(BaseModel):
     # ``simplyblock_core.controllers.cluster_expansion.planner``. See the feature plan
     # ``single_node_expansion_plan.md`` for the schema.
     expand_state: dict = default_factory(dict)
-    # Set while new device weights (placement sizes after an uneven growth of
-    # lblk devices) are written but not yet pushed to every node and handed to
-    # a rebalance. A re-run of `cluster grow-devices` finishes the job. See
-    # device_controller.rebalance_after_growth.
-    reweight_pending: bool = False
     # State owned by release-specific upgrade plug-ins (see
     # simplyblock_core/release_upgrades/). Keys are plugin STATE_KEYs; a key
     # is set by the plugin's pre_update step (first thing `cluster update`
@@ -485,6 +526,10 @@ class Cluster(BaseModel):
 
         return self._resolve_backup_config(self.backup_config)
 
+    def prefixed_image(self, image: str) -> str:
+        """``image`` as this cluster pulls it, behind ``container_image_prefix``."""
+        return prefix_image(self.container_image_prefix, image)
+
     def set_backup_config(self, config: Mapping[str, Any]) -> None:
         """Validate a raw backup configuration and store it on this record.
 
@@ -503,6 +548,63 @@ class Cluster(BaseModel):
         """
         self._resolve_backup_config(config)
         self.backup_config = dict(config)
+
+    def _resolve_kms_settings(self, config: Mapping[str, Any]):
+        if "provider" not in config and "base_url" in config:
+            # The flat shape HashicorpVaultSettings used before kms_settings
+            # existed, with no discriminator -- legacy cluster records (and
+            # anything still posting the old hashicorp_vault_settings shape)
+            # carry this.
+            config = {"provider": "vault", **config}
+        return _KMS_SETTINGS_ADAPTER.validate_python(config)
+
+    def get_kms_settings(self):
+        """Validate and return this cluster's KMS configuration, or ``None``
+        for the default (``LocalKMS``, keys held in FoundationDB).
+
+        ``kms_settings`` stays an untyped dict on the record for the same
+        reason ``backup_config`` does (see ``get_backup_config``); validating
+        on read gives the typing without an FDB migration for every write.
+        A cluster written before this field existed has no ``kms_settings``
+        but may have the legacy ``hashicorp_vault_settings`` field populated
+        -- read from there until ``kms_settings_migration``
+        (``release_upgrades/``) rewrites the record on this cluster's next
+        ``cluster upgrade-complete``.
+
+        Raises:
+            ValueError: The stored configuration is not valid. ``ValidationError``
+                is a ``ValueError``, so one except clause covers both.
+        """
+        if self.kms_settings:
+            return self._resolve_kms_settings(self.kms_settings)
+        if self.hashicorp_vault_settings is not None:
+            legacy = self.hashicorp_vault_settings
+            # Not legacy.to_dict(): HashicorpVaultSettings is a BaseModel
+            # subclass, so that also carries id/uuid/name/status/... from the
+            # base class, which KMSSettings' extra="forbid" would then reject.
+            return self._resolve_kms_settings({
+                "base_url": legacy.base_url,
+                "transit_mount": legacy.transit_mount,
+                "kv_mount": legacy.kv_mount,
+                "cert_role": legacy.cert_role,
+            })
+        return None
+
+    def set_kms_settings(self, config: Mapping[str, Any] | None) -> None:
+        """Validate a raw KMS configuration and store it on this record.
+
+        The only way to put a KMS configuration on a cluster going forward --
+        nothing writes to the legacy ``hashicorp_vault_settings`` field any
+        more. ``config=None`` clears it back to the default (``LocalKMS``).
+
+        Raises:
+            ValueError: The configuration does not match any known KMS provider.
+        """
+        if not config:
+            self.kms_settings = {}
+            return
+        self._resolve_kms_settings(config)
+        self.kms_settings = dict(config)
 
     def get_backup_path(self, path=""):
         if self.backup_s3_bucket and self.backup_s3_cred:

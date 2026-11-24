@@ -891,115 +891,184 @@ def fetch(
 
 
 # ---------------------------------------------------------------------------
-# kubectl pod-log helpers
+# Kubernetes pod-log helpers (Python client; the admin-control pod has no kubectl)
 # ---------------------------------------------------------------------------
 
+try:
+    from kubernetes import client as k8s_client
+    from kubernetes import config as k8s_config
+    from kubernetes.client.rest import ApiException
+    from kubernetes.stream import stream as k8s_stream
+except ImportError:  # docker-mode management nodes may not have it
+    k8s_client = k8s_config = k8s_stream = None
+    ApiException = Exception
 
-def _kubectl(*args, timeout=60) -> str:
-    """Run kubectl with the given args and return stdout. Returns '' on failure."""
+SA_NAMESPACE_FILE = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
+
+# Pod name prefixes collected in kubernetes mode, and the bundle subdirectory
+# each lands in. Control-plane and SPDK pods are here so their logs survive a
+# cluster without Graylog/OpenSearch.
+K8S_POD_GROUPS = [
+    ("simplyblock-tasks", "control-plane"),
+    ("simplyblock-webappapi", "control-plane"),
+    ("simplyblock-monitoring", "control-plane"),
+    ("simplyblock-admin-control", "control-plane"),
+    ("snode-spdk-pod", "spdk"),
+    ("simplyblock-csi-node", "csi-node"),
+    ("simplyblock-csi-controller", "csi-controller"),
+    ("simplyblock-manager", "simplyblock-manager"),
+    ("simplyblock-storage-node-ds", "storage-node-ds"),
+]
+
+
+def _default_namespace(path=SA_NAMESPACE_FILE) -> str:
+    """The pod's own namespace when run in-cluster, else 'simplyblock'."""
     try:
-        r = subprocess.run(
-            ["kubectl"] + list(args),
-            capture_output=True, text=True, timeout=timeout,
-        )
-        return r.stdout
-    except Exception as exc:
-        print(f"    WARN: kubectl {' '.join(args[:4])} … failed: {exc}", file=sys.stderr)
-        return ""
+        ns = Path(path).read_text().strip()
+        return ns or "simplyblock"
+    except OSError:
+        return "simplyblock"
 
 
-def _kubectl_list_pods(namespace: str, prefix: str) -> list[str]:
-    """Return pod names in *namespace* whose name starts with *prefix*."""
-    out = _kubectl("get", "pods", "-n", namespace,
-                   "--no-headers", "-o", "custom-columns=:metadata.name")
-    return [p for p in out.splitlines() if p.startswith(prefix)]
+def _k8s_api():
+    """CoreV1Api from the in-cluster config, falling back to kubeconfig; None if neither."""
+    if k8s_client is None:
+        print("    WARN: python 'kubernetes' package missing; skipping pod logs", file=sys.stderr)
+        return None
+    try:
+        k8s_config.load_incluster_config()
+    except Exception:
+        try:
+            k8s_config.load_kube_config()
+        except Exception as exc:
+            print(f"    WARN: no kubernetes config available: {exc}", file=sys.stderr)
+            return None
+    return k8s_client.CoreV1Api()
 
 
-def _kubectl_containers(namespace: str, pod: str) -> list[str]:
-    """Return init + regular container names for *pod*."""
-    out = _kubectl(
-        "get", "pod", pod, "-n", namespace,
-        "-o",
-        "jsonpath={range .spec.initContainers[*]}{.name}{'\\n'}{end}"
-        "{range .spec.containers[*]}{.name}{'\\n'}{end}",
-    )
-    return [c for c in out.splitlines() if c]
+def _k8s_list_pods(api, namespace: str, prefix: str) -> list[str]:
+    try:
+        pods = api.list_namespaced_pod(namespace=namespace).items
+    except ApiException as exc:
+        print(f"    WARN: cannot list pods in {namespace}: {exc}", file=sys.stderr)
+        return []
+    return [p.metadata.name for p in pods if p.metadata.name.startswith(prefix + "-")]
 
 
-def collect_k8s_pod_logs(namespace: str, pod: str, out_dir: Path,
-                          from_iso: str, to_iso: str) -> None:
-    """
-    Write current + previous logs for every container in *pod* to *out_dir*.
-    Files are named  <pod>_<container>.log
-    """
-    containers = _kubectl_containers(namespace, pod)
-    for container in containers:
+def _k8s_containers(api, namespace: str, pod: str) -> list[str]:
+    try:
+        p = api.read_namespaced_pod(name=pod, namespace=namespace)
+    except ApiException as exc:
+        print(f"    WARN: cannot read pod {pod}: {exc}", file=sys.stderr)
+        return []
+    return [c.name for c in (p.spec.init_containers or []) + (p.spec.containers or [])]
+
+
+def _k8s_log(api, namespace, pod, container, **kw) -> str:
+    try:
+        return api.read_namespaced_pod_log(
+            name=pod, namespace=namespace, container=container,
+            timestamps=True, _request_timeout=120, **kw) or ""
+    except ApiException as exc:
+        if kw.get("previous") and exc.status == 400:
+            return ""
+        return f"(could not retrieve logs: {exc.status} {exc.reason})\n"
+
+
+def collect_k8s_pod_logs(api, namespace: str, pod: str, out_dir: Path,
+                         from_iso: str, to_iso: str) -> None:
+    """Write current + previous logs for every container in *pod* to <pod>_<container>.log."""
+    since_dt = datetime.fromisoformat(from_iso)
+    since_seconds = max(1, int((datetime.now(UTC) - since_dt).total_seconds()))
+    for container in _k8s_containers(api, namespace, pod):
         log_file = out_dir / f"{pod}_{container}.log"
         print(f"      {pod} / {container}")
         with open(log_file, "w") as fh:
             fh.write(f"=== Pod: {pod} | Container: {container} | Namespace: {namespace} ===\n")
             fh.write(f"=== From: {from_iso} | Until: {to_iso} ===\n\n")
-
             fh.write("--- current logs ---\n")
-            out = _kubectl("logs", pod, "-c", container, "-n", namespace,
-                           "--timestamps", f"--since-time={from_iso}", timeout=120)
-            # Trim lines beyond to_iso
+            out = _k8s_log(api, namespace, pod, container, since_seconds=since_seconds)
             for line in out.splitlines():
                 if line[:26] > to_iso[:26]:
                     break
                 fh.write(line + "\n")
-
             fh.write("\n--- previous (last crash) logs ---\n")
-            prev = _kubectl("logs", pod, "-c", container, "-n", namespace,
-                            "--timestamps", "--previous", timeout=60)
+            prev = _k8s_log(api, namespace, pod, container, previous=True)
             fh.write(prev if prev.strip() else "(no previous logs)\n")
 
 
-def collect_k8s_csi_dmesg(namespace: str, pod: str, out_dir: Path,
-                            from_iso: str, to_iso: str) -> None:
-    """
-    Collect dmesg from the csi-node container of a CSI pod,
-    filtered to the requested time window using the kernel boot epoch.
-    """
-    from_epoch = int(datetime.fromisoformat(from_iso).timestamp())
-    to_epoch   = int(datetime.fromisoformat(to_iso).timestamp())
+def _k8s_exec(api, namespace, pod, container, command) -> str:
+    return k8s_stream(
+        api.connect_get_namespaced_pod_exec, pod, namespace,
+        container=container, command=command,
+        stderr=False, stdin=False, stdout=True, tty=False, _request_timeout=30) or ""
 
+
+def collect_k8s_csi_dmesg(api, namespace: str, pod: str, out_dir: Path,
+                          from_iso: str, to_iso: str) -> None:
+    """dmesg from the csi-node container, filtered to the window via the boot epoch."""
+    import re
+    from_epoch = int(datetime.fromisoformat(from_iso).timestamp())
+    to_epoch = int(datetime.fromisoformat(to_iso).timestamp())
     log_file = out_dir / f"{pod}_csi-node_dmesg.log"
     print(f"      {pod} / csi-node (dmesg)")
-
-    # Derive boot epoch from /proc/uptime inside the container
-    uptime_out = _kubectl("exec", pod, "-c", "csi-node", "-n", namespace,
-                          "--", "cat", "/proc/uptime", timeout=10)
     try:
-        boot_epoch = int(datetime.now(UTC).timestamp()) - int(float(uptime_out.split()[0]))
-    except Exception:
-        boot_epoch = 0
-
-    # Prefer human-readable reltime; fall back to monotonic seconds
-    dmesg_out = _kubectl("exec", pod, "-c", "csi-node", "-n", namespace,
-                         "--", "dmesg", "--kernel", "--time-format=reltime",
-                         "--nopager", timeout=30)
-    if not dmesg_out.strip():
-        dmesg_out = _kubectl("exec", pod, "-c", "csi-node", "-n", namespace,
-                             "--", "dmesg", "--kernel", "--nopager", timeout=30)
-        # Filter by monotonic timestamp
-        filtered = []
-        import re
-        for line in dmesg_out.splitlines():
-            m = re.match(r'^\[\s*([0-9]+\.[0-9]+)\]', line)
-            if m:
-                wall = boot_epoch + int(float(m.group(1)))
-                if wall < from_epoch:
-                    continue
-                if wall > to_epoch:
-                    break
-            filtered.append(line)
-        dmesg_out = "\n".join(filtered)
-
+        uptime_out = _k8s_exec(api, namespace, pod, "csi-node", ["cat", "/proc/uptime"])
+        try:
+            boot_epoch = int(datetime.now(UTC).timestamp()) - int(float(uptime_out.split()[0]))
+        except Exception:
+            boot_epoch = 0
+        dmesg_out = _k8s_exec(api, namespace, pod, "csi-node",
+                              ["dmesg", "--kernel", "--time-format=reltime", "--nopager"])
+        if not dmesg_out.strip():
+            raw = _k8s_exec(api, namespace, pod, "csi-node", ["dmesg", "--kernel", "--nopager"])
+            filtered = []
+            for line in raw.splitlines():
+                m = re.match(r'^\[\s*([0-9]+\.[0-9]+)\]', line)
+                if m:
+                    wall = boot_epoch + int(float(m.group(1)))
+                    if wall < from_epoch:
+                        continue
+                    if wall > to_epoch:
+                        break
+                filtered.append(line)
+            dmesg_out = "\n".join(filtered)
+    except Exception as exc:
+        dmesg_out = f"(could not exec into {pod}: {exc})\n"
     with open(log_file, "w") as fh:
         fh.write(f"=== Pod: {pod} | Container: csi-node | dmesg ===\n")
         fh.write(f"=== From: {from_iso} | Until: {to_iso} ===\n\n")
         fh.write(dmesg_out or "(no dmesg output)\n")
+
+
+def collect_k8s_namespace(api, namespace: str, k8s_dir: Path,
+                          from_iso: str, to_iso: str) -> None:
+    """Collect logs for every pod group in K8S_POD_GROUPS, plus csi-node dmesg."""
+    for prefix, subdir in K8S_POD_GROUPS:
+        pods = _k8s_list_pods(api, namespace, prefix)
+        if not pods:
+            print(f"  No {prefix} pods found in namespace {namespace}.")
+            continue
+        out = k8s_dir / subdir
+        out.mkdir(exist_ok=True)
+        print(f"  {prefix} pods ({len(pods)}) …")
+        for pod in pods:
+            collect_k8s_pod_logs(api, namespace, pod, out, from_iso, to_iso)
+            if prefix == "simplyblock-csi-node":
+                collect_k8s_csi_dmesg(api, namespace, pod, out, from_iso, to_iso)
+
+
+def sbctl_snapshots(cluster_uuid: str):
+    """(label, sbctl args, output file, as JSON) for the cluster-level snapshots."""
+    return [
+        ("sbctl cluster show", ["cluster", "show", cluster_uuid], "cluster_show.txt", False),
+        ("sbctl lvol list", ["lvol", "list", "--cluster-id", cluster_uuid], "lvol_list.json", True),
+        ("sbctl sn list", ["sn", "list"], "sn_list.json", True),
+        ("sbctl cluster list-tasks", ["cluster", "list-tasks", cluster_uuid, "--limit", "0"],
+         "cluster_list_tasks.txt", False),
+        ("sbctl cluster get-logs --limit 0", ["cluster", "get-logs", cluster_uuid, "--limit", "0"],
+         "cluster_get_logs.txt", False),
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -1045,7 +1114,7 @@ def main():
         help=(
             "Deployment mode: 'docker' (default) uses Docker Swarm service names "
             "for control-plane log collection; 'kubernetes' uses Kubernetes container "
-            "names and skips Graylog-based SPDK log collection (kubectl is used instead)."
+            "names and also reads pod logs from the Kubernetes API."
         ),
     )
     parser.add_argument(
@@ -1077,11 +1146,11 @@ def main():
     )
     parser.add_argument(
         "--namespace",
-        default="simplyblock",
+        default=_default_namespace(),
         metavar="NS",
         help=(
             "Kubernetes namespace to collect CSI / storage-node DS pod logs from "
-            "(default: simplyblock).  Pass an empty string to skip kubectl collection."
+            "(default: this pod's namespace in-cluster, else simplyblock).  Pass an empty string to skip."
         ),
     )
     parser.add_argument(
@@ -1296,7 +1365,7 @@ def main():
 
         # ── 8. Storage-node logs ─────────────────────────────────────────────
         # Docker mode: collect SPDK/SNodeAPI logs from Graylog/OpenSearch.
-        # Kubernetes mode: SPDK logs are captured via kubectl in step 9.
+        # Kubernetes mode: SPDK pod logs are also read from the API in step 9.
 
         if args.mode == "docker":
             print("\n[6] Collecting storage-node logs (docker) …")
@@ -1389,65 +1458,22 @@ def main():
                     )
                     print(f"    {cname:<42} {n:>8,} lines")
 
-        # ── 9. Kubernetes pod logs (CSI node + storage-node DS) ──────────────
+        # ── 9. Kubernetes pod logs (control plane, SPDK, CSI, storage-node DS) ─
 
         # Kubernetes pod logs only exist in a kubernetes deployment. A docker
-        # deployment has no pods, so this step is skipped there rather than
-        # shelling out to kubectl against a cluster that is not there.
+        # deployment has no pods, so this step is skipped there.
         k8s_ns = args.namespace
         if args.mode != "kubernetes":
             print(f"\n[7] Skipping Kubernetes pod logs (deploy mode is {args.mode}).")
         elif not k8s_ns:
             print("\n[7] Skipping Kubernetes pod logs (namespace collection disabled).")
+        elif (k8s_api := _k8s_api()) is None:
+            print("\n[7] Skipping Kubernetes pod logs (no kubernetes client/config).")
         else:
             print(f"\n[7] Collecting Kubernetes pod logs (namespace: {k8s_ns}) …")
             k8s_dir = log_root / "k8s_pods"
             k8s_dir.mkdir()
-
-            # 9a. simplyblock-csi-node* pods — all containers + dmesg
-            csi_pods = _kubectl_list_pods(k8s_ns, "simplyblock-csi-node")
-            if csi_pods:
-                csi_dir = k8s_dir / "csi-node"
-                csi_dir.mkdir()
-                print(f"  CSI node pods ({len(csi_pods)}) …")
-                for pod in csi_pods:
-                    collect_k8s_pod_logs(k8s_ns, pod, csi_dir, from_iso, to_iso)
-                    collect_k8s_csi_dmesg(k8s_ns, pod, csi_dir, from_iso, to_iso)
-            else:
-                print(f"  No simplyblock-csi-node pods found in namespace {k8s_ns}.")
-
-            # 9b. simplyblock-csi-controller* pods — all containers
-            csi_ctrl_pods = _kubectl_list_pods(k8s_ns, "simplyblock-csi-controller")
-            if csi_ctrl_pods:
-                csi_ctrl_dir = k8s_dir / "csi-controller"
-                csi_ctrl_dir.mkdir()
-                print(f"  CSI controller pods ({len(csi_ctrl_pods)}) …")
-                for pod in csi_ctrl_pods:
-                    collect_k8s_pod_logs(k8s_ns, pod, csi_ctrl_dir, from_iso, to_iso)
-            else:
-                print(f"  No simplyblock-csi-controller pods found in namespace {k8s_ns}.")
-
-            # 9c. simplyblock-manager* pods — all containers
-            mgr_pods = _kubectl_list_pods(k8s_ns, "simplyblock-manager")
-            if mgr_pods:
-                mgr_dir = k8s_dir / "simplyblock-manager"
-                mgr_dir.mkdir()
-                print(f"  Simplyblock manager pods ({len(mgr_pods)}) …")
-                for pod in mgr_pods:
-                    collect_k8s_pod_logs(k8s_ns, pod, mgr_dir, from_iso, to_iso)
-            else:
-                print(f"  No simplyblock-manager pods found in namespace {k8s_ns}.")
-
-            # 9d. simplyblock-storage-node-ds* pods — all containers
-            sn_ds_pods = _kubectl_list_pods(k8s_ns, "simplyblock-storage-node-ds")
-            if sn_ds_pods:
-                sn_ds_dir = k8s_dir / "storage-node-ds"
-                sn_ds_dir.mkdir()
-                print(f"  Storage-node DS pods ({len(sn_ds_pods)}) …")
-                for pod in sn_ds_pods:
-                    collect_k8s_pod_logs(k8s_ns, pod, sn_ds_dir, from_iso, to_iso)
-            else:
-                print(f"  No simplyblock-storage-node-ds pods found in namespace {k8s_ns}.")
+            collect_k8s_namespace(k8s_api, k8s_ns, k8s_dir, from_iso, to_iso)
 
         # ── 10. sbctl cluster / node snapshots ───────────────────────────────
 
@@ -1475,28 +1501,8 @@ def main():
             print(f"  {label:<50} FAILED", file=sys.stderr)
             return False
 
-        # 1. cluster show
-        save_sbctl(
-            "sbctl cluster show",
-            ["cluster", "show", cluster_uuid],
-            "cluster_show.txt",
-        )
-
-        # 2. lvol list
-        save_sbctl(
-            "sbctl lvol list",
-            ["lvol", "list", "--cluster-id", cluster_uuid],
-            "lvol_list.json",
-            use_json=True,
-        )
-
-        # 3. sn list (already fetched; save the raw JSON for completeness)
-        save_sbctl(
-            "sbctl sn list",
-            ["sn", "list"],
-            "sn_list.json",
-            use_json=True,
-        )
+        for label, cmd_args, out_name, as_json in sbctl_snapshots(cluster_uuid):
+            save_sbctl(label, cmd_args, out_name, use_json=as_json)
 
         # 4. sn check <node_uuid>  – one file per storage node
         print("  sbctl sn check  (per node) …")
@@ -1513,13 +1519,6 @@ def main():
                 print(f"    {label}")
             else:
                 print(f"    {label}  FAILED", file=sys.stderr)
-
-        # 5. cluster get-logs --limit 0  (all cluster-level events)
-        save_sbctl(
-            "sbctl cluster get-logs --limit 0",
-            ["cluster", "get-logs", cluster_uuid, "--limit", "0"],
-            "cluster_get_logs.txt",
-        )
 
         # ── 11. Write a collection manifest ──────────────────────────────────
 

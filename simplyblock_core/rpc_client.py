@@ -2,6 +2,7 @@ import errno
 import hashlib
 import http.client
 import json
+import os
 import threading
 from collections import OrderedDict
 from enum import IntEnum
@@ -187,11 +188,31 @@ class RPCProtocolError(RPCException):
     """Response wasn't valid/well-formed JSON-RPC."""
 
 
+# strerror text -> errno, for SPDK handlers that answer with a generic
+# JSON-RPC code and carry the errno only as spdk_strerror() in the message.
+_ERRNO_BY_STRERROR = {os.strerror(n): n for n in errno.errorcode}
+
+
 class RPCRemoteError(RPCException):
     def __init__(self, message: str, code: int, data: Any = None):
         super().__init__(message)
         self.code = code
         self.data = data
+
+    @property
+    def posix_errno(self) -> int | None:
+        """The errno SPDK failed with, or None when it cannot be told.
+
+        SPDK reports it two ways: as the code itself (``-errno``), or under a
+        generic JSON-RPC code with ``spdk_strerror(errno)`` as the message --
+        a repeated ``bdev_lvol_add_clone`` answers
+        ``{"code": -32602, "message": "File exists"}``. Comparing ``code``
+        against ``-errno.X`` alone misses the second form. ``-1`` is
+        ``RPCErrorCode.invalid_state``, not EPERM, so it is not read as one.
+        """
+        if self.code < -1 and -self.code in errno.errorcode:
+            return -self.code
+        return _ERRNO_BY_STRERROR.get(str(self))
 
 
 def request_reached_remote(err: BaseException) -> bool:
@@ -558,7 +579,7 @@ class RPCClient:
             "io_unit_size": 8192,
             "max_aq_depth": 128,
             "num_shared_buffers": shared_bufs,
-            "buf_cache_size": 512,
+            "buf_cache_size": constants.NVMF_BUF_CACHE_SIZE,
             "dif_insert_or_strip": False,
             "ack_timeout": 2000,
         }
@@ -925,8 +946,16 @@ class RPCClient:
         return self._request("accel_crypto_key_create", cipher="AES_XTS",
                               key=key, key2=key2, name=name)
 
-    def lvol_crypto_delete(self, name):
-        return self._request("bdev_crypto_delete", name=name)
+    def lvol_crypto_delete(self, name, *, idempotent=False):
+        """``idempotent=True``: a retried delete against a bdev already
+        removed on a prior pass gets -ENODEV here, not a fresh failure —
+        treat it as the no-op it is instead of raising (SFAM-2826)."""
+        try:
+            return self._request("bdev_crypto_delete", name=name)
+        except RPCRemoteError as e:
+            if idempotent and e.code == -errno.ENODEV:
+                return None
+            raise
 
     def lvol_compress_delete(self, name):
         return self._request("bdev_compress_delete", name=name)
@@ -1499,7 +1528,9 @@ class RPCClient:
         """Create an SPDK AIO bdev over a Linux block device (lblk cluster
         mode). ``filename`` is the device path — prefer the stable
         /dev/disk/by-id symlink. ``block_size`` 0 lets SPDK use the device's
-        logical block size."""
+        logical block size. Callers go through utils.create_aio_bdev, which
+        passes the block size a device was formatted with
+        (NVMeDevice.aio_block_size)."""
         kwargs = {"name": name, "filename": filename}
         if block_size:
             kwargs["block_size"] = block_size
@@ -1511,6 +1542,23 @@ class RPCClient:
     def bdev_aio_rescan(self, name):
         """Re-read the backing device's size (device grow pickup)."""
         return self._request("bdev_aio_rescan", name=name)
+
+    def bdev_uring_create(self, name, filename, block_size=0):
+        """Create an SPDK io_uring bdev over a Linux block device (lblk
+        cluster mode, device-mapper nodes: see constants.LBLK_IO_ENGINE_URING).
+        Same arguments as bdev_aio_create; callers go through
+        utils.create_aio_bdev with io_engine="uring"."""
+        kwargs = {"name": name, "filename": filename}
+        if block_size:
+            kwargs["block_size"] = block_size
+        return self._request("bdev_uring_create", **kwargs)
+
+    def bdev_uring_delete(self, name):
+        return self._request("bdev_uring_delete", name=name)
+
+    def bdev_uring_rescan(self, name):
+        """Re-read the backing device's size (device grow pickup)."""
+        return self._request("bdev_uring_rescan", name=name)
 
     def alceml_bdev_backend_resize_begin(self, name, request_timeout=None):
         """Put an alceml bdev into its resize state: new I/O is held, pending
@@ -1831,8 +1879,19 @@ class RPCClient:
     def nvmf_subsystem_get_controllers(self, nqn):
         return self._request("nvmf_subsystem_get_controllers", nqn=nqn)
 
-    def lvol_crypto_key_delete(self, name):
-        return self._request("accel_crypto_key_destroy", key_name=name)
+    def lvol_crypto_key_delete(self, name, *, idempotent=False):
+        """``idempotent=True``: unlike ``bdev_crypto_delete``, a missing key
+        does not answer -ENODEV -- ``accel_crypto_key_destroy`` rejects it as
+        ``invalid_params`` with message "No key object found" (checked live
+        against SPDK), so that is what a retried delete must recognize as
+        the no-op it is instead of raising (SFAM-2826)."""
+        try:
+            return self._request("accel_crypto_key_destroy", key_name=name)
+        except RPCRemoteError as e:
+            if (idempotent and e.code == RPCErrorCode.invalid_params
+                    and "No key object found" in str(e)):
+                return None
+            raise
 
     def bdev_lvol_snapshot_register(self, lvol_name, snapshot_name, registered_uuid, blobid):
         params = {

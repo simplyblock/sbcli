@@ -29,6 +29,7 @@ from simplyblock_core.controllers.host_auth import (
 from simplyblock_core.db_controller import DBController, SubsystemCapacityError
 from simplyblock_core.exceptions import (
     PreconditionError,
+    SubsystemMoveInProgressError,
     SyncLeadershipMovingError,
     SyncReplicationSiteError,
     SyncReplicationUnsupportedError,
@@ -778,6 +779,16 @@ def _lvstore_has_existing_leader(host_node):
     return leader is not None and leader.status == StorageNode.STATUS_ONLINE
 
 
+def _lvol_geometry(cl, ndcs, npcs):
+    """(ndcs, npcs) for a new lvol: 0x0 when the cluster has LVol geometry
+    disabled, else the explicit values, else the cluster's distr geometry."""
+    if not cl.lvol_geometry_enabled:
+        return 0, 0
+    if ndcs or npcs:
+        return ndcs or 0, npcs or 0
+    return cl.distr_ndcs, cl.distr_npcs
+
+
 def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=False, use_crypto=False,
                 distr_vuid=0, max_rw_iops=0, max_rw_mbytes=0, max_r_mbytes=0, max_w_mbytes=0,
                 with_snapshot=False, max_size=0, lvol_priority_class=0,
@@ -906,6 +917,12 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
         return False, size_error
 
     cl = db_controller.get_cluster_by_id(pool.cluster_id)
+
+    if not cl.lvol_geometry_enabled:
+        if ndcs or npcs:
+            logger.warning(f"LVol geometry is disabled on cluster {cl.get_id()}, "
+                           f"ignoring ndcs={ndcs}, npcs={npcs}")
+        ndcs, npcs = 0, 0
 
     if (fabric == "tcp" and not cl.fabric_tcp) or (fabric == "rdma" and not cl.fabric_rdma):
         return False,  f"Fabric not available in cluster: {fabric}"
@@ -1044,10 +1061,12 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
 
     cluster_size_prov_util = int(((cluster_size_prov+size) / cluster_size_total) * 100)
 
+    # Provisioned-capacity thresholds are alarms (cap_monitor raises the
+    # cluster_prov_cap_* events), never an admission limit: a thin cluster is
+    # full when its devices are, and over-provisioning is what thin means.
     if cl.prov_cap_crit and cl.prov_cap_crit < cluster_size_prov_util:
-        msg = f"Cluster provisioned cap critical would be, util: {cluster_size_prov_util}% of cluster util: {cl.prov_cap_crit}"
-        logger.error(msg)
-        return False, msg
+        logger.warning(f"Cluster provisioned cap critical, util: {cluster_size_prov_util}% "
+                       f"of cluster util: {cl.prov_cap_crit} (informational)")
 
     elif cl.prov_cap_warn and cl.prov_cap_warn < cluster_size_prov_util:
         logger.warning(f"Cluster provisioned cap warning, util: {cluster_size_prov_util}% of cluster util: {cl.prov_cap_warn}")
@@ -1140,12 +1159,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
     lvol.subsys_port = host_node.get_lvol_subsys_port(host_node.lvstore)
     lvol.top_bdev = f"{lvol.lvs_name}/{lvol.lvol_bdev}"
     lvol.base_bdev = lvol.top_bdev
-    if npcs or ndcs:
-        lvol.npcs = npcs or 0
-        lvol.ndcs = ndcs or 0
-    else:
-        lvol.npcs = cl.distr_npcs
-        lvol.ndcs = cl.distr_ndcs
+    lvol.ndcs, lvol.npcs = _lvol_geometry(cl, ndcs, npcs)
     lvol.do_replicate = bool(do_replicate)
     if lvol.do_replicate:
         if replication_cluster_id:
@@ -1592,9 +1606,11 @@ def _create_bdev_stack(lvol, snode, is_primary=True):
                         if not ret:
                             raise
                 else:
-                    ret = rpc_client.bdev_lvol_register(
-                        lvol.lvol_bdev, lvol.lvs_name, lvol.lvol_uuid, lvol.blobid,
-                        qos_controller.wire_priority_class(snode.cluster_id, lvol.lvol_priority_class))
+                    from simplyblock_core.controllers.lvol_register import register_lvol
+                    ret = register_lvol(
+                        rpc_client, lvol.lvol_bdev, lvol.lvs_name, lvol.lvol_uuid, lvol.blobid,
+                        qos_controller.wire_priority_class(snode.cluster_id, lvol.lvol_priority_class),
+                        cluster_id=snode.cluster_id, node_label=snode.get_id())
 
             elif type == "bdev_lvol_clone":
                 if is_primary:
@@ -1962,6 +1978,16 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0, min_cntlid
                 f"Cannot attach lvol {lvol.uuid} to subsystem {lvol.nqn}: "
                 f"a member of that subsystem has an active migration "
                 f"{active_mig.uuid}. Retry after the migration completes."
+            )
+
+        # A subsystem a consistency-group subsystem move holds is changing
+        # shape on every node: a namespace added now would miss the move's
+        # nsid assignment and the source/target switch at commit.
+        if lvol.nqn in _moving_nqns_on_node(lvol.node_id):
+            return False, (
+                f"Cannot attach lvol {lvol.uuid} to subsystem {lvol.nqn}: "
+                f"a consistency-group subsystem move holds it. Retry after the "
+                f"move completes."
             )
 
     ret, msg = _create_bdev_stack(lvol, snode, is_primary=is_primary)
@@ -2580,9 +2606,28 @@ def _remove_bdev_stack(bdev_stack, rpc_client, sync=False):
         elif type == "ultra_lvol":
             ret = rpc_client.ultra21_lvol_dismount(name)
         elif type == "crypto" and not sync:
-            ret = rpc_client.lvol_crypto_delete(name)
-            if ret:
-                ret = rpc_client.lvol_crypto_key_delete(f'key_{name}')
+            # A retried teardown pass can reach this branch after the crypto
+            # bdev (and its key) were already removed on a prior pass. The
+            # already-absent case is handled inside the RPC calls themselves
+            # (idempotent=True) rather than here, so a genuine failure is the
+            # only thing left to turn into "not removed" below (SFAM-2826).
+            try:
+                present = rpc_client.bdev_get(name) is not None
+            except RPCException as e:
+                logger.warning(
+                    f"Could not determine whether BDev {name} still exists "
+                    f"({e}); attempting the delete and judging by its result")
+                present = True
+            if not present:
+                logger.info(f"BDev {name} already deleted, skipping")
+                bdev['status'] = 'deleted'
+                continue
+            try:
+                rpc_client.lvol_crypto_delete(name, idempotent=True)
+                rpc_client.lvol_crypto_key_delete(f'key_{name}', idempotent=True)
+                ret = True
+            except RPCRemoteError:
+                ret = None
 
         elif type == "bdev_lvstore":
             try:
@@ -3125,6 +3170,15 @@ def _delete_held_sources(lvol):
                          lvol.cloned_from_snap)
 
 
+def _discard_replication_spare(lvol_id):
+    """Delete the spare landing volume (replication_spare) of *lvol_id*. Best effort."""
+    try:
+        from simplyblock_core import replication_spare
+        replication_spare.discard(lvol_id)
+    except Exception as e:                              # noqa: BLE001
+        logger.warning("Could not discard the spare landing volume of %s: %s", lvol_id, e)
+
+
 def delete_lvol(lvol: LVol, *, force_delete: bool = False, lock: bool = True) -> None:
     db_controller = DBController()
     ops_gate.assert_object_ops_allowed("volume delete", pool_uuid=lvol.pool_uuid)
@@ -3144,6 +3198,14 @@ def delete_lvol(lvol: LVol, *, force_delete: bool = False, lock: bool = True) ->
     if active_mig:
         raise PreconditionError(f"Cannot delete lvol {lvol.uuid}: active migration {active_mig.uuid}")
 
+    # A subsystem a consistency-group move holds is losing or gaining
+    # namespaces on every node, and a step-2 target's non-moving root is what
+    # the commit records the movers under. The move's window is bounded.
+    if lvol.nqn in _moving_nqns_on_node(lvol.node_id, db_controller):
+        raise PreconditionError(
+            f"Cannot delete lvol {lvol.uuid}: subsystem {lvol.nqn} is held by a "
+            f"consistency-group subsystem move; delete it once the move ended")
+
     if lvol.status == LVol.STATUS_RESTORING and not force_delete:
         raise PreconditionError(f"Cannot delete lvol {lvol.uuid}: backup restore in progress")
 
@@ -3162,6 +3224,11 @@ def delete_lvol(lvol: LVol, *, force_delete: bool = False, lock: bool = True) ->
         _cancel_replication_cutover(lvol.get_id(), db_controller.get_job_tasks(cluster_id))
     except Exception as e:                              # noqa: BLE001
         logger.warning("Could not cancel the cutover task of %s: %s", lvol.get_id(), e)
+
+    # A replicating volume's spare landing volume on the destination goes
+    # with it (only replicating volumes have one; others skip the look-up).
+    if lvol.do_replicate or lvol.replication_policy_id or lvol.replication_node_id:
+        _discard_replication_spare(lvol.get_id())
 
     # Consistency-group detach on delete (design §8.2): close the member's
     # epoch so future generations exclude it, but PRESERVE its snapshots in
@@ -3229,6 +3296,7 @@ def delete_lvol(lvol: LVol, *, force_delete: bool = False, lock: bool = True) ->
             logger.exception(f"failed to log delete event for {lvol.get_id()}")
 
         db_controller.release_lvol_ns_slot(lvol)
+        db_controller.delete_lvol_stats(lvol)
 
         # if lvol is clone and snapshot is deleted, then delete snapshot
         if lvol.cloned_from_snap:
@@ -3413,22 +3481,22 @@ def set_lvol(uuid, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes, name=
     snode = db_controller.get_storage_node_by_id(lvol.node_id)
     rpc_client = snode.rpc_client()
 
-    if max_rw_iops < 0:
+    if max_rw_iops is not None and max_rw_iops < 0:
         msg = "max_rw_iops can not be negative"
         logger.error(msg)
         return False
 
-    if max_rw_mbytes < 0:
+    if max_rw_mbytes is not None and max_rw_mbytes < 0:
         msg = "max_rw_mbytes can not be negative"
         logger.error(msg)
         return False
 
-    if max_r_mbytes < 0:
+    if max_r_mbytes is not None and max_r_mbytes < 0:
         msg = "max_r_mbytes can not be negative"
         logger.error(msg)
         return False
 
-    if max_w_mbytes < 0:
+    if max_w_mbytes is not None and max_w_mbytes < 0:
         msg = "max_w_mbytes can not be negative"
         logger.error(msg)
         return False
@@ -4027,6 +4095,16 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, 
         host_entry = HostConnectAuth.resolve(lvol, host_nqn, db_controller)
     except ValueError as e:
         return False, str(e)
+    # A subsystem a consistency-group move holds is losing or gaining this
+    # volume's namespace on every node. A host that connected now would hold a
+    # path the move does not know about: never suspended, so its I/O fails in
+    # the window, and still pointing at the source after the commit. The
+    # move's window is bounded, so the connect is refused and retried rather
+    # than answered with the source. Same guard as the attach in add_lvol.
+    if lvol.nqn in _moving_nqns_on_node(lvol.node_id, db_controller):
+        raise SubsystemMoveInProgressError(
+            f"volume {uuid} is in subsystem {lvol.nqn}, which a consistency-group "
+            f"subsystem move holds; connect again after the move completes")
     if site is not None and lvol.sync_never_connected:
         _mark_connected(db_controller, lvol)
 
@@ -5421,6 +5499,10 @@ def replication_stop(lvol_id, delete=False, from_policy=False):
     logger.info("Setting LVol do_replicate: False")
     lvol.do_replicate = False
     lvol.write_to_db()
+    # The spare landing volume kept ready on the destination serves no
+    # transfer any more. After the write above: a spare create still racing
+    # with this stop sees do_replicate False and deletes its own spare.
+    _discard_replication_spare(lvol_id)
 
     snode = db_controller.get_storage_node_by_id(lvol.node_id)
     tasks = db_controller.get_job_tasks(snode.cluster_id)
@@ -6389,6 +6471,22 @@ def _retire_source_data_path(db_controller, lvol):
                            "on %s failed: %s", lvol.get_id(), node_id, e)
 
 
+def _connection_strings_after_failover(new_lvol) -> list:
+    """The connect entries of the volume a fail-over just created, serialized,
+    or an empty list when they cannot be built: the volume exists by now, so
+    a failed build is logged and the fail-over still answers. A subsystem
+    move holding the subsystem is one such failure; the client connects
+    after it."""
+    try:
+        conn, conn_err = connect_lvol(new_lvol.get_id())
+    except SubsystemMoveInProgressError as e:
+        conn, conn_err = False, str(e)
+    if conn_err:
+        logger.warning(f"Fail-over lvol created but connection-string build failed: {conn_err}")
+        return []
+    return [c.model_dump(by_alias=True) for c in conn]
+
+
 def failover_from_replicated_copy(template, copy, source_cluster_id):
     """Fail one consistency-group member over from a replicated copy on the peer,
     when the member's source record is gone.
@@ -6460,12 +6558,7 @@ def failover_from_replicated_copy(template, copy, source_cluster_id):
             logger.warning("Group reconstitution after fail-over of %s failed: %s",
                            template.get_id(), e)
 
-    connection_strings = []
-    conn, conn_err = connect_lvol(new_lvol.get_id())
-    if conn_err:
-        logger.warning(f"Fail-over lvol created but connection-string build failed: {conn_err}")
-    else:
-        connection_strings = [c.model_dump(by_alias=True) for c in conn]
+    connection_strings = _connection_strings_after_failover(new_lvol)
     logger.info("Failed %s over from replicated copy %s to %s on cluster %s",
                 template.get_id(), copy.get_id(), new_lvol.get_id(), target_node.cluster_id)
     return {
@@ -6651,12 +6744,7 @@ def replicate_lvol_on_target_cluster(lvol_id, generation=0, pin_snapshot_id=None
 
     # Provide the new connection paths (primary/secondary/tertiary) — identical
     # NQN, different IP/port — so the client can fail over to the target cluster.
-    connection_strings = []
-    conn, conn_err = connect_lvol(new_lvol.get_id())
-    if conn_err:
-        logger.warning(f"Fail-over lvol created but connection-string build failed: {conn_err}")
-    else:
-        connection_strings = [c.model_dump(by_alias=True) for c in conn]
+    connection_strings = _connection_strings_after_failover(new_lvol)
 
     # Requirement 4 (consistency groups): a generation older than the current
     # membership must SAY so — which current members the chosen point-in-time
@@ -7475,3 +7563,11 @@ def resolve_effective_ha_type(ha_type, host_node):
     if ha_type == "ha" and not host_node.secondary_node_id:
         return "single"
     return ha_type
+
+
+def _moving_nqns_on_node(node_id, db_controller=None):
+    """Subsystems an active consistency-group subsystem move holds on the
+    node (its sources and its target). ``db_controller`` is the caller's,
+    when it has one open; a fresh one otherwise."""
+    db = db_controller if db_controller is not None else DBController()
+    return db.subsystem_move_reservations(node_id)[0]

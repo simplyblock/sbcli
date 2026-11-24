@@ -103,11 +103,13 @@ from simplyblock_core.controllers import (
     migration_controller,
     migration_events,
     qos_controller,
+    replica_chain,
     snapshot_controller,
     tasks_controller,
     tasks_events,
 )
 from simplyblock_core.controllers.host_auth import _reapply_allowed_hosts
+from simplyblock_core.controllers.lvol_register import register_lvol
 from simplyblock_core.controllers.migration_bdev_ops import (
     delete_bdev_blocking as _delete_bdev_blocking,
 )
@@ -173,6 +175,35 @@ _MIGRATION_BDEV_SUFFIX = constants.LVOL_MIG_BDEV_SUFFIX
 # target after migration.  "am" = "after migration" — stays distinct from the
 # in-flight 'm' suffix so pre-existing migrated snapshots remain identifiable.
 _MIGRATION_BDEV_SUFFIX_DONE = 'am'
+
+
+def _group_sibling_lvol_ids(migration):
+    """uuids of every OTHER lvol migrating in the same batch group as
+    `migration` (empty set if `migration` isn't a batch-group member).
+
+    Used by _apply_migration_to_db()'s owned-snapshot handling to tell a
+    clone sibling that's migrating to the SAME target as part of this same
+    group apart from one genuinely staying behind on a different node --
+    only the latter still needs the snapshot's pre-migration location
+    preserved; a sibling moving with us needs nothing left behind.
+    """
+    if not migration.migration_group_id:
+        return set()
+    try:
+        group = db.get_migration_group_by_id(migration.migration_group_id)
+    except KeyError:
+        return set()
+    uuids = set()
+    for member in group.members:
+        mig_id = member.get("migration_id")
+        if not mig_id:
+            continue
+        try:
+            sibling_mig = db.get_migration_by_id(mig_id)
+        except KeyError:
+            continue
+        uuids.add(sibling_mig.lvol_id)
+    return uuids
 
 
 def _apply_migration_to_db(migration, tgt_lvol_uuid=None, tgt_lvol_bdev=None):
@@ -330,31 +361,64 @@ def _apply_migration_to_db(migration, tgt_lvol_uuid=None, tgt_lvol_bdev=None):
                 })
                 original_snap.write_to_db(db.kv_store)
         else:
-            referenced = False
+            # A living clone sibling only means "this snapshot's PRE-migration
+            # copy is still needed, so preserve the primary record and record
+            # our own copy as an extra instance instead" when that sibling is
+            # staying at its current node. When the sibling is itself a
+            # member of the SAME batch group (migration.migration_group_id)
+            # it is migrating to the exact same target right now too -- the
+            # whole branch (this snapshot and everything cloned from it)
+            # moves together, nothing is left behind that still needs the
+            # pre-migration location, and the primary record should simply
+            # move like the unreferenced case.
+            #
+            # Previously this didn't distinguish the two: ANY clone sibling
+            # (group member or not) was treated as "still referenced", which
+            # — correctly for a genuinely-external sibling, but WRONGLY for a
+            # group-moving one — skipped persisting the snapshot's own
+            # corrected snap_bdev/snap_uuid/blobid/lvol.* fields onto its
+            # primary record entirely (the write only ran in the
+            # "not referenced" branch, using a separately-fetched, still-
+            # stale `original_snap` otherwise). For a batch group migrating a
+            # snapshot together with everything cloned from it, that left the
+            # primary record pointing at the pre-migration source bdev/
+            # lvstore forever, which then made the next migration attempt
+            # look for a bdev that no longer existed at that name
+            # (`No such device`).
+            group_sibling_ids = _group_sibling_lvol_ids(migration)
+            external_snap = None
             for mini in db.get_mini_lvols():
-                if mini.uuid == migration.lvol_id:
+                if mini.uuid == migration.lvol_id or mini.uuid in group_sibling_ids:
                     continue
                 if mini.cloned_from_snap and mini.cloned_from_snap == snap_uuid:
                     logger.debug(
                         f"_apply_migration_to_db: snapshot {snap_uuid} "
-                        f"is still referenced by lvol {mini.uuid}")
-                    original_snap = db.get_snapshot_by_id(snap_uuid)
-                    if not any(s.get('lvol', {}).get('node_id') == snap.lvol.node_id
-                               for s in original_snap.instances):
-                        original_snap.instances.append({
-                            "lvol": {
-                                "node_id": snap.lvol.node_id,
-                                "hostname": snap.lvol.hostname,
-                                "lvol_bdev": snap.lvol.lvol_bdev,
-                                "uuid": snap.lvol.uuid,
-                            },
-                            "snap_bdev": snap.snap_bdev,
-                            "uuid": snap.uuid,
-                        })
-                        original_snap.write_to_db(db.kv_store)
-                    referenced = True
+                        f"is still referenced by lvol {mini.uuid} (not moving with us)")
+                    external_snap = db.get_snapshot_by_id(snap_uuid)
                     break
-            if not referenced:
+
+            if external_snap is not None:
+                # Something outside this migration (and outside its batch
+                # group) still needs the pre-migration copy -- leave the
+                # primary record alone (do NOT persist `snap`'s in-memory
+                # target-side mutations above) and only record our own new
+                # copy as an extra instance on a fresh, unmutated fetch.
+                if not any(s.get('lvol', {}).get('node_id') == snap.lvol.node_id
+                           for s in external_snap.instances):
+                    external_snap.instances.append({
+                        "lvol": {
+                            "node_id": snap.lvol.node_id,
+                            "hostname": snap.lvol.hostname,
+                            "lvol_bdev": snap.lvol.lvol_bdev,
+                            "uuid": snap.lvol.uuid,
+                        },
+                        "snap_bdev": snap.snap_bdev,
+                        "uuid": snap.uuid,
+                    })
+                    external_snap.write_to_db(db.kv_store)
+            else:
+                # No one is left behind needing the pre-migration copy --
+                # safe to move the primary record itself.
                 snap.write_to_db(db.kv_store)
 
         logger.debug(
@@ -1033,9 +1097,16 @@ def _setup_snap_transfer(snap, snap_index, src_node, tgt_node,
     # On a normal first pass the secondary has no knowledge of this bdev yet;
     # on a retry the secondary may already be registered — skip in that case.
     # If registration fails we clean up the primary bdev and abort.
+    #
+    # The tertiary is registered whether or not the secondary is: it used to
+    # be registered only inside the secondary's branch, so a tertiary behind
+    # an offline / departing secondary never held the landing volume, and the
+    # add_clone / convert that followed skipped it for want of the bdev -- an
+    # unregistered member with a tree that never learnt the chain
+    # (replica_chain; follow-up of bf23 LVS_16).
     sec_registered = False
     ter_registered = False
-    if tgt_sec and sec_rpc:
+    if (tgt_sec and sec_rpc) or (tgt_ter and ter_rpc):
         if not _bdev_info:
             try:
                 _delete_bdev_blocking(tgt_composite, tgt_rpc,
@@ -1046,44 +1117,40 @@ def _setup_snap_transfer(snap, snap_index, src_node, tgt_node,
             return None, f"Could not get bdev info for {tgt_composite} after creation"
         snap_blobid = _bdev_info['driver_specific']['lvol']['blobid']
         snap_uuid_on_tgt = _bdev_info['uuid']
-        if sec_rpc.bdev_get(tgt_composite):
-            sec_registered = True
-            logger.info(f"Secondary already has {tgt_composite}; skipping registration")
-        else:
+
+    def _register_on(rpc, label):
+        """True when *rpc*'s node holds the landing volume now."""
+        if rpc.bdev_get(tgt_composite):
+            logger.info(f"{label} already has {tgt_composite}; skipping registration")
+            return True
+        try:
+            return bool(register_lvol(
+                rpc, snap_short, tgt_node.lvstore, snap_uuid_on_tgt, snap_blobid,
+                _priority_class, cluster_id=tgt_node.cluster_id, node_label=label))
+        except RPCException:
+            return False
+
+    if tgt_sec and sec_rpc:
+        if not _register_on(sec_rpc, "Secondary"):
             try:
-                ret_sec = sec_rpc.bdev_lvol_register(
-                    snap_short, tgt_node.lvstore, snap_uuid_on_tgt, snap_blobid,
-                    _priority_class)
-            except RPCException:
-                ret_sec = None
-            if not ret_sec:
-                try:
-                    _delete_bdev_blocking(tgt_composite, tgt_rpc, sec_rpc,
-                                          all_nodes=[n for n in [tgt_node, tgt_sec, tgt_ter] if n],
-                                          lvs_name=tgt_node.lvstore)
-                except Exception as e:
-                    logger.warning(f"cleanup target lvol {tgt_composite} (non-fatal): {e}")
-                return None, f"bdev_lvol_register on secondary failed for snap {snap_uuid}"
-            sec_registered = True
-        if tgt_ter and ter_rpc:
-            if ter_rpc.bdev_get(tgt_composite):
-                ter_registered = True
-            else:
-                try:
-                    ret_ter = ter_rpc.bdev_lvol_register(
-                        snap_short, tgt_node.lvstore, snap_uuid_on_tgt, snap_blobid,
-                        _priority_class)
-                except RPCException:
-                    ret_ter = None
-                if not ret_ter:
-                    try:
-                        _delete_bdev_blocking(tgt_composite, tgt_rpc, sec_rpc, ter_rpc,
-                                              all_nodes=[n for n in [tgt_node, tgt_sec, tgt_ter] if n],
-                                              lvs_name=tgt_node.lvstore)
-                    except Exception as e:
-                        logger.warning(f"cleanup target lvol {tgt_composite} (non-fatal): {e}")
-                    return None, f"bdev_lvol_register on tertiary failed for snap {snap_uuid}"
-                ter_registered = True
+                _delete_bdev_blocking(tgt_composite, tgt_rpc, sec_rpc,
+                                      all_nodes=[n for n in [tgt_node, tgt_sec, tgt_ter] if n],
+                                      lvs_name=tgt_node.lvstore)
+            except Exception as e:
+                logger.warning(f"cleanup target lvol {tgt_composite} (non-fatal): {e}")
+            return None, f"bdev_lvol_register on secondary failed for snap {snap_uuid}"
+        sec_registered = True
+    if tgt_ter and ter_rpc:
+        if not _register_on(ter_rpc, "Tertiary"):
+            try:
+                _delete_bdev_blocking(tgt_composite, tgt_rpc,
+                                      sec_rpc if sec_registered else None, ter_rpc,
+                                      all_nodes=[n for n in [tgt_node, tgt_sec, tgt_ter] if n],
+                                      lvs_name=tgt_node.lvstore)
+            except Exception as e:
+                logger.warning(f"cleanup target lvol {tgt_composite} (non-fatal): {e}")
+            return None, f"bdev_lvol_register on tertiary failed for snap {snap_uuid}"
+        ter_registered = True
 
     # Helper: clean primary, secondary, and tertiary (if registered) on error
     def _cleanup():
@@ -1167,6 +1234,14 @@ def _bdev_is_immutable_snapshot(bdev_info) -> bool:
     quietly answer False for every bdev -- "never converted" -- and send a retry
     straight back into the transfer SPDK fences a node for. A list is still
     read, by its first entry, for any caller that has one.
+
+    SPDK's ``snapshot`` flag means "a snapshot that has clones", not
+    "converted": a just-converted lvol nothing has been linked under yet
+    reports ``snapshot: false``, ``clone: false`` -- exactly the state a retry
+    finds an intermediate snapshot in when the cutover that would have
+    attached the live lvol to it failed (61 cluster, 2026-10-29). What
+    convert does change unconditionally is the bdev turning read-only, so
+    ``supported_io_types.write == false`` is read as converted too.
     """
     if isinstance(bdev_info, list):
         bdev_info = bdev_info[0] if bdev_info else None
@@ -1174,7 +1249,19 @@ def _bdev_is_immutable_snapshot(bdev_info) -> bool:
         lvol = bdev_info["driver_specific"]["lvol"]
     except (KeyError, TypeError):
         return False
-    return bool(lvol.get("is_snapshot") or lvol.get("snapshot"))
+    if lvol.get("is_snapshot") or lvol.get("snapshot"):
+        return True
+    return (bdev_info.get("supported_io_types") or {}).get("write") is False
+
+
+def _bdev_is_linked_under(bdev_info, parent_short) -> bool:
+    """True if a ``bdev_get`` answer shows the lvol already cloned from
+    *parent_short* (bare lvol name, no lvstore prefix) -- add_clone ran.
+    Repeating add_clone for that pair answers EEXIST."""
+    try:
+        return bdev_info["driver_specific"]["lvol"].get("base_snapshot") == parent_short
+    except (KeyError, TypeError):
+        return False
 
 
 def _replica_bdev_state(rpc, composite):
@@ -1215,20 +1302,14 @@ def _post_process_snap(snap: SnapShot, tgt_node: StorageNode, tgt_rpc: RPCClient
         logger.warning(
             f"{tgt_composite} is already an immutable snapshot on the target primary "
             f"(converted by an earlier attempt); resuming at the replicas")
-    sec_present, sec_immutable = (False, False)
-    if tgt_sec and sec_rpc:
-        sec_present, sec_immutable = _replica_bdev_state(sec_rpc, tgt_composite)
-        if not sec_present:
-            logger.warning(
-                f"{tgt_composite} is not registered on the target secondary "
-                f"{tgt_sec.get_id()[:8]}; nothing to link or convert there")
-    ter_present, ter_immutable = (False, False)
-    if tgt_ter and ter_rpc:
-        ter_present, ter_immutable = _replica_bdev_state(ter_rpc, tgt_composite)
-        if not ter_present:
-            logger.warning(
-                f"{tgt_composite} is not registered on the target tertiary "
-                f"{tgt_ter.get_id()[:8]}; nothing to link or convert there")
+    # The target lvstore's secondary and tertiary get add_clone and convert
+    # whenever they can be reached, whatever their DB status: each keeps its own
+    # in-memory snapshot tree and learns of the change only from these calls
+    # (replica_chain). tgt_sec/tgt_ter, resolved by status for the transfer
+    # set-up, are not used for this. A replica that does not hold the bdev (the
+    # migration source doubling as the target's replica, or one skipped at
+    # registration) has nothing to link or convert and is skipped by the
+    # helpers, as _replica_bdev_state did.
 
     # Link to predecessor snapshot in target's ancestry chain.
     # add_clone must succeed on BOTH primary and secondary before we convert
@@ -1279,14 +1360,9 @@ def _post_process_snap(snap: SnapShot, tgt_node: StorageNode, tgt_rpc: RPCClient
                 ret = tgt_rpc.bdev_lvol_add_clone(tgt_composite, pred_composite)
                 if not ret:
                     return False, f"bdev_lvol_add_clone failed for {snap_uuid}"
-            if tgt_sec and sec_rpc and sec_present and not sec_immutable:
-                ret_sec = sec_rpc.bdev_lvol_add_clone(tgt_composite, pred_composite)
-                if not ret_sec:
-                    return False, f"bdev_lvol_add_clone on secondary failed for {snap_uuid}"
-            if tgt_ter and ter_rpc and ter_present and not ter_immutable:
-                ret_ter = ter_rpc.bdev_lvol_add_clone(tgt_composite, pred_composite)
-                if not ret_ter:
-                    return False, f"bdev_lvol_add_clone on tertiary failed for {snap_uuid}"
+            err = replica_chain.add_clone_on_replicas(tgt_node, tgt_composite, pred_composite, db=db)
+            if err:
+                return False, f"add_clone on a replica failed for {snap_uuid}: {err}"
         except KeyError:
             logger.warning(f"Predecessor snap {pred_uuid} not found; skipping add_clone")
 
@@ -1304,14 +1380,9 @@ def _post_process_snap(snap: SnapShot, tgt_node: StorageNode, tgt_rpc: RPCClient
         if not ret:
             return False, f"bdev_lvol_convert failed for {snap_uuid}"
 
-    if tgt_sec and sec_rpc and sec_present and not sec_immutable:
-        ret_sec = sec_rpc.bdev_lvol_convert(tgt_composite)
-        if not ret_sec:
-            return False, f"bdev_lvol_convert on secondary failed for {snap_uuid}"
-    if tgt_ter and ter_rpc and ter_present and not ter_immutable:
-        ret_ter = ter_rpc.bdev_lvol_convert(tgt_composite)
-        if not ret_ter:
-            return False, f"bdev_lvol_convert on tertiary failed for {snap_uuid}"
+    err = replica_chain.convert_on_replicas(tgt_node, tgt_composite, db=db)
+    if err:
+        return False, f"convert on a replica failed for {snap_uuid}: {err}"
 
     # Early partial DB update: route health-check and delete to the target node
     # immediately after convert.  snap_bdev keeps its source path here; the full
@@ -1503,6 +1574,19 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc, primary_s
                 existing_stat = src_rpc.bdev_lvol_transfer_stat(src_composite)
                 if (existing_stat is not None
                         and existing_stat.get('transfer_state') == 'In progress'):
+                    if not tgt_rpc.bdev_get(tgt_composite):
+                        # The transfer is writing into a bdev that no longer
+                        # exists: the intermediate-snap path deletes its target
+                        # when a poll fails or times out, but cannot stop the
+                        # source side. Resuming it marked the transfer done and
+                        # then failed post-processing on the missing bdev on
+                        # every retry until the budget ran out. Wait for the
+                        # stale transfer to settle; the next pass sees it no
+                        # longer in progress and starts a fresh one.
+                        return False, True, (
+                            f"Transfer of snap {snap_uuid} is in progress but its "
+                            f"target {tgt_composite} is gone; waiting for it to "
+                            f"settle before restarting it")
                     logger.info(
                         f"Resuming in-progress transfer for snap {snap_uuid}")
                     transfers.append({
@@ -2348,21 +2432,18 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc, primar
         # its predecessor snapshot in their ancestry chain.
         # bdev_lvol_final_migration handles this on the primary internally;
         # non-primary nodes need an explicit call.
+        # Every reachable replica, whatever its DB status (replica_chain). Still
+        # non-fatal: IO is live on the target, so this step cannot be retried.
         _clone_tgt_composite = f"{tgt_node.lvstore}/{tgt_lvol_bdev}"
-        for _extra_node in filter(None, [
-            _get_target_secondary_node(tgt_node, src_node.get_id())[0],
-            _get_target_tertiary_node(tgt_node, src_node.get_id())[0],
-        ]):
-            try:
-                _ret = _make_rpc(_extra_node).bdev_lvol_add_clone(
-                    _clone_tgt_composite, tgt_snap_composite)
-            except RPCException as e:
-                logger.warning(
-                    f"add_clone on {_extra_node.get_id()[:8]} failed for final lvol (non-fatal): {e}")
-                continue
-            if not _ret:
-                logger.warning(
-                    f"add_clone on {_extra_node.get_id()[:8]} failed for final lvol (non-fatal)")
+        try:
+            # never retried: a failed member is recorded as owed and replayed
+            _err = replica_chain.add_clone_on_replicas(
+                tgt_node, _clone_tgt_composite, tgt_snap_composite, db=db,
+                record_failed=True)
+        except Exception as e:  # noqa: BLE001 -- non-fatal past the cutover
+            _err = str(e)
+        if _err:
+            logger.error(f"add_clone of the final lvol failed on a replica (non-fatal): {_err}")
 
         migration.current_job_id = ""
         # Save crash recovery anchor before Done handler so a mid-handler crash
@@ -2818,11 +2899,25 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc, prim
         # target before we touch the source.  If the target is unreachable, skip
         # all source snap deletions to avoid accidental data loss.
         _snaps_to_delete_src: list = []
+        _snaps_deferred_src: dict = {}
         try:
             to_delete_all = migration_controller.get_snaps_safe_to_delete_on_source(migration)
+            # A batch group's siblings are leaving the source too, but their
+            # records still place them there until their own cleanup runs, so
+            # the owner of a snapshot they clone from (always processed first)
+            # would otherwise keep it on the source for ever -- and no sibling
+            # ever reconsiders it: it is only in the owner's plan. Hand those
+            # to the orchestrator, which deletes them after the barrier.
+            # SFAM-2840: LVS_19/SNAP_84 left behind under CLN_85/CLN_86.
+            deferred_all: set = set()
+            if migration.migration_group_id:
+                deferred_all = (migration_controller.get_snaps_safe_to_delete_on_source(
+                                    migration, moving_lvol_ids=_group_sibling_lvol_ids(migration))
+                                - to_delete_all - set(migration.intermediate_snaps))
             tgt_lvols = tgt_rpc.bdev_lvol_get_lvols(tgt_node.lvstore) or []
             tgt_names = {e.get('name', '').split('/')[-1] for e in tgt_lvols}
-            for snap_uuid in to_delete_all:
+            src_lvs_name = (primary_src_node or src_node).lvstore
+            for snap_uuid in to_delete_all | deferred_all:
                 try:
                     snap = db.get_snapshot_by_id(snap_uuid)
                     _snap_bdev = snap.snap_bdev or ''
@@ -2830,13 +2925,25 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc, prim
                     _m_name   = _snap_tgt_short_name(snap)
                     _canonical = _snap_short_name(snap)
                     _am_name  = _canonical + _MIGRATION_BDEV_SUFFIX_DONE
-                    if any(n in tgt_names for n in (_primary, _m_name, _canonical, _am_name)):
-                        _snaps_to_delete_src.append(snap_uuid)
-                    else:
+                    if not any(n in tgt_names for n in (_primary, _m_name, _canonical, _am_name)):
                         logger.warning(
                             f"Target missing snapshot {_m_name} ({snap_uuid}); "
                             "skipping source delete to protect data")
                         _warnings.append(f"target missing snap {_m_name}; source copy kept")
+                    elif snap_uuid in to_delete_all:
+                        _snaps_to_delete_src.append(snap_uuid)
+                    else:
+                        _src_bdev = source_snap_bdevs_saved.get(snap_uuid) or _snap_bdev
+                        if not _src_bdev.startswith(f"{src_lvs_name}/"):
+                            logger.warning(
+                                f"Snapshot {snap_uuid} no longer names a source bdev "
+                                f"({_src_bdev}); cannot defer its source delete")
+                            _warnings.append(f"snap {snap_uuid}: source name unknown; source copy kept")
+                        else:
+                            logger.info(
+                                f"Source snapshot {_src_bdev} ({snap_uuid}) is still cloned by "
+                                "group siblings; deferring its delete to the group orchestrator")
+                            _snaps_deferred_src[snap_uuid] = _src_bdev
                 except KeyError:
                     pass  # already gone from DB; safe to skip
         except Exception as _ve:
@@ -2845,6 +2952,18 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc, prim
                 "skipping all source snap deletions")
             _warnings.append(f"snap target-verification failed: {_ve}")
             _snaps_to_delete_src = []
+            _snaps_deferred_src = {}
+
+        if _snaps_deferred_src:
+            try:
+                db.atomic_update(
+                    db.get_migration_group_by_id(migration.migration_group_id),
+                    lambda g: g.source_snaps_deferred.update(_snaps_deferred_src))
+            except KeyError:
+                logger.warning(
+                    f"Group {migration.migration_group_id} not found; deferred source "
+                    f"snapshots {sorted(_snaps_deferred_src.values())} will not be deleted")
+                _warnings.append("group missing; deferred source snaps kept")
 
         ctx = {
             'stage': 'cleanup_src',

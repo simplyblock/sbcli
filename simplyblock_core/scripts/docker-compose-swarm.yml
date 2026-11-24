@@ -118,7 +118,7 @@ services:
   TwoNodeEventCollector:
     <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "/usr/local/bin/sb-event-collector"
+    command: "python3 simplyblock_core/services/two_node_event_collector.py"
     networks:
       - hostnet
     deploy:
@@ -538,7 +538,7 @@ services:
 
   FDBExporter:
     <<: *service-base
-    image: aikoven/foundationdb-exporter:3.1.0
+    image: "${IMAGE_PREFIX}aikoven/foundationdb-exporter:3.1.0"
     environment:
       FDB_CLUSTER_FILE: /etc/foundationdb/fdb.cluster
     deploy:

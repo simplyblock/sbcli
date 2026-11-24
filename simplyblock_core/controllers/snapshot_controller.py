@@ -647,10 +647,13 @@ def check_snapshot_capacity(pool, cluster, lvol, all_snaps=None):
             cl_rec = records[0]
             util = int(((cl_rec.size_prov + snap_used + size) / cl_rec.size_total) * 100)
             if cluster.prov_cap_crit < util:
-                return (f"Cannot take snapshot: cluster provisioned cap would "
-                        f"reach {util}% of the {cluster.prov_cap_crit}% limit "
-                        f"(snapshot inherits {utils.humanbytes(size)} utilized "
-                        f"from the volume)")
+                # An alarm, not a limit (cap_monitor raises the event): refusing
+                # here stalled every migration cutover's shrink rounds on bed
+                # bf26 (2026-11-17), whose abandoned attempts then cost clients
+                # their volumes.
+                logger.warning(f"Snapshot of {lvol.get_id()}: cluster provisioned "
+                               f"cap reaches {util}% of the {cluster.prov_cap_crit}% "
+                               f"critical threshold (informational)")
     return None
 
 
@@ -1700,10 +1703,10 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
             cluster.get_id(), all_snaps=all_snaps)
         cluster_size_prov_util = int(((rec.size_prov + snap_used + size) / rec.size_total) * 100)
 
+        # Alarm only (cap_monitor raises the cluster_prov_cap_* events).
         if cluster.prov_cap_crit and cluster.prov_cap_crit < cluster_size_prov_util:
-            msg = f"Cluster provisioned cap critical would be, util: {cluster_size_prov_util}% of cluster util: {cluster.prov_cap_crit}"
-            logger.error(msg)
-            return False, msg
+            logger.warning(f"Cluster provisioned cap critical, util: {cluster_size_prov_util}% "
+                           f"of cluster util: {cluster.prov_cap_crit} (informational)")
 
         elif cluster.prov_cap_warn and cluster.prov_cap_warn < cluster_size_prov_util:
             logger.warning(f"Cluster provisioned cap warning, util: {cluster_size_prov_util}% of cluster util: {cluster.prov_cap_warn}")

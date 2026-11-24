@@ -26,6 +26,7 @@ that. The arbiter calls them on its work pool, never on the decision thread.
 from dataclasses import dataclass, field
 
 from simplyblock_core import utils
+from simplyblock_core.controllers import subsystem_access
 
 logger = utils.get_logger(__name__)
 
@@ -53,7 +54,7 @@ class Step:
 
 
 def _hosts(subsystem: dict) -> set:
-    return {h.get("nqn", "") for h in subsystem.get("hosts") or [] if h.get("nqn")}
+    return subsystem_access.listed_hosts(subsystem)
 
 
 def fenceable(nqn: str, volume_nqns: set, volume_prefix: str = "") -> bool:

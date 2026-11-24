@@ -60,7 +60,6 @@ class CLIWrapper(CLIWrapperBase):
             self.init_storage_node__device_hang(subparser)
         self.init_storage_node__get_device(subparser)
         self.init_storage_node__restart_device(subparser)
-        self.init_storage_node__resize_device(subparser)
         self.init_storage_node__add_device(subparser)
         self.init_storage_node__remove_device(subparser)
         self.init_storage_node__set_failed_device(subparser)
@@ -98,6 +97,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand = self.add_sub_command(subparser, 'deploy', 'Prepares a host to be used as a storage node.')
         subcommand.add_argument('--ifname', help='Management interface name, e.g. eth0.', type=str, dest='ifname')
         subcommand.add_argument('--isolate-cores', help='Isolates cores in kernel args for the provided CPU mask. Default: `false`.', default=False, dest='isolate_cores', action='store_true')
+        subcommand.add_argument('--container-image-prefix', help='Registry/proxy prefix for the images pulled on this host, e.g. `registry-1.docker.io`.', type=str, dest='container_image_prefix')
 
     def init_storage_node__configure(self, subparser):
         subcommand = self.add_sub_command(subparser, 'configure', 'Prepare a configuration file to be used when adding the storage node.')
@@ -255,10 +255,6 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('device_id', help='The storage device id.', type=str)
         subcommand.add_argument('--force', help='Force restart.', dest='force', action='store_true')
 
-    def init_storage_node__resize_device(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'resize-device', 'Grows a Linux block device (lblk) online to the size of its block device.')
-        subcommand.add_argument('device_id', help='The storage device id.', type=str)
-
     def init_storage_node__add_device(self, subparser):
         subcommand = self.add_sub_command(subparser, 'add-device', 'Adds a new storage device.')
         subcommand.add_argument('device_id', help='The storage device id.', type=str)
@@ -408,6 +404,7 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             self.init_cluster__set(subparser)
         self.init_cluster__set_shared_placement(subparser)
+        self.init_cluster__set_lvol_geometry(subparser)
         self.init_cluster__event_alerts(subparser)
         self.init_cluster__switch_write_protection(subparser)
         self.init_cluster__change_name(subparser)
@@ -435,7 +432,7 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             subcommand.add_argument('--CLI_PASS', help='The password for CLI SSH connection.', type=SecretStr, dest='CLI_PASS')
         subcommand.add_argument('--cap-warn', help='The capacity warning level in percent. Default: `89`.', type=int, default=89, dest='cap_warn')
-        subcommand.add_argument('--cap-crit', help='The capacity critical level in percent. Default: `99`.', type=int, default=99, dest='cap_crit')
+        subcommand.add_argument('--cap-crit', help='The capacity critical level in percent. Default: `98`.', type=int, default=98, dest='cap_crit')
         subcommand.add_argument('--prov-cap-warn', help='The capacity warning level in percent. Default: `250`.', type=int, default=250, dest='prov_cap_warn')
         subcommand.add_argument('--prov-cap-crit', help='The capacity critical level in percent. Default: `500`.', type=int, default=500, dest='prov_cap_crit')
         subcommand.add_argument('--ifname', help='Management interface name, e.g. eth0.', type=str, dest='ifname')
@@ -468,6 +465,7 @@ class CLIWrapper(CLIWrapperBase):
             subcommand.add_argument('--disable-monitoring', help='Disable monitoring stack, false by default. Default: `false`.', dest='disable_monitoring', action='store_true')
         subcommand.add_argument('--strict-node-anti-affinity', help='Enable strict node anti affinity for storage nodes. Never more than one chunk is placed on a node. This requires a minimum of _data-chunks-in-stripe + parity-chunks-in-stripe + 1_ nodes in the cluster.', dest='strict_node_anti_affinity', action='store_true')
         subcommand.add_argument('--enable-failure-domain', help='Enable failure-domain anti-affinity. Each storage node must then be added with a --failure-domain tag (rack/cabinet/DC); data, journal and secondary/tertiary copies are spread across distinct failure domains (best-effort). Deploy-time only: a cluster cannot be upgraded into this feature, it must be redeployed.', dest='enable_failure_domain', action='store_true')
+        subcommand.add_argument('--disable-lvol-geometry', help='Create new logical volumes with ndcs=npcs=0 instead of the cluster\'s erasure coding geometry. Enabled by default; can be changed later with `cluster set-lvol-geometry`.', dest='disable_lvol_geometry', action='store_true')
         subcommand.add_argument('--sync-replication', help='Enable site-level synchronous replication over exactly two sites. Each storage node must then be added with --site; every lvstore is replicated to the other site. Requires --ha-type ha. Deploy-time only: a cluster cannot be upgraded into this feature, it must be redeployed.', dest='sync_replication', action='store_true')
         subcommand.add_argument('--stretched-control-plane', help='Run a control plane on each of the cluster\'s two sites over one FoundationDB, one of them leading (docs/stretched-control-plane.md). Requires --ha-type ha and one of: --sync-replication (any n+k over two sites); --enable-failure-domain with 1+1 (two sites) or 1+2 (three storage sites), where a node\'s failure domain is its site. Deploy-time only.', dest='stretched_control_plane', action='store_true')
         subcommand.add_argument('--site', help='With --stretched-control-plane: the site this control plane runs in (1-63 characters from [A-Za-z0-9._-]).', type=str, dest='site')
@@ -486,10 +484,12 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--nvmf-base-port', help='Base port for all NVMe-oF listeners (lvol, hublvol, device). Default: `4420`.', type=int, default=4420, dest='nvmf_base_port')
         subcommand.add_argument('--rpc-base-port', help='The base port for SPDK JSON-RPC. Default: `8080`.', type=int, default=8080, dest='rpc_base_port')
         subcommand.add_argument('--snode-api-port', help='The SNodeAPI/firewall port (one per host IP). Default: `50001`.', type=int, default=50001, dest='snode_api_port')
+        subcommand.add_argument('--container-image-prefix', help='Registry/proxy prefix for every container image the cluster pulls, e.g. `registry-1.docker.io`.', type=str, dest='container_image_prefix')
         subcommand.add_argument('--max-subsys', help='Max number of nvmf subsystems per storage node. Cluster-wide; a node adopts it on its next restart.', type=int, default=0, dest='max_subsys')
         subcommand.add_argument('--hugepages-mem', help='Huge-page memory floor per storage node, e.g. 4G. Cluster-wide; a node adopts it on its next restart.', type=str, default='', dest='hugepages_mem')
         subcommand.add_argument('--vcpu-count', help='Absolute number of vCPUs SPDK gets on each storage node. A node with fewer than this + 1 cores is refused.', type=int, default=0, dest='vcpu_count')
         subcommand.add_argument('--hashicorp-vault-url', help='Hashicorp vault URL for storing encryption keys for this cluster', type=str, dest='hashicorp_vault_url')
+        subcommand.add_argument('--kmip-server-url', help='KMIP server address (host:port) for storing encryption keys for this cluster', type=str, dest='kmip_server_url')
         subcommand.add_argument('--alerting-config-path', help='Path to the YAML alerting configuration file. Takes precedence over --contact-point.', type=str, dest='alerting_config_path')
         subcommand.add_argument('--cluster-vip', help='Cluster Virtual IP, this is the load balancer IP or domain, would be used for the cluster logging ingress.', type=str, dest='cluster_vip')
 
@@ -498,7 +498,7 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             subcommand.add_argument('--page_size', help='The size of a data page in bytes. Default: `2097152`.', type=int, default=2097152, dest='page_size')
         subcommand.add_argument('--cap-warn', help='The capacity warning level in percent. Default: `89`.', type=int, default=89, dest='cap_warn')
-        subcommand.add_argument('--cap-crit', help='The capacity critical level in percent. Default: `99`.', type=int, default=99, dest='cap_crit')
+        subcommand.add_argument('--cap-crit', help='The capacity critical level in percent. Default: `98`.', type=int, default=98, dest='cap_crit')
         subcommand.add_argument('--prov-cap-warn', help='The capacity warning level in percent. Default: `250`.', type=int, default=250, dest='prov_cap_warn')
         subcommand.add_argument('--prov-cap-crit', help='The capacity critical level in percent. Default: `500`.', type=int, default=500, dest='prov_cap_crit')
         subcommand.add_argument('--data-chunks-per-stripe', help='The erasure coding schema parameter k (distributed raid). Default: `1`.', type=int, default=1, dest='distr_ndcs')
@@ -519,6 +519,7 @@ class CLIWrapper(CLIWrapperBase):
             subcommand.add_argument('--inflight-io-threshold', help='The number of inflight IOs allowed before the IO queuing starts. Default: `4`.', type=int, default=4, dest='inflight_io_threshold')
         subcommand.add_argument('--strict-node-anti-affinity', help='Enable strict node anti affinity for storage nodes. Never more than one chunk is placed on a node. This requires a minimum of _data-chunks-in-stripe + parity-chunks-in-stripe + 1_ nodes in the cluster."', dest='strict_node_anti_affinity', action='store_true')
         subcommand.add_argument('--enable-failure-domain', help='Enable failure-domain anti-affinity. Each storage node must then be added with a --failure-domain tag (rack/cabinet/DC); data, journal and secondary/tertiary copies are spread across distinct failure domains (best-effort). Deploy-time only: a cluster cannot be upgraded into this feature, it must be redeployed.', dest='enable_failure_domain', action='store_true')
+        subcommand.add_argument('--disable-lvol-geometry', help='Create new logical volumes with ndcs=npcs=0 instead of the cluster\'s erasure coding geometry. Enabled by default; can be changed later with `cluster set-lvol-geometry`.', dest='disable_lvol_geometry', action='store_true')
         subcommand.add_argument('--sync-replication', help='Enable site-level synchronous replication over exactly two sites. Each storage node must then be added with --site; every lvstore is replicated to the other site. Requires --ha-type ha. Deploy-time only: a cluster cannot be upgraded into this feature, it must be redeployed.', dest='sync_replication', action='store_true')
         subcommand.add_argument('--stretched-control-plane', help='Run a control plane on each of the cluster\'s two sites over one FoundationDB, one of them leading (docs/stretched-control-plane.md). Requires --ha-type ha and one of: --sync-replication (any n+k over two sites); --enable-failure-domain with 1+1 (two sites) or 1+2 (three storage sites), where a node\'s failure domain is its site. Deploy-time only.', dest='stretched_control_plane', action='store_true')
         subcommand.add_argument('--site', help='With --stretched-control-plane: the site this control plane runs in (1-63 characters from [A-Za-z0-9._-]).', type=str, dest='site')
@@ -535,10 +536,12 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--nvmf-base-port', help='Base port for all NVMe-oF listeners (lvol, hublvol, device). Default: `4420`.', type=int, default=4420, dest='nvmf_base_port')
         subcommand.add_argument('--rpc-base-port', help='The base port for SPDK JSON-RPC. Default: `8080`.', type=int, default=8080, dest='rpc_base_port')
         subcommand.add_argument('--snode-api-port', help='The SNodeAPI/firewall port (one per host IP). Default: `50001`.', type=int, default=50001, dest='snode_api_port')
+        subcommand.add_argument('--container-image-prefix', help='Registry/proxy prefix for the images this cluster pulls. Default: the prefix of the existing cluster.', type=str, dest='container_image_prefix')
         subcommand.add_argument('--max-subsys', help='Max number of nvmf subsystems per storage node. Cluster-wide; a node adopts it on its next restart.', type=int, default=0, dest='max_subsys')
         subcommand.add_argument('--hugepages-mem', help='Huge-page memory floor per storage node, e.g. 4G. Cluster-wide; a node adopts it on its next restart.', type=str, default='', dest='hugepages_mem')
         subcommand.add_argument('--vcpu-count', help='Absolute number of vCPUs SPDK gets on each storage node. A node with fewer than this + 1 cores is refused.', type=int, default=0, dest='vcpu_count')
         subcommand.add_argument('--hashicorp-vault-url', help='Hashicorp vault URL for storing encryption keys for this cluster', type=str, dest='hashicorp_vault_url')
+        subcommand.add_argument('--kmip-server-url', help='KMIP server address (host:port) for storing encryption keys for this cluster', type=str, dest='kmip_server_url')
 
     def init_cluster__op_stop(self, subparser):
         subcommand = self.add_sub_command(subparser, 'op-stop', 'Stops the cluster accepting object lifecycle operations: creation, deletion and modification of volumes, snapshots, clones and pools. Read paths and the cluster\'s own maintenance are unaffected.')
@@ -567,9 +570,8 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('cluster_id', help='The cluster id.', type=str).completer = self._completer_get_cluster_list
 
     def init_cluster__grow_devices(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'grow-devices', 'Grows every Linux block device (lblk) of the cluster online to the size of its block device.')
+        subcommand = self.add_sub_command(subparser, 'grow-devices', 'Grows all Linux block devices (lblk) of the cluster online by the same factor.')
         subcommand.add_argument('cluster_id', help='The cluster id.', type=str).completer = self._completer_get_cluster_list
-        subcommand.add_argument('--no-rebalance', help='Keep the device weights after an uneven growth and do not rebalance the cluster.', default=False, dest='no_rebalance', action='store_true')
 
     def init_cluster__show(self, subparser):
         subcommand = self.add_sub_command(subparser, 'show', 'Shows a cluster\'s statistics.')
@@ -687,6 +689,11 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('cluster_id', help='The cluster id.', type=str).completer = self._completer_get_cluster_list
         subcommand.add_argument('--disable', help='Reverse transition (per-chunk -> per-page). Debug only; only safe on a balanced or empty bdev. Requires --force.', dest='disable', action='store_true')
         subcommand.add_argument('--force', help='Bypass the rebalancing / non-online-node guards. Required when --disable is passed.', dest='force', action='store_true')
+
+    def init_cluster__set_lvol_geometry(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'set-lvol-geometry', 'Enable or disable LVol geometry on the cluster.')
+        subcommand.add_argument('cluster_id', help='The cluster id.', type=str).completer = self._completer_get_cluster_list
+        subcommand.add_argument('--disable', help='Disable LVol geometry (default action is to enable it).', dest='disable', action='store_true')
 
     def init_cluster__event_alerts(self, subparser):
         subcommand = self.add_sub_command(subparser, 'event-alerts', 'Provisions the Grafana alert rules read from the cluster event log.')
@@ -1625,8 +1632,6 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.storage_node__get_device(sub_command, args)
                 elif sub_command in ['restart-device']:
                     ret = self.storage_node__restart_device(sub_command, args)
-                elif sub_command in ['resize-device']:
-                    ret = self.storage_node__resize_device(sub_command, args)
                 elif sub_command in ['add-device']:
                     ret = self.storage_node__add_device(sub_command, args)
                 elif sub_command in ['remove-device']:
@@ -1799,6 +1804,8 @@ class CLIWrapper(CLIWrapperBase):
                         ret = self.cluster__set(sub_command, args)
                 elif sub_command in ['set-shared-placement']:
                     ret = self.cluster__set_shared_placement(sub_command, args)
+                elif sub_command in ['set-lvol-geometry']:
+                    ret = self.cluster__set_lvol_geometry(sub_command, args)
                 elif sub_command in ['event-alerts']:
                     ret = self.cluster__event_alerts(sub_command, args)
                 elif sub_command in ['switch-write-protection']:

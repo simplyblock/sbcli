@@ -43,10 +43,26 @@ from simplyblock_core.exceptions import (
     ControlPlaneTakeoverRefusedError,
     MigrationConflictError,
     PreconditionError,
+    PromoteIncompleteError,
+    SubsystemMoveInProgressError,
 )
 from simplyblock_core.models.backup_config import BackupConfig, S3Credentials
-from simplyblock_core.models.cluster import Cluster, HashicorpVaultSettings
+from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.pool import Pool
+
+
+def _kms_settings_from_args(args):
+    """Raw ``kms_settings`` dict for cluster_ops.{create,add}_cluster from the
+    mutually exclusive ``--hashicorp-vault-url``/``--kmip-server-url`` flags."""
+    hashicorp_vault_url = getattr(args, 'hashicorp_vault_url', None)
+    kmip_server_url = getattr(args, 'kmip_server_url', None)
+    if hashicorp_vault_url and kmip_server_url:
+        raise ValueError("--hashicorp-vault-url and --kmip-server-url are mutually exclusive")
+    if hashicorp_vault_url:
+        return {"provider": "vault", "base_url": hashicorp_vault_url}
+    if kmip_server_url:
+        return {"provider": "kmip", "server_url": kmip_server_url}
+    return None
 
 
 def range_type(min, max):
@@ -226,7 +242,8 @@ class CLIWrapperBase:
 
     def storage_node__deploy(self, sub_command, args):
         isolate_cores = args.isolate_cores
-        return storage_ops.deploy(args.ifname, isolate_cores)
+        return storage_ops.deploy(args.ifname, isolate_cores,
+                                  container_image_prefix=args.container_image_prefix)
 
     def storage_node__configure_upgrade(self, sub_command, args):
         storage_ops.upgrade_automated_deployment_config()
@@ -519,20 +536,6 @@ class CLIWrapperBase:
     def storage_node__restart_device(self, sub_command, args):
         return device_controller.restart_device(args.device_id, args.force)
 
-    def storage_node__resize_device(self, sub_command, args):
-        try:
-            result = device_controller.resize_device(args.device_id)
-        except ValueError as e:
-            print(e)
-            return False
-        if not result["resized"]:
-            return f"Device size unchanged: {utils.humanbytes(result['new_size'])}"
-        out = (f"Device grown from {utils.humanbytes(result['old_size'])} "
-               f"to {utils.humanbytes(result['new_size'])}")
-        if result["warning"]:
-            out += f"\nWarning: {result['warning']}"
-        return out
-
     def storage_node__add_device(self, sub_command, args):
         return device_controller.add_device(args.device_id)
 
@@ -604,7 +607,11 @@ class CLIWrapperBase:
 
     def storage_node__make_primary(self, sub_command, args):
         node_id = args.node_id
-        return storage_ops.make_sec_new_primary(node_id)
+        try:
+            return storage_ops.make_sec_new_primary(node_id)
+        except PromoteIncompleteError as e:
+            print(e)
+            return False
 
     def storage_node__dump_lvstore(self, sub_command, args):
         node_id = args.node_id
@@ -831,6 +838,10 @@ class CLIWrapperBase:
         return cluster_ops.set_shared_placement(
             args.cluster_id, enable=enable, force=force)
 
+    def cluster__set_lvol_geometry(self, sub_command, args):
+        cluster_ops.set_lvol_geometry(args.cluster_id, enable=not args.disable)
+        return True
+
     def cluster__change_name(self, sub_command, args):
         cluster_id = args.cluster_id
         cluster_name = args.name
@@ -838,25 +849,22 @@ class CLIWrapperBase:
         return True
 
     def cluster__grow_devices(self, sub_command, args):
-        result = device_controller.grow_cluster_devices(
-            args.cluster_id, rebalance=not getattr(args, 'no_rebalance', False))
-        lines = [f"{r['device_id']}: {utils.humanbytes(r['old_size'])} -> {utils.humanbytes(r['new_size'])}"
-                 for r in result["devices"] if r["resized"]]
-        lines += [f"{dev_id}: failed: {err}" for dev_id, err in result["errors"].items()]
-        rebalance = result.get("rebalance")
-        if rebalance and rebalance["started"]:
-            lines.append("The devices have grown unevenly: device weights set to the new sizes, "
-                         "cluster rebalancing started.")
-        elif rebalance and rebalance["weights_updated"]:
-            lines.append(f"The devices have grown unevenly: device weights set to the new sizes. "
-                         f"{rebalance['reason']}")
-        elif rebalance:
-            lines.append(f"Warning: the devices have grown unevenly. {rebalance['reason']}")
-        elif not result["uniform"]:
-            lines.append("Warning: the data devices of the cluster have grown unevenly; the added capacity is "
-                         "only fully usable once all of them have grown by the same factor, or after "
-                         "grow-devices without --no-rebalance has updated the weights.")
-        return "\n".join(lines) or "No device has grown"
+        try:
+            result = device_controller.grow_cluster_devices(args.cluster_id)
+        except ValueError as e:
+            print(e)
+            return False
+        lines = [f"{dev_id}: {err}" for dev_id, err in result["errors"].items()]
+        if not result["grown"]:
+            lines.append(result["reason"])
+            return "\n".join(lines)
+        lines.append(f"All data devices grown by factor {result['factor']:.4f}:")
+        for r in result["devices"]:
+            line = f"{r['device_id']}: {utils.humanbytes(r['old_size'])} -> {utils.humanbytes(r['new_size'])}"
+            if r["unused_size"]:
+                line += f" ({utils.humanbytes(r['unused_size'])} of the block device unused)"
+            lines.append(line)
+        return "\n".join(lines)
 
     def cluster__complete_expand(self, sub_command, args):
         cluster_ops.cluster_expand(args.cluster_id)
@@ -1132,7 +1140,10 @@ class CLIWrapperBase:
         if args.site:
             kwargs['site'] = args.site
 
-        data, err = lvol_controller.connect_lvol(args.volume_id, **kwargs)
+        try:
+            data, err = lvol_controller.connect_lvol(args.volume_id, **kwargs)
+        except SubsystemMoveInProgressError as e:
+            return str(e)
         if err:
             return err
         if data:
@@ -2018,6 +2029,7 @@ class CLIWrapperBase:
         is_single_node = args.is_single_node
         client_data_nic = args.client_data_nic
         enable_failure_domain = getattr(args, 'enable_failure_domain', False)
+        lvol_geometry_enabled = not args.disable_lvol_geometry
         device_mode = getattr(args, 'device_mode', 'nvme')
         inline_checksum = getattr(args, 'inline_checksum', False)
 
@@ -2036,8 +2048,9 @@ class CLIWrapperBase:
             qpair_count, max_queue_size, inflight_io_threshold, strict_node_anti_affinity, is_single_node, name, fabric,
             client_data_nic, max_fault_tolerance=max_fault_tolerance, backup_config=backup_config,
             nvmf_base_port=args.nvmf_base_port, rpc_base_port=args.rpc_base_port, snode_api_port=args.snode_api_port,
-            hashicorp_vault_settings=HashicorpVaultSettings({"base_url": args.hashicorp_vault_url}) if args.hashicorp_vault_url else None,
+            kms_settings=_kms_settings_from_args(args),
             enable_failure_domain=enable_failure_domain,
+            lvol_geometry_enabled=lvol_geometry_enabled,
             device_mode=device_mode,
             inline_checksum=inline_checksum,
             atomic_4k=atomic_4k,
@@ -2048,6 +2061,7 @@ class CLIWrapperBase:
             leader_site=getattr(args, 'leader_site', "") or "",
             site=getattr(args, 'site', "") or "",
             site_api_endpoint=getattr(args, 'site_api_endpoint', "") or "",
+            container_image_prefix=args.container_image_prefix,
         )
 
     def cluster_create(self, args):
@@ -2085,6 +2099,7 @@ class CLIWrapperBase:
         fabric = args.fabric
         client_data_nic = args.client_data_nic
         enable_failure_domain = getattr(args, 'enable_failure_domain', False)
+        lvol_geometry_enabled = not args.disable_lvol_geometry
         device_mode = getattr(args, 'device_mode', 'nvme')
         # Private (developer-mode-only) arg: absent unless sbctl was run with --dev.
         enable_hang_device = getattr(args, "enable_hang_device", False)
@@ -2110,8 +2125,9 @@ class CLIWrapperBase:
             max_fault_tolerance=max_fault_tolerance,
             backup_config=backup_config,
             nvmf_base_port=args.nvmf_base_port, rpc_base_port=args.rpc_base_port, snode_api_port=args.snode_api_port,
-            hashicorp_vault_settings=HashicorpVaultSettings({"base_url": args.hashicorp_vault_url}) if args.hashicorp_vault_url else None,
+            kms_settings=_kms_settings_from_args(args),
             enable_failure_domain=enable_failure_domain,
+            lvol_geometry_enabled=lvol_geometry_enabled,
             device_mode=device_mode,
             enable_hang_device=enable_hang_device,
             max_subsys=args.max_subsys or 0,
@@ -2129,6 +2145,7 @@ class CLIWrapperBase:
             leader_site=getattr(args, 'leader_site', "") or "",
             site=getattr(args, 'site', "") or "",
             site_api_endpoint=getattr(args, 'site_api_endpoint', "") or "",
+            container_image_prefix=args.container_image_prefix,
         )
 
     def query_yes_no(self, question, default="yes"):

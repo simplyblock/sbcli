@@ -12,7 +12,7 @@ consult (``_single_peer_jm_is_complete``, ``_two_node_fence_holds_ports``,
 all FDB reads and writes.
 
 What is modelled: the nodes (``simnode``), the network, the client's
-multipath IO, the Go event collector, and the outer shell of the flows the
+multipath IO, the event collector, and the outer shell of the flows the
 arbiter does not own -- the monitor's status/restart trigger, the restart
 runner, the migration runner, the port-allow runner and the monitor's
 stale-port remediation. Each modelled flow keeps the real decision points
@@ -172,7 +172,9 @@ class World:
         self.fault_at: float | None = None     # when the first fault hit (timing base)
         self.fences: list = []
         self.ana_changed: dict = {}            # (node, port, group) -> last change
-        self.conditions: set = set()          # environment (not bugs): jm_needs_reconnect
+        # environment (not bugs): jm_needs_reconnect, jm_reconnect_ineffective,
+        # jc_error_while_fenced, reader_read_inflight_on_peer_jm
+        self.conditions: set = set()
         self.jm_reconnected: dict = {}
         # data versions per LVS and node (F10): a write a node acks alone is
         # missing on its peer until the peer's rebuild completes
@@ -468,6 +470,10 @@ class World:
 
         def reconnect_jms(node, peer):
             sim = world.by_ep.get((node.mgmt_ip, node.rpc_port))
+            if "jm_reconnect_ineffective" in world.conditions:
+                # c1/c2: only a node restart brought the remote JMs back
+                world.log("CP: reconnect of the remote JMs of %s had no effect" % node.get_id()[:8])
+                return
             if sim is not None and sim.up and world.net.data_ok(sim, world.peer_of(sim)):
                 world.jm_reconnected[sim.uuid] = True
                 world.log("CP: reconnected remote JMs of %s" % sim.name)
@@ -514,7 +520,7 @@ class World:
         interval = constants.TWO_NODE_LEASE_RENEW_MS / 1000.0
         self.vt.after(max(interval, ctx.elapsed), self.lease_tick)
 
-    # ---- the Go collector ----------------------------------------------------------------------
+    # ---- the event collector -------------------------------------------------------------------
 
     def collector_tick(self):
         from simplyblock_core.arbitration import events as ev

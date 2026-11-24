@@ -25,7 +25,14 @@ import uuid as uuid_lib
 from datetime import datetime
 from typing import Any, NoReturn
 
-from simplyblock_core import constants, db_controller, utils, xfer_timing
+from simplyblock_core import (
+    constants,
+    db_controller,
+    migration_space,
+    utils,
+    xfer_timing,
+)
+from simplyblock_core.controllers import ns_host_guard
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol, LVolReplication
 from simplyblock_core.models.snapshot import SnapShot
@@ -136,7 +143,8 @@ def _release_lvs_claim(task):
     before this runs.
     """
     _requeue_direct_rounds(task)
-    drop_params(task, "cutover_lvs", "cutover_group", "throttle_tried")
+    drop_params(task, "cutover_lvs", "cutover_group", "cutover_cluster",
+                "cutover_claimed_at", "throttle_tried")
 
 
 def _throttle_cap(task):
@@ -280,6 +288,10 @@ def _record_cutover_done(task):
 
     _restore_source_throttle(task)
     _stop_source_replication(task)
+    # After the stop: a transfer of the source still draining checks the
+    # volume after its spare create and deletes the spare itself once the
+    # volume no longer replicates; the one created before is gone here.
+    _discard_cadence_spare(params.get("lvol_id"))
     _delete_direct_rounds(task)
     _prune_endgame_snapshots(task)
     _delete_source_if_requested(task)
@@ -349,6 +361,21 @@ def _delete_source_if_requested(task):
     try:
         from simplyblock_core.controllers import lvol_controller
         src_lvol = db.get_lvol_by_id(src_lvol_id)
+        # A host still connected only to the source would lose its block
+        # device with it; its CSI connects the target within seconds.
+        deadline = time.time() + constants.REPL_NS_HOST_RECONNECT_WAIT_SEC
+        while True:
+            blocked = ns_host_guard.removal_blocked(
+                getattr(src_lvol, "nqn", ""), ns_host_guard.volume_node_ids(src_lvol),
+                _live_target_node_ids(src_lvol, task.function_params),
+                f"deleting migrated-away source {src_lvol_id}")
+            if not blocked or time.time() >= deadline:
+                break
+            time.sleep(5)
+        if blocked:
+            logger.error(f"{blocked}; the source volume is kept and must be "
+                         f"deleted once the host runs on the target")
+            return
         logger.info(f"Cutover committed with --delete-source: deleting "
                     f"source volume {src_lvol_id}")
         lvol_controller.delete_lvol(src_lvol)
@@ -558,6 +585,10 @@ def _acquire_lvs_claim(task, lvol, tasks):
                 int(time.time()) + constants.REPL_CUTOVER_SHRINK_TIMEOUT_SEC))
             raise TaskDefer(f"queued for lvstore {lvs_name} behind "
                             f"{owner_lvol[:8]} (delta already converged)")
+    cluster_id = migration_space.source_cluster_id(db, lvol, task.cluster_id)
+    busy = _cluster_endgame_slots_taken(task, tasks, own_group, cluster_id)
+    if busy:
+        raise TaskDefer(busy)
     xfer_timing.stamp("lvs_claim_acquired", lvol=lvol.get_id(), lvs=lvs_name,
                       round=params.get("shrink_round"))
     # Committed immediately: the claim has to be visible to the other hosts'
@@ -565,7 +596,93 @@ def _acquire_lvs_claim(task, lvol, tasks):
     # endgame_started_at survives a released-and-retaken claim: the plan
     # forecast measures a cutover from its FIRST claim to done.
     extra = {} if params.get("endgame_started_at") else {"endgame_started_at": time.time()}
-    return _record(task, cutover_lvs=lvs_name, cutover_group=own_group, **extra)
+    task = _record(task, cutover_lvs=lvs_name, cutover_group=own_group,
+                   cutover_cluster=cluster_id, cutover_claimed_at=time.time(), **extra)
+    return _confirm_cluster_endgame_slot(task, own_group, cluster_id)
+
+
+def _endgame_unit(t):
+    """What one endgame slot holds: a consistency group cuts over as one."""
+    params = t.function_params or {}
+    return params.get("cutover_group") or t.get_id()
+
+
+def _cluster_endgame_holders(tasks, cluster_id):
+    """The FN_REPLICATION_FINAL tasks of *tasks* that hold an endgame of
+    *cluster_id* (a claimed lvstore), live ones only."""
+    out = []
+    for t in tasks or ():
+        if t.function_name != JobSchedule.FN_REPLICATION_FINAL:
+            continue
+        if t.status == JobSchedule.STATUS_DONE or t.canceled:
+            continue
+        params = t.function_params or {}
+        if not params.get("cutover_lvs"):
+            continue
+        # a claim from before the cluster was recorded counts where it runs
+        if (params.get("cutover_cluster") or t.cluster_id) != cluster_id:
+            continue
+        out.append(t)
+    return out
+
+
+def _cluster_endgame_slots_taken(task, tasks, own_group, cluster_id):
+    """Why this volume may not start an endgame on its source cluster now,
+    or "" (rule 1 of simplyblock_core/migration_space.py).
+
+    At most REPL_CUTOVER_MAX_ENDGAMES_PER_CLUSTER endgames run at once per
+    source cluster, whatever lvstores they are on: each one takes a snapshot
+    of its volume every round, and bf29 (2026-11-20) ran five at once and
+    filled the source. A volume that waits here has taken no snapshot and
+    holds no lvstore, so it keeps replicating on its ordinary cadence. A
+    consistency-group sibling joins its group's slot."""
+    limit = max(1, int(constants.REPL_CUTOVER_MAX_ENDGAMES_PER_CLUSTER))
+    units = {_endgame_unit(t) for t in _cluster_endgame_holders(tasks, cluster_id)
+             if t.get_id() != task.get_id()}
+    if own_group and own_group in units:
+        return ""
+    if len(units) < limit:
+        return ""
+    _record(task, shrink_deadline=(
+        int(time.time()) + constants.REPL_CUTOVER_SHRINK_TIMEOUT_SEC))
+    return (f"queued for an endgame slot of source cluster {cluster_id}: "
+            f"{len(units)} of {limit} in use")
+
+
+def _confirm_cluster_endgame_slot(task, own_group, cluster_id):
+    """Re-check the cluster's endgame slots after the claim is committed.
+
+    The pre-check reads the pass's task list, which predates every claim made
+    in this pass: volumes that all caught up in the same pass would each see
+    the slots free. Every claimant writes its claim BEFORE this read, so of
+    two racing claimants at least one sees the other, and both rank the
+    claims the same way -- by claim time, so a running endgame is never
+    displaced by a later claim. A claimant ranked past the limit withdraws.
+    An unreadable task table leaves the pre-check's answer standing."""
+    limit = max(1, int(constants.REPL_CUTOVER_MAX_ENDGAMES_PER_CLUSTER))
+    try:
+        fresh = db.get_job_tasks(task.cluster_id)
+    except Exception as e:                                # noqa: BLE001
+        logger.warning("cutover for lvol %s: cannot re-check the endgame slots of "
+                       "cluster %s: %s", task.function_params.get("lvol_id"), cluster_id, e)
+        return task
+    first: dict[str, tuple[float, str]] = {}
+    for t in _cluster_endgame_holders(fresh, cluster_id) + [task]:
+        params = t.function_params or {}
+        key = (float(params.get("cutover_claimed_at") or 0), t.get_id())
+        unit = _endgame_unit(t)
+        if unit not in first or key < first[unit]:
+            first[unit] = key
+    ranked = sorted(first, key=lambda u: first[u])
+    own_unit = own_group or task.get_id()
+    if own_unit in ranked[:limit]:
+        return task
+    logger.info("cutover for lvol %s: endgame slot of cluster %s lost to a concurrent "
+                "claim; withdrawing", task.function_params.get("lvol_id"), cluster_id)
+    drop_params(task, "cutover_lvs", "cutover_group", "cutover_cluster",
+                "cutover_claimed_at")
+    raise TaskDefer(f"queued for an endgame slot of source cluster {cluster_id}: "
+                    f"lost to a concurrent claim")
 
 
 def _await_cutover_proceed(task, params):
@@ -637,9 +754,20 @@ def task_runner(task: JobSchedule, tasks):
                        lvol_id, tgt_node.get_id(), tgt_node.status)
         _record(task, last_error=(
             f"target node {tgt_node.get_id()[:8]} is {tgt_node.status}"))
+        # An endgame cannot progress meanwhile, and while it holds the volume
+        # the volume replicates nothing (bed bf29 R3b): hand it back to the
+        # ordinary cadence after a short grace (_suspend_endgame_for_target).
+        if params.get("cutover_lvs") or params.get("shrink_snap_id"):
+            task = _suspend_endgame_for_target(task, lvol, tgt_node)
         # Deferred rather than failed: a node being offline is transient, and
         # burning a retry per pass would exhaust them all before it recovers.
         raise TaskDefer("target node not online, waiting")
+    if params.get("target_down_since"):
+        logger.info("cutover for lvol %s: target node %s is back after %ds",
+                    lvol_id, tgt_node.get_id(),
+                    int(time.time() - params["target_down_since"]))
+        task = drop_params(task, "target_down_since") or task
+        params = task.function_params
 
     # Cooldown set after a hub-attach failure to give the target node time to
     # recover and the control plane time to reflect a down state in DB.
@@ -736,6 +864,13 @@ def task_runner(task: JobSchedule, tasks):
             task = drop_params(task, "catchup_since", "catchup_win", "catchup_prev",
                                "catchup_strikes") or task
             params = task.function_params
+        # Nothing is claimed while the first round could not be taken anyway
+        # (pending deletions, a source short of space): holding the lvstore
+        # and the cluster's endgame slot through that wait would stop the
+        # other volumes' transfers for nothing. The round checks again.
+        held, task = _round_snapshot_hold(task, lvol)
+        if held:
+            raise TaskDefer(held)
         task = _acquire_lvs_claim(task, lvol, tasks)
         # The endgame gets its full convergence budget from here. The deadline
         # an abandon set (back-off + timeout) also had to cover the prune gate
@@ -855,6 +990,17 @@ def task_runner(task: JobSchedule, tasks):
         task = _rebase_on_last_round(task)
         params = task.function_params
 
+    # Every host on the source must also be connected to the target before
+    # the freeze: the flip leaves the source paths inaccessible, and a host
+    # without a target controller would have no usable path (its CSI connects
+    # the target within seconds of the clone's export).
+    blocked = ns_host_guard.removal_blocked(
+        lvol.nqn, ns_host_guard.volume_node_ids(lvol), _target_node_ids(params),
+        f"cutover freeze of {lvol_id}")
+    if blocked:
+        _record(task, last_error=blocked)
+        raise TaskDefer(blocked)
+
     # Marks the freeze as running: a plan cancel or a policy detach leaves a
     # freezing cutover alone (tasks_controller.cutover_is_freezing). Written
     # BEFORE the fence, and through the cancellation probe: a task canceled
@@ -891,6 +1037,51 @@ def task_runner(task: JobSchedule, tasks):
     if params.get("early_prepared"):
         _record_clone_base(params)
     _record_cutover_done(task)
+
+
+def _suspend_endgame_for_target(task, lvol, tgt_node):
+    """The target node is down before the cutover clone exists: after
+    REPL_CUTOVER_TARGET_DOWN_GRACE_SEC, give the endgame up -- without
+    burning an attempt and without a back-off -- and return the task.
+
+    Bed bf29 R3b (2026-11-20): the target primary was shut down while a
+    volume was in its endgame. The endgame waited for it (the clone is built
+    through the target primary), and while it held the volume nothing
+    replicated it: the endgame takes no snapshot while it waits, and the
+    cadence snapshot and retention skip a volume in its endgame. No cycle
+    completed for ~20 min (RPO 1280 s). The wait itself dates from feb45b996
+    (2026-08-27), which made it a deferral instead of a burned retry, but
+    left the endgame -- lvstore claim, round in flight -- in place for it.
+
+    Giving it up drops the endgame's round state and releases the lvstore
+    claim and the cluster's endgame slot, so the volume falls back to its
+    ordinary cadence (snapshots + delta transfers to whichever target member
+    leads, still under the migration space rules) and another volume can
+    take the slot. The source write cap is lifted: the outage is not the
+    volume's failure to converge, and may last long. The task stays: once the
+    target is back, the catch-up gate lets it enter a fresh endgame.
+    """
+    params = task.function_params
+    now = time.time()
+    since = params.get("target_down_since")
+    if not since:
+        return _record(task, target_down_since=now)
+    if now - since < constants.REPL_CUTOVER_TARGET_DOWN_GRACE_SEC:
+        return task
+    reason = (f"target node {tgt_node.get_id()[:8]} {tgt_node.status} for "
+              f"{int(now - since)}s before the cutover clone exists")
+    logger.warning("cutover for lvol %s: endgame suspended: %s; the volume replicates "
+                   "on its ordinary cadence until the target is back",
+                   lvol.get_id(), reason)
+    xfer_timing.stamp("endgame_suspended_target_down", lvol=lvol.get_id(),
+                      round=params.get("shrink_round"))
+    task = _record(task, last_error=f"endgame suspended: {reason}")
+    task = _discard_spare_landing(task) or task
+    task = drop_params(task, *_ENDGAME_ROUND_PARAMS) or task
+    _release_lvs_claim(task)
+    _restore_source_throttle(task)
+    # (the caller defers right away; the claim's release committed on its own)
+    return task
 
 
 def _prepare_early(task, lvol, src_node, tgt_node):
@@ -1205,6 +1396,9 @@ def _take_shrink_snapshot(task, lvol, direct=False):
                     round=params.get("shrink_round", 0))
     name = params.get("next_shrink_snap_name") or _new_shrink_snap_name(direct)
     if direct != name.startswith(DIRECT_ROUND_PREFIX):
+        # The landing volume pre-staged under the old name would never be
+        # adopted (bf29: three 10 GiB REP_repl_round_* left on cluster A).
+        _discard_landing_named(name, lvol.get_id(), task.cluster_id)
         name = _new_shrink_snap_name(direct)
     # The pre-recorded name may already exist: an earlier pass created the
     # snapshot but did not get to record it (bf17, 2026-11-08: "Snapshot name
@@ -1218,6 +1412,7 @@ def _take_shrink_snapshot(task, lvol, direct=False):
         new_snap, err = existing[0].get_id(), None
     else:
         if existing:
+            _discard_landing_named(name, lvol.get_id(), task.cluster_id)
             name = _new_shrink_snap_name(direct)
         with xfer_timing.phase("take_shrink_snapshot", lvol=lvol.get_id(),
                                round=params.get("shrink_round", 0) + 1):
@@ -1225,7 +1420,9 @@ def _take_shrink_snapshot(task, lvol, direct=False):
                 lvol, name, snap_type=SnapShot.TYPE_INTERNAL,
                 **({"replicate": False} if direct else {}))
         if err and "must be unique" in str(err):
-            # taken by something not ours: next pass uses a fresh name
+            # taken by something not ours: next pass uses a fresh name, and
+            # what was pre-staged for this one is never adopted
+            _discard_landing_named(name, lvol.get_id(), task.cluster_id)
             task = _record(task, next_shrink_snap_name=_new_shrink_snap_name(direct))
     if err:
         # Three values like the success path: every caller unpacks three, and
@@ -1306,11 +1503,88 @@ def _direct_last_round(params):
         return None
 
 
+def _round_snapshot_hold(task, lvol):
+    """``(why, task)``: why the next round snapshot must wait, or "".
+
+    Rules 2 and 3 of simplyblock_core/migration_space.py (bed bf29,
+    2026-11-20: five endgames' round snapshots pinned ~440 MB/s of
+    overwritten data and filled the source cluster):
+
+    * Rule 2 -- no new round snapshot while one of the volume's snapshots is
+      still being deleted: rounds then go only as fast as their predecessors
+      are released, instead of stacking pending deletions. A deletion still
+      pending after REPL_ENDGAME_DELETION_WAIT_MAX_SEC is set aside (logged)
+      and no longer waited for; any newer one is.
+    * Rule 3 -- no new round snapshot while the source cluster's free space
+      is under the headroom the snapshot needs (migration_space.space_hold).
+
+    Only this migration's snapshots wait; client IO is never held. The wait
+    is bounded by the endgame's shrink deadline like any other: an endgame
+    that cannot snapshot is abandoned, releasing its slot and lvstore.
+    """
+    params = task.function_params
+    now = time.time()
+    lvol_id = lvol.get_id()
+    nxt = params.get("shrink_round", 0) + 1
+
+    # ---- rule 2: the volume's earlier deletions have completed ----------- #
+    ignored = set(params.get("deletion_ignored") or ())
+    pending = [s for s in migration_space.deletions_pending(db, lvol) if s not in ignored]
+    if pending:
+        since = params.get("deletion_wait_since") or now
+        if not params.get("deletion_wait_since"):
+            task = _record(task, deletion_wait_since=since)
+        waited = now - since
+        if waited < constants.REPL_ENDGAME_DELETION_WAIT_MAX_SEC:
+            xfer_timing.stamp("round_waits_deletion", lvol=lvol_id, round=nxt,
+                              n=len(pending))
+            return (f"round {nxt} snapshot waits for {len(pending)} deletion(s) of "
+                    f"the volume's snapshots to complete "
+                    f"({', '.join(p[:8] for p in pending)})"), task
+        logger.warning("cutover for lvol %s: snapshot deletion(s) %s still pending after "
+                       "%ds; no longer waiting for them before round %d",
+                       lvol_id, ", ".join(pending), int(waited), nxt)
+        task = _record(task, deletion_ignored=sorted(ignored | set(pending)))
+        task = drop_params(task, "deletion_wait_since") or task
+    elif params.get("deletion_wait_since"):
+        logger.info("cutover for lvol %s: snapshot deletions completed after %ds; "
+                    "taking round %d", lvol_id, int(now - params["deletion_wait_since"]), nxt)
+        task = drop_params(task, "deletion_wait_since") or task
+    params = task.function_params
+
+    # ---- rule 3: free space on the source cluster ------------------------ #
+    cluster_id = migration_space.source_cluster_id(db, lvol, task.cluster_id)
+    unknown_since = params.get("space_unknown_since", 0) or 0
+    why, new_unknown = migration_space.space_hold(db, lvol, cluster_id, unknown_since, now)
+    if new_unknown != unknown_since:
+        task = (_record(task, space_unknown_since=new_unknown) if new_unknown
+                else drop_params(task, "space_unknown_since") or task)
+    if why:
+        if not params.get("space_low_since"):
+            logger.warning("cutover for lvol %s: %s", lvol_id, why)
+            migration_space.space_low_event(lvol, why)
+            task = _record(task, space_low_since=now)
+        xfer_timing.stamp("round_waits_space", lvol=lvol_id, round=nxt)
+        return why, task
+    if params.get("space_low_since"):
+        logger.info("cutover for lvol %s: source space recovered after %ds; taking "
+                    "round %d", lvol_id, int(now - params["space_low_since"]), nxt)
+        task = drop_params(task, "space_low_since") or task
+    return "", task
+
+
 def _take_round(task, lvol):
     """Take the next round's snapshot and, with direct rounds, send it into
     the cutover clone; (error, task). Direct or not is decided once per
     endgame, at its first round: a clone holding direct rounds is never
-    rebased onto ordinary rounds' copies."""
+    rebased onto ordinary rounds' copies.
+
+    The snapshot waits (an error, so the caller defers) while the volume's
+    earlier deletions are pending or the source is short of space
+    (_round_snapshot_hold)."""
+    held, task = _round_snapshot_hold(task, lvol)
+    if held:
+        return held, task
     params = task.function_params
     if "direct_rounds" not in params:
         direct = _direct_mode_possible(lvol, params)
@@ -1339,18 +1613,88 @@ def _take_round(task, lvol):
     if not params.get("direct_rounds"):
         _, err, task = _take_shrink_snapshot(task, lvol)
         return err, task
-    _, err, task = _take_shrink_snapshot(task, lvol, direct=True)
+    new_snap, err, task = _take_shrink_snapshot(task, lvol, direct=True)
     if err:
         return err, task
     # direct_rounds_used outlives the endgame's params: whatever ends this
     # attempt, its round snapshots must not be left unreplicated
-    task = _record(task, direct_submits=0, direct_xfer_node="", direct_rounds_used=True)
+    ids = list(task.function_params.get("direct_round_ids") or [])
+    if new_snap and new_snap not in ids:
+        ids.append(new_snap)
+    task = _record(task, direct_submits=0, direct_xfer_node="", direct_rounds_used=True,
+                   direct_round_ids=ids)
     err, task = _submit_direct_round(task, lvol)
     if err:
         # the snapshot exists; the next pass sends it (_direct_round_done)
         logger.warning("cutover for lvol %s: round %s not sent yet: %s", lvol.get_id(),
                        task.function_params.get("shrink_round"), err)
+    task = _drop_superseded_rounds(task, lvol, new_snap)
     return None, task
+
+
+def _drop_superseded_rounds(task, lvol, in_flight=None):
+    """Delete this endgame's direct-round snapshots that nothing needs any
+    more; returns the task.
+
+    A direct round arrives in the cutover clone and the next round is a delta
+    against it, so only two round snapshots are of use: the last one that
+    arrived (the next round's base, and the final step's if this is the last
+    round) and the one in flight. Every older one only pins what was written
+    since it was taken, on the source. Held until the cutover, they filled
+    bed bf24 (2026-11-14): endgames that did not converge took 10-13 rounds
+    each, 30 s apart, five volumes in parallel. Under random overwrites every
+    round touches nearly every cluster, so each held round pinned about the
+    whole 10 GiB volume. The source cluster went from 36% to 88% in 15 minutes
+    (17 -> 63 snapshots), three devices filled up and client writes failed
+    with EIO.
+
+    Deleting one merges it into its successor, which has arrived already and
+    is not transferring (the round in flight is the successor's successor).
+    The copy in flight reads only its own clusters, so the merge does not
+    change what it sends. A delete that is refused now is tried again after
+    the next round. Whatever is left over goes with the rest after the
+    cutover (_delete_direct_rounds), or replicates the ordinary way if the
+    endgame gives up (_requeue_direct_rounds).
+    """
+    params = task.function_params or {}
+    ids = list(params.get("direct_round_ids") or [])
+    keep = {params.get("direct_done_snap"), params.get("shrink_snap_id"), in_flight}
+    superseded = [i for i in ids if i and i not in keep]
+    if not superseded:
+        return task
+    base = _clone_base_source(lvol, params)
+    if base is not None:
+        keep.add(base.get_id())
+        superseded = [i for i in superseded if i not in keep]
+        if not superseded:
+            return task
+    from simplyblock_core.controllers import snapshot_controller
+    dropped = []
+    for snap_id in superseded:
+        try:
+            snap = db.get_snapshot_by_id(snap_id)
+        except KeyError:
+            dropped.append(snap_id)                       # gone already
+            continue
+        if snap.status == SnapShot.STATUS_IN_DELETION:
+            dropped.append(snap_id)
+            continue
+        try:
+            ok = snapshot_controller.delete(snap_id)
+        except Exception as e:                            # noqa: BLE001
+            ok = False
+            logger.warning("cutover for lvol %s: superseded round snapshot %s not deleted: %s",
+                           lvol.get_id(), snap_id, e)
+        if ok:
+            dropped.append(snap_id)
+    if not dropped:
+        return task
+    logger.info("cutover for lvol %s: deleted %d superseded round snapshot(s) (%s); "
+                "keeping %s", lvol.get_id(), len(dropped), ", ".join(dropped),
+                ", ".join(sorted(k for k in keep if k)))
+    xfer_timing.stamp("direct_rounds_dropped", lvol=lvol.get_id(), n=len(dropped),
+                      round=params.get("shrink_round"))
+    return _record(task, direct_round_ids=[i for i in ids if i not in dropped])
 
 
 def _submit_direct_round(task, lvol):
@@ -1463,7 +1807,10 @@ def _direct_round_done(task, lvol):
             return False, task
         state = str(st.get("transfer_state"))
         if state == "Done":
-            return True, _record(task, direct_done_snap=snap_id)
+            landed_before = params.get("direct_done_snap")
+            task = _record(task, direct_done_snap=snap_id)
+            _drop_landed_round(lvol, landed_before, snap_id)
+            return True, task
         if state == "In progress":
             return False, task
     if int(params.get("direct_submits") or 0) >= constants.REPL_CUTOVER_DIRECT_ROUND_SUBMITS:
@@ -1496,21 +1843,56 @@ def _direct_round_snapshots(lvol_id):
             and s.status == SnapShot.STATUS_ONLINE]
 
 
+def _drop_landed_round(lvol, landed_before, landed_now):
+    """Delete the round that landed before *landed_now*: once a round is in the
+    clone, the one before it serves nothing. The next round's delta base is
+    *landed_now* (_direct_round_base), and the delete swap-merges the older
+    round INTO it -- below that base, so no later round's delta changes, and
+    the surviving snapshot keeps its blob. The first round's base is the
+    clone's base copy (not a round) and is never deleted here.
+
+    bf23 (2026-11-11): rounds were kept until the endgame ended; an endgame
+    runs up to REPL_CUTOVER_MAX_SHRINK_ROUNDS of them, every one pinning what
+    the volume rewrote since the round before, and attempts that failed while
+    the target cluster had a node down stacked theirs on top: cluster A held
+    ~50 round snapshots, chains 8-10 deep, and went read-only (all devices
+    cannot_allocate) under heavy rewrite load."""
+    if not landed_before or landed_before == landed_now:
+        return
+    try:
+        snap = db.get_snapshot_by_id(landed_before)
+    except KeyError:
+        return
+    if not (snap.snap_name or "").startswith(DIRECT_ROUND_PREFIX) \
+            or snap.target_replicated_snap_uuid \
+            or snap.status != SnapShot.STATUS_ONLINE:
+        return
+    from simplyblock_core.controllers import snapshot_controller
+    try:
+        if snapshot_controller.delete(landed_before):
+            logger.info("cutover for lvol %s: round snapshot %s superseded by %s; deleted",
+                        lvol.get_id(), landed_before, landed_now)
+    except Exception as e:                                # noqa: BLE001
+        # best effort: the endgame's end deletes whatever is left
+        logger.warning("cutover for lvol %s: could not delete superseded round "
+                       "snapshot %s: %s", lvol.get_id(), landed_before, e)
+
+
 def _requeue_direct_rounds(task):
     """An endgame that ends without a cutover leaves its direct rounds'
-    snapshots on the source, sent only into the clone it discards. They
-    replicate the ordinary way (the chain-ancestor rule orders them); left
-    alone they would sit unreplicated and close the backlog gate for good."""
-    from simplyblock_core.controllers import tasks_controller
-    if not (task.function_params or {}).get("direct_rounds_used"):
-        return
-    for s in _direct_round_snapshots(task.function_params.get("lvol_id")):
-        try:
-            tasks_controller.add_snapshot_replication_task(s.cluster_id, s.lvol.node_id, s.get_id())
-        except Exception as e:                            # noqa: BLE001
-            logger.error("Could not queue the replication of round snapshot %s: %s",
-                         s.get_id(), e)
-    drop_params(task, "direct_rounds_used")
+    snapshots on the source, sent only into the clone it discards. They are
+    deleted, not replicated: each delete swap-merges a round into its
+    successor, the newest into the live volume, so their data stays in the
+    volume and the next ordinary cadence snapshot carries it, as a delta
+    against the last snapshot that did replicate (the clone's base copy).
+
+    Until bf23 they were each queued for ordinary replication. A failed
+    attempt so left up to REPL_CUTOVER_MAX_SHRINK_ROUNDS snapshots that had to
+    replicate one by one before the next endgame, and every further failed
+    attempt (a target node down) stacked another set on top: the source
+    cluster filled up and went read-only (2026-11-11, R3). Deleted, they
+    neither pin space nor close the backlog gate."""
+    _delete_direct_rounds(task)
 
 
 def _delete_direct_rounds(task):
@@ -1526,6 +1908,17 @@ def _delete_direct_rounds(task):
     drop_params(task, "direct_rounds_used")
 
 
+def _discard_cadence_spare(lvol_id):
+    """Delete the cadence spare landing volume of *lvol_id* (replication_spare)."""
+    if not lvol_id:
+        return
+    try:
+        from simplyblock_core import replication_spare
+        replication_spare.discard(lvol_id)
+    except Exception as e:                                # noqa: BLE001
+        logger.warning("Could not discard the cadence spare of %s: %s", lvol_id, e)
+
+
 def _discard_spare_landing(task):
     """Delete the landing volume pre-staged for a round that will not run.
 
@@ -1539,13 +1932,7 @@ def _discard_spare_landing(task):
     # The cadence spare of the volume (replication_spare) is idle too once the
     # rounds are over: the volume cuts over or gives up, either way no cadence
     # snapshot of it lands here again.
-    lvol_id = (task.function_params or {}).get("lvol_id")
-    if lvol_id:
-        try:
-            from simplyblock_core import replication_spare
-            replication_spare.discard(lvol_id)
-        except Exception as e:                                # noqa: BLE001
-            logger.warning("Could not discard the cadence spare of %s: %s", lvol_id, e)
+    _discard_cadence_spare((task.function_params or {}).get("lvol_id"))
     try:
         # The caller's copy may predate the rounds _shrink_step just ran.
         name = (db.get_task_by_id(task.uuid).function_params or {}).get(
@@ -1555,25 +1942,59 @@ def _discard_spare_landing(task):
     if not name:
         return task
     task = drop_params(task, "next_shrink_snap_name") or task
+    _discard_landing_named(name, (task.function_params or {}).get("lvol_id"),
+                           task.cluster_id)
+    return task
+
+
+def _landing_in_transfer(landing_id, cluster_id):
+    """True when a live replication task transfers into *landing_id*, or when
+    that cannot be ruled out (the task table is unreadable)."""
+    try:
+        tasks = db.get_job_tasks(cluster_id)
+    except Exception as e:                                # noqa: BLE001
+        logger.warning("Cannot read tasks to check landing volume %s: %s", landing_id, e)
+        return True
+    for t in tasks:
+        if (t.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION
+                and t.status != JobSchedule.STATUS_DONE and not t.canceled
+                and (t.function_params or {}).get("remote_lvol_id") == landing_id):
+            return True
+    return False
+
+
+def _discard_landing_named(name, lvol_id, cluster_id):
+    """Delete the landing volume pre-staged for round snapshot *name*
+    (REP_<name>, snapshot_replication._prestage_next_landing) when that name
+    will not be used: it exists, is online and no transfer lands in it.
+
+    Nothing else reclaims such a volume: bed bf29 (2026-11-20) left three
+    10 GiB REP_repl_round_* landing volumes on cluster A for good. Best
+    effort, logged loudly when it fails."""
+    if not name:
+        return
     rep_name = f"REP_{name}"
     try:
         spare = db.get_lvol_by_name(rep_name)
     except KeyError:
-        return task
+        return
     except Exception as e:                                # noqa: BLE001
         logger.error("Could not look up the spare landing volume %s: %s", rep_name, e)
-        return task
-    if spare.status == LVol.STATUS_IN_DELETION:
-        return task
+        return
+    if spare.status != LVol.STATUS_ONLINE:
+        return
+    if _landing_in_transfer(spare.get_id(), cluster_id):
+        logger.info("cutover for lvol %s: pre-staged landing volume %s is in use by a "
+                    "transfer; kept", lvol_id, rep_name)
+        return
     try:
         from simplyblock_core.controllers import lvol_controller
         logger.info("cutover for lvol %s: deleting the unused pre-staged landing "
-                    "volume %s", task.function_params.get("lvol_id"), rep_name)
+                    "volume %s", lvol_id, rep_name)
         lvol_controller.delete_lvol(spare, force_delete=True)
     except Exception as e:                                # noqa: BLE001
         logger.error("Could not delete the unused pre-staged landing volume %s "
                      "(%s): %s", rep_name, spare.get_id(), e)
-    return task
 
 
 def _shrink_round_done(snap_id):
@@ -1674,7 +2095,13 @@ def _shrink_step(task, lvol, tasks=()):
             continue
 
         started_at = params.get("shrink_started_at")
-        if started_at is None:
+        times = params.get("shrink_round_times") or []
+        if params.get("shrink_round_measured") == params["shrink_round"] and times:
+            # Measured on an earlier pass, which then could not take the next
+            # snapshot (_round_snapshot_hold, a refused snapshot): the round's
+            # duration is what was measured then, not the time since.
+            elapsed = float(times[-1])
+        elif started_at is None:
             # Unmeasurable round (an older task, or one enqueued without the
             # stamp). Treat it as NOT converged rather than as instant: a
             # missing measurement must never be read as "the delta is small",
@@ -1699,7 +2126,8 @@ def _shrink_step(task, lvol, tasks=()):
                               round=params["shrink_round"],
                               ms=elapsed * 1000.0)
             task = _record(task, shrink_round_times=round_times,
-                           shrink_round_done_at=time.time())
+                           shrink_round_done_at=time.time(),
+                           shrink_round_measured=params["shrink_round"])
             params = task.function_params
 
         # Every round is an endgame round now -- the lvstore is held before the
@@ -1829,7 +2257,11 @@ def _final_delta_estimate(params):
 _ENDGAME_ROUND_PARAMS = ("shrink_snap_id", "shrink_round", "shrink_round_times",
                          "shrink_started_at", "shrink_round_done_at",
                          "direct_rounds", "direct_xfer_node", "direct_submits",
-                         "direct_done_snap")
+                         "direct_done_snap", "direct_round_ids",
+                         # _round_snapshot_hold's waits (bf29)
+                         "shrink_round_measured",
+                         "deletion_wait_since", "deletion_ignored",
+                         "space_low_since", "space_unknown_since")
 
 
 def _abandon_endgame(task, lvol, reason) -> NoReturn:
@@ -1966,8 +2398,56 @@ def _abandon_prepared_cutover(task):
     return task
 
 
-def _delete_cutover_clone(clone_id):
-    """Start deleting the clone; True once it is gone, False while it is not."""
+def _target_node_ids(params):
+    """The nodes exporting the prepared cutover clone, if there is one."""
+    clone_id = (params or {}).get("tgt_lvol_id")
+    if not clone_id:
+        return []
+    try:
+        return ns_host_guard.volume_node_ids(db.get_lvol_by_id(clone_id))
+    except KeyError:
+        return []
+
+
+def _live_target_node_ids(src_lvol, params):
+    """The nodes exporting the volume the source migrated to.
+
+    After the cutover the prepared clone's record is gone: the volume runs
+    under a new record carrying the same NQN. Bed bf29 (2026-11-20): the
+    source-delete guard looked the target up by tgt_lvol_id, found nothing,
+    took every host as stranded and kept the migrated-away source of two
+    volumes (a full volume leaked per migration, and a same-named volume left
+    on the cluster the next round migrates back to). So the target is found
+    by NQN: every other live volume exporting it, plus the clone if it still
+    exists."""
+    ids = list(_target_node_ids(params))
+    nqn = getattr(src_lvol, "nqn", "")
+    if nqn:
+        for cluster in db.get_clusters():
+            for lv in db.get_lvols(cluster.get_id()):
+                if (lv.get_id() != src_lvol.get_id() and getattr(lv, "nqn", "") == nqn
+                        and lv.status not in (LVol.STATUS_IN_DELETION, LVol.STATUS_DELETED)):
+                    ids.extend(ns_host_guard.volume_node_ids(lv))
+    return list(dict.fromkeys(ids))
+
+
+def _source_node_ids(lvol_id):
+    try:
+        return ns_host_guard.volume_node_ids(db.get_lvol_by_id(lvol_id))
+    except KeyError:
+        return []
+
+
+class CloneRemovalBlocked(Exception):
+    """A host reaches the volume only through the clone's namespace."""
+
+
+def _delete_cutover_clone(clone_id, src_lvol_id=None):
+    """Start deleting the clone; True once it is gone, False while it is not.
+
+    Raises CloneRemovalBlocked while a host is connected to the clone's
+    namespace and to none of the source's (ns_host_guard): deleting it would
+    take that host's block device away for good (bed bf26 2026-11-17)."""
     from simplyblock_core.controllers import lvol_controller
     try:
         clone = db.get_lvol_by_id(clone_id)
@@ -1976,6 +2456,12 @@ def _delete_cutover_clone(clone_id):
     if clone.status == LVol.STATUS_DELETED:
         return True
     if clone.status != LVol.STATUS_IN_DELETION:
+        blocked = ns_host_guard.removal_blocked(
+            clone.nqn, ns_host_guard.volume_node_ids(clone),
+            _source_node_ids(src_lvol_id) if src_lvol_id else [],
+            f"discarding cutover clone {clone_id}")
+        if blocked:
+            raise CloneRemovalBlocked(blocked)
         lvol_controller.delete_lvol(clone)
     return False
 
@@ -1998,7 +2484,13 @@ def _discard_failed_cutover(task):
             raise TaskDefer("waiting for SPDK to end the failed final step "
                             "before discarding its clone")
         try:
-            gone = _delete_cutover_clone(clone_id)
+            gone = _delete_cutover_clone(clone_id, params.get("lvol_id"))
+        except CloneRemovalBlocked as e:
+            # Not counted against the discard deadline: the host is the one
+            # that has to come back, and the source keeps serving meanwhile.
+            logger.warning(str(e))
+            _record(task, last_error=str(e))
+            raise TaskDefer(str(e))
         except Exception as e:                          # noqa: BLE001
             gone = False
             task = _record(task, last_error=(
@@ -2156,9 +2648,14 @@ def _cleanup_unfinished_cutover(task):
     if not clone_id:
         return
     try:
-        _delete_cutover_clone(clone_id)
+        _delete_cutover_clone(clone_id, params.get("lvol_id"))
         logger.info("cutover task %s ended without a cutover; deleting its "
                     "clone %s", task.uuid, clone_id)
+    except CloneRemovalBlocked as e:
+        # Left exported rather than taking a host's device away; the clone is
+        # an orphan from here on and is reported loudly.
+        logger.error("cutover task %s ended without a cutover; its clone %s is "
+                     "kept: %s", task.uuid, clone_id, e)
     except Exception as e:                              # noqa: BLE001
         logger.error("cutover task %s ended without a cutover and its clone %s "
                      "could not be deleted: %s", task.uuid, clone_id, e)

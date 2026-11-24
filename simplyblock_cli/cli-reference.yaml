@@ -26,6 +26,14 @@ commands:
             type: bool
             default: false
             action: store_true
+          - name: "--container-image-prefix"
+            help: "Registry/proxy prefix for the images pulled on this host, e.g. `registry-1.docker.io`."
+            description: >
+              Put in front of the SNodeAPI and SPDK images this command pulls. Use the same
+              value the cluster is created with (`cluster create --container-image-prefix`);
+              the host joins no cluster here, so it cannot read it from one.
+            dest: container_image_prefix
+            type: str
       - name: configure
         help: "Prepare a configuration file to be used when adding the storage node."
         description: >
@@ -570,19 +578,6 @@ commands:
             dest: force
             type: bool
             action: store_true
-      - name: resize-device
-        help: "Grows a Linux block device (lblk) online to the size of its block device."
-        usage: >
-          Re-reads the size of the device's block device on the storage node's host, for example, after its LUN was
-          grown on the storage array, and grows the storage device online without interrupting I/O. Shrinking is
-          refused. The placement weight of the device keeps its original size, so the added capacity is only fully
-          usable once all data devices of the cluster have grown by the same factor, or after cluster grow-devices
-          has updated the weights of unevenly grown devices and rebalanced the cluster.
-        arguments:
-          - name: "device_id"
-            help: "The storage device id."
-            dest: device_id
-            type: str
       - name: add-device
         help: "Adds a new storage device."
         usage: >
@@ -884,10 +879,10 @@ commands:
             type: int
             default: 89
           - name: "--cap-crit"
-            help: "The capacity critical level in percent. Default: `99`."
+            help: "The capacity critical level in percent. Default: `98`."
             dest: cap_crit
             type: int
-            default: 99
+            default: 98
           - name: "--prov-cap-warn"
             help: "The capacity warning level in percent. Default: `250`."
             dest: prov_cap_warn
@@ -1042,6 +1037,11 @@ commands:
             dest: enable_failure_domain
             type: bool
             action: store_true
+          - name: "--disable-lvol-geometry"
+            help: "Create new logical volumes with ndcs=npcs=0 instead of the cluster's erasure coding geometry. Enabled by default; can be changed later with `cluster set-lvol-geometry`."
+            dest: disable_lvol_geometry
+            type: bool
+            action: store_true
           - name: "--sync-replication"
             help: "Enable site-level synchronous replication over exactly two sites. Each storage node must then be added with --site; every lvstore is replicated to the other site. Requires --ha-type ha. Deploy-time only: a cluster cannot be upgraded into this feature, it must be redeployed."
             dest: sync_replication
@@ -1158,6 +1158,16 @@ commands:
             dest: snode_api_port
             type: int
             default: 50001
+          - name: "--container-image-prefix"
+            help: "Registry/proxy prefix for every container image the cluster pulls, e.g. `registry-1.docker.io`."
+            description: >
+              Stored on the cluster and put in front of the images it deploys: the swarm
+              and monitoring stack services, the SNodeAPI, SPDK and SPDK-proxy images on
+              storage node add and restart, and the images used by `cluster update`. Empty
+              pulls images as named. The control-plane images of a Kubernetes deployment
+              come from its Helm chart and are not affected.
+            dest: container_image_prefix
+            type: str
           - name: "--max-subsys"
             help: "Max number of nvmf subsystems per storage node. Cluster-wide; a node adopts it on its next restart."
             description: >
@@ -1186,6 +1196,10 @@ commands:
           - name: "--hashicorp-vault-url"
             help: "Hashicorp vault URL for storing encryption keys for this cluster"
             dest: hashicorp_vault_url
+            type: str
+          - name: "--kmip-server-url"
+            help: "KMIP server address (host:port) for storing encryption keys for this cluster"
+            dest: kmip_server_url
             type: str
           - name: "--alerting-config-path"
             help: "Path to the YAML alerting configuration file. Takes precedence over --contact-point."
@@ -1217,10 +1231,10 @@ commands:
             type: int
             default: 89
           - name: "--cap-crit"
-            help: "The capacity critical level in percent. Default: `99`."
+            help: "The capacity critical level in percent. Default: `98`."
             dest: cap_crit
             type: int
-            default: 99
+            default: 98
           - name: "--prov-cap-warn"
             help: "The capacity warning level in percent. Default: `250`."
             dest: prov_cap_warn
@@ -1327,6 +1341,11 @@ commands:
             dest: enable_failure_domain
             type: bool
             action: store_true
+          - name: "--disable-lvol-geometry"
+            help: "Create new logical volumes with ndcs=npcs=0 instead of the cluster's erasure coding geometry. Enabled by default; can be changed later with `cluster set-lvol-geometry`."
+            dest: disable_lvol_geometry
+            type: bool
+            action: store_true
           - name: "--sync-replication"
             help: "Enable site-level synchronous replication over exactly two sites. Each storage node must then be added with --site; every lvstore is replicated to the other site. Requires --ha-type ha. Deploy-time only: a cluster cannot be upgraded into this feature, it must be redeployed."
             dest: sync_replication
@@ -1420,6 +1439,15 @@ commands:
             dest: snode_api_port
             type: int
             default: 50001
+          - name: "--container-image-prefix"
+            help: "Registry/proxy prefix for the images this cluster pulls. Default: the prefix of the existing cluster."
+            description: >
+              Stored on the new cluster and put in front of the images it deploys, as
+              `cluster create --container-image-prefix` does. Left out, the new cluster
+              inherits the prefix of a cluster already on this control plane; pass an
+              empty value to pull this cluster's images as named.
+            dest: container_image_prefix
+            type: str
           - name: "--max-subsys"
             help: "Max number of nvmf subsystems per storage node. Cluster-wide; a node adopts it on its next restart."
             description: >
@@ -1448,6 +1476,10 @@ commands:
           - name: "--hashicorp-vault-url"
             help: "Hashicorp vault URL for storing encryption keys for this cluster"
             dest: hashicorp_vault_url
+            type: str
+          - name: "--kmip-server-url"
+            help: "KMIP server address (host:port) for storing encryption keys for this cluster"
+            dest: kmip_server_url
             type: str
       - name: op-stop
         help: "Stops the cluster accepting object lifecycle operations: creation, deletion and modification of volumes, snapshots, clones and pools. Read paths and the cluster's own maintenance are unaffected."
@@ -1512,26 +1544,20 @@ commands:
             type: str
             completer: _completer_get_cluster_list
       - name: grow-devices
-        help: "Grows every Linux block device (lblk) of the cluster online to the size of its block device."
+        help: "Grows all Linux block devices (lblk) of the cluster online by the same factor."
         usage: >
-          Re-reads the size of every online data device of an lblk cluster and grows the devices whose block device
-          has grown, one at a time. Used after the LUNs of the cluster were grown on the storage array. When all
-          devices have grown by the same factor, nothing else changes. When they have grown unevenly, the device
-          weights are set to the new sizes and the cluster is rebalanced, which re-places a large part of the data
-          in the background; this needs an active cluster with all nodes and devices online and no running
-          migration. Grow all LUNs on the array first, then run this command once.
+          Re-reads the size of the block device of every data device of an lblk cluster, for example, after the
+          LUNs were grown on the storage array, and grows every device online by the same factor: the smallest
+          growth of any of the block devices. With three LUNs grown by 1.5 and three by 2.0, every device grows by
+          1.5 and the rest stays unused. If one block device did not grow, nothing grows. Device weights and data
+          placement never change. All data devices and their nodes must be online. A block device smaller than its
+          device is refused and raises an alert. Grow all LUNs on the array first, then run this command once.
         arguments:
           - name: "cluster_id"
             help: "The cluster id."
             dest: cluster_id
             type: str
             completer: _completer_get_cluster_list
-          - name: "--no-rebalance"
-            help: "Keep the device weights after an uneven growth and do not rebalance the cluster."
-            dest: no_rebalance
-            type: bool
-            default: false
-            action: store_true
       - name: show
         help: "Shows a cluster's statistics."
         arguments:
@@ -1854,6 +1880,23 @@ commands:
           - name: "--force"
             help: "Bypass the rebalancing / non-online-node guards. Required when --disable is passed."
             dest: force
+            type: bool
+            action: store_true
+      - name: set-lvol-geometry
+        help: "Enable or disable LVol geometry on the cluster."
+        usage: >
+          When enabled (the default), new logical volumes inherit the cluster's erasure coding geometry
+          (data-chunks-per-stripe/parity-chunks-per-stripe) or the values passed at creation. When disabled, new
+          logical volumes are always created with ndcs=npcs=0. Existing logical volumes are not changed.
+        arguments:
+          - name: "cluster_id"
+            help: "The cluster id."
+            dest: cluster_id
+            type: str
+            completer: _completer_get_cluster_list
+          - name: "--disable"
+            help: "Disable LVol geometry (default action is to enable it)."
+            dest: disable
             type: bool
             action: store_true
       - name: event-alerts

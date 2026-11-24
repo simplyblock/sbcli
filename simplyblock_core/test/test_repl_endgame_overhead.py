@@ -63,6 +63,10 @@ class _TaskDB:
     def get_job_tasks(self, cluster_id, reverse=False):
         return list(self.tasks.values())
 
+    def get_replication_tasks_for_snapshot(self, snapshot_id):
+        return [t for t in self.tasks.values()
+                if (t.function_params or {}).get("snapshot_id") == snapshot_id]
+
     def get_task_by_id(self, uuid):
         if uuid not in self.tasks:
             raise KeyError(uuid)
@@ -289,6 +293,17 @@ class TestLandingPrestage(unittest.TestCase):
         self._names("repl_commit_next")
         self.create.side_effect = RuntimeError("boom")
         self.assertIsNone(sr._prestage_next_landing(self.snap, self.remote_lv))
+
+    def test_no_landing_volume_for_a_direct_round(self):
+        # bf29 (2026-11-20): a direct round is never replicated, so a landing
+        # volume staged under its name was never adopted nor discarded.
+        self._names("repl_round_next", "repl_round_next")
+        self.assertIsNone(sr._prestage_next_landing(self.snap, self.remote_lv))
+        self.create.assert_not_called()
+
+    def test_direct_round_prefix_matches_the_cutover_runner(self):
+        from simplyblock_core.services import tasks_runner_replication_final as trf
+        self.assertEqual(sr._DIRECT_ROUND_PREFIX, trf.DIRECT_ROUND_PREFIX)
 
 
 class TestShrinkSnapshotNames(unittest.TestCase):
