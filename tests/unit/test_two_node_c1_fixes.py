@@ -361,3 +361,15 @@ def test_connect_entry_tells_the_csi_driver_it_is_two_node(arbitrated):
                                      cluster=_Cluster(arbitrated), host_entry=None, host_nqn=None)
     assert entry.two_node is arbitrated
     assert entry.model_dump(by_alias=True)["two-node"] is arbitrated
+
+
+def test_keep_alive_for_multi_attach_clusters():
+    """1+0 multi-attach: a hard-reset node's own volumes waited 10-14 s for the
+    8 s keep-alive (FTT1/FTT2 beds, 2026-11-20)."""
+    cl = _Cluster(False)
+    cl.multi_attach = True
+    entry = build_nvme_connect_entry(transport="tcp", ip="10.0.0.1", port=4420, nqn="nqn.x",
+                                     ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO,
+                                     cluster=cl, host_entry=None, host_nqn=None)
+    assert entry.keep_alive_tmo == constants.MULTI_ATTACH_CLIENT_KEEP_ALIVE_TO == 3
+    assert "--keep-alive-tmo=3" in entry.connect

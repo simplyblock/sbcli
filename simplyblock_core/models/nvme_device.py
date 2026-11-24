@@ -136,6 +136,48 @@ class NVMeDevice(BaseModel):
     # does not compute it; alerts_controller turns it into device_slow /
     # device_unhealthy while it is fresh. Empty until first reported.
     health_assessment: dict = default_factory(dict)
+    # Multi-attach array LUN mode (cluster.multi_attach). All "off" by
+    # default, so a device of a regular cluster is unchanged.
+    #: The device is an array LUN presented to several storage nodes; its
+    #: subsystem NQN is host-independent (``<cluster nqn>:lun:<uuid>``) and
+    #: every distrib, the owner's included, reaches it as
+    #: ``remote_alceml_<uuid>n1`` over NVMe-oF.
+    multi_attach: bool = False
+    #: World-wide name (or serial) of the LUN, the same on every node.
+    lun_wwn: str = ""
+    #: Node whose alceml currently serves the LUN; "" means the owner
+    #: (``node_id``).
+    serving_node_id: str = ""
+    #: Epoch ms the serving node last took the LUN over (lun_takeover);
+    #: 0 before any takeover.
+    served_since: int = 0
+    #: node_id -> {"path": by-id path of the LUN on that node, "bdev": the
+    #: base bdev name there}. The owner's entry, plus the LVS secondary and
+    #: tertiary once an array-managed LUN is attached to them (bdev "").
+    node_paths: dict = default_factory(dict)
+    #: Nodes a LUN takeover fenced from this LUN at the array. Phase 3 never
+    #: unfences on its own: a fenced node's host may still hold queued
+    #: writes. Such a node is no takeover candidate for this LUN.
+    fenced_node_ids: list = default_factory(list)
+    #: The LUN's alceml instances run with persistent reservation keys
+    #: (multi_attach.reservation_key): the serving one holds the reservation
+    #: and a takeover fences by preempting it. Decided once, when the device
+    #: is first marked a LUN (multi_attach.mark_lun_devices): a LUN formatted
+    #: with a key cannot be opened without one.
+    lun_reservations: bool = False
+    #: The array's id of the LUN when the cluster's array plugin created it
+    #: (controllers/array_controller); "" for a LUN the operator presented.
+    #: Only such LUNs are attached, detached, grown and deleted by simplyblock.
+    array_lun_id: str = ""
+    #: Nodes the array presents the LUN to, as last applied by
+    #: array_controller.reconcile_lun_attachments (owner, LVS secondary and
+    #: tertiary, serving node).
+    array_attached_node_ids: list = default_factory(list)
+
+    def serving_node(self) -> str:
+        """The node whose alceml serves this device now (the owner unless a
+        multi-attach takeover moved it)."""
+        return self.serving_node_id or self.node_id
 
     def weight_size(self) -> int:
         """Bytes the cluster-map weight of this device is derived from: the

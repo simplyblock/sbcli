@@ -34,6 +34,7 @@ from tenacity import (
 import docker
 from simplyblock_core import (
     constants,
+    floors,
     index_ops,
     jm_raid,
     mgmt_node_ops,
@@ -44,6 +45,7 @@ from simplyblock_core import (
 )
 from simplyblock_core.controllers import (
     activation_gate,
+    array_controller,
     cluster_events,
     device_controller,
     pool_controller,
@@ -55,6 +57,9 @@ from simplyblock_core.controllers import (
 from simplyblock_core.controllers.backup import device as backup_device
 from simplyblock_core.controllers.cluster_expansion.planner import (
     RemoteTripletPlacementError,
+)
+from simplyblock_core.controllers.cluster_expansion.planner import (
+    fd_activation_min_domains as fd_planner_min_domains,
 )
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.exceptions import (
@@ -427,6 +432,52 @@ def _validate_leader_site(sync_replication, leader_site, stretched_control_plane
     if leader_site and not sync_replication and not stretched_control_plane:
         raise SyncReplicationSiteError(
             "leader_site is only allowed together with sync_replication or stretched_control_plane")
+
+
+#: Erasure-coding scheme a multi-attach (array LUN) cluster runs: the array
+#: already protects every LUN, so simplyblock adds no parity.
+MULTI_ATTACH_SCHEME = (1, 0)
+
+
+def _resolve_multi_attach(multi_attach, ftt, raid_devices, ha_type, is_single_node,
+                          distr_ndcs, distr_npcs, max_fault_tolerance):
+    """Validate the multi-attach array LUN options and return the effective
+    ``(distr_ndcs, distr_npcs, max_fault_tolerance)``.
+
+    Without ``multi_attach`` the inputs are returned unchanged (``ftt`` must
+    then be unset). With it the cluster runs 1+0 (the array protects the
+    LUNs) and tolerates ``ftt`` node failures by reopening an owner's LUN on
+    another node, so it needs ``raid_devices``, an HA cluster (the LUN is
+    attached to the LVS secondary/tertiary) and more than one node.
+
+    Raises:
+        ValueError: an inconsistent combination of options.
+    """
+    if not multi_attach:
+        if ftt is not None:
+            raise ValueError("ftt is only valid together with multi_attach")
+        return distr_ndcs, distr_npcs, max_fault_tolerance
+    if not raid_devices:
+        raise ValueError("multi_attach requires raid_devices: the array must protect every LUN")
+    if ftt not in (1, 2):
+        raise ValueError("multi_attach requires ftt 1 or 2")
+    if ha_type != "ha":
+        raise ValueError("multi_attach requires ha_type='ha'")
+    if is_single_node:
+        raise ValueError("multi_attach cannot be used on a single-node cluster")
+    if (distr_ndcs, distr_npcs) != MULTI_ATTACH_SCHEME:
+        logger.info("multi_attach: erasure coding %s+%s overridden by %s+%s",
+                    distr_ndcs, distr_npcs, *MULTI_ATTACH_SCHEME)
+    return MULTI_ATTACH_SCHEME[0], MULTI_ATTACH_SCHEME[1], int(ftt)
+
+
+def _validate_warm_standby(multi_attach, warm_standby):
+    """Warm standbys (Cluster.multi_attach_warm_standby) are a multi-attach
+    option only."""
+    if warm_standby and not multi_attach:
+        raise ValueError("multi_attach_warm_standby requires multi_attach")
+
+
 def _validate_stretched_control_plane_params(stretched_control_plane, sync_replication, enable_failure_domain,
                                              distr_ndcs, distr_npcs, ha_type, is_single_node, leader_site, site):
     """The deploy-time rules of a stretched control plane
@@ -476,11 +527,19 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    sync_replication=False,
                    page_copy=False,
                    md_journal=True,
+                   raid_devices=False,
+                   multi_attach=False,
+                   ftt=None,
+                   multi_attach_warm_standby=False,
                    stretched_control_plane=False,
                    leader_site="",
                    site="",
                    site_api_endpoint="",
 ) -> str:
+    distr_ndcs, distr_npcs, max_fault_tolerance = _resolve_multi_attach(
+        multi_attach, ftt, raid_devices, ha_type, is_single_node,
+        distr_ndcs, distr_npcs, max_fault_tolerance)
+    _validate_warm_standby(multi_attach, multi_attach_warm_standby)
     if (distr_ndcs, distr_npcs) not in SUPPORTED_ERASURE_CODING_SCHEMES:
         raise ValueError("Unsupported erasure coding scheme")
     _validate_integrity_flags(inline_checksum, atomic_4k)
@@ -495,7 +554,9 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     if max_fault_tolerance > 1:
         if ha_type != "ha":
             raise ValueError("max_fault_tolerance > 1 requires ha_type='ha'")
-        if distr_npcs < 2:
+        # Multi-attach runs 1+0: its FTT comes from the array LUN being
+        # reopened on another node, not from parity.
+        if distr_npcs < 2 and not multi_attach:
             raise ValueError("max_fault_tolerance > 1 requires distr_npcs >= 2")
 
     if kms_settings is not None:
@@ -658,6 +719,9 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.atomic_4k = bool(atomic_4k)
     cluster.page_copy = bool(page_copy)
     cluster.md_journal = bool(md_journal)
+    cluster.raid_devices = bool(raid_devices)
+    cluster.multi_attach = bool(multi_attach)
+    cluster.multi_attach_warm_standby = bool(multi_attach and multi_attach_warm_standby)
     cluster.client_data_nic = client_data_nic or ""
     cluster.max_fault_tolerance = max_fault_tolerance
     cluster.nvmf_base_port = nvmf_base_port
@@ -812,6 +876,10 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
                 leader_site="",
                 page_copy=False,
                 md_journal=True,
+                raid_devices=False,
+                multi_attach=False,
+                ftt=None,
+                multi_attach_warm_standby=False,
                 snode_api_service=constants.K8S_SNODE_API_SERVICE,
                 spdk_proxy_service=constants.K8S_SPDK_PROXY_SERVICE,
                 spdk_proxy_tls_secret=constants.K8S_SPDK_PROXY_TLS_SECRET,
@@ -854,6 +922,10 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
         leader_site=leader_site,
         page_copy=page_copy,
         md_journal=md_journal,
+        raid_devices=raid_devices,
+        multi_attach=multi_attach,
+        ftt=ftt,
+        multi_attach_warm_standby=multi_attach_warm_standby,
         snode_api_service=snode_api_service,
         spdk_proxy_service=spdk_proxy_service,
         spdk_proxy_tls_secret=spdk_proxy_tls_secret,
@@ -896,6 +968,10 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
                 leader_site="",
                 page_copy=False,
                 md_journal=True,
+                raid_devices=False,
+                multi_attach=False,
+                ftt=None,
+                multi_attach_warm_standby=False,
                 snode_api_service=constants.K8S_SNODE_API_SERVICE,
                 spdk_proxy_service=constants.K8S_SPDK_PROXY_SERVICE,
                 spdk_proxy_tls_secret=constants.K8S_SPDK_PROXY_TLS_SECRET,
@@ -913,6 +989,10 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
             if existing.cluster_name and existing.cluster_name == name:
                 raise ValueError(f"A cluster with the name '{name}' already exists")
 
+    distr_ndcs, distr_npcs, max_fault_tolerance = _resolve_multi_attach(
+        multi_attach, ftt, raid_devices, ha_type, is_single_node,
+        distr_ndcs, distr_npcs, max_fault_tolerance)
+    _validate_warm_standby(multi_attach, multi_attach_warm_standby)
     if (distr_ndcs, distr_npcs) not in SUPPORTED_ERASURE_CODING_SCHEMES:
         raise ValueError("Unsupported erasure coding scheme")
 
@@ -926,7 +1006,9 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
     if max_fault_tolerance > 1:
         if ha_type != "ha":
             raise ValueError("max_fault_tolerance > 1 requires ha_type='ha'")
-        if distr_npcs < 2:
+        # Multi-attach runs 1+0: its FTT comes from the array LUN being
+        # reopened on another node, not from parity.
+        if distr_npcs < 2 and not multi_attach:
             raise ValueError("max_fault_tolerance > 1 requires distr_npcs >= 2")
 
     if kms_settings is not None:
@@ -1056,6 +1138,9 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
     cluster.atomic_4k = bool(atomic_4k)
     cluster.page_copy = bool(page_copy)
     cluster.md_journal = bool(md_journal)
+    cluster.raid_devices = bool(raid_devices)
+    cluster.multi_attach = bool(multi_attach)
+    cluster.multi_attach_warm_standby = bool(multi_attach and multi_attach_warm_standby)
     cluster.client_data_nic = client_data_nic or ""
     cluster.max_fault_tolerance = max_fault_tolerance
     cluster.nvmf_base_port = nvmf_base_port
@@ -1113,6 +1198,25 @@ def set_two_node_arbitration(cl_id, enabled: bool) -> None:
         fresh.two_node_arbitration = enabled
 
     db_controller.atomic_update(cluster, mutate)
+
+
+def set_array_plugin(cl_id, plugin: str, endpoint: str = "", options: dict | None = None,
+                     credentials: dict | None = None, lun_size: int = 0) -> None:
+    """Configure the storage-array plugin of a multi-attach cluster (see
+    controllers/array_controller.register_array: the plugin is connected
+    before anything is saved, credentials go to the KMS). An empty
+    ``plugin`` removes the registration, after which takeovers are refused.
+
+    Raises:
+        ValueError: not a multi-attach cluster, the plugin cannot be loaded
+            or connected, or (removal) LUNs created through it exist.
+    """
+    cluster = db_controller.get_cluster_by_id(cl_id)
+    if not plugin:
+        if cluster.array_plugin:
+            array_controller.delete_array(cl_id, cluster.array_id)
+        return
+    array_controller.register_array(cl_id, plugin, endpoint, options, credentials, lun_size)
 
 
 def _wait_for_full_device_connectivity(cl_id, timeout_sec=300, poll_sec=10, checkpoint=None):
@@ -1550,10 +1654,21 @@ def _record_activation_topology(cluster, single_node, fresh) -> None:
 
 
 def activation_minimum_devices(cluster, single_node_cluster) -> int:
-    """ndcs+npcs devices are needed for placement; the +1 spare is rebuild
-    headroom that a single-node cluster (no data redundancy to rebuild onto
-    a spare) does not require."""
+    """The RE-activation device gate (recovery of an existing layout): ndcs+npcs
+    devices are needed for placement; the +1 spare is rebuild headroom that a
+    single-node cluster (no data redundancy to rebuild onto a spare) does not
+    require. A FRESH activation is judged by the full floors instead
+    (``activation_floor_violations``); a re-activation deliberately keeps
+    this weaker gate so a drifted cluster can still be recovered."""
     return cluster.distr_ndcs + cluster.distr_npcs + (0 if single_node_cluster else 1)
+
+
+def activation_floor_violations(cluster, snodes, online_nodes) -> builtins.list[str]:
+    """The floors (simplyblock_core.floors) a fresh activation would violate
+    with ``online_nodes`` online: node count, one data device per node, the
+    cluster-wide data-device count and, with failure domains, the domain
+    count. Journal devices never count (they sit in ``jm_device``)."""
+    return floors.evaluate(cluster, snodes, online_nodes=online_nodes)
 
 
 #: Sites of a sync-replication cluster: one simplyblock cluster spans exactly two.
@@ -1788,10 +1903,23 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False, site_activ
         logger.warning("Single-node cluster: activating as non-HA "
                        "(no secondary nodes, single journal) regardless of ha_type")
 
-    minimum_devices = activation_minimum_devices(cluster, single_node_cluster)
-    if dev_count < minimum_devices:
-        _revert()
-        raise ValueError(f"Failed to activate cluster, No enough online device.. Minimum is {minimum_devices}")
+    if is_fresh_activation:
+        # Fresh activation refuses below any floor (simplyblock_core.floors).
+        # A node without a data device is refused here too: downstream,
+        # _prepare_cluster_devices_jm_on_dev accepts an empty device list.
+        floor_violations = activation_floor_violations(cluster, snodes, online_nodes)
+        if floor_violations:
+            _revert()
+            raise ValueError("Failed to activate cluster, below the resource floors for "
+                             f"the {cluster.distr_ndcs}+{cluster.distr_npcs} scheme: "
+                             + "; ".join(floor_violations))
+    else:
+        # Re-activation (recovery): the weaker device gate of before, so a
+        # drifted or partially-online cluster can still be brought back.
+        minimum_devices = activation_minimum_devices(cluster, single_node_cluster)
+        if dev_count < minimum_devices:
+            _revert()
+            raise ValueError(f"Failed to activate cluster, No enough online device.. Minimum is {minimum_devices}")
 
     # Sync replication: the configured two-site layout is enforced on every
     # activation (force included) -- a third site or an unsited node is never
@@ -1837,7 +1965,7 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False, site_activ
     fd_desired_layout: dict[str, tuple[str, str]] = {}
     if cluster.enable_failure_domain:
         distinct_domains = {node.failure_domain for node in online_nodes if node.failure_domain >= 0}
-        min_domains = cluster.distr_npcs + 2
+        min_domains = fd_planner_min_domains(cluster.distr_npcs, cluster.distr_ndcs)
         if len(distinct_domains) < min_domains:
             logger.warning(
                 "Failure-domain feature is enabled but only %d distinct failure "
@@ -1894,7 +2022,7 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False, site_activ
                 # stranding another node's secondary/tertiary with none at all.
                 # This also subsumes the plain "at least two domains" floor.
                 domain_count_violation = fd_planner.fd_activation_domain_count_violation(
-                    cluster.distr_npcs, len(fd_host_counts),
+                    cluster.distr_npcs, len(fd_host_counts), ndcs=cluster.distr_ndcs,
                     site_bound=bool(cluster.stretched_control_plane and not cluster.sync_replication))
                 if domain_count_violation:
                     _fd_fail(_on_site(domain_count_violation))
@@ -2038,6 +2166,10 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False, site_activ
                     raise ValueError("Failed to activate cluster, not enough nodes for dual fault tolerance")
                 snode = db_controller.get_storage_node_by_id(snode.get_id())
                 used_nodes_as_tertiary.append(snode.tertiary_node_id)
+
+        # Multi-attach cluster with an array: present every owner's LUN to
+        # its new secondary / tertiary (a no-op on every other cluster).
+        array_controller.reconcile_after_role_change(cl_id)
 
         # Sync replication: every LVS also gets its remote triplet on the other
         # site. Refs a re-activation finds are kept; missing ones are picked.
@@ -2824,6 +2956,10 @@ def cluster_expand(cl_id) -> None:
             sec_node_2 = db_controller.get_storage_node_by_id(snode.tertiary_node_id)
             sec_node_2.lvstore_stack_tertiary = snode.get_id()
             sec_node_2.write_to_db()
+
+        if cluster.ha_type == "ha":
+            # Multi-attach cluster with an array: the new roles' LUN paths.
+            array_controller.reconcile_after_role_change(cl_id)
 
         if cluster.ha_type == "ha" and cluster.sync_replication:
             try:
@@ -4570,6 +4706,10 @@ def delete_cluster(cl_id, force=False) -> None:
     if pools:
         raise ValueError("Can only remove Empty cluster, Pools found")
 
+    # Multi-attach cluster with an array: the only place its LUNs are
+    # deleted, with the array credentials in the KMS. No-op otherwise.
+    array_controller.delete_cluster_luns(cluster, force=force)
+
     logger.info(f"Deleting Cluster {cl_id}")
     cluster_events.cluster_delete(cluster)
     cluster.remove(db_controller.kv_store)
@@ -4611,7 +4751,18 @@ def set_(cl_id, attr, value) -> bool:
                 cluster.write_to_db()
                 return True
     else:
-        value = cluster.get_attrs_map()[attr]['type'](value)
+        attr_type = cluster.get_attrs_map()[attr]['type']
+        if attr_type is bool and isinstance(value, str):
+            # bool("false") is True; parse the CLI's string form explicitly.
+            lowered = value.strip().lower()
+            if lowered in ("1", "true", "yes", "on"):
+                value = True
+            elif lowered in ("0", "false", "no", "off"):
+                value = False
+            else:
+                raise ValueError(f"Not a boolean value for {attr}: {value!r}")
+        else:
+            value = attr_type(value)
         logger.info(f"Setting {attr} to {value}")
         if attr == "two_node_arbitration":
             set_two_node_arbitration(cl_id, value)

@@ -32,6 +32,7 @@ from .._dtos import (
 from .._sse import WATCH_RESPONSES, WatchParam, sse_response
 from .alert import api as alert_api
 from .arbitration import api as arbitration_api
+from .array import api as array_api
 from .backup import api as backup_api
 from .consistency_group import api as consistency_group_api
 from .control_plane import api as control_plane_api
@@ -78,6 +79,17 @@ class ClusterParams(BaseModel):
     inflight_io_threshold: int = 4
     enable_node_affinity: bool = False
     strict_node_anti_affinity: bool = False
+    # Every data device is protected below simplyblock (hardware RAID LUN, md
+    # or dm RAID): data-device floor n+k instead of n+2k. Immutable.
+    raid_devices: bool = False
+    # Multi-attach array LUN mode (1+0, FTT from LUN takeover). Requires
+    # raid_devices, ha_type 'ha' and ftt. Immutable.
+    multi_attach: bool = False
+    #: Node failures to tolerate in multi-attach mode; only with multi_attach.
+    ftt: Literal[1, 2] | None = None
+    #: Multi-attach only: keep warm standby alcemls of every LUN on its
+    #: attached non-serving nodes (fast takeover; costs page-map hugepages).
+    multi_attach_warm_standby: bool = False
     is_single_node: bool = False
     fabric: str = "tcp"
     cr_name: str = ""
@@ -430,10 +442,13 @@ class DeviceGrowthDTO(BaseModel):
     errors: dict[str, str]
     reason: str
     shrunk: builtins.list[str] = []
+    luns: dict[str, dict] | None = None
 
 
 @instance_api.post('/grow-devices', name='clusters:grow_devices', response_model=DeviceGrowthDTO)
-def grow_devices(cluster: Cluster) -> DeviceGrowthDTO:
+def grow_devices(cluster: Cluster,
+                 lun_factor: Annotated[float | None, Query(gt=1)] = None,
+                 lun_size: Annotated[int | None, Query(gt=0)] = None) -> DeviceGrowthDTO:
     """Grow all lblk data devices of the cluster online by the same factor.
 
     Every block device is rescanned (for example, after its LUN was grown on
@@ -443,14 +458,31 @@ def grow_devices(cluster: Cluster) -> DeviceGrowthDTO:
     (`grown` false, `reason`). Device weights and data placement never change.
     A block device smaller than its device is refused, listed in `shrunk`
     and `errors`, and raises the device_shrunk alert.
+
+    On a cluster whose array plugin creates its LUNs, every LUN is grown at
+    the array first: by `lun_factor`, or to `lun_size` bytes (a LUN already
+    that large is left alone, so the call can be repeated after a failure;
+    nodes added later get LUNs of that size).
     """
     if cluster.device_mode != constants.DEVICE_MODE_LBLK:
         raise HTTPException(409, 'Online device growth needs a cluster in lblk device mode')
-    return DeviceGrowthDTO(**device_controller.grow_cluster_devices(cluster.get_id()))
+    if lun_factor is not None and lun_size is not None:
+        raise HTTPException(400, 'Give lun_factor or lun_size, not both')
+    extra: dict = {}
+    if lun_factor is not None:
+        extra["lun_factor"] = lun_factor
+    if lun_size is not None:
+        extra["lun_size"] = lun_size
+    try:
+        result = device_controller.grow_cluster_devices(cluster.get_id(), **extra)
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+    return DeviceGrowthDTO(**result)
 
 
 instance_api.include_router(alert_api, prefix='/alerts')
 instance_api.include_router(arbitration_api, prefix='/arbitration')
+instance_api.include_router(array_api, prefix='/arrays')
 instance_api.include_router(storage_node_api, prefix='/storage-nodes')
 instance_api.include_router(task_api, prefix='/tasks')
 instance_api.include_router(pool_api, prefix='/storage-pools')

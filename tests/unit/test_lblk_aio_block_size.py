@@ -275,6 +275,13 @@ class TestResolveCarriesBlockSize(unittest.TestCase):
 
 class TestReconcileRestoresBlockSize(unittest.TestCase):
 
+    def setUp(self):
+        # Not a multi-attach cluster: reconcile's foreign-LUN lookup (a DB
+        # read, multi-attach only) finds nothing.
+        p = patch("simplyblock_core.storage_node_ops._foreign_lun_keys", return_value=set())
+        p.start()
+        self.addCleanup(p.stop)
+
     def test_dropped_size_restored(self):
         db_dev = _record(aio_block_size=0)
         found = _record(aio_block_size=4096)

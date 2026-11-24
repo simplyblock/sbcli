@@ -9,11 +9,14 @@ import time
 from pathlib import Path
 from typing import Any
 
+from pydantic import SecretStr
+
 from simplyblock_cli.alerting_config_parser import parse_alerting_config
 from simplyblock_core import cluster_ops, constants, db_controller, utils
 from simplyblock_core import mgmt_node_ops as mgmt_ops
 from simplyblock_core import storage_node_ops as storage_ops
 from simplyblock_core.controllers import (
+    array_controller,
     control_plane_controller,
     device_controller,
     fdb_backup_controller,
@@ -300,6 +303,23 @@ class CLIWrapperBase:
         lblk_journal_device = getattr(args, 'lblk_journal_device', False)
         if lblk_journal_device and not lblk:
             self.parser.error("--lblk-journal-device requires --lblk")
+        lblk_journal_only = getattr(args, 'lblk_journal_only', False)
+        if lblk_journal_only:
+            if not lblk:
+                self.parser.error("--lblk-journal-only requires --lblk")
+            if lblk_journal_device:
+                self.parser.error("--lblk-journal-only and --lblk-journal-device exclude each other")
+            if not (blk_names or blk_serials):
+                self.parser.error("--lblk-journal-only needs the journal disk or partition named with "
+                                  "--blk-names or --blk-serials")
+        lblk_array_only = getattr(args, 'lblk_array_only', False)
+        if lblk_array_only:
+            if not lblk:
+                self.parser.error("--lblk-array-only requires --lblk")
+            if lblk_journal_only or lblk_journal_device or blk_names or blk_names_exclude or blk_serials:
+                self.parser.error("--lblk-array-only selects no local device: not with --blk-names, "
+                                  "--blk-names-exclude, --blk-serials, --lblk-journal-only or "
+                                  "--lblk-journal-device")
         lblk_selection = None
         if use_lblk:
             if not lblk:
@@ -313,6 +333,8 @@ class CLIWrapperBase:
                 "names_exclude": [str(x) for x in blk_names_exclude.split(',')] if blk_names_exclude else None,
                 "serials": [str(x) for x in blk_serials.split(',')] if blk_serials else None,
                 "journal_device": bool(lblk_journal_device),
+                "journal_only": bool(lblk_journal_only),
+                "array_only": bool(lblk_array_only),
             }
         # The core split is decided by the cluster's vcpu-count when the node
         # is added or restarted; here the default heuristic lays out a usable
@@ -849,12 +871,29 @@ class CLIWrapperBase:
         return True
 
     def cluster__grow_devices(self, sub_command, args):
+        lun_factor = getattr(args, 'lun_factor', None)
+        if lun_factor is not None:
+            try:
+                lun_factor = float(lun_factor)
+            except ValueError:
+                print(f"--lun-factor must be a number, not {lun_factor!r}")
+                return False
+        extra: dict = {"lun_factor": lun_factor} if lun_factor is not None else {}
+        lun_size = int(getattr(args, 'lun_size', 0) or 0)
+        if lun_size:
+            if lun_factor is not None:
+                print("Give --lun-factor or --lun-size, not both")
+                return False
+            extra = {"lun_size": lun_size}
         try:
-            result = device_controller.grow_cluster_devices(args.cluster_id)
+            result = device_controller.grow_cluster_devices(args.cluster_id, **extra)
         except ValueError as e:
             print(e)
             return False
-        lines = [f"{dev_id}: {err}" for dev_id, err in result["errors"].items()]
+        lines = [f"LUN {r['lun_id']} of {dev_id}: {utils.humanbytes(r['old_size'])} -> "
+                 f"{utils.humanbytes(r['new_size'])} at the array"
+                 for dev_id, r in (result.get("luns") or {}).items()]
+        lines += [f"{dev_id}: {err}" for dev_id, err in result["errors"].items()]
         if not result["grown"]:
             lines.append(result["reason"])
             return "\n".join(lines)
@@ -865,6 +904,60 @@ class CLIWrapperBase:
                 line += f" ({utils.humanbytes(r['unused_size'])} of the block device unused)"
             lines.append(line)
         return "\n".join(lines)
+
+    def cluster__set_array(self, sub_command, args):
+        options = {}
+        if args.options:
+            try:
+                options = json.loads(args.options)
+            except json.JSONDecodeError as e:
+                raise ValueError(f"--options is not valid JSON: {e}")
+            if not isinstance(options, dict):
+                raise ValueError("--options must be a JSON object")
+        credentials = {}
+        if args.credentials_file:
+            try:
+                raw = json.loads(Path(args.credentials_file).read_text())
+            except (OSError, json.JSONDecodeError) as e:
+                # Never the file content: it is the secret.
+                raise ValueError(f"--credentials-file could not be read as JSON: {type(e).__name__}")
+            if not isinstance(raw, dict) or not all(isinstance(v, str) for v in raw.values()):
+                raise ValueError("--credentials-file must hold a JSON object of strings")
+            # Wrapped at the boundary; unwrapped only by the KMS and the plugin.
+            credentials = {str(k): SecretStr(v) for k, v in raw.items()}
+        credential_ref = None
+        if getattr(args, "credential_ref", None):
+            try:
+                credential_ref = json.loads(args.credential_ref)
+            except json.JSONDecodeError as e:
+                raise ValueError(f"--credential-ref is not valid JSON: {e}")
+            if not isinstance(credential_ref, dict):
+                raise ValueError("--credential-ref must be a JSON object")
+        journal_options = None
+        if getattr(args, "journal_options", None):
+            try:
+                journal_options = json.loads(args.journal_options)
+            except json.JSONDecodeError as e:
+                raise ValueError(f"--journal-options is not valid JSON: {e}")
+            if not isinstance(journal_options, dict):
+                raise ValueError("--journal-options must be a JSON object")
+        view = array_controller.register_array(
+            args.cluster_id, args.plugin, args.endpoint or "", options, credentials,
+            int(args.lun_size or 0), credential_ref=credential_ref,
+            journal=getattr(args, "journal", None) or "local",
+            journal_lun_size=int(getattr(args, "journal_lun_size", 0) or 0),
+            journal_options=journal_options)
+        return _format_result([view], json=getattr(args, "json", False))
+
+    def cluster__get_array(self, sub_command, args):
+        arrays = array_controller.get_arrays(args.cluster_id)
+        if not arrays:
+            return "No array registered"
+        return _format_result(arrays, json=getattr(args, "json", False))
+
+    def cluster__remove_array(self, sub_command, args):
+        array_controller.delete_array(args.cluster_id, args.array_id, force=args.force)
+        return True
 
     def cluster__complete_expand(self, sub_command, args):
         cluster_ops.cluster_expand(args.cluster_id)
@@ -2026,6 +2119,9 @@ class CLIWrapperBase:
         max_queue_size = args.max_queue_size
         inflight_io_threshold = args.inflight_io_threshold
         strict_node_anti_affinity = args.strict_node_anti_affinity
+        raid_devices = getattr(args, 'raid_devices', False)
+        multi_attach = getattr(args, 'multi_attach', False)
+        ftt = getattr(args, 'ftt', None)
         is_single_node = args.is_single_node
         client_data_nic = args.client_data_nic
         enable_failure_domain = getattr(args, 'enable_failure_domain', False)
@@ -2057,6 +2153,10 @@ class CLIWrapperBase:
             sync_replication=getattr(args, 'sync_replication', False),
             page_copy=getattr(args, 'page_copy', False),
             md_journal=md_journal,
+            raid_devices=raid_devices,
+            multi_attach=multi_attach,
+            ftt=ftt,
+            multi_attach_warm_standby=getattr(args, 'multi_attach_warm_standby', False),
             stretched_control_plane=getattr(args, 'stretched_control_plane', False),
             leader_site=getattr(args, 'leader_site', "") or "",
             site=getattr(args, 'site', "") or "",
@@ -2091,6 +2191,9 @@ class CLIWrapperBase:
         inflight_io_threshold = args.inflight_io_threshold
         disable_monitoring = args.disable_monitoring
         strict_node_anti_affinity = args.strict_node_anti_affinity
+        raid_devices = getattr(args, 'raid_devices', False)
+        multi_attach = getattr(args, 'multi_attach', False)
+        ftt = getattr(args, 'ftt', None)
         name = args.name
         tls_secret = args.tls_secret
         ingress_host_source = args.ingress_host_source
@@ -2141,6 +2244,10 @@ class CLIWrapperBase:
             sync_replication=getattr(args, 'sync_replication', False),
             page_copy=getattr(args, 'page_copy', False),
             md_journal=md_journal,
+            raid_devices=raid_devices,
+            multi_attach=multi_attach,
+            ftt=ftt,
+            multi_attach_warm_standby=getattr(args, 'multi_attach_warm_standby', False),
             stretched_control_plane=getattr(args, 'stretched_control_plane', False),
             leader_site=getattr(args, 'leader_site', "") or "",
             site=getattr(args, 'site', "") or "",

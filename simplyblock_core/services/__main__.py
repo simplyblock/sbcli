@@ -23,6 +23,7 @@ import sys
 # advertise names that do nothing when run.
 _LIBRARIES = frozenset({
     "hub_controller_manager",
+    "lun_watchdog",  # a thread inside storage_node_monitor
     "migration_task_common",
     "replication_final_step",
     "task_runner_base",

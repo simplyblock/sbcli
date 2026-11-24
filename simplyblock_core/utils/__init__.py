@@ -1656,7 +1656,7 @@ def _unsafe_live_device_reason(dev):
     return None
 
 
-def resolve_lblk_entries(configured_entries, host_devices):
+def resolve_lblk_entries(configured_entries, host_devices, *, name_fallback=True):
     """Match the node's configured lblk devices against the live host
     inventory, SERIAL-FIRST: kernel names shift across reboots, so the stored
     name is only a fallback for devices without a resolvable serial. Partition
@@ -1677,9 +1677,17 @@ def resolve_lblk_entries(configured_entries, host_devices):
     (mounted, held, or backing the root filesystem) is demoted to `missing`
     rather than returned as resolved — a fallback match by name/partuuid
     must clear the same safety bar `filter_eligible_block_devices` enforces
-    at add-node time, not just "something is attached at that name now"."""
+    at add-node time, not just "something is attached at that name now".
+
+    ``name_fallback=False`` (multi-attach clusters): an entry with a serial is
+    matched by serial or partuuid only. An array LUN keeps its identity; when
+    it is absent the node is fenced from it or it is detached, and its old
+    kernel name may now be another disk of the host: on the FTT1 bed, after a
+    hard reset of a node fenced from its LUN, the LUN's name nvme2n1 was the
+    node's journal volume, which the restart took up as a data device."""
     by_path = _index_by_selector(host_devices)
-    by_serial = {d["serial"]: d for d in host_devices}
+    # A path of a multipath map shares the map's serial; the map is the device.
+    by_serial = {d["serial"]: d for d in host_devices if not d.get("multipath_map")}
     by_name = {d["name"]: d for d in host_devices}
     by_partuuid = {d["partuuid"].lower(): d for d in host_devices
                    if d.get("partuuid")}
@@ -1699,7 +1707,7 @@ def resolve_lblk_entries(configured_entries, host_devices):
             if live is None and entry.get("partuuid"):
                 live = by_partuuid.get(entry["partuuid"].lower())
                 matched_by = "partuuid"
-            if live is None:
+            if live is None and (name_fallback or not entry.get("serial")):
                 live = by_name.get(entry.get("name"))
                 matched_by = "name"
         if live is None:
@@ -1726,11 +1734,19 @@ def resolve_lblk_entries(configured_entries, host_devices):
         }
         if path:
             resolved_entry["path"] = path
+        if live.get("wwn"):
+            # LUN identity of a multi-attach (array LUN) device.
+            resolved_entry["wwn"] = live["wwn"]
         if entry.get("type") == "part" or live.get("type") == "part":
             resolved_entry["type"] = "part"
             resolved_entry["partuuid"] = live.get("partuuid") or entry.get("partuuid", "")
         if entry.get("journal"):
             resolved_entry["journal"] = True
+        # A LUN the cluster's array plugin created (multi-attach): its
+        # identity at the array, for multi_attach.mark_lun_devices.
+        for key in ("lun_wwn", "array_lun_id"):
+            if entry.get(key):
+                resolved_entry[key] = entry[key]
         # Block-size inputs for a new device's AIO bdev (choose_aio_block_size).
         # An agent that predates them sends none; the chooser copes.
         for key in ("logical_block_size", "physical_block_size", "start_bytes"):
@@ -2766,6 +2782,21 @@ def previous_lblk_dedicated_journal_serials(config_paths=None) -> set:
     return serials
 
 
+def lblk_journal_only_layout(lblk_entries, socket=0):
+    """``sn configure --lblk-journal-only``: the node's one selected disk or
+    partition becomes its journal, flagged, and is used whole (a disk is
+    never partitioned). The node then has no local data device: on a
+    multi-attach cluster whose array plugin creates each node's data LUN at
+    add-node, that LUN is its data device. Raises ValueError unless exactly
+    one disk or partition is selected."""
+    if len(lblk_entries) != 1:
+        raise ValueError(
+            f"--lblk-journal-only needs exactly one disk or partition for the node on socket "
+            f"{socket}; selected: {sorted(lblk_entries)}")
+    name, entry = next(iter(lblk_entries.items()))
+    return {name: dict(entry, journal=True)}
+
+
 def lblk_node_journal_layout(lblk_entries, jm_percent=3, journal_device=False,
                              keep_serials=()):
     """Give one storage node's devices their journal.
@@ -2821,7 +2852,11 @@ def lblk_node_journal_layout(lblk_entries, jm_percent=3, journal_device=False,
 
 def node_config_device_count(node) -> int:
     """Number of storage devices a node-config entry carries — ssd_pcis for
-    nvme mode, lblk_devices for lblk mode."""
+    nvme mode, lblk_devices for lblk mode. A node configured with
+    --lblk-array-only carries none: its array plugin creates its journal LUN
+    and data LUN at add-node, so it counts those two."""
+    if node.get("lblk_array_only"):
+        return 2
     return len(node.get("lblk_devices") or []) or len(node.get("ssd_pcis") or [])
 
 
@@ -2838,15 +2873,16 @@ def lblk_device_serials(lblk_devices) -> set[str]:
     return {e["serial"] for e in (lblk_devices or []) if e.get("serial")}
 
 
-def node_config_min_sys_memory(node) -> int:
+def node_config_min_sys_memory(node, extra_capacity=0) -> int:
     """Minimum system memory for a node-config entry: sys_memory_for_capacity
     of its total device capacity. lblk entries carry their sizes; nvme entries
     carry ssd_capacity, measured by generate_configs before it unbound the
     devices, since nvme-cli no longer sees them afterwards. An entry written
-    before that field existed goes through nvme-cli."""
+    before that field existed goes through nvme-cli. ``extra_capacity``
+    (lblk only): the LUNs an array plugin creates for the node at add-node."""
     lblk = node.get("lblk_devices") or []
-    if lblk:
-        capacity = sum(int(e.get("size") or 0) for e in lblk)
+    if lblk or node.get("lblk_array_only"):
+        capacity = sum(int(e.get("size") or 0) for e in lblk) + int(extra_capacity or 0)
     elif node.get("ssd_capacity"):
         capacity = int(node["ssd_capacity"])
     else:
@@ -3206,6 +3242,8 @@ def regenerate_config(new_config, old_config, force=False):
         old_config["nodes"][i]["ssd_pcis"] = new_config["nodes"][i]["ssd_pcis"]
         if new_config["nodes"][i].get("lblk_devices") is not None:
             old_config["nodes"][i]["lblk_devices"] = new_config["nodes"][i]["lblk_devices"]
+        if "lblk_array_only" in new_config["nodes"][i]:
+            old_config["nodes"][i]["lblk_array_only"] = new_config["nodes"][i]["lblk_array_only"]
         old_config["nodes"][i]["nic_ports"] = new_config["nodes"][i]["nic_ports"]
         for nic in old_config["nodes"][i]["nic_ports"]:
             if nic not in all_nics:
@@ -3267,7 +3305,14 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
     nics = detect_nics()
     lblk_mode = lblk_selection is not None
     lblk_entries: dict = {}
-    if lblk_mode:
+    array_only = bool(lblk_mode and lblk_selection.get("array_only"))
+    if array_only:
+        # sn configure --lblk-array-only: no local device at all. The array
+        # plugin creates the node's journal LUN and data LUN at add-node.
+        lblk_units: dict = {}
+        lblk_keep_serials: set = set()
+        nvmes: dict = {}
+    elif lblk_mode:
         # lblk cluster mode: eligible Linux block devices instead of NVMe
         # PCIe controllers. No driver unbind, no formatting here (--force
         # only marks partitioned disks eligible; the wipe happens at
@@ -3438,7 +3483,10 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
             node_info["number_of_distribs"] = number_of_distribs
 
             nvme_neg1_list = all_nvmes_neg1_per_node[node_index]
-            if lblk_mode:
+            if array_only:
+                node_info["lblk_devices"] = []
+                node_info["lblk_array_only"] = True
+            elif lblk_mode:
                 node_entries = {}
                 for unit in list(nvme_neg1_list) + list(nvme_per_core_group[idx]):
                     for dev_name in lblk_units[unit]:
@@ -3446,11 +3494,15 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
                         entry.pop("_pair", None)
                         node_entries[dev_name] = entry
                 try:
-                    node_entries = lblk_node_journal_layout(
-                        node_entries, jm_percent=jm_percent,
-                        journal_device=bool(lblk_selection.get("journal_device")),
-                        keep_serials=lblk_keep_serials)
-                    if node_entries and len(node_entries) < constants.LBLK_MIN_DEVICES_PER_NODE:
+                    if lblk_selection.get("journal_only"):
+                        node_entries = lblk_journal_only_layout(node_entries, nid)
+                    else:
+                        node_entries = lblk_node_journal_layout(
+                            node_entries, jm_percent=jm_percent,
+                            journal_device=bool(lblk_selection.get("journal_device")),
+                            keep_serials=lblk_keep_serials)
+                    if (node_entries and not lblk_selection.get("journal_only")
+                            and len(node_entries) < constants.LBLK_MIN_DEVICES_PER_NODE):
                         raise ValueError(
                             f"lblk mode requires at least {constants.LBLK_MIN_DEVICES_PER_NODE} "
                             f"partitions or SSDs per node; only {len(node_entries)} unit(s) "
@@ -3874,7 +3926,14 @@ def validate_node_config(node):
     # Exactly one device source: PCIe SSDs (nvme mode) or Linux block
     # devices (lblk mode). Both empty, or both populated, is a broken config.
     lblk_devices = node.get("lblk_devices") or []
-    if bool(node["ssd_pcis"]) == bool(lblk_devices):
+    if node.get("lblk_array_only"):
+        # sn configure --lblk-array-only: no local device; the array plugin
+        # creates the node's journal and data LUNs at add-node.
+        if node["ssd_pcis"] or lblk_devices:
+            logger.error(f"A node configured with --lblk-array-only carries no devices, "
+                         f"node {node.get('socket')} does")
+            return False
+    elif bool(node["ssd_pcis"]) == bool(lblk_devices):
         logger.error(
             f"Node config must carry exactly one non-empty device list of "
             f"'ssd_pcis' / 'lblk_devices' in node: {node.get('socket')}")
@@ -3896,7 +3955,11 @@ def validate_node_config(node):
                          f"'size' in node: {node.get('socket')}")
             return False
     if lblk_devices:
-        if len(lblk_devices) < constants.LBLK_MIN_DEVICES_PER_NODE:
+        # sn configure --lblk-journal-only: the node's one entry is its flagged
+        # journal disk; its data device is the array LUN added at add-node,
+        # where the minimum is checked again with that LUN counted.
+        journal_only = len(lblk_devices) == 1 and bool(lblk_devices[0].get("journal"))
+        if len(lblk_devices) < constants.LBLK_MIN_DEVICES_PER_NODE and not journal_only:
             logger.error(
                 f"lblk mode requires at least {constants.LBLK_MIN_DEVICES_PER_NODE} "
                 f"partitions or SSDs per node; node {node.get('socket')} carries "

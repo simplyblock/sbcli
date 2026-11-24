@@ -331,6 +331,13 @@ class TestDeleteRescanRouting(unittest.TestCase):
 
 class TestReconcileTakesEngine(unittest.TestCase):
 
+    def setUp(self):
+        # Not a multi-attach cluster: reconcile's foreign-LUN lookup (a DB
+        # read, multi-attach only) finds nothing.
+        p = patch("simplyblock_core.storage_node_ops._foreign_lun_keys", return_value=set())
+        p.start()
+        self.addCleanup(p.stop)
+
     def test_engine_taken_over(self):
         db_dev = _record(engine=AIO)
         found = _record(engine=URING)

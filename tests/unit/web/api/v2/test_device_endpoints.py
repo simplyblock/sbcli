@@ -415,6 +415,18 @@ class TestGrowClusterDevices:
         assert body['devices'] == [GROWN_DEVICE]
         mock.grow_cluster_devices.assert_called_once_with(CLUSTER_ID)
 
+    def test_lun_factor_is_passed_through(self, client, db, cluster, monkeypatch):
+        mock = self._mock(monkeypatch, {
+            'grown': True, 'factor': 2.0, 'devices': [], 'errors': {}, 'reason': '',
+            'luns': {'d1': {'lun_id': 'vol-1', 'old_size': 1, 'new_size': 2}}})
+        cluster.device_mode = 'lblk'
+
+        response = client.post(f'{self.URL}?lun_factor=2')
+        assert response.status_code == 200
+        assert response.json()['luns']['d1']['lun_id'] == 'vol-1'
+        mock.grow_cluster_devices.assert_called_once_with(CLUSTER_ID, lun_factor=2.0)
+        assert client.post(f'{self.URL}?lun_factor=1').status_code == 422
+
     def test_nothing_grown_reports_reason_and_errors(self, client, db, cluster, monkeypatch):
         self._mock(monkeypatch, {
             'grown': False, 'factor': 1.0, 'devices': [], 'errors': {DEVICE_ID: 'shrank'},

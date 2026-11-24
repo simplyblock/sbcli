@@ -112,6 +112,8 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--blk-names', help='Comma separated list of block devices to use (requires --lblk). Each entry is a persistent /dev/disk name, such as /dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_drive-scsi0 or /dev/disk/by-partuuid/28427de0-1916-4c05-895f-0829cd8790ba. A kernel name (sdb) or kernel path (/dev/sdb) is refused: it states a position in this boot\'s enumeration order, and it would name another disk after a reboot that probes the controllers in another order. The path is taken as given: the node records it, and add-node and every restart open the device by that path alone, never by serial or kernel name. A path that no longer exists is a missing device. Use --blk-serials for a device udev published no persistent name for. Requested devices must be eligible; a busy device is an error.', type=str, default='', dest='blk_names', required=False)
         subcommand.add_argument('--blk-names-exclude', help='Comma separated list of block devices to exclude (requires --lblk), spelled the way --blk-names takes them. All other eligible disks are used.', type=str, default='', dest='blk_names_exclude', required=False)
         subcommand.add_argument('--blk-serials', help='Comma separated list of block device serial numbers (or WWNs) to use (requires --lblk).', type=str, default='', dest='blk_serials', required=False)
+        subcommand.add_argument('--lblk-journal-only', help='With --lblk on a multi-attach cluster whose array plugin creates each node\'s data LUN at add-node and keeps its journal locally: the one selected disk or partition is the node\'s journal and nothing else. It is used whole (a disk is never partitioned), and the node has no local data device; its data device is the array LUN. Needs exactly one disk or partition, named with --blk-names or --blk-serials.', dest='lblk_journal_only', action='store_true')
+        subcommand.add_argument('--lblk-array-only', help='With --lblk on a multi-attach cluster whose array plugin creates each node\'s LUNs at add-node and keeps its journal on a LUN: the node uses no local device. Its journal LUN and data LUN are created on the array when the node is added. Not with --blk-names, --blk-names-exclude, --blk-serials, --lblk-journal-only or --lblk-journal-device.', dest='lblk_array_only', action='store_true')
         subcommand.add_argument('--lblk-journal-device', help='With --lblk and whole disks: dedicate each node\'s smallest disk to the journal instead of partitioning it into a journal partition and a data partition (the default). Needs at least two disks per node. Partition selections always carry their journal in a split partition.', dest='lblk_journal_device', action='store_true')
         subcommand.add_argument('--jm-percent', help='Journal size in percent of the node\'s total selected capacity when the journal is carved from a selected partition or disk (requires --lblk, not with --lblk-journal-device). Default: `3`.', type=int, default=3, dest='jm_percent', required=False)
         subcommand.add_argument('--force', help='Force format detected or passed nvme pci address to 4K and clean partitions. With --lblk: mark partitioned disks eligible; the partition wipe happens at add-node with --force-format.', dest='force', action='store_true')
@@ -378,6 +380,9 @@ class CLIWrapper(CLIWrapperBase):
         self.init_cluster__status(subparser)
         self.init_cluster__complete_expand(subparser)
         self.init_cluster__grow_devices(subparser)
+        self.init_cluster__set_array(subparser)
+        self.init_cluster__get_array(subparser)
+        self.init_cluster__remove_array(subparser)
         self.init_cluster__show(subparser)
         self.init_cluster__get(subparser)
         if self.developer_mode:
@@ -463,7 +468,11 @@ class CLIWrapper(CLIWrapperBase):
             subcommand.add_argument('--inflight-io-threshold', help='The number of inflight IOs allowed before the IO queuing starts. Default: `4`.', type=int, default=4, dest='inflight_io_threshold')
         if self.developer_mode:
             subcommand.add_argument('--disable-monitoring', help='Disable monitoring stack, false by default. Default: `false`.', dest='disable_monitoring', action='store_true')
-        subcommand.add_argument('--strict-node-anti-affinity', help='Enable strict node anti affinity for storage nodes. Never more than one chunk is placed on a node. This requires a minimum of _data-chunks-in-stripe + parity-chunks-in-stripe + 1_ nodes in the cluster.', dest='strict_node_anti_affinity', action='store_true')
+        subcommand.add_argument('--strict-node-anti-affinity', help='Enable strict node anti affinity for storage nodes. Never more than one chunk is placed on a node. The cluster needs the same node floor as every cluster (_data-chunks-per-stripe + 2 x parity-chunks-per-stripe_ nodes); the flag only affects status reporting.', dest='strict_node_anti_affinity', action='store_true')
+        subcommand.add_argument('--raid-devices', help='Declare that every data device is protected below simplyblock (hardware RAID LUN, md or dm RAID). Lowers the data-device floor from n+2k to n+k and allows a stripe to place several chunks on one device when no other device is writable. Cannot be changed after cluster creation.', dest='raid_devices', action='store_true')
+        subcommand.add_argument('--multi-attach', help='Multi-attach array LUN mode. Every data device is a LUN of an external array that already protects it and presents it to several storage nodes. The cluster runs 1+0 erasure coding (the data-chunks and parity-chunks settings are overridden); on a node failure the LUN is reopened on a standby node and reached over an additional NVMe-oF path. Requires --raid-devices, --ftt and --ha-type ha. Cannot be changed after cluster creation.', dest='multi_attach', action='store_true')
+        subcommand.add_argument('--multi-attach-warm-standby', help='Multi-attach only: keep a warm standby instance of every LUN on each node it is attached to but not served by. A takeover then activates it on the first I/O instead of loading the LUN\'s page map cold (minutes on large LUNs). Each standby holds the LUN\'s page map in hugepages on its node.', dest='multi_attach_warm_standby', action='store_true')
+        subcommand.add_argument('--ftt', help='Node failures to tolerate in multi-attach mode (1 or 2; 2 adds a tertiary LVS node and needs at least 3 storage nodes). Required with --multi-attach, refused without it.', type=int, dest='ftt', choices=[1,2,])
         subcommand.add_argument('--enable-failure-domain', help='Enable failure-domain anti-affinity. Each storage node must then be added with a --failure-domain tag (rack/cabinet/DC); data, journal and secondary/tertiary copies are spread across distinct failure domains (best-effort). Deploy-time only: a cluster cannot be upgraded into this feature, it must be redeployed.', dest='enable_failure_domain', action='store_true')
         subcommand.add_argument('--disable-lvol-geometry', help='Create new logical volumes with ndcs=npcs=0 instead of the cluster\'s erasure coding geometry. Enabled by default; can be changed later with `cluster set-lvol-geometry`.', dest='disable_lvol_geometry', action='store_true')
         subcommand.add_argument('--sync-replication', help='Enable site-level synchronous replication over exactly two sites. Each storage node must then be added with --site; every lvstore is replicated to the other site. Requires --ha-type ha. Deploy-time only: a cluster cannot be upgraded into this feature, it must be redeployed.', dest='sync_replication', action='store_true')
@@ -517,7 +526,11 @@ class CLIWrapper(CLIWrapperBase):
             subcommand.add_argument('--max-queue-size', help='The max size the queue will grow. Default: `128`.', type=int, default=128, dest='max_queue_size')
         if self.developer_mode:
             subcommand.add_argument('--inflight-io-threshold', help='The number of inflight IOs allowed before the IO queuing starts. Default: `4`.', type=int, default=4, dest='inflight_io_threshold')
-        subcommand.add_argument('--strict-node-anti-affinity', help='Enable strict node anti affinity for storage nodes. Never more than one chunk is placed on a node. This requires a minimum of _data-chunks-in-stripe + parity-chunks-in-stripe + 1_ nodes in the cluster."', dest='strict_node_anti_affinity', action='store_true')
+        subcommand.add_argument('--strict-node-anti-affinity', help='Enable strict node anti affinity for storage nodes. Never more than one chunk is placed on a node. The cluster needs the same node floor as every cluster (_data-chunks-per-stripe + 2 x parity-chunks-per-stripe_ nodes); the flag only affects status reporting.', dest='strict_node_anti_affinity', action='store_true')
+        subcommand.add_argument('--raid-devices', help='Declare that every data device is protected below simplyblock (hardware RAID LUN, md or dm RAID). Lowers the data-device floor from n+2k to n+k and allows a stripe to place several chunks on one device when no other device is writable. Cannot be changed after cluster creation.', dest='raid_devices', action='store_true')
+        subcommand.add_argument('--multi-attach', help='Multi-attach array LUN mode. Every data device is a LUN of an external array that already protects it and presents it to several storage nodes. The cluster runs 1+0 erasure coding (the data-chunks and parity-chunks settings are overridden); on a node failure the LUN is reopened on a standby node and reached over an additional NVMe-oF path. Requires --raid-devices, --ftt and --ha-type ha. Cannot be changed after cluster creation.', dest='multi_attach', action='store_true')
+        subcommand.add_argument('--multi-attach-warm-standby', help='Multi-attach only: keep a warm standby instance of every LUN on each node it is attached to but not served by. A takeover then activates it on the first I/O instead of loading the LUN\'s page map cold (minutes on large LUNs). Each standby holds the LUN\'s page map in hugepages on its node.', dest='multi_attach_warm_standby', action='store_true')
+        subcommand.add_argument('--ftt', help='Node failures to tolerate in multi-attach mode (1 or 2; 2 adds a tertiary LVS node and needs at least 3 storage nodes). Required with --multi-attach, refused without it.', type=int, dest='ftt', choices=[1,2,])
         subcommand.add_argument('--enable-failure-domain', help='Enable failure-domain anti-affinity. Each storage node must then be added with a --failure-domain tag (rack/cabinet/DC); data, journal and secondary/tertiary copies are spread across distinct failure domains (best-effort). Deploy-time only: a cluster cannot be upgraded into this feature, it must be redeployed.', dest='enable_failure_domain', action='store_true')
         subcommand.add_argument('--disable-lvol-geometry', help='Create new logical volumes with ndcs=npcs=0 instead of the cluster\'s erasure coding geometry. Enabled by default; can be changed later with `cluster set-lvol-geometry`.', dest='disable_lvol_geometry', action='store_true')
         subcommand.add_argument('--sync-replication', help='Enable site-level synchronous replication over exactly two sites. Each storage node must then be added with --site; every lvstore is replicated to the other site. Requires --ha-type ha. Deploy-time only: a cluster cannot be upgraded into this feature, it must be redeployed.', dest='sync_replication', action='store_true')
@@ -572,6 +585,31 @@ class CLIWrapper(CLIWrapperBase):
     def init_cluster__grow_devices(self, subparser):
         subcommand = self.add_sub_command(subparser, 'grow-devices', 'Grows all Linux block devices (lblk) of the cluster online by the same factor.')
         subcommand.add_argument('cluster_id', help='The cluster id.', type=str).completer = self._completer_get_cluster_list
+        subcommand.add_argument('--lun-factor', help='Multi-attach cluster with a registered array only: first grow every LUN the array plugin created by this factor (greater than 1, e.g. 1.5) at the array and wait until every node sees the new size.', type=str, dest='lun_factor')
+        subcommand.add_argument('--lun-size', help='Multi-attach cluster with a registered array only, instead of --lun-factor: first grow every LUN the array plugin created to this size (e.g. `6T`); a LUN already that large is left alone, so the command can be repeated after a failure. Nodes added later get LUNs of this size.', type=size_type(), default='0', dest='lun_size')
+
+    def init_cluster__set_array(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'set-array', 'Registers the storage array of a multi-attach cluster (or updates it, e.g. to rotate credentials).')
+        subcommand.add_argument('cluster_id', help='The cluster id.', type=str).completer = self._completer_get_cluster_list
+        subcommand.add_argument('--plugin', help='The array plugin, e.g. `aws-ebs`.', type=str, dest='plugin', required=True)
+        subcommand.add_argument('--endpoint', help='The array\'s management endpoint (for aws-ebs: an EC2 endpoint URL override, usually empty).', type=str, default='', dest='endpoint')
+        subcommand.add_argument('--options', help='Plugin options as a JSON object, e.g. `{"az": "us-east-1a", "iops": 6000}`.', type=str, dest='options')
+        subcommand.add_argument('--credentials-file', help='A JSON file with the array credentials as an object of strings (for aws-ebs: aws_access_key_id, aws_secret_access_key; omit to use the instance role).', type=str, dest='credentials_file')
+        subcommand.add_argument('--credential-ref', help='Instead of --credentials-file: a secret kept outside simplyblock, as JSON, e.g. `{"kind": "vault-kv", "mount": "secret", "path": "arrays/pure01"}` or `{"kind": "kmip-secret", "uid": "42"}`.', type=str, dest='credential_ref')
+        subcommand.add_argument('--lun-size', help='Size of the LUN created for each node added to the cluster, e.g. `1T`. Default: none.', type=size_type(), default='0', dest='lun_size')
+        subcommand.add_argument('--journal', help='Where each node\'s journal is kept: `local` (a disk or partition of its host) or `lun` (a LUN of its own, created on the array next to the node\'s data LUN; needs --lun-size). Default: `local`.', type=str, default='local', dest='journal', choices=['local','lun',])
+        subcommand.add_argument('--journal-lun-size', help='With --journal lun: size of each node\'s journal LUN, e.g. `64G`. Default: 3%% of --lun-size, at least 2 GiB.', type=size_type(), default='0', dest='journal_lun_size')
+        subcommand.add_argument('--journal-options', help='With --journal lun: plugin options for the journal LUNs as a JSON object, applied over --options, e.g. `{"pool": "fast-pool"}` to create them in a pool of higher performance or priority.', type=str, dest='journal_options')
+
+    def init_cluster__get_array(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'get-array', 'Shows the storage array registered for a multi-attach cluster (without its credentials).')
+        subcommand.add_argument('cluster_id', help='The cluster id.', type=str).completer = self._completer_get_cluster_list
+
+    def init_cluster__remove_array(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'remove-array', 'Removes the storage array registration of a multi-attach cluster and its credentials.')
+        subcommand.add_argument('cluster_id', help='The cluster id.', type=str).completer = self._completer_get_cluster_list
+        subcommand.add_argument('array_id', help='The array id.', type=str)
+        subcommand.add_argument('--force', help='Remove it even though LUNs created through it exist (they can then no longer be fenced).', default=False, dest='force', action='store_true')
 
     def init_cluster__show(self, subparser):
         subcommand = self.add_sub_command(subparser, 'show', 'Shows a cluster\'s statistics.')
@@ -1748,6 +1786,12 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.cluster__complete_expand(sub_command, args)
                 elif sub_command in ['grow-devices']:
                     ret = self.cluster__grow_devices(sub_command, args)
+                elif sub_command in ['set-array']:
+                    ret = self.cluster__set_array(sub_command, args)
+                elif sub_command in ['get-array']:
+                    ret = self.cluster__get_array(sub_command, args)
+                elif sub_command in ['remove-array']:
+                    ret = self.cluster__remove_array(sub_command, args)
                 elif sub_command in ['show']:
                     ret = self.cluster__show(sub_command, args)
                 elif sub_command in ['get']:

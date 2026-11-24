@@ -420,8 +420,70 @@ def get_block_devices_info() -> list[dict]:
                 "physical_block_size": physical_bs,
                 "start_bytes": _partition_start_bytes(name, part_name),
             })
+    devices += _multipath_maps(data, devices, persistent)
     logger.debug("function:get_block_devices_info end")
     return devices
+
+
+def _multipath_maps(lsblk: dict, devices: list[dict], persistent: dict) -> list[dict]:
+    """The dm-multipath maps of the host, one entry each.
+
+    A SCSI LUN reached over several paths (FC, or iSCSI with several
+    sessions) appears once per path as an sd disk, and once as the map that
+    multipathd builds over those paths; lsblk lists the map as a child of
+    every path. The map is what is used: it survives the loss of a path. It
+    is reported with the identity of its paths (lsblk gives a map neither a
+    SERIAL nor a WWN), so a LUN is found under the same serial and WWN with
+    and without multipathing. Its paths stay in the inventory, each marked
+    with its ``multipath_map`` and held by it, so that nothing takes a path
+    on its own. The map is opened as /dev/mapper/<name>; its kernel name
+    (dm-N) is what makes the control plane serve it through bdev_uring."""
+    by_name = {d["name"]: d for d in devices if d.get("type") == "disk"}
+    maps: dict[str, dict] = {}
+    for dev in lsblk.get("blockdevices", []):
+        if dev.get("type") != "disk":
+            continue
+        for child in dev.get("children") or []:
+            if child.get("type") != "mpath":
+                continue
+            entry = maps.setdefault(child["name"], {"child": child, "paths": []})
+            entry["paths"].append(dev["name"])
+    out = []
+    for map_name, m in sorted(maps.items()):
+        child, paths = m["child"], m["paths"]
+        kname = child.get("kname") or map_name
+        first = by_name.get(paths[0], {})
+        for path in paths:
+            if path in by_name:
+                by_name[path]["multipath_map"] = map_name
+        links = persistent.get(kname, []) or persistent.get(map_name, [])
+        # The stable, host-independent link first: dm-uuid-mpath-<wwid>.
+        links = sorted(links, key=lambda link: (0 if "/dm-uuid-mpath-" in link else 1, link))
+        out.append({
+            "name": map_name,
+            "kname": kname,
+            "device_path": f"/dev/mapper/{map_name}",
+            "type": "mpath",
+            "size": int(child.get("size") or first.get("size") or 0),
+            "serial": first.get("serial", ""),
+            "serial_synthetic": bool(first.get("serial_synthetic")),
+            "wwn": first.get("wwn", ""),
+            "model": first.get("model", ""),
+            "vendor": first.get("vendor", ""),
+            "rota": bool(first.get("rota")),
+            "ro": bool(child.get("ro")),
+            "has_partitions": any(c.get("type") == "part" for c in child.get("children") or []),
+            "mounted_in_subtree": _subtree_mounted(child),
+            "holders": _disk_holders(kname),
+            "is_root_disk": False,
+            "by_id_path": links[0] if links else "",
+            "by_id_paths": links,
+            "numa_node": first.get("numa_node", -1),
+            "logical_block_size": _logical_block_size(kname),
+            "physical_block_size": _physical_block_size(kname),
+            "paths": sorted(paths),
+        })
+    return out
 
 
 SB_GPT_PARTITION_TYPECODE = "6527994e-2c5a-4eec-9613-8f5944074e8b"
@@ -450,6 +512,215 @@ def simplyblock_data_signature(device_name: str) -> bool | None:
         logger.warning(f"cannot read the first block of /dev/{device_name}: {e}")
         return None
     return head.startswith(ALCEML_STORAGE_SIGNATURE)
+
+
+def _normalize_wwn(value: str) -> str:
+    # lsblk reports a SCSI WWN as 0x<hex>, arrays as naa.<hex>; the same id.
+    v = (value or "").strip().lower()
+    return v.removeprefix("0x").removeprefix("naa.")
+
+
+def _host_file(path: str) -> str:
+    """Contents of a host configuration file: the host's /etc as mounted into
+    the Kubernetes agent (/host/etc) first, then the local one (Docker agent
+    on the host)."""
+    for candidate in (f"/host{path}", path):
+        text = _read_sysfs(candidate)
+        if text:
+            return text
+    return ""
+
+
+def get_san_initiators() -> dict:
+    """The host's SAN initiator identities, for registering it on a storage
+    array: ``iscsi_iqn`` (/etc/iscsi/initiatorname.iscsi), ``fc_wwpns`` (FC
+    HBA ports from /sys/class/fc_host), ``nvme_hostnqn`` (/etc/nvme/hostnqn)
+    and ``sdc_guid`` (PowerFlex SDC). Missing ones are left out. Read-only."""
+    out: dict = {}
+    for line in _host_file("/etc/iscsi/initiatorname.iscsi").splitlines():
+        line = line.strip()
+        if line.startswith("InitiatorName=") and not line.startswith("#"):
+            out["iscsi_iqn"] = line.split("=", 1)[1].strip()
+            break
+    wwpns = []
+    base = "/sys/class/fc_host"
+    if os.path.isdir(base):
+        for host in sorted(os.listdir(base)):
+            name = _read_sysfs(f"{base}/{host}/port_name").lower()
+            if re.fullmatch(r"0x[0-9a-f]{16}", name) and int(name, 16):
+                wwpns.append(name.removeprefix("0x"))
+    if wwpns:
+        out["fc_wwpns"] = wwpns
+    nqn = _host_file("/etc/nvme/hostnqn").strip()
+    if nqn:
+        out["nvme_hostnqn"] = nqn
+    guid = ""
+    for drv_cfg in ("/opt/emc/scaleio/sdc/bin/drv_cfg", "/host/opt/emc/scaleio/sdc/bin/drv_cfg"):
+        if os.path.exists(drv_cfg):
+            guid, _, _ = shell_utils.run_command(f"{drv_cfg} --query_guid")
+            break
+    match = re.search(r"\b([0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12})\b",
+                      guid or "")
+    if match:
+        out["sdc_guid"] = match.group(1)
+    return out
+
+
+def scan_for_new_luns() -> dict:
+    """Make the kernel look for LUNs / namespaces newly presented to this host
+    by a storage array: every SCSI host (FC HBAs and iSCSI sessions alike) is
+    scanned (``- - -`` = all channels, targets, LUNs) and every NVMe
+    controller rescans its namespaces. Existing devices are not touched.
+
+    The host must already have its SAN paths: iSCSI sessions logged in, FC
+    zoning done. NVMe-oF subsystems are connected here, by ``nvme
+    connect-all`` for every entry of the host's ``/etc/nvme/discovery.conf``
+    (the file nvmf-autoconnect reads at boot): arrays that present every LUN
+    in a subsystem of its own (NetApp ONTAP) add a subsystem with each LUN,
+    which no connection made earlier reaches. Returns ``{"scanned": [...]}``,
+    with ``connect-all <entry>`` for each discovery entry run."""
+    import glob as _glob
+    remove_dead_nvme_controllers()
+    scanned: list[str] = _connect_nvme_discovery_entries()
+    for path in sorted(_glob.glob("/sys/class/scsi_host/host*/scan")):
+        try:
+            _write_sysfs(path, "- - -")
+            scanned.append(path)
+        except OSError as e:
+            logger.warning("SCSI host scan %s failed: %s", path, e)
+    for path in sorted(_glob.glob("/sys/class/nvme/nvme*/rescan_controller")):
+        try:
+            _write_sysfs(path, "1")
+            scanned.append(path)
+        except OSError as e:
+            logger.warning("NVMe rescan %s failed: %s", path, e)
+    return {"scanned": scanned}
+
+
+def _connect_nvme_discovery_entries() -> list[str]:
+    """``nvme connect-all`` for each line of the host's
+    /etc/nvme/discovery.conf, with the host's NQN; subsystems already
+    connected are skipped by nvme-cli. Failures are logged, not raised."""
+    import shlex
+    import subprocess
+    conf = _host_file("/etc/nvme/discovery.conf")
+    if not conf or not shutil.which("nvme"):
+        return []
+    hostnqn = (_host_file("/etc/nvme/hostnqn") or "").strip()
+    done = []
+    for line in conf.splitlines():
+        line = line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        args = shlex.split(line)
+        cmd = ["nvme", "connect-all", *args]
+        if hostnqn and not {"-q", "--hostnqn"} & set(args) and not any(a.startswith("--hostnqn=") for a in args):
+            cmd += ["--hostnqn", hostnqn]
+        try:
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            logger.warning("nvme connect-all %s failed: %s", line, e)
+            continue
+        # nvme-cli exits non-zero when every subsystem was connected already.
+        if res.returncode != 0 and "already connected" not in (res.stderr or ""):
+            logger.warning("nvme connect-all %s: rc %s: %s", line, res.returncode, (res.stderr or "").strip()[:200])
+        done.append(f"connect-all {line}")
+    return done
+
+
+def _controller_dead(disk_name: str) -> bool:
+    """An NVMe namespace whose controller the kernel gave up on (state
+    ``dead``): no I/O can reach it or be queued on it."""
+    return bool(disk_name) and _read_sysfs(f"/sys/block/{disk_name}/device/state") == "dead"
+
+
+def remove_dead_nvme_controllers() -> list[str]:
+    """Remove from the PCI bus every NVMe controller the kernel gave up on
+    (state ``dead``), then make the live controllers rescan their namespaces.
+
+    A volume detached while the host booted leaves such a controller, and its
+    namespace head keeps the volume's block device name. When the same volume
+    is attached again, the new controller cannot register the namespace
+    ("cannot create duplicate filename /class/block/nvmeXnY") and the LUN
+    stays invisible (2026-11-24 warm FTT2 bed: a node reintegrated as standby
+    could not see the LUN; at the next dual outage it was the only standby
+    left and the takeover found none). Only PCIe controllers are removed;
+    fabric controllers are left to nvme-cli. Returns the removed PCI
+    addresses; failures are logged."""
+    import glob as _glob
+    removed: list[str] = []
+    for ctrl in sorted(_glob.glob("/sys/class/nvme/nvme*")):
+        if _read_sysfs(f"{ctrl}/state") != "dead":
+            continue
+        if _read_sysfs(f"{ctrl}/transport") not in ("pcie", ""):
+            continue
+        pci_dev = os.path.realpath(f"{ctrl}/device")
+        addr = os.path.basename(pci_dev)
+        if not os.path.exists(f"{pci_dev}/remove"):
+            continue
+        try:
+            _write_sysfs(f"{pci_dev}/remove", "1")
+            removed.append(addr)
+            logger.warning("Removed dead NVMe controller %s (PCI %s)", os.path.basename(ctrl), addr)
+        except OSError as e:
+            logger.warning("Dead NVMe controller %s (PCI %s) not removed: %s",
+                           os.path.basename(ctrl), addr, e)
+    if removed:
+        for path in sorted(_glob.glob("/sys/class/nvme/nvme*/rescan_controller")):
+            try:
+                _write_sysfs(path, "1")
+            except OSError as e:
+                logger.warning("NVMe rescan %s failed: %s", path, e)
+    return removed
+
+
+def find_lun_devices(wwn: str) -> list[dict]:
+    """The whole disks of this host that carry LUN ``wwn`` (multi-attach array
+    LUN mode): every lsblk disk whose WWN, or serial (the inventory falls back
+    to the WWN for it), matches, case-insensitive and with or without ``0x``.
+
+    One dict per match: ``name``, ``device_path``, ``by_id_path``,
+    ``by_id_paths``, ``size`` (bytes), ``ro`` and ``has_alceml_signature`` --
+    True when block 0 carries the alceml storage signature, False when it was
+    read and does not, None when it could not be read (a fenced or failed
+    path). Nothing is written to the device; dead NVMe controllers are
+    removed first (remove_dead_nvme_controllers). Several matches mean
+    several host paths to the LUN; the caller chooses."""
+    want = _normalize_wwn(wwn)
+    if not want:
+        return []
+    found = []
+    if remove_dead_nvme_controllers():
+        import time as _time
+        _time.sleep(1)  # the rescanned controllers register their namespaces
+    devices = get_block_devices_info()
+    matched = [d for d in devices
+               if d.get("type") in ("disk", "mpath")
+               and want in (_normalize_wwn(d.get("wwn", "")), _normalize_wwn(d.get("serial", "")))]
+    # A disk whose NVMe controller is dead holds no path to the LUN and no
+    # I/O for it: the kernel keeps such a 0-byte remnant when the volume was
+    # detached while the host booted (2026-11-21 FTT2 bed: the fenced node,
+    # back from a hard reset, kept reporting the detached LUN and stayed
+    # fenced for good).
+    matched = [d for d in matched if not _controller_dead(d.get("name", ""))]
+    # Several paths of one LUN under a multipath map: the map, not the paths.
+    if any(d.get("type") == "mpath" for d in matched):
+        matched = [d for d in matched if d.get("type") == "mpath"]
+    for dev in matched:
+        found.append({
+            "name": dev["name"],
+            "device_path": dev["device_path"],
+            "by_id_path": dev.get("by_id_path", ""),
+            "by_id_paths": dev.get("by_id_paths", []),
+            "size": dev.get("size", 0),
+            "ro": dev.get("ro", False),
+            "type": dev.get("type", "disk"),
+            "kname": dev.get("kname", dev["name"]),
+            # /dev/<name> of a map is /dev/mapper/<name>; /dev/<kname> is dm-N.
+            "has_alceml_signature": simplyblock_data_signature(
+                dev.get("kname") or dev["name"] if dev.get("type") == "mpath" else dev["name"]),
+        })
+    return found
 
 
 def _logical_block_size(disk_name: str) -> int:
@@ -817,7 +1088,9 @@ def rescan_block_device(device_path: str) -> dict:
     SCSI disks (FC, iSCSI, SAS) are rescanned through
     ``/sys/block/<dev>/device/rescan``; NVMe namespaces through
     ``rescan_controller`` of every controller that reaches them, which also
-    covers the head device of native NVMe multipathing. Other devices, such
+    covers the head device of native NVMe multipathing. A dm-multipath map
+    (``dm-N`` with an ``mpath-`` uuid) has each of its path devices
+    rescanned, then ``multipathd resize map``. Other devices, such
     as virtio-blk, pick up a resize on their own, so their size is just
     read. Partitions are refused: growing one is a partition-table change,
     not a rescan.
@@ -839,19 +1112,39 @@ def rescan_block_device(device_path: str) -> dict:
         raise ValueError(f"{name} is a partition, which cannot be resized online")
 
     rescanned: list[str] = []
-    if _re.match(r"^nvme\d+n\d+$", name):
-        # A plain namespace links device -> its controller; the head device
-        # of native multipathing links device -> the subsystem, whose
-        # controllers are its nvme* children.
-        candidates = [f"{sys_dev}/device/rescan_controller"]
-        candidates += sorted(_glob.glob(f"{sys_dev}/device/nvme*/rescan_controller"))
-        for path in candidates:
-            if os.path.exists(path):
-                _write_sysfs(path, "1")
-                rescanned.append(path)
-    elif os.path.exists(f"{sys_dev}/device/rescan"):
-        _write_sysfs(f"{sys_dev}/device/rescan", "1")
-        rescanned.append(f"{sys_dev}/device/rescan")
+
+    def _rescan_disk(disk: str, sys_disk: str) -> None:
+        if _re.match(r"^nvme\d+n\d+$", disk):
+            # A plain namespace links device -> its controller; the head
+            # device of native multipathing links device -> the subsystem,
+            # whose controllers are its nvme* children.
+            candidates = [f"{sys_disk}/device/rescan_controller"]
+            candidates += sorted(_glob.glob(f"{sys_disk}/device/nvme*/rescan_controller"))
+            for path in candidates:
+                if os.path.exists(path):
+                    _write_sysfs(path, "1")
+                    rescanned.append(path)
+        elif os.path.exists(f"{sys_disk}/device/rescan"):
+            _write_sysfs(f"{sys_disk}/device/rescan", "1")
+            rescanned.append(f"{sys_disk}/device/rescan")
+
+    if _re.match(r"^dm-\d+$", name):
+        # A dm-multipath map (array LUN over several paths): every path
+        # device is rescanned first, then multipathd resizes the map, which
+        # only grows once all its paths report the new size.
+        slaves = sorted(os.listdir(f"{sys_dev}/slaves")) if os.path.isdir(f"{sys_dev}/slaves") else []
+        for slave in slaves:
+            if _re.match(r"^[a-zA-Z0-9_\-]+$", slave):
+                _rescan_disk(slave, f"/sys/class/block/{slave}")
+        map_name = _read_sysfs(f"{sys_dev}/dm/name")
+        uuid = _read_sysfs(f"{sys_dev}/dm/uuid")
+        if map_name and uuid.startswith("mpath-") and _re.match(r"^[A-Za-z0-9_.\-]+$", map_name):
+            out, err, rc = shell_utils.run_command(f"multipathd resize map {map_name}")
+            if rc != 0 or "fail" in (out or "").lower():
+                raise ValueError(f"multipathd resize map {map_name} failed: {err or out}")
+            rescanned.append(f"multipathd:{map_name}")
+    else:
+        _rescan_disk(name, sys_dev)
 
     sectors = _read_sysfs(f"{sys_dev}/size")
     if not sectors:

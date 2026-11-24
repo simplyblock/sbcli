@@ -7,6 +7,7 @@ from simplyblock_core import (
     constants,
     distr_controller,
     jm_raid,
+    multi_attach,
     storage_node_ops,
     utils,
 )
@@ -128,6 +129,10 @@ CAUSE_ADMIN_REMOVE = "admin_remove"
 # when IO resumes (2026-07-06 failback incident: placement failures because
 # peers still saw the recovering node's devices UNAVAILABLE).
 CAUSE_NODE_RECOVERY = "node_recovery"
+# Multi-attach array LUN mode: the device's LUN is served by another node
+# (controllers/lun_takeover) while its owner is not ONLINE. The device may go
+# ONLINE as long as its SERVING node is ONLINE.
+CAUSE_LUN_TAKEOVER = "lun_takeover"
 
 
 def _atomic_device_set(db_controller, node_id, device_id, apply_fields):
@@ -200,6 +205,22 @@ def connect_peers_to_node_devices(snode):
         th.join()
 
 
+def _serving_node_online(db_controller, device):
+    try:
+        server = db_controller.get_storage_node_by_id(device.serving_node())
+    except KeyError:
+        return False
+    return server.status == StorageNode.STATUS_ONLINE
+
+
+def _served_by_online_node(db_controller, device, cause):
+    """CAUSE_LUN_TAKEOVER only: the multi-attach device is served by another
+    node (serving_node_id) and that node is ONLINE."""
+    if cause != CAUSE_LUN_TAKEOVER or not multi_attach.served_elsewhere(device, device.node_id):
+        return False
+    return _serving_node_online(db_controller, device)
+
+
 def device_set_state(device_id, state, cause=CAUSE_OTHER, connect_peers=True):
     db_controller = DBController()
     try:
@@ -236,11 +257,29 @@ def device_set_state(device_id, state, cause=CAUSE_OTHER, connect_peers=True):
     # ONLINE node, so it is unaffected.
     if (state == NVMeDevice.STATUS_ONLINE
             and snode.status != StorageNode.STATUS_ONLINE
-            and cause not in (CAUSE_DEVICE_RESTART, CAUSE_NODE_RECOVERY)):
+            and cause not in (CAUSE_DEVICE_RESTART, CAUSE_NODE_RECOVERY)
+            and not _served_by_online_node(db_controller, device, cause)):
         logger.warning(
             f"Refusing to set device {device_id} ONLINE while node "
             f"{snode.get_id()} is {snode.status} (cause={cause}); "
             f"node bring-up owns device re-online")
+        return False
+
+    # Multi-attach: a device whose LUN another node serves is ONLINE only
+    # while that node is; its owner's recovery does not bring it back (the
+    # owner built nothing for it).
+    if (state == NVMeDevice.STATUS_ONLINE
+            and multi_attach.served_elsewhere(device, snode.get_id())
+            and not _serving_node_online(db_controller, device)):
+        logger.warning(
+            f"Refusing to set device {device_id} ONLINE: its LUN is served by node "
+            f"{device.serving_node()}, which is not ONLINE (cause={cause})")
+        return False
+    if (state == NVMeDevice.STATUS_ONLINE
+            and multi_attach.fenced_from(device, device.serving_node())):
+        logger.warning(
+            f"Refusing to set device {device_id} ONLINE: node {device.serving_node()} "
+            f"is fenced from its LUN (cause={cause})")
         return False
 
     # Failed is a terminal state. The only allowed exits are:
@@ -528,6 +567,11 @@ def device_repair(device_id, force=False):
             "Device %s was removed by operator request; not repairing",
             device_id)
         return False
+    if multi_attach.not_servable_here(device, device.node_id):
+        logger.info("Device %s: its LUN is served by node %s (owner fenced: %s); "
+                    "the owner does not repair it", device_id, device.serving_node(),
+                    multi_attach.fenced_from(device, device.node_id))
+        return False
 
     if device.status != NVMeDevice.STATUS_ONLINE and device.retries_exhausted and not force:
         logger.debug("Device %s repair budget exhausted; not retrying", device_id)
@@ -677,6 +721,11 @@ def device_repair_due(device):
         # The operator removed this device on purpose. Never resurrect it --
         # not on any attempt, and not under force.
         return False
+    if multi_attach.not_servable_here(device, device.node_id):
+        # Multi-attach: another node serves the LUN (or the owner is fenced
+        # from it). Repair rebuilds the stack on the owner, which must not
+        # hold one; the serving node's stack is the takeover's business.
+        return False
     schedule = constants.DEVICE_REPAIR_BACKOFF_SEC
     if device.repair_attempts >= len(schedule):
         return False
@@ -755,6 +804,7 @@ def _def_create_device_stack(device_obj, snode, force=False, clear_data=False):
                 checksum_method=checksum_method,
                 cache_size=cache_size,
                 cache_eviction_threshold=cache_eviction_threshold,
+                **multi_attach.alceml_create_kwargs(device_obj, snode, cluster),
             )
         except RPCException as e:
             logger.error("Failed to create alceml bdev %s: %s", alceml_name, e)
@@ -775,7 +825,8 @@ def _def_create_device_stack(device_obj, snode, force=False, clear_data=False):
     else:
         logger.info(f"bdev already exists {pt_name}")
 
-    subsystem_nqn = snode.subsystem + ":dev:" + alceml_id
+    # Multi-attach: host-independent NQN (multi_attach.device_subsystem_nqn).
+    subsystem_nqn = multi_attach.device_subsystem_nqn(snode, device_obj, cluster)
     namespace_found = False
     subsys_found = False
     ret = rpc_client.subsystem_get(subsystem_nqn)
@@ -789,7 +840,9 @@ def _def_create_device_stack(device_obj, snode, force=False, clear_data=False):
 
     if not subsys_found:
         logger.info("Creating subsystem %s", subsystem_nqn)
-        ret = rpc_client.subsystem_create(subsystem_nqn, 'sbcli-cn', alceml_id)
+        ret = rpc_client.subsystem_create(
+            subsystem_nqn, 'sbcli-cn', alceml_id,
+            **multi_attach.subsystem_create_kwargs(snode, device_obj, db_controller))
         for iface in snode.data_nics:
             if iface.ip4_address:
                 ret = rpc_client.listeners_create(subsystem_nqn, iface.trtype, iface.listen_address, snode.nvmf_port)
@@ -800,7 +853,14 @@ def _def_create_device_stack(device_obj, snode, force=False, clear_data=False):
 
     if not namespace_found:
         logger.info(f"Adding {pt_name} to the subsystem")
-        ret = rpc_client.nvmf_subsystem_add_ns(subsystem_nqn, pt_name)
+        if multi_attach.is_multi_attach(device_obj):
+            # Every node that exports the LUN must use the same namespace
+            # UUID: SPDK multipath joins paths by namespace identity.
+            ret = rpc_client.nvmf_subsystem_add_ns(
+                subsystem_nqn, pt_name, multi_attach.namespace_uuid(device_obj),
+                nguid=multi_attach.namespace_nguid(device_obj))
+        else:
+            ret = rpc_client.nvmf_subsystem_add_ns(subsystem_nqn, pt_name)
     else:
         logger.info(f"bdev already added to subsys {pt_name}")
 
@@ -2189,8 +2249,39 @@ def _growth_devices(db_controller, cluster_id):
     return pairs
 
 
-def _check_resizable(cluster, dev, snode):
-    """Raise ValueError when ``dev`` cannot be grown online right now."""
+def _resizable_errors(db_controller, cluster, pairs) -> dict:
+    """``{device_id: reason}`` for every device of ``pairs`` that cannot be
+    grown online right now (_check_resizable on its serving node)."""
+    errors = {}
+    for node, dev in pairs:
+        try:
+            host = _growth_host(db_controller, node, dev)[0]
+            _check_resizable(cluster, dev, node, host)
+        except (ValueError, KeyError) as e:
+            errors[dev.get_id()] = str(e)
+    return errors
+
+
+def _growth_host(db_controller, snode, dev):
+    """``(node, base_bdev, path)`` where the alceml of ``dev`` runs now: the
+    owner ``snode``, or for a multi-attach device whose LUN another node took
+    over (lun_takeover), that serving node, with the base bdev and block
+    device path the takeover recorded for it."""
+    if not multi_attach.served_elsewhere(dev, snode.get_id()):
+        return snode, dev.nvme_bdev, dev.by_id_path or dev.device_path
+    host = db_controller.get_storage_node_by_id(dev.serving_node())
+    p = (dev.node_paths or {}).get(host.get_id()) or {}
+    base = p.get("bdev") or utils.aio_bdev_name_for_serial(dev.serial_number)
+    return host, base, p.get("path") or dev.by_id_path or dev.device_path
+
+
+def _check_resizable(cluster, dev, snode, host=None):
+    """Raise ValueError when ``dev`` (owned by ``snode``) cannot be grown
+    online right now. ``host`` is the node whose alceml serves it
+    (_growth_host), the owner by default: a LUN served elsewhere after a
+    takeover is grown on its serving node. The owner must still be online,
+    so growth never runs while a node of the cluster is out."""
+    host = host or snode
     if cluster.device_mode != constants.DEVICE_MODE_LBLK or dev.bdev_type != "aio":
         raise ValueError("Online resizing is only supported for Linux block devices (lblk device mode)")
     if dev.status != NVMeDevice.STATUS_ONLINE:
@@ -2203,14 +2294,20 @@ def _check_resizable(cluster, dev, snode):
         raise ValueError("Device runs with a testing or hang bdev under alceml, remove it first")
     if not dev.alceml_bdev or not dev.nvme_bdev:
         raise ValueError("Device has no alceml or AIO bdev recorded")
+    if host.get_id() != snode.get_id() and host.status != StorageNode.STATUS_ONLINE:
+        raise ValueError(f"The device's LUN is served by node {host.get_id()} after a takeover; "
+                         f"that node must be online, current status: {host.status}")
+    if multi_attach.served_elsewhere(dev, host.get_id()):
+        raise ValueError(f"The device's LUN is served by node {dev.serving_node()}, not by "
+                         f"{host.get_id()}")
     if tasks_controller.get_active_dev_restart_task(snode.cluster_id, dev.get_id()):
         raise ValueError("A restart task is active for the device")
 
 
-def _rescan_size(snode, dev):
+def _rescan_size(snode, dev, path=None):
     """Make the storage node's host re-read the size of the device's block
     device (SCSI or NVMe rescan) and return it in bytes."""
-    path = dev.by_id_path or dev.device_path
+    path = path or dev.by_id_path or dev.device_path
     if not path:
         raise ValueError("No block device path known for the device")
     result, err = snode.client(timeout=60, retry=1).rescan_block_device(path)
@@ -2251,11 +2348,13 @@ def _resize_failed(device_id, dev, msg, set_unavailable):
     return ValueError(msg)
 
 
-def _reopen_alceml(snode, dev):
+def _reopen_alceml(snode, dev, base_bdev=None):
     """Let alceml reopen its AIO bdev at the size the block device has now:
     resize_begin -> bdev_aio_rescan (bdev_uring_rescan for a uring device)
-    -> resize_end. Raises ValueError."""
+    -> resize_end, on ``snode`` (the node serving the device) with its base
+    bdev ``base_bdev`` (default: the owner's). Raises ValueError."""
     device_id = dev.get_id()
+    base_bdev = base_bdev or dev.nvme_bdev
     rpc_client = snode.rpc_client()
     io_engine = utils.lblk_io_engine_of_device(snode, dev)
     try:
@@ -2268,7 +2367,7 @@ def _reopen_alceml(snode, dev):
 
     rescan_error = None
     try:
-        utils.rescan_lblk_bdev(rpc_client, dev.nvme_bdev, io_engine)
+        utils.rescan_lblk_bdev(rpc_client, base_bdev, io_engine)
     except RPCException as e:
         rescan_error = e
 
@@ -2289,7 +2388,49 @@ def _device_report(dev, old_size):
             "placement_size": dev.weight_size()}
 
 
-def grow_cluster_devices(cluster_id):
+def grow_cluster_devices(cluster_id, lun_factor=None, lun_size=None):
+    """Grow every data device of an lblk cluster by the same factor (see
+    _grow_cluster_devices).
+
+    ``lun_factor`` (multi-attach cluster with a registered array only): grow
+    every LUN the array plugin created by this factor at the array first and
+    wait until every node it is presented to sees the new size
+    (array_controller.grow_luns). If any LUN fails, nothing is grown on the
+    cluster; the uniform growth below would refuse anyway, since growth takes
+    the smallest factor of all block devices. The result then also carries
+    ``luns``.
+
+    ``lun_size`` instead of ``lun_factor``: grow every LUN to that many bytes
+    (a LUN already that large is left alone, so a failed growth is simply
+    repeated) and make it the LUN size of nodes added later."""
+    if lun_factor is None and lun_size is None:
+        return _grow_cluster_devices(cluster_id)
+    from simplyblock_core.controllers import array_controller
+    # Check before the array is touched: a refusal after the LUNs grew would
+    # leave them grown and the cluster not, and a re-run with the factor
+    # would grow them again.
+    db_controller = DBController()
+    cluster = db_controller.get_cluster_by_id(cluster_id)
+    if cluster.device_mode == constants.DEVICE_MODE_LBLK:
+        errors = _resizable_errors(db_controller, cluster, _growth_devices(db_controller, cluster_id))
+        if errors:
+            result = _growth_result(False, 1.0, [], errors,
+                                    "Not every data device can be grown; no LUN was grown at "
+                                    "the array")
+            result["luns"] = {}
+            return result
+    lun_report = array_controller.grow_luns(cluster_id, lun_factor, size=lun_size)
+    if lun_report["errors"]:
+        result = _growth_result(False, 1.0, [], dict(lun_report["errors"]),
+                                "Not every LUN could be grown at the array; nothing was grown "
+                                "on the cluster")
+    else:
+        result = _grow_cluster_devices(cluster_id)
+    result["luns"] = lun_report["luns"]
+    return result
+
+
+def _grow_cluster_devices(cluster_id):
     """Grow every data device of an lblk cluster by the same factor: the
     smallest growth of any of their block devices (see the section comment).
 
@@ -2315,21 +2456,18 @@ def grow_cluster_devices(cluster_id):
     if not pairs:
         return _growth_result(False, 1.0, [], {}, "The cluster has no data devices")
 
-    errors = {}
-    for node, dev in pairs:
-        try:
-            _check_resizable(cluster, dev, node)
-        except ValueError as e:
-            errors[dev.get_id()] = str(e)
+    errors = _resizable_errors(db_controller, cluster, pairs)
     if errors:
         return _growth_result(False, 1.0, [], errors,
                               "Not every data device can be grown; growth is uniform across all "
                               "data devices, so nothing was grown")
 
+    hosts = {dev.get_id(): _growth_host(db_controller, node, dev) for node, dev in pairs}
     backend = {}
     for node, dev in pairs:
+        host, _, path = hosts[dev.get_id()]
         try:
-            backend[dev.get_id()] = _rescan_size(node, dev)
+            backend[dev.get_id()] = _rescan_size(host, dev, path)
         except ValueError as e:
             errors[dev.get_id()] = str(e)
     if errors:
@@ -2367,8 +2505,9 @@ def grow_cluster_devices(cluster_id):
 
     logger.info(f"Growing {len(pairs)} data devices of cluster {cluster_id} by factor {factor:.4f}")
     for node, dev in pairs:
+        host, base, _ = hosts[dev.get_id()]
         try:
-            _reopen_alceml(node, dev)
+            _reopen_alceml(host, dev, base)
         except ValueError as e:
             errors[dev.get_id()] = str(e)
             return _growth_result(False, factor, [], errors,
