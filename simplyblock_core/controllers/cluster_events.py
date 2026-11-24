@@ -40,6 +40,19 @@ def cluster_leader_site_change(cluster, new_site, old_site):
         message=f"Cluster leader site changed {cluster.get_id()}: {old_site or '-'} -> {new_site}")
 
 
+def control_plane_leader_change(cluster, new_site, old_site, how=""):
+    """The stretched control plane's lease moved (docs/stretched-control-plane.md):
+    ``new_site`` leads ("" = nobody, a release), ``old_site`` led before."""
+    ec.log_event_cluster(
+        cluster_id=cluster.get_id(),
+        domain=ec.DOMAIN_MANAGEMENT,
+        event=ec.EVENT_STATUS_CHANGE,
+        db_object=cluster,
+        caused_by=ec.CAUSED_BY_MONITOR,
+        message=(f"Control plane leadership of cluster {cluster.get_id()}: "
+                 f"{old_site or '-'} -> {new_site or '-'}" + (f" ({how})" if how else "")))
+
+
 def cluster_status_change(cluster, new_state, old_status):
     ec.log_event_cluster(
         cluster_id=cluster.get_id(),

@@ -16,6 +16,7 @@ from simplyblock_core import (
     xfer_timing,
 )
 from simplyblock_core.controllers import (
+    control_plane_controller,
     lvol_controller,
     lvol_events,
     qos_controller,
@@ -3680,6 +3681,7 @@ def main():
     logger.info("Starting Tasks runner (%d workers)...", _WORKERS.size)
     wake = _EndgameWake()
     while True:
+        control_plane_controller.wait_until_services_enabled("snapshot-replication")
         try:
             db.get_clusters()
         except Exception as e:

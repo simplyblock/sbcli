@@ -157,6 +157,29 @@ class NodeTransitionInProgress(Exception):
     the v2 API answers 503."""
 
 
+class ControlPlaneError(PreconditionError):
+    """A stretched-control-plane operation is refused: the cluster is not
+    stretched, names no such site, or the request is malformed."""
+
+
+class ControlPlaneNotReadyError(ControlPlaneError):
+    """A planned leadership move is refused because the target site is not
+    ready for it; ``problems`` names every failed gate."""
+
+    def __init__(self, message: str, problems: list[str]):
+        super().__init__(message)
+        self.problems = problems
+
+
+class ControlPlaneTakeoverRefusedError(ControlPlaneError):
+    """A takeover is refused because the site declared down still answers;
+    ``alive`` names what answered."""
+
+    def __init__(self, message: str, alive: list[str]):
+        super().__init__(message)
+        self.alive = alive
+
+
 class MonitoringConfigError(Exception):
     """A monitoring component (Grafana, Prometheus) refused a configuration
     change or could not be reached to apply it."""

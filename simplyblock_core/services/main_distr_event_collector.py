@@ -15,6 +15,7 @@ from simplyblock_core import (
 )
 from simplyblock_core.arbitration import events as arbitration_events
 from simplyblock_core.controllers import (
+    control_plane_controller,
     device_controller,
     events_controller,
     storage_events,
@@ -879,6 +880,7 @@ def ensure_collectors(nodes):
 
 def main():
     while True:
+        control_plane_controller.wait_until_services_enabled("main-distr-event-collector")
         try:
             db.get_clusters()
         except Exception as e:
