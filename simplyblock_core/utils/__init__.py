@@ -1184,7 +1184,7 @@ def _get_active_port_reservations(cluster_id):
         for res in PortReservation().read_from_db(db_controller.kv_store, id=cluster_id):
             if res.cluster_id != cluster_id:
                 continue
-            if (now - res.created_at) > constants.PORT_RESERVATION_TTL_SEC:
+            if res.expired(now):
                 continue
             reserved.add(res.port)
     except Exception:

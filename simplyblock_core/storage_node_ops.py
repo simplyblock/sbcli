@@ -3931,6 +3931,13 @@ def reserve_cluster_hugepages(snode_api, nodes, cluster):
     return True
 
 
+def _rpc_port_slot(node_addr, socket, cpu_mask) -> str:
+    """The name the rpc port of one storage node is reserved under. A storage
+    node's identity on a host is (api_endpoint, socket, cpu_mask), the same
+    triple add_node matches an earlier attempt's record on."""
+    return f"rpc/{node_addr}/{socket}/{cpu_mask or ''}"
+
+
 class _SpdkPodStillPresent(Exception):
     """The SPDK pod has not disappeared from the API server yet."""
 
@@ -4670,11 +4677,8 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         # Generate the node uuid up front so it can own the port reservations
         # made before the node record itself is persisted (the new node isn't
         # written to the DB until after SPDK boots, so two concurrent adds would
-        # otherwise read the same "next free" port). reserve_cluster_nvmf_port
-        # allocates and reserves the port atomically against other concurrent
-        # node adds.
+        # otherwise read the same "next free" port).
         node_uuid = str(uuid.uuid4())
-        rpc_port = db_controller.reserve_cluster_nvmf_port(cluster_id, node_uuid)
         logger.info(f"mgmt interface is {mgmt_iface}")
 
         spdk_image = cluster.prefixed_image(spdk_image or constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
@@ -4762,6 +4766,22 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                 f"socket {node_socket} (status {existing_healthy.status}); skipping duplicate add "
                 f"for this slot and checking the rest")
             continue
+
+        # The rpc port is reserved for the slot, not for this attempt, so a
+        # retry gets the port of the attempt before it. The SPDK pod is named
+        # after the port and the agent removes a pod of that name before it
+        # starts one, so the retry replaces whatever the earlier attempt left
+        # running. An attempt can die between starting its pod and writing the
+        # node record (the tasks runner is rescheduled, the agent's caller
+        # times out while the host waits on a MachineConfig rollout); with a
+        # new port each time the retry started a second pod beside the first,
+        # which no record named and which held the host's huge pages, so the
+        # retry stayed Pending on "Insufficient hugepages-2Mi" (OpenShift,
+        # 2026-11-25: pods on 4420, 4421 and 4422 for one node). Reserved here,
+        # after the cleanup above, so that a port freed by a removed
+        # IN_CREATION record is the one handed back.
+        rpc_port = db_controller.reserve_cluster_nvmf_port(
+            cluster_id, node_uuid, slot=_rpc_port_slot(node_addr, node_socket, incoming_cpu_mask))
 
         total_mem = minimum_hp_memory
         for n in db_controller.get_storage_nodes_by_cluster_id(cluster_id):

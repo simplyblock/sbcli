@@ -400,6 +400,13 @@ CLUSTER_ADD_LOCK_WAIT_TIMEOUT_SEC = 1800
 # loses its reserved port.
 PORT_RESERVATION_TTL_SEC = 600
 
+# A reservation made for a named slot (the rpc port of one storage node on one
+# host) is kept this long instead. It is what hands a retried add the port of
+# the attempt before it, so that the retry replaces that attempt's SPDK pod
+# rather than starting a second one next to it. It has to outlive the gap
+# between two attempts, which on OpenShift spans a whole MachineConfig rollout.
+PORT_RESERVATION_SLOT_TTL_SEC = 24 * 3600
+
 # add_node_add_task's dedup check (by node_addr) is itself a plain
 # read-then-write: two concurrent posts for one host can both pass it before
 # either commits, queuing two FN_NODE_ADD tasks for the same host (the
