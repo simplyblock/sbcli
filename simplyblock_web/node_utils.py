@@ -838,7 +838,8 @@ def split_partition_for_journal(part_name: str, jm_bytes: int,
     the partition being split. The journal partition keeps the number and the
     PARTUUID of the original partition, so the selector the partition was
     chosen by (``/dev/disk/by-partuuid/...``, ``...-partN``) still answers
-    and a re-configure recognises the split (split_partition_partner).
+    and a re-configure recognises the split (split_partition_partner). A
+    partition whose PARTUUID cannot be read is not split.
     Geometry is converted from the 512-byte units of sysfs to the disk's
     logical sectors, which sgdisk counts in, so 4K-native disks are split
     correctly. The partition must be idle (unmounted, no holders, not backing
@@ -900,7 +901,17 @@ def split_partition_for_journal(part_name: str, jm_bytes: int,
             f"partition {part_name} ({size_512 * 512} bytes) is too small "
             f"to split into a {jm_bytes}-byte journal plus a data partition")
 
-    guid = f" -u {part_number}:{part['partuuid']}" if part.get("partuuid") else ""
+    # The journal partition must keep the PARTUUID: the partition was selected
+    # by it (/dev/disk/by-partuuid/...), and a configure runs again on every
+    # start of the storage node pod. The inventory has none in the
+    # storage-node container (lsblk reads PARTUUID from the udev database,
+    # which is not mounted there), so the device itself is asked.
+    partuuid = part.get("partuuid") or _probe_partuuid(part_name)
+    if not partuuid:
+        raise ValueError(
+            f"cannot read the PARTUUID of partition {part_name}; it is not split, because the "
+            f"journal partition could not keep it and the partition would not be found again")
+    guid = f" -u {part_number}:{partuuid}"
     cmds = [
         f"sgdisk -d {part_number} /dev/{parent}",
         (f"sgdisk -a 1 -n {part_number}:{start_sector}:{data_start - 1} "
@@ -949,6 +960,14 @@ def split_partition_for_journal(part_name: str, jm_bytes: int,
             f"new partitions {jm_name}/{data_name} missing from inventory "
             f"after split of {part_name}")
     return inventory[jm_name], inventory[data_name]
+
+
+def _probe_partuuid(part_name: str) -> str:
+    """PARTUUID of one partition, probed from the device (``blkid -p``), or
+    "" when it cannot be read. lsblk reads PARTUUID from the udev database,
+    which the storage-node container does not mount, and prints none there."""
+    out, _, rc = shell_utils.run_command(f"blkid -p -o value -s PART_ENTRY_UUID /dev/{part_name}")
+    return (out or "").strip() if rc == 0 else ""
 
 
 def _partition_entry_fields(part_name: str) -> dict:

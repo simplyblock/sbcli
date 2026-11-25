@@ -213,7 +213,7 @@ class TestSplitPartitionForJournal(unittest.TestCase):
 
     def _run(self, jm_bytes=2 * GIB, part_kwargs=None, pttype="gpt",
              start=2048, size_sectors=8 * GIB // 512, sgdisk_rc=0,
-             sector_size=512, signature=False):
+             sector_size=512, signature=False, probed_partuuid="PROBED-UUID"):
         part = _inv(self.PART, dtype="part", parent_name=self.PARENT,
                     **(part_kwargs or {}))
         # post-split inventory contains the two new partitions
@@ -253,6 +253,10 @@ class TestSplitPartitionForJournal(unittest.TestCase):
             # for a GPT disk. Only a probe of the device itself reports it.
             if cmd.startswith("lsblk") and "PTTYPE" in cmd:
                 return "", "", 0
+            # The same holds for PARTUUID: the inventory, built from lsblk,
+            # carries none in the container (lab, 2026-11-25).
+            if cmd.startswith("blkid -p") and "PART_ENTRY_UUID" in cmd:
+                return (probed_partuuid, "", 0) if probed_partuuid else ("", "", 2)
             if cmd.startswith("blkid -p"):
                 return pttype, "", 0
             if cmd.startswith("sgdisk"):
@@ -296,6 +300,23 @@ class TestSplitPartitionForJournal(unittest.TestCase):
         sg = [c for c in commands if c.startswith("sgdisk")]
         self.assertIn("-u 2:ORIG-UUID", sg[1])
         self.assertNotIn("-u", sg[2])
+
+    def test_partuuid_is_probed_from_the_device_when_the_inventory_has_none(self):
+        """Lab, 2026-11-25: in the storage-node container lsblk prints no
+        PARTUUID, the journal partition got a new one, and the next configure
+        of the node refused the selection: /dev/disk/by-partuuid/<original>
+        'not present'."""
+        _, commands = self._run()
+        sg = [c for c in commands if c.startswith("sgdisk")]
+        self.assertIn("-u 2:PROBED-UUID", sg[1])
+        self.assertNotIn("-u", sg[2])
+
+    def test_partition_without_a_readable_partuuid_is_not_split(self):
+        commands = []
+        with self.assertRaises(ValueError) as ctx:
+            _, commands = self._run(probed_partuuid="")
+        self.assertIn("PARTUUID", str(ctx.exception))
+        self.assertEqual([c for c in commands if c.startswith("sgdisk")], [])
 
     def test_4kn_geometry_in_logical_sectors(self):
         # 4K-native disk: sysfs start 2048 (512-byte units) is logical sector
