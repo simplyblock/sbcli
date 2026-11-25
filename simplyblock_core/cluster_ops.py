@@ -1624,6 +1624,49 @@ def _restore_lvstore_statuses(statuses) -> None:
             db_controller.atomic_update(node, lambda n, v=value: setattr(n, "lvstore_status", v))
 
 
+def storage_pool_max_unavailable(cluster, nodes, worker_cap=None) -> int:
+    """How many workers the storage MachineConfigPool may take at once.
+
+    The pool's maxUnavailable is how many machines OpenShift cordons together
+    when it rolls a MachineConfig. The storage can afford ``max_fault_tolerance``
+    units down, and what a unit is depends on the layout:
+
+      * With failure domains on, every node in a domain, and at least as many
+        domains as a stripe has chunks, a domain holds one chunk of a stripe at
+        most. A whole domain down then costs a stripe what one node down costs
+        it, so the pool may take the workers of the ``max_fault_tolerance``
+        largest domains.
+      * Everywhere else a unit is a worker, and the answer is the fault
+        tolerance.
+
+    This is the same rule the operator applies to a maintenance window, and
+    the pool is only the outer bound: OpenShift does not know the domains, so
+    it may cordon workers of several, and the operator then holds back those
+    the storage cannot lose yet.
+
+    ``worker_cap`` is the owner's spec.maxConcurrentWorkerRestarts, counted in
+    workers. It narrows the answer and cannot widen it. Never below one: a pool
+    at zero never rolls a node.
+    """
+    tolerance = max(int(cluster.max_fault_tolerance or 0), 1)
+    limit = tolerance
+
+    nodes = [n for n in nodes if n.status != StorageNode.STATUS_REMOVED]
+    chunks = cluster.distr_ndcs + cluster.distr_npcs
+    if cluster.enable_failure_domain and cluster.distr_npcs >= 1 \
+            and nodes and all(n.failure_domain >= 0 for n in nodes):
+        workers_by_domain: dict[int, set] = {}
+        for node in nodes:
+            workers_by_domain.setdefault(node.failure_domain, set()).add(node.mgmt_ip)
+        if len(workers_by_domain) >= chunks:
+            sizes = sorted((len(workers) for workers in workers_by_domain.values()), reverse=True)
+            limit = sum(sizes[:tolerance])
+
+    if worker_cap:
+        limit = min(limit, int(worker_cap))
+    return max(limit, 1)
+
+
 def _cluster_activate_impl(cl_id, force=False, force_lvstore_create=False, site_activation=None) -> None:
     if site_activation is not None:
         # A site activation never writes the cluster status: nothing to revert.
@@ -2885,14 +2928,17 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False, site_activ
     # The cluster is now active and about to serve IO. During node-add the
     # storage MCP was created wide (= parallel-add count) so the first-time
     # CPU-topology reboots happened in one parallel wave rather than a
-    # serialized queue. Now narrow it to the cluster's fault tolerance so any
-    # future MachineConfig/KubeletConfig rollout never reboots more storage
-    # nodes at once than the data plane can absorb. Done here (success path,
+    # serialized queue. Now narrow it to what the storage can afford to lose
+    # together (storage_pool_max_unavailable) so any future
+    # MachineConfig/KubeletConfig rollout never reboots more storage workers
+    # at once than the data plane can absorb. Done here (success path,
     # before flipping to ACTIVE) so a failed/aborted activation leaves the
     # cluster non-serving with the wide value — harmless, since no data is at
-    # risk until it goes ACTIVE. (Use max_fault_tolerance - 1 instead if you
-    # want headroom for an unplanned failure concurrent with a rollout.)
-    utils.set_storage_mcp_max_unavailable(cl_id, cluster.max_fault_tolerance)
+    # risk until it goes ACTIVE.
+    utils.set_storage_mcp_max_unavailable(cl_id, storage_pool_max_unavailable(
+        cluster, db_controller.get_storage_nodes_by_cluster_id(cl_id),
+        utils.get_max_concurrent_worker_restarts_from_cr(
+            cluster.cr_name, cluster.cr_namespace, cluster.cr_plural)))
 
     # JM mesh gate (2026-08-05 incident: nodes joined via add-node retries
     # activated with peers missing their remote_jm controllers — the cluster

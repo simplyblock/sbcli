@@ -4432,6 +4432,36 @@ def get_max_parallel_node_adds_from_cr(cr_name, cr_namespace, cr_plural="storage
         return None
 
 
+def get_max_concurrent_worker_restarts_from_cr(cr_name, cr_namespace, cr_plural="storageclusters"):
+    """Read spec.maxConcurrentWorkerRestarts from the StorageCluster CR.
+
+    It is the cap the cluster's owner puts on how many workers restart at once,
+    for the sake of whatever else runs on them, and it is counted in workers.
+    Returns None when the cluster has no CR, the cap is unstated, or the CR
+    cannot be read: each of those is a cluster this knows no cap for, and the
+    caller then applies the storage's own limit alone. Never raises, like the
+    pool patch it feeds.
+    """
+    if not cr_name or not cr_namespace:
+        return None
+    try:
+        load_kube_config_with_fallback()
+        cr = client.CustomObjectsApi().get_namespaced_custom_object(
+            group=constants.CR_GROUP,
+            version=constants.CR_VERSION,
+            namespace=cr_namespace,
+            plural=cr_plural or "storageclusters",
+            name=cr_name,
+        )
+    except (ApiException, config.ConfigException) as e:
+        logger.warning(f"Failed to read maxConcurrentWorkerRestarts from CR {cr_name}: {e}")
+        return None
+    value = (cr.get("spec") or {}).get("maxConcurrentWorkerRestarts")
+    if value is None:
+        return None
+    return max(int(value), 1)
+
+
 def patch_cr_status(
         *,
         group: str,
