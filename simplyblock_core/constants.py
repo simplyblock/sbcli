@@ -129,6 +129,29 @@ LBLK_PCI_ALLOWED_PLACEHOLDER = "0000:00:00.0"
 # Queue-depth sampling period enabled on every AIO base bdev so
 # bdev_get_iostat reports queue_depth (feeds the hung-IO watchdog).
 AIO_QD_SAMPLING_PERIOD_US = 100000  # 100 ms
+# Block size of the AIO base bdev of a NEW lblk device. 512e devices (512
+# logical / 4096 physical, e.g. EBS and most array LUNs) would otherwise get
+# 512-byte bdevs, which costs read-modify-write cycles in the device. The
+# logical block size is used only when 4096 is not possible (see
+# utils.choose_aio_block_size). An existing device always keeps the block
+# size it was formatted with (NVMeDevice.aio_block_size): alceml's on-disk
+# layout depends on it.
+AIO_DEFAULT_BLOCK_SIZE = 4096
+# I/O engine of an lblk device's base bdev (NVMeDevice.lblk_io_engine).
+# SPDK's bdev_aio submits every I/O on a block device with RWF_NOWAIT so
+# io_submit never blocks the reactor. device-mapper honours RWF_NOWAIT only
+# when every target in the table does; dm-multipath does not, so every AIO
+# submit to a multipath map fails with EOPNOTSUPP. Device-mapper devices are
+# therefore served by SPDK's io_uring bdev (bdev_uring_create), everything
+# else (whole disks, sd/nvme partitions, md arrays) by bdev_aio. The bdev
+# NAME (aio_<serial>) and NVMeDevice.bdev_type "aio" are the same for both.
+LBLK_IO_ENGINE_AIO = "aio"
+LBLK_IO_ENGINE_URING = "uring"
+LBLK_IO_ENGINES = (LBLK_IO_ENGINE_AIO, LBLK_IO_ENGINE_URING)
+# lsblk TYPE values of device-mapper nodes (multipath map, LVM volume,
+# dm-crypt, other dm). A partition mapped from a multipath map (kpartx) has
+# TYPE "part" but a dm-* kernel name.
+LBLK_DM_TYPES = ("mpath", "lvm", "crypt", "dm")
 # Hung-IO watchdog: consecutive device_monitor polls (DEV_MONITOR_INTERVAL_SEC
 # apart) with queue_depth > 0 and zero completion progress before the device
 # is declared stalled (3 x 10s = 30s — deliberately above kernel SCSI/NVMe
@@ -149,6 +172,10 @@ LBLK_MIN_DEVICES_PER_NODE = 2
 # total selected capacity, floored here, and never more than
 # LBLK_JM_SPLIT_MAX_FRACTION of the unit being split.
 LBLK_JM_MIN_SIZE = 2 * 1024 * 1024 * 1024
+#: lvstore cluster size of a flex-geometry cluster (Cluster.flex_geometry): the
+#: same for every erasure-coding scheme, so its volumes and snapshots keep one
+#: cluster size whatever geometry they are placed with.
+FLEX_GEOMETRY_LVS_CLUSTER_SIZE = 8 * 1024 * 1024
 LBLK_JM_SPLIT_MAX_FRACTION = 0.5
 
 PMEM_DIR = '/tmp/pmem'
@@ -321,6 +348,32 @@ TASK_LEASE_TTL_SEC = 180
 # spdk_process_start calls replacing each other's container mid-restart).
 RESTART_CLAIM_HEARTBEAT_SEC = TASK_LEASE_HEARTBEAT_SEC
 RESTART_CLAIM_TTL_SEC = TASK_LEASE_TTL_SEC
+
+# Stretched control plane (docs/stretched-control-plane.md): a control plane
+# on each of a cluster's two sites over one FoundationDB, one of them leading.
+# The leader's lease agent renews the ControlPlaneLease every
+# CONTROL_PLANE_LEASE_RENEW_SEC with a TTL of CONTROL_PLANE_LEASE_TTL_SEC; a
+# planned move drains the holder for CONTROL_PLANE_DRAIN_SEC (its services
+# observe the drain and stop) before the lease is released. Services and the
+# API read the lease through a cache of CONTROL_PLANE_MODE_CACHE_SEC, and the
+# agent treats CONTROL_PLANE_DISCONNECT_FAILURES consecutive FoundationDB
+# failures as "disconnected" (the site lost the database's majority).
+CONTROL_PLANE_LEASE_TTL_SEC = 10
+CONTROL_PLANE_LEASE_RENEW_SEC = 3
+CONTROL_PLANE_DRAIN_SEC = 6
+CONTROL_PLANE_MODE_CACHE_SEC = 1.0
+CONTROL_PLANE_DISCONNECT_FAILURES = 3
+# The environment variable naming the site this control plane runs in; on
+# Kubernetes the operator sets it on every control-plane pod. A Docker
+# management node falls back to its MgmtNode record (by hostname).
+CONTROL_PLANE_SITE_ENV = "SB_CONTROL_PLANE_SITE"
+# Docker Swarm: the service template hands every control-plane container
+# the hostname of the manager it runs on, which is how a container finds
+# its MgmtNode record (and so its site); a container's own hostname is its id.
+CONTROL_PLANE_NODE_HOSTNAME_ENV = "NODE_HOSTNAME"
+# The readiness gates of a planned leadership move: the target site's
+# FoundationDB region may lag the primary by at most this many seconds.
+CONTROL_PLANE_MAX_FDB_LAG_SEC = 1.0
 
 # Node-add concurrency: the cross-node mesh section of add_node is serialized
 # per cluster behind a DbLock named "cluster_add/<cluster_id>". Cluster
@@ -711,6 +764,41 @@ REPL_CUTOVER_FREEZE_MAX_ROUND_SEC = (REPL_CUTOVER_FINAL_STEP_LIMIT_SEC
 # released, the volume replicates on its ordinary cadence, and the endgame is
 # retried after this long (the abandon burns one attempt of the task's budget).
 REPL_CUTOVER_ENDGAME_BACKOFF_SEC = 300
+# --- a migration must not fill its source cluster (bed bf29, 2026-11-20) ---
+# Five endgames of one source cluster at once, under sustained overwrite, took
+# a shrink snapshot every 15-30 s each; every one pinned what the client
+# overwrote after it, and their deletions fell behind: 41% -> 99% in 16 min.
+# See simplyblock_core/migration_space.py. These hold back only the
+# migration's own snapshots -- never client IO or client volume creation.
+#
+# Cutover endgames (shrink-round phase) running at once per SOURCE cluster.
+# The others replicate on their ordinary cadence while they wait for a slot.
+REPL_CUTOVER_MAX_ENDGAMES_PER_CLUSTER = 1
+# An endgame takes its next round snapshot only once none of the volume's
+# snapshots is still in deletion -- for at most this long per wait: a deletion
+# that is stuck (no leader, a clone in deletion) must not stall the endgame
+# into its shrink deadline on its own. The free-space check still applies.
+REPL_ENDGAME_DELETION_WAIT_MAX_SEC = 300
+# A migration snapshot needs this many times the bytes written to the volume
+# since its last snapshot free on the source (the snapshot pins them, and the
+# client overwrites about as much again while the round transfers) ...
+REPL_MIGRATION_HEADROOM_FACTOR = 2
+# ... and never less than this share of the cluster (other volumes' writes,
+# and the capacity record being up to a collector interval old).
+REPL_MIGRATION_MIN_FREE_PCT = 5
+# A cluster capacity record older than this is no reading (the collector
+# writes one every DEV_STAT_COLLECTOR_INTERVAL_SEC).
+REPL_MIGRATION_CAPACITY_STALE_SEC = 120
+# Without a usable capacity reading a migration snapshot waits this long, then
+# goes ahead without the check (logged): a broken stats collector must not
+# stop migrations for good.
+REPL_MIGRATION_CAPACITY_UNKNOWN_WAIT_SEC = 120
+# A cutover endgame whose target node is down before its clone exists cannot
+# progress, and holds its volume out of ordinary replication while it waits
+# (bed bf29 R3b: RPO 1280 s). After this long it is given up -- no attempt
+# burned, no back-off -- and the volume replicates on its cadence until the
+# target is back.
+REPL_CUTOVER_TARGET_DOWN_GRACE_SEC = 60
 # --- cutover source throttle ----------------------------------------------
 # A round converges to overhead / (1 - W/T): with the application writing at
 # W and the delta transferring at T, no number of rounds gets under the
@@ -896,6 +984,14 @@ REPL_MERGE_ALERT_EVERY_SEC = 600.0
 # leader within about a minute of its primary going down (crashed or shut
 # down); a wait beyond this means no member could be proven safe to lead.
 REPL_TARGET_LEADERLESS_ALERT_SEC = 180
+# A transfer that has waited this long for a target lvstore whose members are
+# ALL online asks the control plane's guarded leaderless recovery
+# (storage_node_ops.restore_healthy_lvs_leadership) to give it a leader, then
+# at most every REPL_TARGET_LEADERLESS_RECOVER_EVERY_SEC. A primary SPDK that
+# dropped the leadership itself takes it back only on IO, and a target gets
+# none while replication waits (bf32 2026-11-21: LVS_7/LVS_10, 76 min).
+REPL_TARGET_LEADERLESS_RECOVER_SEC = 60
+REPL_TARGET_LEADERLESS_RECOVER_EVERY_SEC = 120
 # Pass interval of the snapshot replication runner while any transfer or
 # merge is in flight; TASK_EXEC_INTERVAL_SEC when idle. Not sub-second: each
 # pass reads the task table (see test_transfer_completion_latency).
@@ -911,6 +1007,13 @@ REPL_ACTIVE_PASS_SEC = 1.0
 REPL_RUNNER_WORKERS = int(os.getenv("REPL_RUNNER_WORKERS", "8"))
 # Pause before a task that returned a failure is dispatched again.
 REPL_RUNNER_RETRY_PAUSE_SEC = 3.0
+# An in_creation landing volume (REP_*) whose create is not running in this
+# runner and that no other live task of its snapshot may be creating is taken
+# for a dead attempt's leftover and deleted only after this long. Landing
+# creates take up to ~50 s on a loaded target (bed bf13); bed bf32 (2026-11-21)
+# deleted one 2 s into its create, which left a stale registration on the
+# secondaries.
+REPL_LANDING_ABANDON_SEC = int(os.getenv("REPL_LANDING_ABANDON_SEC", "600"))
 # Requests a replication transfer keeps in flight. A full transfer sends one
 # whole cluster per request (16 x 2 MiB = 32 MiB in flight); a delta
 # (allow_partial) sends at most 64 KiB per request, so it needs a deeper window
@@ -1294,6 +1397,93 @@ QOS_REPLICATION_WIRE_CLASS = QOS_REPLICATION_CLASS_ID + 1
 qos_class_replication_weight_percent = 10
 
 MIG_PARALLEL_JOBS = 64
+# Send the placement anti-affinity floor to the data plane (affinity_floor on
+# distr_migration_*_start, allow_device_colocation on bdev_distrib_create).
+# Flip to True once the ultra feat/affinity-floor data plane is deployed;
+# older data planes reject unknown RPC parameters.
+DISTR_AFFINITY_FLOOR_RPC = False
+
+# Multi-attach array LUN mode (cluster.multi_attach). None of these apply to
+# a regular cluster.
+# Peers' controllers to a multi-attach device hold I/O this long while no
+# path is available (per-controller ctrlr_loss_timeout_sec), so a takeover
+# that adds the LUN's new export as a path within the window resumes I/O
+# instead of failing it. The cluster-wide bdev_nvme defaults (1 s) stay.
+# It must cover the slowest takeover: the regular monitor's detection of the
+# node (~20 s) when the fast probe (MULTI_ATTACH_PROBE_*) did not trigger, and
+# the takeover up to its MULTI_ATTACH_TAKEOVER_DEADLINE_SEC. The I/O stall of a
+# takeover started by the fast probe is a few seconds.
+MULTI_ATTACH_HOLD_SEC = 150
+MULTI_ATTACH_RECONNECT_DELAY_SEC = 2
+MULTI_ATTACH_FAST_IO_FAIL_SEC = MULTI_ATTACH_HOLD_SEC
+# The alceml of a multi-attach device fails its pending I/O and unregisters
+# after this long without completion (bdev_alceml_create stuck_io_timeout_ms;
+# the data-plane default is 4000 ms). It must exceed the multipath path
+# failover below the LUN and stay below MULTI_ATTACH_HOLD_SEC, so a stuck
+# owner instance is gone before the peers stop waiting.
+MULTI_ATTACH_ALCEML_STUCK_IO_MS = 60000
+# Controller-ID ranges of multi-attach device subsystems: a node with
+# cntlid_block i exports with cntlids [i*64+1, i*64+64]. SPDK multipath needs
+# distinct cntlids across the paths of one controller, and a LUN may be
+# exported by any node. Valid NVMe cntlids end at 0xFFEF.
+MULTI_ATTACH_CNTLID_BLOCK_SIZE = 64
+MULTI_ATTACH_MAX_CNTLID = 0xFFEF
+MULTI_ATTACH_MAX_NODES = 1022
+# A LUN takeover (controllers/lun_takeover) must finish well inside the
+# peers' hold, or their I/O fails before the new path exists; it gives up at
+# this deadline (seconds from its start) and the device goes unavailable.
+MULTI_ATTACH_TAKEOVER_DEADLINE_SEC = 90
+# Fence a lost node's LUN with an NVMe/SCSI persistent reservation instead of
+# waiting for the array to detach it: every multi-attach alceml registers a
+# key (multi_attach.reservation_key), the owner holds the reservation, and a
+# takeover's alceml preempts it at open (ultra #236), in milliseconds. The
+# array fence (EBS force-detach: 0.5-4 s, longer with several LUNs of one
+# node) then follows off the I/O path. Needs an array plugin that reports
+# supports_reservations and an ultra data plane with LUN failover.
+MULTI_ATTACH_RESERVATIONS = True
+# A takeover waits this long for its alceml to report the reservation taken.
+MULTI_ATTACH_ACTIVATION_WAIT_SEC = 5
+# Warm standby (Cluster.multi_attach_warm_standby): ms between two refreshes
+# of a standby alceml's page map from the LUN's region counters (ultra #236,
+# refresh_interval_ms; the data plane's default is the same).
+MULTI_ATTACH_WARM_REFRESH_MS = 2000
+# Warm standby diagnostics: at a warm activation the data plane reads every
+# page header once more, compares it with the warm map, logs each difference
+# and falls back to the full reload (ultra warm_verify). Costs a cold
+# activation's header scan, so it is off unless the control plane runs with
+# SIMPLYBLOCK_WARM_VERIFY=1 (verified clean on the 2026-11-23 FTT2 beds:
+# 70+ warm activations, no difference).
+MULTI_ATTACH_WARM_VERIFY = os.environ.get("SIMPLYBLOCK_WARM_VERIFY") == "1"
+# How often the storage-node monitor reconciles a node's warm standbys
+# (lun_takeover.ensure_warm_standbys), per node.
+MULTI_ATTACH_WARM_STANDBY_INTERVAL_SEC = 30
+# Client keep-alive on multi-attach clusters: a node lost without closing its
+# connections (hard reset, network cut) leaves its own volumes' paths dead
+# until the host's keep-alive notices, 1-2 intervals: 8 s took 10-14 s on the
+# bed. 3 s bounds that to 3-6 s.
+MULTI_ATTACH_CLIENT_KEEP_ALIVE_TO = 3
+# A multi-attach device's I/O error event raised this long after a takeover
+# of its LUN is taken as the old path's failure, not the device's
+# (main_distr_event_collector): the takeover switches every node's path.
+MULTI_ATTACH_TAKEOVER_PATH_ERROR_GRACE_MS = 15000
+# Fast loss detection of a node serving LUNs (services/lun_watchdog). With
+# 1+0 every volume waits on a lost node's LUN until its takeover, so the
+# takeover starts from this probe, not from the node's status: the OFFLINE
+# verdict took minutes on the multi-attach bed. The node's SPDK RPC is probed
+# every PROBE_INTERVAL with PROBE_TIMEOUT, together with its node agent. A
+# node is lost when its agent reports SPDK not running (at once), or when
+# neither SPDK nor the agent has answered for LOST_AFTER. The fence comes
+# first, so a takeover of a node that is alive behind a management network
+# fault is safe; it costs a short I/O pause on its LUNs.
+MULTI_ATTACH_PROBE_INTERVAL_SEC = 0.5
+MULTI_ATTACH_PROBE_TIMEOUT_SEC = 0.8
+MULTI_ATTACH_LOST_AFTER_SEC = 2.0
+# The array connection a fence uses is kept this long (a new one validates
+# the credentials first: about a second on EBS).
+ARRAY_PLUGIN_CACHE_SEC = 600
+# Lease of a running takeover (one per LUN, in FDB): a holder older than this
+# is presumed dead.
+MULTI_ATTACH_TAKEOVER_LOCK_TTL_SEC = 2 * MULTI_ATTACH_TAKEOVER_DEADLINE_SEC
 MIG_JOB_SIZE = 64
 
 # Sync-replication resync (tasks_runner_sync_resync): the shared task driver
@@ -1467,11 +1657,16 @@ TWO_NODE_LEASE_RENEW_MS = 250
 TWO_NODE_LEASE_MARGIN_MS = 500
 TWO_NODE_STABLE_FOR_S = 30
 TWO_NODE_WAIT_TIMEOUT_MS = 20000
+#: jc_wait_events max events per answer (contract section 3.7).
+TWO_NODE_COLLECTOR_MAX_EVENTS = 256
+#: How often the collector re-reads cluster/node topology to start or stop
+#: per-node collector threads.
+TWO_NODE_COLLECTOR_RECONCILE_S = 5
 TWO_NODE_VERDICT_HISTORY = 50
 #: Arbiter decision loop period (events are folded and decided every tick).
 TWO_NODE_DECISION_TICK_MS = 100
 #: With no cluster that has ``two_node_arbitration`` on, the arbiter (and the
-#: Go event collector) re-scan the cluster list only this often instead of every
+#: event collector) re-scan the cluster list only this often instead of every
 #: tick, so deployments without two-node clusters carry almost no FDB load.
 TWO_NODE_IDLE_RESCAN_S = 30
 #: How often the arbiter re-reads each node's ``jc_ha_status`` and replaces its

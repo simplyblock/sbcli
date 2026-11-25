@@ -31,6 +31,7 @@ from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCException
+from simplyblock_core.utils import lvstore_cluster_size as utils_lvstore_cluster_size
 
 logger = logging.getLogger()
 
@@ -188,7 +189,8 @@ def build_manifest(backup: Backup) -> backup_manifest.BackupManifest:
         # collector: the manifest records object sizes derived from it, and a
         # cluster that records no data-chunk count falls back to one page
         # rather than describing its objects as zero-sized.
-        cluster_size = cluster.page_size_in_blocks * max(cluster.distr_ndcs, 1)
+        cluster_size = utils_lvstore_cluster_size(
+            cluster.flex_geometry is True, cluster.distr_ndcs, cluster.page_size_in_blocks)
 
     return backup_manifest.BackupManifest(
         backup_id=UUID(backup.uuid),

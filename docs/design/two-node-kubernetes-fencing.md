@@ -233,7 +233,7 @@ survivor then provably runs alone. The storage never decides; it waits for that 
 ### 4.2 Control plane
 
 - The arbiter does not act on the cluster at all: no leases, epochs, grants, fences, unfences,
-  heals or leadership restoration. The Go collector does not poll its nodes (the node agent owns
+  heals or leadership restoration. The collector does not poll its nodes (the node agent owns
   the single `jc_wait_events` waiter), legacy remote-JM events are not queued for the arbiter, and
   no planned-loss markers are written.
 - `jc_set_dual_node` still carries the full arbitration config on every call (node add, restart
@@ -322,7 +322,7 @@ Read-only; the agent never asks Pacemaker to fence. In order of preference:
 | sbcli | settings, `client_host_nqns`, `host_fences`, API (section 3.5) | both |
 | sbcli | host fence lifecycle in the arbiter (section 3.2) | witness |
 | sbcli | winner policy for partitions (section 3.3) | witness |
-| sbcli | `pacemaker` gates: arbiter, Go collector, event queue, planned loss (section 4.2) | pacemaker |
+| sbcli | `pacemaker` gates: arbiter, collector, event queue, planned loss (section 4.2) | pacemaker |
 | operator | fence agent DaemonSet, `StorageFenced`, `StorageFenceRemediation(Template)` CRDs + controller, NHC sample, release protocol | both |
 | operator | node agent duties of section 4.3, Pacemaker readers of section 4.5 | pacemaker |
 | ultra + SPDK fork | grant lifts a self-fence (section 4.4) | pacemaker |

@@ -144,6 +144,9 @@ def test_runner_skips_a_task_that_vanished_before_dispatch(monkeypatch):
         def get_job_tasks(self, cluster_id, reverse=False):
             return [_Task()]
 
+        def get_replication_tasks_for_snapshot(self, snapshot_id):
+            return [_Task()]
+
         def get_task_by_id(self, uuid):
             raise KeyError(f"Task {uuid} not found")   # vanished before the re-read
 

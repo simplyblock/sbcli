@@ -62,8 +62,22 @@ def connected_hosts(nqn: str, node_ids: Iterable[str], db=None) -> set | None:
 
 def stranded_hosts(nqn: str, removing: Iterable[str], keeping: Iterable[str],
                    db=None) -> set | None:
-    """Hosts connected to *nqn* on the *removing* nodes but on none of the
-    *keeping* nodes; None when that could not be established."""
+    """Hosts connected to *nqn* on the *removing* nodes that have no controller
+    on the *keeping* nodes; None when that could not be established.
+
+    A host NQN does not identify a machine: one Kubernetes node connects with
+    the kernel default (``/etc/nvme/hostnqn``) on one path and with the
+    simplyblock form derived from its node UID on another (bed bf28,
+    2026-11-19: every client reached the source as
+    ``nqn.2014-08.io.simplyblock:uuid:<node uid>`` and the early-prepared
+    target as ``nqn.2014-08.org.nvmexpress:uuid:<machine id>``, with different
+    host ids), and nothing records which forms belong together. So hosts are
+    matched by name where they can be, and every unmatched host on the keeping
+    side is taken to be one unmatched host of the removing side under its
+    other name. Hosts are stranded only when the removing side has more
+    unmatched hosts than the keeping side can account for; all of the removing
+    side's unmatched hosts are then reported, since which of them is the
+    stranded one cannot be told."""
     gone = connected_hosts(nqn, removing, db=db)
     if gone is None:
         return None
@@ -72,7 +86,10 @@ def stranded_hosts(nqn: str, removing: Iterable[str], keeping: Iterable[str],
     stay = connected_hosts(nqn, keeping, db=db)
     if stay is None:
         return None
-    return gone - stay
+    unmatched_gone, unmatched_stay = gone - stay, stay - gone
+    if len(unmatched_gone) <= len(unmatched_stay):
+        return set()
+    return unmatched_gone
 
 
 def removal_blocked(nqn: str, removing: Iterable[str], keeping: Iterable[str],

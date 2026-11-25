@@ -5,7 +5,10 @@ Tests cover all FTT scenarios:
   - FTT=1 (npcs=1): block if any node not online or journal replicating
   - FTT=2 (npcs=2, ft=2): allow one not-online, block at two
   - npcs=2, ft=1: like FTT=2 plus primary-secondary pair constraint
-  - Rebalancing: block based on headroom (active_nodes - ndcs - npcs)
+  - Resource floors (simplyblock_core.floors) are judged last: the removal is
+    refused when the cluster without the node would be below a floor. The
+    FTT tests below patch the floors out (their fixtures model the FTT rule
+    with as few nodes as it takes); TestFloorGate exercises the gate itself.
   - Journal replication counts as one additional not-online node
   - REMOVED and IN_CREATION nodes are excluded from counts
 """
@@ -13,7 +16,11 @@ Tests cover all FTT scenarios:
 import unittest
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+from simplyblock_core import storage_node_ops
 from simplyblock_core.models.cluster import Cluster
+from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCConnectionError
 from simplyblock_core.storage_node_ops import _check_ftt_allows_node_removal
@@ -76,6 +83,30 @@ def _set_jm_replicating(node):
     """Make a node report active journal replication."""
     rpc = node.rpc_client()
     rpc.jc_get_jm_status.return_value = {"jm1": False}
+
+
+def _with_devices(node, count=1):
+    """Give a mock node ``count`` online data devices (the floor gate counts them)."""
+    devs = []
+    for i in range(count):
+        d = MagicMock(spec=NVMeDevice)
+        d.status = NVMeDevice.STATUS_ONLINE
+        d.get_id = MagicMock(return_value=f"{node.get_id()}-dev-{i}")
+        devs.append(d)
+    node.nvme_devices = devs
+    return node
+
+
+@pytest.fixture(autouse=True)
+def _floors_out_of_the_ftt_tests(request):
+    """The FTT fixtures are sized for the FTT rule alone; the resource floors
+    (n+2k nodes, one data device per node, ...) are a separate gate with its
+    own tests (TestFloorGate), so they are patched out everywhere else."""
+    if request.cls is not None and request.cls.__name__ == "TestFloorGate":
+        yield
+        return
+    with patch.object(storage_node_ops.floors, "evaluate", return_value=[]):
+        yield
 
 
 # ---------------------------------------------------------------------------
@@ -278,101 +309,6 @@ class TestNpcs2Ft1(unittest.TestCase):
         allowed, reason = _check_ftt_allows_node_removal("n1", db)
         self.assertFalse(allowed)
         self.assertIn("npcs=2/ft=1", reason)
-
-
-# ---------------------------------------------------------------------------
-# Rebalancing
-# ---------------------------------------------------------------------------
-
-class TestRebalancing(unittest.TestCase):
-
-    def test_rebalancing_exact_minimum_nodes_blocks(self):
-        """ndcs=2, npcs=1: minimum=3. With exactly 3 nodes and rebalancing → block."""
-        cl = _cluster(npcs=1, ndcs=2, ft=1, rebalancing=True)
-        nodes = [_node("n1"), _node("n2"), _node("n3")]
-        db = _db(cl, nodes)
-        allowed, reason = _check_ftt_allows_node_removal("n1", db)
-        self.assertFalse(allowed)
-        self.assertIn("rebalancing", reason)
-
-    def test_rebalancing_one_above_minimum_allows(self):
-        """ndcs=2, npcs=1: minimum=3. With 4 nodes and rebalancing → allowed."""
-        cl = _cluster(npcs=1, ndcs=2, ft=1, rebalancing=True)
-        nodes = [_node("n1"), _node("n2"), _node("n3"), _node("n4")]
-        db = _db(cl, nodes)
-        allowed, _ = _check_ftt_allows_node_removal("n1", db)
-        self.assertTrue(allowed)
-
-    def test_rebalancing_one_above_min_but_one_offline_blocks(self):
-        """ndcs=2, npcs=1: 4 nodes, 1 offline, rebalancing → headroom=1, not_online=1 → block."""
-        cl = _cluster(npcs=1, ndcs=2, ft=1, rebalancing=True)
-        nodes = [_node("n1"), _node("n2"), _node("n3"),
-                 _node("n4", status=StorageNode.STATUS_OFFLINE)]
-        db = _db(cl, nodes)
-        allowed, reason = _check_ftt_allows_node_removal("n1", db)
-        self.assertFalse(allowed)
-        self.assertIn("rebalancing", reason)
-
-    def test_rebalancing_two_above_min_one_offline_allows_ftt2(self):
-        """ndcs=2, npcs=2, ft=2: 6 nodes, 1 offline, rebalancing → headroom=2, not_online=1 → allowed."""
-        cl = _cluster(npcs=2, ndcs=2, ft=2, rebalancing=True)
-        nodes = [_node("n1"), _node("n2"), _node("n3"), _node("n4"),
-                 _node("n5"), _node("n6", status=StorageNode.STATUS_OFFLINE)]
-        db = _db(cl, nodes)
-        allowed, _ = _check_ftt_allows_node_removal("n1", db)
-        self.assertTrue(allowed)
-
-    def test_rebalancing_npcs2_exact_minimum_blocks(self):
-        """ndcs=2, npcs=2: minimum=4. With exactly 4 nodes and rebalancing → block."""
-        cl = _cluster(npcs=2, ndcs=2, ft=2, rebalancing=True)
-        nodes = [_node("n1"), _node("n2"), _node("n3"), _node("n4")]
-        db = _db(cl, nodes)
-        allowed, reason = _check_ftt_allows_node_removal("n1", db)
-        self.assertFalse(allowed)
-        self.assertIn("rebalancing", reason)
-
-    def test_rebalancing_npcs2_one_above_allows_first(self):
-        """ndcs=2, npcs=2: 5 nodes, rebalancing → headroom=1, not_online=0 → allowed."""
-        cl = _cluster(npcs=2, ndcs=2, ft=2, rebalancing=True)
-        nodes = [_node(f"n{i}") for i in range(5)]
-        db = _db(cl, nodes)
-        allowed, _ = _check_ftt_allows_node_removal("n0", db)
-        self.assertTrue(allowed)
-
-    def test_rebalancing_npcs2_one_above_blocks_second(self):
-        """ndcs=2, npcs=2: 5 nodes, 1 offline, rebalancing → headroom=1, not_online=1 → block."""
-        cl = _cluster(npcs=2, ndcs=2, ft=2, rebalancing=True)
-        nodes = [_node("n1"), _node("n2"), _node("n3"), _node("n4"),
-                 _node("n5", status=StorageNode.STATUS_OFFLINE)]
-        db = _db(cl, nodes)
-        allowed, reason = _check_ftt_allows_node_removal("n1", db)
-        self.assertFalse(allowed)
-        self.assertIn("rebalancing", reason)
-
-    def test_not_rebalancing_exact_minimum_allows(self):
-        """Same scenario but NOT rebalancing → rebalancing check doesn't apply."""
-        cl = _cluster(npcs=1, ndcs=2, ft=1, rebalancing=False)
-        nodes = [_node("n1"), _node("n2"), _node("n3")]
-        db = _db(cl, nodes)
-        allowed, _ = _check_ftt_allows_node_removal("n1", db)
-        self.assertTrue(allowed)
-
-    def test_rebalancing_removed_nodes_excluded(self):
-        """Removed nodes don't count as active, reducing headroom."""
-        cl = _cluster(npcs=1, ndcs=2, ft=1, rebalancing=True)
-        # 4 nodes but one is removed → 3 active → exact minimum → block
-        nodes = [_node("n1"), _node("n2"), _node("n3"),
-                 _node("n4", status=StorageNode.STATUS_REMOVED)]
-        db = _db(cl, nodes)
-        allowed, reason = _check_ftt_allows_node_removal("n1", db)
-        self.assertFalse(allowed)
-        self.assertIn("rebalancing", reason)
-
-
-# ---------------------------------------------------------------------------
-# Edge cases
-# ---------------------------------------------------------------------------
-
 class TestEdgeCases(unittest.TestCase):
 
     def test_node_not_found(self):
@@ -849,73 +785,6 @@ class TestFailureDomainAwareCapacity(unittest.TestCase):
         allowed, reason = _check_ftt_allows_node_removal("n1", db)
         self.assertFalse(allowed)
         self.assertIn("FTT=1", reason)
-
-
-# ---------------------------------------------------------------------------
-# Rebalancing additional scenarios
-# ---------------------------------------------------------------------------
-
-class TestRebalancingAdditional(unittest.TestCase):
-
-    def test_rebalancing_ndcs4_npcs2_six_nodes_blocks(self):
-        """ndcs=4, npcs=2: minimum=6. With 6 nodes, rebalancing → headroom=0 → block."""
-        cl = _cluster(npcs=2, ndcs=4, ft=2, rebalancing=True)
-        nodes = [_node(f"n{i}") for i in range(6)]
-        db = _db(cl, nodes)
-        allowed, reason = _check_ftt_allows_node_removal("n0", db)
-        self.assertFalse(allowed)
-        self.assertIn("rebalancing", reason)
-
-    def test_rebalancing_ndcs4_npcs2_seven_nodes_allows(self):
-        """ndcs=4, npcs=2: minimum=6. With 7 nodes, rebalancing → headroom=1 → allowed."""
-        cl = _cluster(npcs=2, ndcs=4, ft=2, rebalancing=True)
-        nodes = [_node(f"n{i}") for i in range(7)]
-        db = _db(cl, nodes)
-        allowed, _ = _check_ftt_allows_node_removal("n0", db)
-        self.assertTrue(allowed)
-
-    def test_rebalancing_ndcs1_npcs1_two_nodes_blocks(self):
-        """ndcs=1, npcs=1: minimum=2. With 2 nodes, rebalancing → block."""
-        cl = _cluster(npcs=1, ndcs=1, ft=1, rebalancing=True)
-        nodes = [_node("n1"), _node("n2")]
-        db = _db(cl, nodes)
-        allowed, reason = _check_ftt_allows_node_removal("n1", db)
-        self.assertFalse(allowed)
-        self.assertIn("rebalancing", reason)
-
-    def test_rebalancing_ndcs1_npcs1_three_nodes_allows(self):
-        """ndcs=1, npcs=1: minimum=2. With 3 nodes, rebalancing → allowed."""
-        cl = _cluster(npcs=1, ndcs=1, ft=1, rebalancing=True)
-        nodes = [_node("n1"), _node("n2"), _node("n3")]
-        db = _db(cl, nodes)
-        allowed, _ = _check_ftt_allows_node_removal("n1", db)
-        self.assertTrue(allowed)
-
-    def test_rebalancing_in_creation_not_counted_as_active(self):
-        """in_creation nodes reduce active count, reducing headroom."""
-        cl = _cluster(npcs=1, ndcs=2, ft=1, rebalancing=True)
-        # 4 nodes but 1 in_creation → 3 active → minimum → block
-        nodes = [_node("n1"), _node("n2"), _node("n3"),
-                 _node("n4", status=StorageNode.STATUS_IN_CREATION)]
-        db = _db(cl, nodes)
-        allowed, reason = _check_ftt_allows_node_removal("n1", db)
-        self.assertFalse(allowed)
-
-    def test_rebalancing_check_happens_before_ftt_check(self):
-        """Even if FTT would allow it, rebalancing with no headroom blocks."""
-        cl = _cluster(npcs=2, ndcs=2, ft=2, rebalancing=True)
-        # 4 nodes, all online, FTT=2 would allow but rebalancing blocks (headroom=0)
-        nodes = [_node(f"n{i}") for i in range(4)]
-        db = _db(cl, nodes)
-        allowed, reason = _check_ftt_allows_node_removal("n0", db)
-        self.assertFalse(allowed)
-        self.assertIn("rebalancing", reason)
-
-
-# ---------------------------------------------------------------------------
-# Reason string validation
-# ---------------------------------------------------------------------------
-
 class TestReasonStrings(unittest.TestCase):
 
     def test_ftt1_reason_includes_count(self):
@@ -938,15 +807,6 @@ class TestReasonStrings(unittest.TestCase):
         allowed, reason = _check_ftt_allows_node_removal("n1", db)
         self.assertFalse(allowed)
         self.assertIn("2 not-online", reason)
-
-    def test_rebalancing_reason_includes_node_counts(self):
-        cl = _cluster(npcs=1, ndcs=2, ft=1, rebalancing=True)
-        nodes = [_node("n1"), _node("n2"), _node("n3")]
-        db = _db(cl, nodes)
-        allowed, reason = _check_ftt_allows_node_removal("n1", db)
-        self.assertFalse(allowed)
-        self.assertIn("3 active nodes", reason)
-        self.assertIn("rebalancing", reason)
 
     def test_pair_reason_includes_node_ids(self):
         cl = _cluster(npcs=2, ft=1)
@@ -1099,3 +959,85 @@ class TestFencedOwnSecondary(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# Resource floors: the cluster after the removal must stay at or above them
+# ---------------------------------------------------------------------------
+
+class TestFloorGate(unittest.TestCase):
+    """2+1: node floor n+2k = 4, data-device floor 4 (n+k = 3 with
+    raid_devices), one data device per node."""
+
+    def _nodes(self, count, devices=1):
+        return [_with_devices(_node(f"n{i}"), devices) for i in range(count)]
+
+    def test_removal_that_leaves_the_node_floor_is_allowed(self):
+        cl = _cluster(npcs=1, ndcs=2, ft=1)
+        db = _db(cl, self._nodes(5, devices=2))
+        allowed, reason = _check_ftt_allows_node_removal("n1", db)
+        self.assertTrue(allowed, reason)
+
+    def test_removal_below_the_node_floor_is_refused_and_named(self):
+        cl = _cluster(npcs=1, ndcs=2, ft=1)
+        db = _db(cl, self._nodes(4, devices=2))
+        allowed, reason = _check_ftt_allows_node_removal("n1", db)
+        self.assertFalse(allowed)
+        self.assertIn("nodes online 3 < floor 4 (n+2k)", reason)
+
+    def test_removal_below_the_data_device_floor_is_refused(self):
+        cl = _cluster(npcs=1, ndcs=2, ft=1)
+        nodes = self._nodes(5, devices=1)
+        # Without n1 four devices remain -- the floor. Take one away.
+        nodes[4].nvme_devices = []
+        db = _db(cl, nodes)
+        allowed, reason = _check_ftt_allows_node_removal("n1", db)
+        self.assertFalse(allowed)
+        self.assertIn("node n4 has 0 online data devices < floor 1", reason)
+        self.assertIn("data devices online 3 < floor 4 (n+2k)", reason)
+
+    def test_raid_devices_lowers_the_data_device_floor(self):
+        cl = _cluster(npcs=1, ndcs=2, ft=1)
+        cl.raid_devices = True
+        nodes = self._nodes(5, devices=1)
+        nodes[4].nvme_devices = []
+        db = _db(cl, nodes)
+        allowed, reason = _check_ftt_allows_node_removal("n1", db)
+        # The per-node floor still refuses; the cluster-wide one no longer does.
+        self.assertFalse(allowed)
+        self.assertIn("node n4 has 0 online data devices", reason)
+        self.assertNotIn("data devices online", reason)
+
+    def test_journal_device_does_not_count(self):
+        cl = _cluster(npcs=1, ndcs=2, ft=1)
+        nodes = self._nodes(5, devices=1)
+        jm = MagicMock(spec=NVMeDevice)
+        jm.status = NVMeDevice.STATUS_JM
+        jm.get_id = MagicMock(return_value="n4-jm")
+        nodes[4].nvme_devices = [jm]
+        db = _db(cl, nodes)
+        allowed, reason = _check_ftt_allows_node_removal("n1", db)
+        self.assertFalse(allowed)
+        self.assertIn("node n4 has 0 online data devices", reason)
+
+    def test_rebalancing_no_longer_adds_a_headroom_rule(self):
+        """The former headroom formula (active nodes - (ndcs+npcs)) is gone:
+        with the floors satisfied a rebalance does not block the removal."""
+        cl = _cluster(npcs=1, ndcs=2, ft=1, rebalancing=True)
+        db = _db(cl, self._nodes(5, devices=2))
+        allowed, reason = _check_ftt_allows_node_removal("n1", db)
+        self.assertTrue(allowed, reason)
+
+    def test_failure_domain_floor(self):
+        cl = _cluster(npcs=1, ndcs=2, ft=1, enable_failure_domain=True)
+        # Six nodes in three domains: removing n0 leaves domains {0,1,2} = n+k.
+        nodes = [_with_devices(_node(f"n{i}", failure_domain=i % 3), 1) for i in range(6)]
+        db = _db(cl, nodes)
+        allowed, reason = _check_ftt_allows_node_removal("n0", db)
+        self.assertTrue(allowed, reason)
+        # Two domains only: below the n+k = 3 domain floor.
+        nodes = [_with_devices(_node(f"n{i}", failure_domain=i % 2), 1) for i in range(6)]
+        db = _db(cl, nodes)
+        allowed, reason = _check_ftt_allows_node_removal("n0", db)
+        self.assertFalse(allowed)
+        self.assertIn("failure domains online 2 < floor 3 (n+k)", reason)

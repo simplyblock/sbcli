@@ -144,6 +144,20 @@ def snode_rpc_timeout(node, timeout_seconds, caused_by=ec.CAUSED_BY_MONITOR):
         node_id=node.get_id())
 
 
+def snode_port_check_correlated(node, reason, caused_by=ec.CAUSED_BY_MONITOR):
+    """Multi-attach clusters: more nodes than the cluster tolerates fail only
+    their port check at once; none of them is set DOWN for it."""
+    ec.log_event_cluster(
+        cluster_id=node.cluster_id,
+        domain=ec.DOMAIN_CLUSTER,
+        event=ec.EVENT_STATUS_CHANGE,
+        db_object=node,
+        caused_by=caused_by,
+        event_level=EventObj.LEVEL_ERROR,
+        message=f"Port checks failing cluster-wide, nodes not set down: {reason}",
+        node_id=node.get_id())
+
+
 def snode_orphaned_objects(node, orphans, caused_by=ec.CAUSED_BY_MONITOR):
     """Raised by the lvol monitor's orphan sweep: lvstore objects exist on this
     node with no record in the database. Detect-only — see

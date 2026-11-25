@@ -106,18 +106,24 @@ def device_resized(device, old_size, new_size, caused_by=ec.CAUSED_BY_CLI):
         caused_by, ec.EVENT_STATUS_CHANGE)
 
 
-def devices_reweighted(cluster_id, rebalancing, caused_by=ec.CAUSED_BY_CLI):
-    """Cluster-log entry for new device weights after an uneven growth of
-    lblk devices; the rebalance that follows is logged by its tasks."""
+def device_shrink_detected(device, backend_size, caused_by=ec.CAUSED_BY_CLI):
+    """ERROR-level cluster-log entry for a block device found smaller than
+    its storage device. The device_shrunk alert stands until a rescan sees
+    the block device at its full size again."""
+    db_controller = DBController()
+    snode = db_controller.get_storage_node_by_id(device.node_id)
     ec.log_event_cluster(
-        cluster_id=cluster_id,
+        cluster_id=snode.cluster_id,
         domain=ec.DOMAIN_CLUSTER,
         event=ec.EVENT_STATUS_CHANGE,
-        db_object=DBController().get_cluster_by_id(cluster_id),
+        db_object=device,
         caused_by=caused_by,
-        message="Device weights set to the current device sizes after uneven growth"
-                + ("; rebalancing started" if rebalancing else ""),
-        node_id=cluster_id)
+        message=(f"Block device of the device shrank to {utils.humanbytes(backend_size)}, "
+                 f"below the device size of {utils.humanbytes(device.size)}. Shrinking is not "
+                 f"supported: restore the LUN to at least the device size"),
+        node_id=device.get_id(),
+        event_level=EventObj.LEVEL_ERROR,
+        storage_id=device.cluster_device_order)
 
 
 def device_resize_failed(device, message, caused_by=ec.CAUSED_BY_CLI):
