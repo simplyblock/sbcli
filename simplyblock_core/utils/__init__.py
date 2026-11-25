@@ -1076,6 +1076,21 @@ def storage_mco_names(cluster_id: str) -> StorageMcoNames:
     )
 
 
+def lvstore_cluster_size(flex_geometry: bool, ndcs: int, page_size: int) -> int:
+    """The lvstore cluster size of a cluster, in bytes; also its raid0 strip.
+
+    Without flex geometry it is one full stripe of user data: a page per data
+    chunk (1+x: 2 MiB, 2+x: 4 MiB, 4+x: 8 MiB off the 2 MiB page), so a
+    one-cluster allocation writes whole stripes. With flex geometry it is
+    constants.FLEX_GEOMETRY_LVS_CLUSTER_SIZE (8 MiB) whatever the scheme.
+    ``ndcs`` 0 (unset) counts as one page.
+    """
+    from simplyblock_core import constants
+    if flex_geometry:
+        return constants.FLEX_GEOMETRY_LVS_CLUSTER_SIZE
+    return page_size * max(int(ndcs or 0), 1)
+
+
 def nearest_upper_power_of_2(n):
     # Check if n is already a power of 2
     if (n & (n - 1)) == 0:

@@ -1135,6 +1135,14 @@ commands:
             dest: atomic_4k
             type: bool
             action: store_true
+          - name: "--flex-geometry"
+            help: >
+              Create the lvstores with a fixed 8 MiB cluster (and raid0 strip) whatever the erasure-coding scheme,
+              instead of one page per data chunk (1+x: 2 MiB, 2+x: 4 MiB, 4+x: 8 MiB). Cannot be changed after
+              cluster creation.
+            dest: flex_geometry
+            type: bool
+            action: store_true
           - name: "--enable-page-copy"
             help: >
               Do snapshot copy-on-write in the distribution layer as a metadata-only page copy instead of copying the
@@ -1472,6 +1480,14 @@ commands:
               4K block-size requirement. Only meaningful with --enable-inline-checksum. Cannot be changed after cluster
               creation.
             dest: atomic_4k
+            type: bool
+            action: store_true
+          - name: "--flex-geometry"
+            help: >
+              Create the lvstores with a fixed 8 MiB cluster (and raid0 strip) whatever the erasure-coding scheme,
+              instead of one page per data chunk (1+x: 2 MiB, 2+x: 4 MiB, 4+x: 8 MiB). Cannot be changed after
+              cluster creation.
+            dest: flex_geometry
             type: bool
             action: store_true
           - name: "--enable-page-copy"

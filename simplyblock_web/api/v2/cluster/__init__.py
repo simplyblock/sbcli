@@ -136,6 +136,9 @@ class ClusterParams(BaseModel):
     device_mode: Literal["nvme", "lblk"] = "nvme"
     inline_checksum: bool = False
     atomic_4k: bool = False
+    #: lvstore cluster (and raid0 strip) of a fixed 8 MiB whatever the
+    #: erasure-coding scheme, instead of one page per data chunk.
+    flex_geometry: bool = False
     page_copy: bool = False
     md_journal: bool = True
     # The cluster's workload names: the Services its storage nodes are reached
