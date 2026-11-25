@@ -83,7 +83,7 @@ class Rpc:
             return None
         if name in self.env.absent:
             return None
-        return {"name": name, "block_size": 4096, "num_blocks": 1000}
+        return {"name": name, "block_size": 4096, "num_blocks": 1000, "aliases": [f"uuid-of-{name}"]}
 
     def _jm_taken_down(self, *args, **kwargs):
         for key in self.env.connected:
