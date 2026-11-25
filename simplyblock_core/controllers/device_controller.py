@@ -1369,7 +1369,10 @@ def _delete_gone_aio_jm_member(device: NVMeDevice, member: str, rpc_client: RPCC
     if device.bdev_type != "aio":
         return
     try:
-        rpc_client.bdev_aio_delete(member)
+        # By the engine the bdev was opened with (aio, or uring for a
+        # device-mapper node); a bdev that does not say is an aio one.
+        io_engine = utils.bdev_io_engine(rpc_client.bdev_get(member)) or constants.LBLK_IO_ENGINE_AIO
+        utils.delete_lblk_bdev(rpc_client, member, io_engine)
     except RPCException as e:
         logger.warning("Failed to delete the AIO bdev of gone JM raid member %s: %s", member, e)
 
@@ -1396,7 +1399,22 @@ def _ensure_aio_jm_member(snode: StorageNode, device: NVMeDevice, member: str,
         logger.warning("JM raid member %s (serial %s) is not on the host", member, entry.get("serial"))
         return False
     filename = entry.get("path") or live.get("by_id_path") or live.get("device_path")
-    rpc_client.bdev_aio_create(member, filename)
+    # The member holds a part of the journal raid: it is opened again with the
+    # block size and the I/O engine it was created with (utils.addAioDevices
+    # recorded both on the node's lblk_devices entry).
+    serial = entry.get("serial")
+    io_engine = utils.choose_lblk_io_engine(
+        utils.recorded_lblk_io_engine(snode, serial),
+        utils.lblk_io_engine_for({**live, "filename": filename}),
+        what=f"JM raid member {member}")
+    try:
+        utils.create_aio_bdev(rpc_client, member, filename,
+                              utils.recorded_aio_block_size(snode, serial) or 0,
+                              io_engine=io_engine)
+    except Exception as e:  # create_aio_bdev raises a plain Exception for every failure
+        logger.warning("JM raid member %s could not be opened on %s, it stays out of the "
+                       "raid: %s", member, filename, e)
+        return False
     rpc_client.bdev_examine(member)
     rpc_client.bdev_wait_for_examine()
     return bool(rpc_client.bdev_get(member))
