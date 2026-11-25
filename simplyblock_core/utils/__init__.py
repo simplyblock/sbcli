@@ -1055,6 +1055,8 @@ class StorageMcoNames(NamedTuple):
     master_kubelet_config: str
     # Matches the master KubeletConfig of any cluster, this one's included.
     master_kubelet_config_pattern: str
+    # On the pool: how many workers the pool they came from let go at once.
+    inherited_limit_annotation: str
 
 
 def storage_mco_names(cluster_id: str) -> StorageMcoNames:
@@ -1073,6 +1075,7 @@ def storage_mco_names(cluster_id: str) -> StorageMcoNames:
         kubelet_label=f"storage-cpumanager-{short_id}",
         master_kubelet_config=f"storage-kubelet-{short_id}-master",
         master_kubelet_config_pattern="^storage-kubelet-.*-master$",
+        inherited_limit_annotation="storage.simplyblock.io/inherited-max-unavailable",
     )
 
 
@@ -4344,6 +4347,12 @@ def set_storage_mcp_max_unavailable(cluster_id: str, max_unavailable: int) -> bo
         cluster's fault tolerance, so any later rollout never reboots more
         storage nodes at once than the data plane can absorb.
 
+    The value never exceeds what the pool inherited. The CPU-topology job
+    records, on the pool, how many workers the pool they came from let go at
+    once, when that pool stated a limit. Every value written here is narrowed
+    to it, so deploying the storage does not lift a limit the workers were
+    already under. A pool that inherited nothing takes the value as asked.
+
     OpenShift-only: MachineConfigPool is an OCP CRD, so this is a no-op on k3s
     or when CPU topology was never applied (pool absent). Never raises — this
     is rollout pacing, not business logic, and must not crash activation or
@@ -4353,10 +4362,23 @@ def set_storage_mcp_max_unavailable(cluster_id: str, max_unavailable: int) -> bo
     # at 1. The MCP name mirrors the CPU-topology job template
     # (storage-<first-6-of-cluster-id>).
     value = max(int(max_unavailable), 1)
-    mcp_name = storage_mco_names(cluster_id).pool
+    names = storage_mco_names(cluster_id)
+    mcp_name = names.pool
     try:
         load_kube_config_with_fallback()
         api = client.CustomObjectsApi()
+        pool = api.get_cluster_custom_object(
+            group="machineconfiguration.openshift.io",
+            version="v1",
+            plural="machineconfigpools",
+            name=mcp_name,
+        )
+        annotations = (pool.get("metadata") or {}).get("annotations") or {}
+        inherited = str(annotations.get(names.inherited_limit_annotation) or "")
+        if inherited.isdigit() and 1 <= int(inherited) < value:
+            logger.info(f"MachineConfigPool {mcp_name} inherited maxUnavailable={inherited}; "
+                        f"narrowing {value} to it")
+            value = int(inherited)
         api.patch_cluster_custom_object(
             group="machineconfiguration.openshift.io",
             version="v1",

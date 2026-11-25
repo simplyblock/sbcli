@@ -68,6 +68,39 @@ spec:
                   -o jsonpath='{range .spec.nodeSelector.matchExpressions[?(@.key=="kubernetes.io/hostname")].values[*]}{@}{"\n"}{end}' 2>/dev/null
               }
 
+              # ---- Inherited limit ------------------------------------------
+              # Prints how many workers the pool this host is leaving let go at
+              # once, or nothing when that pool states no maxUnavailable. A pool
+              # that states none rolls one worker at a time only because that is
+              # what OpenShift does by default, which is nobody's decision, so it
+              # hands no limit on. A percentage is of the pool it was stated on.
+              # The storage pool's own value is the one written here, and a host
+              # already in it inherits nothing from it.
+              inherited_limit() {
+                SOURCE_POOL=$(kubectl get node "$HOSTNAME" \
+                  -o jsonpath='{.metadata.annotations.machineconfiguration\.openshift\.io/currentConfig}' 2>/dev/null \
+                  | sed -n 's/^rendered-\(.*\)-[0-9a-f]\{32\}$/\1/p')
+                [ -n "$SOURCE_POOL" ] || SOURCE_POOL=worker
+                [ "$SOURCE_POOL" != "$MCP_NAME" ] || return 0
+                STATED=$(kubectl get machineconfigpool "$SOURCE_POOL" \
+                  -o jsonpath='{.spec.maxUnavailable}' 2>/dev/null || true)
+                case "$STATED" in
+                  "") return 0 ;;
+                  *%)
+                    MACHINES=$(kubectl get machineconfigpool "$SOURCE_POOL" \
+                      -o jsonpath='{.status.machineCount}' 2>/dev/null || true)
+                    STATED=$(( ${STATED%?} * ${MACHINES:-0} / 100 )) ;;
+                esac
+                [ "$STATED" -ge 1 ] || STATED=1
+                echo "$STATED"
+              }
+              INHERITED=$(inherited_limit)
+              MAX_UNAVAILABLE={{ MCP_MAX_UNAVAILABLE }}
+              if [ -n "$INHERITED" ] && [ "$INHERITED" -lt "$MAX_UNAVAILABLE" ]; then
+                echo "[INFO] The host's pool let $INHERITED worker(s) go at once; $MCP_NAME keeps to that"
+                MAX_UNAVAILABLE=$INHERITED
+              fi
+
               # ---- MachineConfigPool ----------------------------------------
               # Created, never applied: `kubectl apply` on a pool that already
               # exists replaces its nodeSelector values with the placeholder below
@@ -81,6 +114,9 @@ spec:
                 name: $MCP_NAME
                 labels:
                   custom-kubelet: $KC_LABEL
+                annotations:
+                  # Empty when the pool the hosts came from stated no limit.
+                  {{ STORAGE_MCO.inherited_limit_annotation }}: "$INHERITED"
               spec:
                 machineConfigSelector:
                   matchExpressions:
@@ -100,9 +136,9 @@ spec:
                         - $PENDING_HOST
                 # Wide during initial node-add so first-time CPU-topology
                 # reboots roll in parallel (nodes are empty pre-activation);
-                # cluster_activate narrows this to the fault tolerance once the
-                # cluster serves IO.
-                maxUnavailable: {{ MCP_MAX_UNAVAILABLE }}
+                # cluster_activate narrows this to what the storage can afford
+                # once the cluster serves IO. Never above the inherited limit.
+                maxUnavailable: $MAX_UNAVAILABLE
               MCPEOF
               if CREATE_OUT=$(kubectl create -f /tmp/mcp.yaml 2>&1); then
                 echo "[INFO] Created MCP $MCP_NAME, selecting no host until it has rendered"
