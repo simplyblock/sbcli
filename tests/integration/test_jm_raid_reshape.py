@@ -12,11 +12,12 @@ read back from the database. Only what sits above the database is replaced:
 the SPDK RPC client of each node, the leadership probe and the device-status
 fan-out to the cluster's distribs.
 """
+from contextlib import ExitStack
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from simplyblock_core import jm_raid, storage_node_ops
+from simplyblock_core import jm_raid, storage_node_ops, utils
 from simplyblock_core.controllers import (
     device_controller,
     lvol_controller,
@@ -57,6 +58,7 @@ class Rpc:
         self.mock = MagicMock()
         self.mock.bdev_get.side_effect = lambda name: (
             None if name in env.absent else {"name": name, "block_size": 4096, "num_blocks": 1000})
+        self.mock.bdev_list.side_effect = lambda: list(env.bdevs)
         self.mock.bdev_raid_create.side_effect = self._raid_create
         self.mock.bdev_raid_get_bdevs.side_effect = lambda category="online": [
             {"name": name} for name in env.raids[node_id]]
@@ -92,6 +94,7 @@ class Env:
         self.replicating: set = set()
         self.unreachable: set = set()
         self.created: list = []
+        self.bdevs: list = []
         self.synced: list = []
         self.raids = {node_id: [] for node_id in NODES}
         self.leaders: dict = {}
@@ -740,3 +743,126 @@ def test_a_node_that_is_not_online_has_its_jm_record_removed_without_a_teardown(
 
     assert env.node().jm_device.status == JMDevice.STATUS_REMOVED
     env.rpcs[NODES[0]].mock.bdev_raid_delete.assert_not_called()
+
+
+# -- a device added to the node ------------------------------------------------
+
+def _new_whole_drive(env, index=4):
+    """A drive the node found on a restart: one record for the whole drive,
+    not yet in the cluster."""
+    dev = NVMeDevice()
+    dev.uuid = _device_id(1, index)
+    dev.cluster_id = CLUSTER
+    dev.node_id = NODES[0]
+    dev.nvme_controller = f"nvme_{index}"
+    dev.nvme_bdev = f"nvme_{index}n1"
+    dev.device_name = dev.nvme_bdev
+    dev.size = 100 * 1024 ** 3
+    dev.status = NVMeDevice.STATUS_NEW
+    dev.cluster_device_order = -1
+    env.db.atomic_update(env.node(), lambda n, d=dev: n.nvme_devices.append(d))
+    return dev.uuid
+
+
+def _adding(env, cut_works=True):
+    """add_device with the data plane replaced: the drive is cut into a
+    journal partition and one data partition when the node is asked to."""
+    def _cut(rpc_client, nvme, snode, num_partitions, jm_percent, partition_size, nbd_index):
+        if cut_works:
+            env.bdevs.extend({"name": f"{nvme.nvme_bdev}p{i}", "block_size": 4096,
+                              "num_blocks": 1000 * i} for i in range(1, num_partitions + 2))
+        return cut_works
+
+    stack = ExitStack()
+    stack.enter_context(patch.object(storage_node_ops, "_create_device_partitions", side_effect=_cut))
+    stack.enter_context(patch.object(device_controller, "_def_create_device_stack", return_value=True))
+    stack.enter_context(patch.object(storage_node_ops, "_connect_to_remote_devs", return_value=[]))
+    stack.enter_context(patch("simplyblock_core.distr_controller.send_cluster_map_add_device"))
+    stack.enter_context(patch.object(tasks_controller, "add_new_device_mig_task"))
+    return stack
+
+
+def _device(env, device_id):
+    return next(d for d in env.node().nvme_devices if d.get_id() == device_id)
+
+
+def test_a_new_whole_drive_is_cut_like_the_others_and_extends_the_jm_raid(env):
+    """A drive added later used to be taken whole: it had no journal
+    partition, and the node's JM raid could never grow onto it."""
+    device_id = _new_whole_drive(env)
+
+    with _adding(env):
+        assert device_controller.add_device(device_id) == device_id
+
+    dev = _device(env, device_id)
+    assert (dev.nvme_bdev, dev.is_partition, dev.status) == ("nvme_4n1p2", True, ONLINE)
+    assert device_controller.jm_raid_target_members(env.node()) == _members(5)
+    tasks = env.reshape_tasks()
+    assert len(tasks) == 1
+
+    env.run_to_done(tasks[0].uuid)
+
+    assert env.node().jm_device.jm_nvme_bdev_list == _members(5)
+
+
+def test_a_drive_that_cannot_be_cut_is_not_added(env):
+    device_id = _new_whole_drive(env)
+
+    with _adding(env, cut_works=False):
+        assert device_controller.add_device(device_id) is False
+
+    dev = _device(env, device_id)
+    assert (dev.nvme_bdev, dev.is_partition, dev.status) == ("nvme_4n1", False, NVMeDevice.STATUS_NEW)
+    assert env.reshape_tasks() == []
+
+
+def test_a_new_data_partition_of_a_drive_already_cut_is_added_as_it_is(env):
+    device_id = _new_whole_drive(env)
+
+    def _as_partition(node):
+        for dev in node.nvme_devices:
+            if dev.get_id() == device_id:
+                dev.nvme_bdev = "nvme_4n1p2"
+                dev.is_partition = True
+
+    env.db.atomic_update(env.node(), _as_partition)
+
+    with _adding(env) as stack:
+        cut = stack.enter_context(patch.object(device_controller, "_cut_new_drive"))
+        assert device_controller.add_device(device_id) == device_id
+
+    cut.assert_not_called()
+    assert device_controller.jm_raid_target_members(env.node()) == _members(5)
+
+
+def test_an_lblk_device_added_back_has_its_journal_partition_opened_again(env):
+    """Its bdev was dropped when the device went away; the rebuild waits for
+    every member to be present."""
+    device_id = _device_id(1, 9)
+    member = utils.aio_bdev_name_for_serial("J9")
+
+    def _mut(node):
+        node.lblk_devices = [
+            {"name": "sdx1", "serial": "J9", "journal": True, "journal_raid": True, "data_serial": "D9"},
+            {"name": "sdx2", "serial": "D9"}]
+        dev = NVMeDevice()
+        dev.uuid = device_id
+        dev.cluster_id = CLUSTER
+        dev.node_id = NODES[0]
+        dev.bdev_type = "aio"
+        dev.serial_number = "D9"
+        dev.nvme_bdev = utils.aio_bdev_name_for_serial("D9")
+        dev.status = NVMeDevice.STATUS_NEW
+        dev.cluster_device_order = -1
+        node.nvme_devices.append(dev)
+
+    env.db.atomic_update(env.node(), _mut)
+
+    with _adding(env) as stack:
+        ensure = stack.enter_context(
+            patch.object(device_controller, "_ensure_aio_jm_member", return_value=True))
+        assert device_controller.add_device(device_id) == device_id
+
+    assert ensure.call_args.args[2] == member
+    assert device_controller.jm_raid_target_members(env.node()) == _members(4) + [member]
+    assert len(env.reshape_tasks()) == 1

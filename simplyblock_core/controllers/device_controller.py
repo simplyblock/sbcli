@@ -2054,6 +2054,69 @@ def device_set_failed(device_id):
     return True
 
 
+def _node_cuts_its_drives(snode: StorageNode) -> bool:
+    """Whether the node cuts every NVMe drive into a journal partition (the
+    first) and data partitions, with its journal on the raid over the journal
+    partitions."""
+    return bool(snode.num_partitions_per_dev and snode.jm_percent
+                and snode.jm_device and snode.jm_device.jm_nvme_bdev_list)
+
+
+def _partition_number(bdev_name: str) -> int:
+    number = bdev_name.rpartition("p")[2]
+    return int(number) if number.isdigit() else 0
+
+
+def _cut_new_drive(snode: StorageNode, device_obj: NVMeDevice) -> list[str] | None:
+    """Cut a new whole NVMe drive the way the node's other drives are cut: a
+    journal partition and the node's number of data partitions.
+
+    The record ``device_obj`` (kept under its id) becomes the first data
+    partition; further data partitions are added to the node as new devices
+    and their ids returned. The journal partition is not a device of its own:
+    once a data partition of the drive serves data, the node's JM raid is
+    rebuilt to take it in (jm_raid_target_members). Returns None when the
+    drive could not be cut; nothing is recorded then."""
+    db_controller = DBController()
+    rpc_client = snode.rpc_client()
+    wanted = 1 + snode.num_partitions_per_dev
+    parts = storage_node_ops._search_for_partitions(rpc_client, device_obj)
+    if len(parts) != wanted:
+        index = next((i for i, d in enumerate(snode.nvme_devices)
+                      if d.get_id() == device_obj.get_id()), len(snode.nvme_devices))
+        logger.info("Cutting new drive %s into a journal partition and %d data partition(s)",
+                    device_obj.nvme_bdev, snode.num_partitions_per_dev)
+        if not storage_node_ops._create_device_partitions(
+                rpc_client, device_obj, snode, snode.num_partitions_per_dev,
+                snode.jm_percent, snode.partition_size, index + 1):
+            return None
+        parts = storage_node_ops._search_for_partitions(rpc_client, device_obj)
+    if len(parts) != wanted:
+        logger.error("Drive %s has %d partition(s) after cutting, expected %d",
+                     device_obj.nvme_bdev, len(parts), wanted)
+        return None
+    parts.sort(key=lambda d: _partition_number(d.nvme_bdev))
+    first, others = parts[1], parts[2:]
+
+    def _as_partition(dev, part=first):
+        dev.nvme_bdev = part.nvme_bdev
+        dev.device_name = part.device_name
+        dev.size = part.size
+        dev.is_partition = True
+
+    _as_partition(device_obj)
+    if _atomic_device_set(db_controller, snode.get_id(), device_obj.get_id(), _as_partition) is None:
+        return None
+    for part in others:
+        part.status = NVMeDevice.STATUS_NEW
+        part.cluster_device_order = -1
+    if others:
+        db_controller.atomic_update(
+            db_controller.get_storage_node_by_id(snode.get_id()),
+            lambda n, new=others: n.nvme_devices.extend(new))
+    return [part.get_id() for part in others]
+
+
 def add_device(device_id, add_migration_task=True):
     db_controller = DBController()
     try:
@@ -2078,6 +2141,16 @@ def add_device(device_id, add_migration_task=True):
         return False
 
     logger.info(f"Adding device {device_id}")
+    more_partitions: list[str] = []
+    if (_node_cuts_its_drives(snode) and device_obj.bdev_type != "aio"
+            and not device_obj.is_partition):
+        # A whole drive on a node whose drives are cut: without its journal
+        # partition the node's JM raid could never grow onto it.
+        cut = _cut_new_drive(snode, device_obj)
+        if cut is None:
+            logger.error("Failed to cut the new drive %s into partitions", device_obj.nvme_bdev)
+            return False
+        more_partitions = cut
     ret = _def_create_device_stack(device_obj, snode, force=True, clear_data=True)
     if not ret:
         logger.error("Failed to create device stack")
@@ -2111,7 +2184,21 @@ def add_device(device_id, add_migration_task=True):
             distr_controller.send_cluster_map_add_device(device_obj, node)
     if add_migration_task:
         tasks_controller.add_new_device_mig_task(device_id)
-    # A device that brings a journal partition extends the node's JM raid.
+    for partition_id in more_partitions:
+        if not add_device(partition_id, add_migration_task=add_migration_task):
+            logger.error("Failed to add data partition %s of the new drive", partition_id)
+    # A device that brings a journal partition extends the node's JM raid. On
+    # an lblk node the partition's bdev was dropped when its device went away
+    # (_delete_gone_aio_jm_member) and is opened again here; a member that
+    # cannot be opened keeps the rebuild waiting (jm_raid_reshape_not_ready).
+    if device_obj.bdev_type == "aio":
+        member = utils.lblk_journal_raid_member_bdev(snode.lblk_devices, device_obj.serial_number)
+        if member:
+            try:
+                _ensure_aio_jm_member(snode, device_obj, member, snode.rpc_client())
+            except RPCException as e:
+                logger.warning("Failed to open JM raid member %s of device %s: %s",
+                               member, device_id, e)
     queue_jm_raid_reshape(snode.get_id())
     return device_id
 
