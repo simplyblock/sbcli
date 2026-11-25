@@ -336,6 +336,13 @@ def task_runner_jm_reshape(task):
     # once: the journal coordinator does not replicate by itself to a JM that
     # was away for less than 15 seconds, and a rebuild is faster than that
     # (device_controller.start_jm_resync).
+    # A node that did not connect to the new JM is connected now: a journal
+    # is synchronised only over a connection, and the task does not end
+    # while one is missing (device_controller.jm_resync_pending).
+    try:
+        device_controller.connect_peers_to_jm(node.get_id())
+    except RPCException as e:
+        raise TaskProgress(f"connecting the other nodes to the rebuilt JM: {e}")
     synced = list(task.function_params.get("synced", []))
     started = device_controller.start_jm_resync(node, synced)
     if started:

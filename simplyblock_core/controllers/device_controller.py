@@ -1622,6 +1622,82 @@ def _delete_jm_stack(snode: StorageNode, rpc_client: RPCClient) -> None:
         rpc_client.bdev_raid_delete(name)
 
 
+#: How long the rebuild waits for the other nodes to let go of the JM it took
+#: down. They do so by themselves about a second after its subsystem is gone
+#: (bdev_nvme ctrlr_loss_timeout_sec).
+JM_PEER_RELEASE_TIMEOUT_SEC = 20
+
+
+def _peers_of_jm(snode: StorageNode) -> list[tuple[StorageNode, str]]:
+    """Every other online node of the cluster, with the name of the bdev its
+    connection to the JM of ``snode`` appears under."""
+    db_controller = DBController()
+    peers = []
+    for node in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
+        if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
+            continue
+        controller = storage_node_ops.remote_jm_controller_name(
+            node.site, snode.site, snode.jm_device.jm_bdev)
+        peers.append((node, f"{controller}n1"))
+    return peers
+
+
+def _wait_for_peers_to_release_jm(snode: StorageNode) -> None:
+    """Wait until no other node holds a connection to the JM of ``snode``
+    that was just taken down.
+
+    The new JM answers under the same subsystem name. A node whose old
+    connection is still there when it is told to connect finds "already
+    connected" and does nothing, the old connection then goes away, and that
+    node never reaches the new JM: the journal it leads is not copied to it,
+    while the leader reports nothing as not ready (lab, 2026-11-25: the
+    connect came 0.7 s after the subsystem was deleted; the journal was not on
+    the JM's disks at the next restart). Raises JMReshapeError when a
+    connection is still there after JM_PEER_RELEASE_TIMEOUT_SEC."""
+    if not snode.enable_ha_jm:
+        return
+    deadline = time.monotonic() + JM_PEER_RELEASE_TIMEOUT_SEC
+    while True:
+        holding = []
+        for node, bdev in _peers_of_jm(snode):
+            try:
+                if node.rpc_client(timeout=5, retry=1).bdev_get(bdev):
+                    holding.append(node.get_id())
+            except RPCException as e:
+                logger.warning("Cannot ask node %s whether it still holds %s: %s",
+                               node.get_id(), bdev, e)
+                holding.append(node.get_id())
+        if not holding:
+            return
+        if time.monotonic() >= deadline:
+            raise JMReshapeError(
+                f"node(s) {holding} still hold a connection to the old JM of node "
+                f"{snode.get_id()} after {JM_PEER_RELEASE_TIMEOUT_SEC}s")
+        time.sleep(1)
+
+
+def connect_peers_to_jm(node_id: str) -> list[str]:
+    """Connect every other online node that has no connection to the JM of
+    the node to it, and return the ids of the nodes still without one."""
+    db_controller = DBController()
+    snode = db_controller.get_storage_node_by_id(node_id)
+    if not snode.enable_ha_jm or not snode.jm_device:
+        return []
+    missing = []
+    for node, bdev in _peers_of_jm(snode):
+        if node.rpc_client(timeout=5, retry=1).bdev_get(bdev):
+            continue
+        logger.info("Node %s has no connection to the JM of node %s, connecting",
+                    node.get_id(), node_id)
+        remote_jm_devices = storage_node_ops._connect_to_remote_jm_devs(node)
+        db_controller.atomic_update(
+            db_controller.get_storage_node_by_id(node.get_id()),
+            lambda n, rd=remote_jm_devices: setattr(n, "remote_jm_devices", rd))
+        if not node.rpc_client(timeout=5, retry=1).bdev_get(bdev):
+            missing.append(node.get_id())
+    return missing
+
+
 def jm_raid_reshape_not_ready(snode: StorageNode) -> str:
     """Why the JM raid of ``snode`` cannot be rebuilt over its current devices
     now, or "" when it can. Touches nothing.
@@ -1676,6 +1752,7 @@ def reshape_jm_raid(node_id: str) -> list[str]:
                 node_id, jm.jm_nvme_bdev_list, target, layout)
     set_jm_device_state(jm.get_id(), JMDevice.STATUS_UNAVAILABLE)
     _delete_jm_stack(snode, rpc_client)
+    _wait_for_peers_to_release_jm(snode)
     new_jm = storage_node_ops._create_jm_stack_on_raid(
         rpc_client, target, snode, after_restart=False, layout=layout)
     if not new_jm:
@@ -1738,6 +1815,21 @@ def _jm_journals(snode: StorageNode) -> list[dict]:
         if not status:
             journal["error"] = "no JM reported"
             continue
+        # A leader on another node reaches the JM over the network. Without
+        # that connection nothing it does arrives, and its status does not
+        # say so.
+        if snode.enable_ha_jm and journal["leader"].get_id() != snode.get_id():
+            controller = storage_node_ops.remote_jm_controller_name(
+                journal["leader"].site, snode.site, snode.jm_device.jm_bdev)
+            try:
+                connected = journal["leader"].rpc_client(timeout=10, retry=1).bdev_get(f"{controller}n1")
+            except RPCException as e:
+                journal["error"] = str(e)
+                continue
+            if not connected:
+                journal["error"] = (f"its leader {journal['leader'].get_id()} has no connection "
+                                    f"to the JM of node {snode.get_id()}")
+                continue
         journal["busy"] = sorted(name for name, ready in status.items() if ready is False)
     return journals
 

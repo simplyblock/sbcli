@@ -12,7 +12,7 @@ read back from the database. Only what sits above the database is replaced:
 the SPDK RPC client of each node, the leadership probe and the device-status
 fan-out to the cluster's distribs.
 """
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -56,22 +56,46 @@ class Rpc:
     def __init__(self, env, node_id):
         self.env, self.node_id = env, node_id
         self.mock = MagicMock()
-        self.mock.bdev_get.side_effect = lambda name: (
-            None if name in env.absent else {"name": name, "block_size": 4096, "num_blocks": 1000})
+        self.mock.bdev_get.side_effect = self._bdev_get
         self.mock.bdev_list.side_effect = lambda: list(env.bdevs)
         self.mock.bdev_raid_create.side_effect = self._raid_create
         self.mock.bdev_raid_get_bdevs.side_effect = lambda category="online": [
             {"name": name} for name in env.raids[node_id]]
         self.mock.bdev_raid_delete.side_effect = lambda name: env.raids[node_id].remove(name)
         self.mock.bdev_jm_create.return_value = True
+        self.mock.bdev_jm_delete.side_effect = self._jm_taken_down
         self.mock.subsystem_get.return_value = None
         self.mock.jc_get_jm_status.side_effect = self._jc_status
         self.mock.bdev_jm_get_status.side_effect = AssertionError("bdev_jm_get_status is a debugging call")
         self.mock.jc_explicit_synchronization.side_effect = self._explicit_sync
 
+    def _bdev_get(self, name):
+        key = (self.node_id, name)
+        if name.startswith("remote_jm_") and key in self.env.connected:
+            # This node's connection to another node's JM. Once that JM is
+            # taken down (_jm_taken_down) the old connection stays for a
+            # number of polls, and then there is none until the node connects.
+            if self.env.connected[key]:
+                return {"name": name}
+            if self.env.held_polls.get(key, 0) > 0:
+                self.env.held_polls[key] -= 1
+                return {"name": name}
+            return None
+        if name in self.env.absent:
+            return None
+        return {"name": name, "block_size": 4096, "num_blocks": 1000}
+
+    def _jm_taken_down(self, *args, **kwargs):
+        for key in self.env.connected:
+            if key[1] == f"remote_jm_{self.node_id}n1":
+                self.env.connected[key] = False
+        return True
+
     def _raid_create(self, name, members, level, *args, **kwargs):
         if name in self.env.failing_raids:
             return False
+        if self.env.held_at_build is None:
+            self.env.held_at_build = dict(self.env.held_polls)
         self.env.raids[self.node_id].append(name)
         self.env.created.append((self.node_id, name, list(members), level))
         return True
@@ -95,6 +119,10 @@ class Env:
         self.unreachable: set = set()
         self.created: list = []
         self.bdevs: list = []
+        self.held_polls: dict = {}
+        self.connected: dict = {}
+        self.cannot_connect: set = set()
+        self.held_at_build = None
         self.synced: list = []
         self.raids = {node_id: [] for node_id in NODES}
         self.leaders: dict = {}
@@ -866,3 +894,75 @@ def test_an_lblk_device_added_back_has_its_journal_partition_opened_again(env):
     assert ensure.call_args.args[2] == member
     assert device_controller.jm_raid_target_members(env.node()) == _members(4) + [member]
     assert len(env.reshape_tasks()) == 1
+
+
+# -- the other nodes and the rebuilt JM ----------------------------------------
+
+@contextmanager
+def _ha_jm(env, held=None):
+    """Node 0 serves its JM to the other nodes. ``held`` is for how many polls
+    a node's connection to the JM that was taken down is still there."""
+    env.set_node(0, enable_ha_jm=True)
+    bdev = f"remote_jm_{NODES[0]}n1"
+    for node_id in NODES[1:]:
+        env.connected[(node_id, bdev)] = True
+        env.held_polls[(node_id, bdev)] = (held or {}).get(node_id, 0)
+
+    def _connect(node, *args, **kwargs):
+        if node.get_id() != NODES[0] and node.get_id() not in env.cannot_connect:
+            env.connected[(node.get_id(), bdev)] = True
+        return []
+
+    with patch.object(storage_node_ops, "_connect_to_remote_jm_devs", side_effect=_connect):
+        yield bdev
+
+
+def test_the_new_jm_is_built_only_once_the_other_nodes_let_go_of_the_old_one(env):
+    """Lab, 2026-11-25: a node told to connect 0.7 s after the old JM was
+    taken down still had its old connection, did nothing, lost it a moment
+    later and never reached the new JM. The journal it leads was not on the
+    JM's disks at the next restart."""
+    env.set_device(0, 1, MIGRATED)
+    with _ha_jm(env, held={NODES[1]: 2}) as bdev:
+        env.run_to_done(env.queue())
+
+    assert env.held_at_build[(NODES[1], bdev)] == 0
+    assert env.connected == {(NODES[1], bdev): True, (NODES[2], bdev): True}
+    assert sorted(env.synced) == ALL_SYNCED
+
+
+def test_a_node_that_does_not_let_go_costs_a_retry_and_nothing_is_built_meanwhile(env):
+    env.set_device(0, 1, MIGRATED)
+    task_id = env.queue()
+    with _ha_jm(env, held={NODES[1]: 10 ** 6}) as bdev,             patch.object(device_controller, "JM_PEER_RELEASE_TIMEOUT_SEC", 0):
+        task = env.drive(task_id)
+
+        assert task.status == JobSchedule.STATUS_SUSPENDED
+        assert task.retry == 1
+        assert "still hold a connection" in task.function_result
+        assert env.created == []
+
+        env.held_polls[(NODES[1], bdev)] = 0
+        env.run_to_done(task_id)
+
+    assert len(_raids_built(env)) == 2
+    assert sorted(env.synced) == ALL_SYNCED
+
+
+def test_a_journal_whose_leader_is_not_connected_is_not_in_sync_until_it_is(env):
+    """Its leader reports nothing as not ready: it does not know the JM."""
+    env.set_device(0, 1, MIGRATED)
+    task_id = env.queue()
+    with _ha_jm(env):
+        env.cannot_connect.add(NODES[1])
+        task = env.drive(task_id)
+        task = env.drive(task_id)
+
+        assert sorted(env.synced) == [(NODES[0], 1), (NODES[2], 3)]
+        assert task.status == JobSchedule.STATUS_RUNNING
+        assert "no connection" in task.function_result
+
+        env.cannot_connect.clear()
+        env.run_to_done(task_id)
+
+    assert sorted(env.synced) == ALL_SYNCED
