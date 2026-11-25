@@ -1,6 +1,7 @@
 
 import logging
 import os
+import re
 import ssl
 import sys
 import time
@@ -15,6 +16,7 @@ from uvicorn.config import Config
 
 from simplyblock_core import constants
 from simplyblock_core import utils as core_utils
+from simplyblock_core.controllers import control_plane_controller
 from simplyblock_core.exceptions import NodeTransitionInProgress, PreconditionError
 from simplyblock_core.settings import Settings
 from simplyblock_web.api import v1, v2
@@ -75,6 +77,33 @@ class AccessLogMiddleware(BaseHTTPMiddleware):
         return response
 
 
+_CLUSTER_IN_PATH = re.compile(r'/api/v(?:1/cluster|2/clusters)/([0-9a-fA-F-]{36})(?:/|$)')
+
+
+class StretchedControlPlaneMiddleware(BaseHTTPMiddleware):
+    """A control plane that does not lead its stretched cluster
+    (docs/stretched-control-plane.md) answers reads itself, sends mutating
+    calls to the leader's API with a 307, and answers 503 while it has no
+    FoundationDB at all. On a deployment without stretched clusters the
+    verdict is "serve" at the cost of one cached read per second."""
+
+    async def dispatch(self, request: Request, call_next):
+        match = _CLUSTER_IN_PATH.search(request.url.path)
+        verdict = control_plane_controller.api_verdict(
+            request.method, request.url.path, match.group(1) if match else "")
+        if verdict.action == "redirect":
+            location = verdict.location
+            if (query := str(request.query_params)):
+                location += f'?{query}'
+            return RedirectResponse(url=location, status_code=307)
+        if verdict.action == "unavailable":
+            return JSONResponse(status_code=503, content={
+                "error": "Control plane unavailable",
+                "detail": verdict.message,
+            })
+        return await call_next(request)
+
+
 app: FastAPI = FastAPI()
 Instrumentator().instrument(app).expose(app, endpoint="/_meta/metrics")
 
@@ -108,6 +137,7 @@ async def runtime_error_handler(request: Request, exc: RuntimeError):
 _web_settings = WebSettings()
 
 app.add_middleware(AccessLogMiddleware)
+app.add_middleware(StretchedControlPlaneMiddleware)
 
 if 2 in _web_settings.api_versions:
     app.include_router(v2.api, prefix='/api/v2')

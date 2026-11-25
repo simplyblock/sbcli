@@ -83,7 +83,9 @@ class TestStatusLeavesARebuiltRemovalNodeOut(unittest.TestCase):
     def test_k2_stays_active_while_the_removal_rebuilds(self):
         leaving = _node("x", "10.0.9.9", StorageNode.STATUS_MIGRATING_DEVICES,
                         (NVMeDevice.STATUS_FAILED,))
-        status, _ = self._verdicts(_cluster(npcs=2), self._online(5) + [leaving])
+        # Six online nodes: the 2+2 node floor (n+2k), so the floors do not
+        # degrade the verdict on their own.
+        status, _ = self._verdicts(_cluster(npcs=2), self._online(6) + [leaving])
         assert status == Cluster.STATUS_ACTIVE
 
     def test_k1_the_removals_own_shutdown_is_already_the_removals(self):

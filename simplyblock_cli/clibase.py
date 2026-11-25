@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 
 import argparse
+import getpass
 import json
 import re
 import sys
@@ -8,11 +9,15 @@ import time
 from pathlib import Path
 from typing import Any
 
+from pydantic import SecretStr
+
 from simplyblock_cli.alerting_config_parser import parse_alerting_config
 from simplyblock_core import cluster_ops, constants, db_controller, utils
 from simplyblock_core import mgmt_node_ops as mgmt_ops
 from simplyblock_core import storage_node_ops as storage_ops
 from simplyblock_core.controllers import (
+    array_controller,
+    control_plane_controller,
     device_controller,
     fdb_backup_controller,
     health_controller,
@@ -36,6 +41,9 @@ from simplyblock_core.controllers.backup.manifest import (
     parse_group_export,
 )
 from simplyblock_core.exceptions import (
+    ControlPlaneError,
+    ControlPlaneNotReadyError,
+    ControlPlaneTakeoverRefusedError,
     MigrationConflictError,
     PreconditionError,
     PromoteIncompleteError,
@@ -115,6 +123,32 @@ def _format_result(data, *, json: bool) -> str:
 
 def _iso(value) -> str | None:
     return value.isoformat() if value is not None else None
+
+
+def _control_plane_status_dict(status) -> dict:
+    """``sbctl control-plane status`` as a dict (its JSON form)."""
+    lease = status.lease
+    return {
+        "cluster_id": status.cluster_id,
+        "stretched_control_plane": status.stretched,
+        "local_site": status.local_site,
+        "mode": status.mode,
+        "mode_reason": status.mode_reason,
+        "leader_site": status.leader_site,
+        "lease_holder_site": lease.holder_site if lease else "",
+        "lease_holder_host": lease.holder_host if lease else "",
+        "lease_state": lease.state if lease else "",
+        "lease_epoch": lease.epoch if lease else 0,
+        "lease_expires_at": lease.expires_at if lease else "",
+        "fdb_region_lag_seconds": status.fdb_lag_seconds,
+        "fdb_data_state": status.fdb_data_state,
+        "sites": [{
+            "site": s.site, "role": s.role, "holds_lease": s.holds_lease,
+            "mgmt_nodes_online": s.mgmt_nodes_online, "mgmt_nodes_total": s.mgmt_nodes_total,
+            "storage_nodes_online": s.storage_nodes_online, "storage_nodes_total": s.storage_nodes_total,
+            "ready": s.ready, "problems": list(s.problems),
+        } for s in status.sites],
+    }
 
 
 def _sync_status_fields(status) -> dict:
@@ -269,6 +303,23 @@ class CLIWrapperBase:
         lblk_journal_device = getattr(args, 'lblk_journal_device', False)
         if lblk_journal_device and not lblk:
             self.parser.error("--lblk-journal-device requires --lblk")
+        lblk_journal_only = getattr(args, 'lblk_journal_only', False)
+        if lblk_journal_only:
+            if not lblk:
+                self.parser.error("--lblk-journal-only requires --lblk")
+            if lblk_journal_device:
+                self.parser.error("--lblk-journal-only and --lblk-journal-device exclude each other")
+            if not (blk_names or blk_serials):
+                self.parser.error("--lblk-journal-only needs the journal disk or partition named with "
+                                  "--blk-names or --blk-serials")
+        lblk_array_only = getattr(args, 'lblk_array_only', False)
+        if lblk_array_only:
+            if not lblk:
+                self.parser.error("--lblk-array-only requires --lblk")
+            if lblk_journal_only or lblk_journal_device or blk_names or blk_names_exclude or blk_serials:
+                self.parser.error("--lblk-array-only selects no local device: not with --blk-names, "
+                                  "--blk-names-exclude, --blk-serials, --lblk-journal-only or "
+                                  "--lblk-journal-device")
         lblk_selection = None
         if use_lblk:
             if not lblk:
@@ -282,6 +333,8 @@ class CLIWrapperBase:
                 "names_exclude": [str(x) for x in blk_names_exclude.split(',')] if blk_names_exclude else None,
                 "serials": [str(x) for x in blk_serials.split(',')] if blk_serials else None,
                 "journal_device": bool(lblk_journal_device),
+                "journal_only": bool(lblk_journal_only),
+                "array_only": bool(lblk_array_only),
             }
         # The core split is decided by the cluster's vcpu-count when the node
         # is added or restarted; here the default heuristic lays out a usable
@@ -504,20 +557,6 @@ class CLIWrapperBase:
 
     def storage_node__restart_device(self, sub_command, args):
         return device_controller.restart_device(args.device_id, args.force)
-
-    def storage_node__resize_device(self, sub_command, args):
-        try:
-            result = device_controller.resize_device(args.device_id)
-        except ValueError as e:
-            print(e)
-            return False
-        if not result["resized"]:
-            return f"Device size unchanged: {utils.humanbytes(result['new_size'])}"
-        out = (f"Device grown from {utils.humanbytes(result['old_size'])} "
-               f"to {utils.humanbytes(result['new_size'])}")
-        if result["warning"]:
-            out += f"\nWarning: {result['warning']}"
-        return out
 
     def storage_node__add_device(self, sub_command, args):
         return device_controller.add_device(args.device_id)
@@ -832,25 +871,93 @@ class CLIWrapperBase:
         return True
 
     def cluster__grow_devices(self, sub_command, args):
-        result = device_controller.grow_cluster_devices(
-            args.cluster_id, rebalance=not getattr(args, 'no_rebalance', False))
-        lines = [f"{r['device_id']}: {utils.humanbytes(r['old_size'])} -> {utils.humanbytes(r['new_size'])}"
-                 for r in result["devices"] if r["resized"]]
-        lines += [f"{dev_id}: failed: {err}" for dev_id, err in result["errors"].items()]
-        rebalance = result.get("rebalance")
-        if rebalance and rebalance["started"]:
-            lines.append("The devices have grown unevenly: device weights set to the new sizes, "
-                         "cluster rebalancing started.")
-        elif rebalance and rebalance["weights_updated"]:
-            lines.append(f"The devices have grown unevenly: device weights set to the new sizes. "
-                         f"{rebalance['reason']}")
-        elif rebalance:
-            lines.append(f"Warning: the devices have grown unevenly. {rebalance['reason']}")
-        elif not result["uniform"]:
-            lines.append("Warning: the data devices of the cluster have grown unevenly; the added capacity is "
-                         "only fully usable once all of them have grown by the same factor, or after "
-                         "grow-devices without --no-rebalance has updated the weights.")
-        return "\n".join(lines) or "No device has grown"
+        lun_factor = getattr(args, 'lun_factor', None)
+        if lun_factor is not None:
+            try:
+                lun_factor = float(lun_factor)
+            except ValueError:
+                print(f"--lun-factor must be a number, not {lun_factor!r}")
+                return False
+        extra: dict = {"lun_factor": lun_factor} if lun_factor is not None else {}
+        lun_size = int(getattr(args, 'lun_size', 0) or 0)
+        if lun_size:
+            if lun_factor is not None:
+                print("Give --lun-factor or --lun-size, not both")
+                return False
+            extra = {"lun_size": lun_size}
+        try:
+            result = device_controller.grow_cluster_devices(args.cluster_id, **extra)
+        except ValueError as e:
+            print(e)
+            return False
+        lines = [f"LUN {r['lun_id']} of {dev_id}: {utils.humanbytes(r['old_size'])} -> "
+                 f"{utils.humanbytes(r['new_size'])} at the array"
+                 for dev_id, r in (result.get("luns") or {}).items()]
+        lines += [f"{dev_id}: {err}" for dev_id, err in result["errors"].items()]
+        if not result["grown"]:
+            lines.append(result["reason"])
+            return "\n".join(lines)
+        lines.append(f"All data devices grown by factor {result['factor']:.4f}:")
+        for r in result["devices"]:
+            line = f"{r['device_id']}: {utils.humanbytes(r['old_size'])} -> {utils.humanbytes(r['new_size'])}"
+            if r["unused_size"]:
+                line += f" ({utils.humanbytes(r['unused_size'])} of the block device unused)"
+            lines.append(line)
+        return "\n".join(lines)
+
+    def cluster__set_array(self, sub_command, args):
+        options = {}
+        if args.options:
+            try:
+                options = json.loads(args.options)
+            except json.JSONDecodeError as e:
+                raise ValueError(f"--options is not valid JSON: {e}")
+            if not isinstance(options, dict):
+                raise ValueError("--options must be a JSON object")
+        credentials = {}
+        if args.credentials_file:
+            try:
+                raw = json.loads(Path(args.credentials_file).read_text())
+            except (OSError, json.JSONDecodeError) as e:
+                # Never the file content: it is the secret.
+                raise ValueError(f"--credentials-file could not be read as JSON: {type(e).__name__}")
+            if not isinstance(raw, dict) or not all(isinstance(v, str) for v in raw.values()):
+                raise ValueError("--credentials-file must hold a JSON object of strings")
+            # Wrapped at the boundary; unwrapped only by the KMS and the plugin.
+            credentials = {str(k): SecretStr(v) for k, v in raw.items()}
+        credential_ref = None
+        if getattr(args, "credential_ref", None):
+            try:
+                credential_ref = json.loads(args.credential_ref)
+            except json.JSONDecodeError as e:
+                raise ValueError(f"--credential-ref is not valid JSON: {e}")
+            if not isinstance(credential_ref, dict):
+                raise ValueError("--credential-ref must be a JSON object")
+        journal_options = None
+        if getattr(args, "journal_options", None):
+            try:
+                journal_options = json.loads(args.journal_options)
+            except json.JSONDecodeError as e:
+                raise ValueError(f"--journal-options is not valid JSON: {e}")
+            if not isinstance(journal_options, dict):
+                raise ValueError("--journal-options must be a JSON object")
+        view = array_controller.register_array(
+            args.cluster_id, args.plugin, args.endpoint or "", options, credentials,
+            int(args.lun_size or 0), credential_ref=credential_ref,
+            journal=getattr(args, "journal", None) or "local",
+            journal_lun_size=int(getattr(args, "journal_lun_size", 0) or 0),
+            journal_options=journal_options)
+        return _format_result([view], json=getattr(args, "json", False))
+
+    def cluster__get_array(self, sub_command, args):
+        arrays = array_controller.get_arrays(args.cluster_id)
+        if not arrays:
+            return "No array registered"
+        return _format_result(arrays, json=getattr(args, "json", False))
+
+    def cluster__remove_array(self, sub_command, args):
+        array_controller.delete_array(args.cluster_id, args.array_id, force=args.force)
+        return True
 
     def cluster__complete_expand(self, sub_command, args):
         cluster_ops.cluster_expand(args.cluster_id)
@@ -1385,10 +1492,54 @@ class CLIWrapperBase:
         mode = args.mode
         alert_config = parse_alerting_config(
             Path(args.alerting_config_path) if args.alerting_config_path else None)
-        return mgmt_ops.deploy_mgmt_node(cluster_ip, cluster_id, ifname, mgmt_ip, cluster_secret, mode, alert_config)
+        return mgmt_ops.deploy_mgmt_node(cluster_ip, cluster_id, ifname, mgmt_ip, cluster_secret, mode, alert_config,
+                                         site=getattr(args, 'site', "") or "",
+                                         site_api_endpoint=getattr(args, 'api_endpoint', "") or "")
 
     def control_plane__list(self, sub_command, args):
         return _format_result(mgmt_ops.list_mgmt_nodes(), json=args.json)
+
+    def control_plane__status(self, sub_command, args):
+        status = control_plane_controller.control_plane_status(args.cluster_id)
+        data = _control_plane_status_dict(status)
+        if args.json:
+            return _format_json(data)
+        rows = [{"key": k, "value": v} for k, v in data.items() if k != "sites"]
+        table = utils.print_table(rows)
+        site_rows = [{
+            "site": s["site"], "role": s["role"], "holds_lease": s["holds_lease"],
+            "mgmt_online": f'{s["mgmt_nodes_online"]}/{s["mgmt_nodes_total"]}',
+            "storage_online": f'{s["storage_nodes_online"]}/{s["storage_nodes_total"]}',
+            "ready": s["ready"], "problems": "; ".join(s["problems"]) or "-",
+        } for s in data["sites"]]
+        return table + "\n" + (utils.print_table(site_rows) if site_rows else "No sites")
+
+    def control_plane__set_leader_site(self, sub_command, args):
+        try:
+            readiness = control_plane_controller.move_leader_site(
+                args.cluster_id, args.site, force=bool(args.force))
+        except ControlPlaneNotReadyError as e:
+            return "Refused, site not ready (pass --force to override):\n  - " + "\n  - ".join(e.problems)
+        except ControlPlaneError as e:
+            return f"Refused: {e}"
+        note = (" (forced past: " + "; ".join(readiness.problems) + ")") if readiness.problems else ""
+        return (f"leader_site set to {args.site}{note}; the lease moves within "
+                f"{constants.CONTROL_PLANE_DRAIN_SEC + constants.CONTROL_PLANE_LEASE_RENEW_SEC}s "
+                f"(watch: sbctl control-plane status {args.cluster_id})")
+
+    def control_plane__takeover(self, sub_command, args):
+        try:
+            status = control_plane_controller.takeover(
+                args.cluster_id, args.site, args.confirm_site_down, operator=getpass.getuser())
+        except ControlPlaneTakeoverRefusedError as e:
+            return "Refused, the site declared down still answers:\n  - " + "\n  - ".join(e.alive)
+        except ControlPlaneError as e:
+            return f"Refused: {e}"
+        return (f"Takeover recorded: {args.site} leads cluster {args.cluster_id}; its control plane "
+                f"acquires the lease within {constants.CONTROL_PLANE_LEASE_RENEW_SEC}s. "
+                f"Mode here: {status.mode} ({status.mode_reason}). "
+                f"Next: fail the lost site's volumes over (sync replication: the site fence and forced "
+                f"promotes), then `sbctl control-plane status {args.cluster_id}`.")
 
     def control_plane__remove(self, sub_command, args):
         return mgmt_ops.remove_mgmt_node(args.node_id)
@@ -1968,6 +2119,9 @@ class CLIWrapperBase:
         max_queue_size = args.max_queue_size
         inflight_io_threshold = args.inflight_io_threshold
         strict_node_anti_affinity = args.strict_node_anti_affinity
+        raid_devices = getattr(args, 'raid_devices', False)
+        multi_attach = getattr(args, 'multi_attach', False)
+        ftt = getattr(args, 'ftt', None)
         is_single_node = args.is_single_node
         client_data_nic = args.client_data_nic
         enable_failure_domain = getattr(args, 'enable_failure_domain', False)
@@ -1996,9 +2150,18 @@ class CLIWrapperBase:
             device_mode=device_mode,
             inline_checksum=inline_checksum,
             atomic_4k=atomic_4k,
+            flex_geometry=getattr(args, 'flex_geometry', False),
             sync_replication=getattr(args, 'sync_replication', False),
             page_copy=getattr(args, 'page_copy', False),
             md_journal=md_journal,
+            raid_devices=raid_devices,
+            multi_attach=multi_attach,
+            ftt=ftt,
+            multi_attach_warm_standby=getattr(args, 'multi_attach_warm_standby', False),
+            stretched_control_plane=getattr(args, 'stretched_control_plane', False),
+            leader_site=getattr(args, 'leader_site', "") or "",
+            site=getattr(args, 'site', "") or "",
+            site_api_endpoint=getattr(args, 'site_api_endpoint', "") or "",
             container_image_prefix=args.container_image_prefix,
         )
 
@@ -2029,6 +2192,9 @@ class CLIWrapperBase:
         inflight_io_threshold = args.inflight_io_threshold
         disable_monitoring = args.disable_monitoring
         strict_node_anti_affinity = args.strict_node_anti_affinity
+        raid_devices = getattr(args, 'raid_devices', False)
+        multi_attach = getattr(args, 'multi_attach', False)
+        ftt = getattr(args, 'ftt', None)
         name = args.name
         tls_secret = args.tls_secret
         ingress_host_source = args.ingress_host_source
@@ -2075,10 +2241,19 @@ class CLIWrapperBase:
                 Path(args.alerting_config_path) if args.alerting_config_path else None),
             inline_checksum=inline_checksum,
             atomic_4k=atomic_4k,
+            flex_geometry=getattr(args, 'flex_geometry', False),
             cluster_vip=cluster_vip,
             sync_replication=getattr(args, 'sync_replication', False),
             page_copy=getattr(args, 'page_copy', False),
             md_journal=md_journal,
+            raid_devices=raid_devices,
+            multi_attach=multi_attach,
+            ftt=ftt,
+            multi_attach_warm_standby=getattr(args, 'multi_attach_warm_standby', False),
+            stretched_control_plane=getattr(args, 'stretched_control_plane', False),
+            leader_site=getattr(args, 'leader_site', "") or "",
+            site=getattr(args, 'site', "") or "",
+            site_api_endpoint=getattr(args, 'site_api_endpoint', "") or "",
             container_image_prefix=args.container_image_prefix,
         )
 

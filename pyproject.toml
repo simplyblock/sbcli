@@ -51,6 +51,22 @@ sbcli-dev = "simplyblock_cli.cli:main"
 simplyblock-service = "simplyblock_core.services.__main__:main"
 simplyblock-task-runner = "simplyblock_core.services.task_runners:main"
 
+# Storage-array plugins of the multi-attach array LUN mode
+# (simplyblock_core.array); the name is the value of Cluster.array_plugin.
+[project.entry-points."simplyblock.array_plugins"]
+aws-ebs = "simplyblock_core.array.aws_ebs:AwsEbsPlugin"
+pure-flasharray = "simplyblock_core.array.san:PureFlashArrayPlugin"
+netapp-ontap = "simplyblock_core.array.san:NetAppOntapPlugin"
+dell-powerstore = "simplyblock_core.array.san:DellPowerStorePlugin"
+dell-powermax = "simplyblock_core.array.san:DellPowerMaxPlugin"
+dell-powerflex = "simplyblock_core.array.san:DellPowerFlexPlugin"
+hpe-wsapi = "simplyblock_core.array.san:HpeWsapiPlugin"
+hpe-nimble = "simplyblock_core.array.san:HpeNimblePlugin"
+ibm-flashsystem = "simplyblock_core.array.san:IbmFlashSystemPlugin"
+hitachi-vsp = "simplyblock_core.array.san:HitachiVspPlugin"
+huawei-dorado = "simplyblock_core.array.san:HuaweiDoradoPlugin"
+infinidat-infinibox = "simplyblock_core.array.san:InfinidatInfiniBoxPlugin"
+
 [dependency-groups]
 test = [
     "mock",

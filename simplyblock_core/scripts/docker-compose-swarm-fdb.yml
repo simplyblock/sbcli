@@ -41,6 +41,7 @@ services:
       - "$DIR/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg"
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
 
   fdb-server:
     <<: *service-base

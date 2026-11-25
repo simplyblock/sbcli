@@ -424,15 +424,60 @@ class TestMemberOfLostDevice(unittest.TestCase):
     def test_returned_member_is_opened_again(self):
         node = _raid_node(2)
         member = utils.aio_bdev_name_for_serial("J0")
+        rpc = self._reopen(node, member, "/dev/disk/by-id/j0")
+        rpc.bdev_aio_create.assert_called_once_with(member, "/dev/disk/by-id/j0")
+        rpc.bdev_uring_create.assert_not_called()
+
+    def _reopen(self, node, member, path, block_size=4096, expect=True):
+        """The member's bdev is gone and its block device is back at ``path``;
+        the bdev SPDK then has reports ``block_size``."""
         rpc = MagicMock()
-        rpc.bdev_get.side_effect = [None, {"name": member}]
+        state = {"there": False}
+
+        def _create(name, filename, block_size=0):
+            state["there"] = True
+            return name
+
+        rpc.bdev_aio_create.side_effect = _create
+        rpc.bdev_uring_create.side_effect = _create
+        rpc.bdev_get.side_effect = lambda name: (
+            {"name": name, "block_size": block_size} if state["there"] else None)
         client = MagicMock()
         client.get_blockdevices.return_value = (
-            [{"serial": "J0", "by_id_path": "/dev/disk/by-id/j0", "device_path": "/dev/sdx1"}], None)
+            [{"serial": "J0", "by_id_path": path, "device_path": "/dev/sdx1"}], None)
         with patch.object(StorageNode, "client", return_value=client):
-            self.assertTrue(device_controller._ensure_aio_jm_member(
-                node, node.nvme_devices[0], member, rpc))
-        rpc.bdev_aio_create.assert_called_once_with(member, "/dev/disk/by-id/j0")
+            self.assertEqual(device_controller._ensure_aio_jm_member(
+                node, node.nvme_devices[0], member, rpc), expect)
+        return rpc
+
+    def test_returned_member_is_opened_with_the_block_size_it_was_created_with(self):
+        node = _raid_node(2)
+        node.lblk_devices[0]["aio_block_size"] = 4096
+        member = utils.aio_bdev_name_for_serial("J0")
+        rpc = self._reopen(node, member, "/dev/disk/by-id/j0")
+        rpc.bdev_aio_create.assert_called_once_with(member, "/dev/disk/by-id/j0", block_size=4096)
+
+    def test_returned_member_of_another_block_size_stays_out_of_the_raid(self):
+        node = _raid_node(2)
+        node.lblk_devices[0]["aio_block_size"] = 4096
+        member = utils.aio_bdev_name_for_serial("J0")
+        self._reopen(node, member, "/dev/disk/by-id/j0", block_size=512, expect=False)
+
+    def test_returned_member_on_a_device_mapper_node_is_opened_with_uring(self):
+        node = _raid_node(2)
+        member = utils.aio_bdev_name_for_serial("J0")
+        rpc = self._reopen(node, member, "/dev/mapper/mpatha-part1")
+        rpc.bdev_uring_create.assert_called_once_with(member, "/dev/mapper/mpatha-part1")
+        rpc.bdev_aio_create.assert_not_called()
+
+    def test_gone_uring_member_is_deleted_as_a_uring_bdev(self):
+        node = _raid_node(2)
+        member = utils.aio_bdev_name_for_serial("J0")
+        rpc = MagicMock()
+        rpc.bdev_get.return_value = {"name": member, "driver_specific": {"uring": {}}}
+        device_controller._delete_gone_aio_jm_member(node.nvme_devices[0], member, rpc)
+        rpc.bdev_uring_delete.assert_called_once_with(member)
+        rpc.bdev_aio_delete.assert_not_called()
 
     def test_member_still_absent_is_not_opened(self):
         node = _raid_node(2)

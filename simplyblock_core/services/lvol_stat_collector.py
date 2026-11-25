@@ -1,12 +1,13 @@
 import time
 
 from simplyblock_core import constants, db_controller, utils
-from simplyblock_core.controllers import lvol_events
+from simplyblock_core.controllers import control_plane_controller, lvol_events
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.stats import LVolStatObject, PoolStatObject
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCException
+from simplyblock_core.utils import lvstore_cluster_size as utils_lvstore_cluster_size
 
 logger = utils.get_logger(__name__)
 
@@ -56,7 +57,8 @@ def lvstore_cluster_size(cluster, lvol, snode) -> int:
         return cluster_size
     # distr_ndcs defaults to 0, and multiplying by it would report every
     # volume as using nothing at all -- a worse answer than one page.
-    cluster_size = cluster.page_size_in_blocks * max(cluster.distr_ndcs, 1)
+    cluster_size = utils_lvstore_cluster_size(
+        cluster.flex_geometry is True, cluster.distr_ndcs, cluster.page_size_in_blocks)
     logger.warning(
         "lvstore %s of lvol %s has no persisted cluster_sz on node %s; "
         "assuming %d bytes from the cluster settings, reported usage may be off",
@@ -279,6 +281,7 @@ def collect_lvol_record(cluster, lvol, snode, rpc_client):
 def main():
     logger.info("Starting stats collector...")
     while True:
+        control_plane_controller.wait_until_services_enabled("lvol-stat-collector")
         try:
             db.get_clusters()
         except Exception as e:

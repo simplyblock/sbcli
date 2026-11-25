@@ -221,6 +221,18 @@ def parse_arguments() -> argparse.Namespace:
         required=False
     )
     parser.add_argument(
+        '--lblk-journal-only',
+        help="With --lblk on a multi-attach cluster whose array plugin creates each node's data LUN at add-node: the one selected whole disk is the node's journal and nothing else. It is never partitioned, and the node has no local data device; its data device is the array LUN. Needs exactly one disk, named with --blk-names or --blk-serials.",
+        action='store_true',
+        dest='lblk_journal_only',
+    )
+    parser.add_argument(
+        '--lblk-array-only',
+        help="With --lblk on a multi-attach cluster whose array plugin creates each node's LUNs at add-node and keeps its journal on a LUN: the node uses no local device. Its journal LUN and data LUN are created on the array when the node is added. Not with --blk-names, --blk-names-exclude, --blk-serials, --lblk-journal-only or --lblk-journal-device.",
+        action='store_true',
+        dest='lblk_array_only',
+    )
+    parser.add_argument(
         '--lblk-journal-device',
         help='With --lblk and whole disks: dedicate each node\'s smallest disk to the '
              'journal instead of partitioning every disk into a journal partition and a '
@@ -291,6 +303,25 @@ def validate_arguments(args: argparse.Namespace) -> None:
                 None, "--blk-names/--blk-names-exclude/--blk-serials require --lblk")
         if getattr(args, 'lblk_journal_device', False) and not lblk:
             raise argparse.ArgumentError(None, "--lblk-journal-device requires --lblk")
+        if getattr(args, 'lblk_journal_only', False):
+            if not lblk:
+                raise argparse.ArgumentError(None, "--lblk-journal-only requires --lblk")
+            if getattr(args, 'lblk_journal_device', False):
+                raise argparse.ArgumentError(
+                    None, "--lblk-journal-only and --lblk-journal-device exclude each other")
+            if not (args.blk_names or args.blk_serials):
+                raise argparse.ArgumentError(
+                    None, "--lblk-journal-only needs the journal disk or partition named with "
+                          "--blk-names or --blk-serials")
+        if getattr(args, 'lblk_array_only', False):
+            if not lblk:
+                raise argparse.ArgumentError(None, "--lblk-array-only requires --lblk")
+            if (getattr(args, 'lblk_journal_only', False) or getattr(args, 'lblk_journal_device', False)
+                    or blk_names or blk_names_exclude or blk_serials):
+                raise argparse.ArgumentError(
+                    None, "--lblk-array-only selects no local device: not with --blk-names, "
+                          "--blk-names-exclude, --blk-serials, --lblk-journal-only or "
+                          "--lblk-journal-device")
         if use_lblk and (args.pci_allowed or args.pci_blocked
                          or getattr(args, 'device_model', '')
                          or getattr(args, 'size_range', '')
@@ -368,6 +399,8 @@ def main() -> None:
                 "names_exclude": [x.strip() for x in args.blk_names_exclude.split(',') if x.strip()] or None,
                 "serials": [x.strip() for x in args.blk_serials.split(',') if x.strip()] or None,
                 "journal_device": bool(getattr(args, 'lblk_journal_device', False)),
+                "journal_only": bool(getattr(args, 'lblk_journal_only', False)),
+                "array_only": bool(getattr(args, 'lblk_array_only', False)),
                 # Read before the discard below: the disks of an existing node
                 # with a dedicated journal device are never partitioned.
                 "keep_serials": sorted(utils.previous_lblk_dedicated_journal_serials()),

@@ -59,6 +59,25 @@ def test_bed_bf26_a_host_only_on_the_side_that_goes_is_stranded(guard):
     assert H1 in why and "discarding clone C" in why
 
 
+def test_bed_bf28_one_machine_under_two_host_nqns_is_not_stranded(guard):
+    # Source paths carry the simplyblock host NQN, the early-prepared target
+    # paths the kernel default: the same client, never stranded.
+    sb = "nqn.2014-08.io.simplyblock:uuid:5892b49a-bc39-41b2-a38a-8daae13a9d0d"
+    kernel = "nqn.2014-08.org.nvmexpress:uuid:ec2d55d6-1c18-ced7-92ee-34f409cb58ce"
+    db = _DB(_node("S1", [sb]), _node("S2", [sb]), _node("T1", [kernel]), _node("T2", [kernel]))
+    # the cutover freeze: the source paths go inaccessible, the target ones stay
+    assert guard.stranded_hosts(NQN, ["S1", "S2"], ["T1", "T2"], db=db) == set()
+    # a discarded target clone: the target paths go, the source ones stay
+    assert guard.removal_blocked(NQN, ["T1", "T2"], ["S1", "S2"], "x", db=db) is None
+
+
+def test_more_unmatched_hosts_going_than_staying_are_stranded(guard):
+    # Two clients on the side that goes, one other name on the side that stays:
+    # at least one machine loses its last path; both candidates are named.
+    db = _DB(_node("T1", [H1, H2]), _node("S1", ["nqn.host:other"]))
+    assert guard.stranded_hosts(NQN, ["T1"], ["S1"], db=db) == {H1, H2}
+
+
 def test_nodes_that_are_down_or_lack_the_subsystem_serve_no_host(guard):
     db = _DB(_node("T1", [H1]),
              _node("S1", [H1], status=StorageNode.STATUS_OFFLINE),
@@ -127,3 +146,25 @@ def test_the_freeze_waits_for_every_source_host_on_the_target(monkeypatch):
     src = inspect.getsource(runner)
     i = src.index("cutover freeze of")
     assert i < src.index("freeze_started_at=time.time()")
+
+
+def test_bed_bf29_the_source_delete_finds_the_target_by_nqn_after_the_clone_is_gone(monkeypatch):
+    # After the cutover the clone named in tgt_lvol_id no longer exists; the
+    # volume runs on the other cluster under a new record with the same NQN.
+    src = SimpleNamespace(get_id=lambda: "SRC", nqn=NQN, node_id="S1", nodes=["S2"],
+                          status="online")
+    live = SimpleNamespace(get_id=lambda: "NEW", nqn=NQN, node_id="T1", nodes=["T2", "T3"],
+                           status="online")
+    other = SimpleNamespace(get_id=lambda: "X", nqn="nqn.other", node_id="T9", nodes=[],
+                            status="online")
+    going = SimpleNamespace(get_id=lambda: "OLD", nqn=NQN, node_id="T7", nodes=[],
+                            status="in_deletion")
+    vols = {"A": [src], "B": [live, other, going]}
+
+    def get_lvol_by_id(i):
+        raise KeyError(i)
+    monkeypatch.setattr(runner, "db", SimpleNamespace(
+        get_lvol_by_id=get_lvol_by_id,
+        get_clusters=lambda: [SimpleNamespace(get_id=lambda: "A"), SimpleNamespace(get_id=lambda: "B")],
+        get_lvols=lambda cid: vols[cid]))
+    assert runner._live_target_node_ids(src, {"tgt_lvol_id": "GONE"}) == ["T1", "T2", "T3"]

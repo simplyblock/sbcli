@@ -7,9 +7,15 @@ from requests.adapters import HTTPAdapter
 from urllib3 import Retry
 
 from simplyblock_core.settings import Settings
+from simplyblock_core.utils import peer_address
 from simplyblock_core.utils.secrets import unwrap_secrets_for_send
 
 logger = logging.getLogger()
+
+
+# A node of the other site of a stretched control plane is named by that
+# site's DNS; connect to its node address instead (utils/peer_address.py).
+peer_address.install()
 
 
 class SNodeClientException(Exception):
@@ -256,6 +262,17 @@ class SNodeClient:
         from a whole disk (refused when busy)."""
         return self._request("POST", "wipe_block_device",
                              {"device_name": device_name})
+
+    def lun_info(self, wwn):
+        """Multi-attach: the local disks carrying LUN ``wwn``, each with
+        ``has_alceml_signature`` (block 0 read, nothing written).
+        Returns ``(result, error)``."""
+        return self._request("POST", "lun_info", {"wwn": wwn})
+
+    def scan_new_luns(self):
+        """Have the host look for LUNs newly presented by a storage array.
+        Returns ``(result, error)``."""
+        return self._request("POST", "scan_new_luns")
 
     def rescan_block_device(self, device_path):
         """Re-read the size of a grown whole-disk block device (lblk).

@@ -1,7 +1,11 @@
 import time
 
-from simplyblock_core import constants, db_controller, utils
-from simplyblock_core.controllers import device_controller, tasks_controller
+from simplyblock_core import constants, db_controller, multi_attach, utils
+from simplyblock_core.controllers import (
+    control_plane_controller,
+    device_controller,
+    tasks_controller,
+)
 from simplyblock_core.controllers.device_controller import CAUSE_LOCAL_FAILURE
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.nvme_device import NVMeDevice
@@ -46,7 +50,7 @@ def _check_aio_hung_io(node, rpc_client) -> list:
     into device failures (cf. constants NVME_TIMEOUT_US rationale)."""
     stalled = []
     for dev in node.nvme_devices:
-        if dev.bdev_type != "aio" or dev.status != NVMeDevice.STATUS_ONLINE:
+        if dev.bdev_type != "aio" or dev.status != NVMeDevice.STATUS_ONLINE or _not_local(dev, node):
             _aio_progress.pop(dev.get_id(), None)
             continue
         try:
@@ -82,6 +86,17 @@ def _check_aio_hung_io(node, rpc_client) -> list:
     return stalled
 
 
+def _not_local(dev, node) -> bool:
+    """Multi-attach: the device's LUN is not served from ``node`` (a takeover
+    moved it, or ``node`` is fenced from it). The node holds no stack for it
+    and its host may not even see the LUN (the fence detached it), so neither
+    a missing disk nor a missing stack there says anything about the device.
+    2026-11-19 FTT1 bed: after an SPDK kill and takeover, the fenced owner's
+    detached LUN was swept as hot-removed; device_remove of a 1+0 device
+    turned into read errors on every lvstore and a cluster suspension."""
+    return multi_attach.not_servable_here(dev, node.get_id())
+
+
 def _check_aio_device_presence(node) -> list:
     """Return the node's aio devices whose backing block device has been
     absent from the host inventory for AIO_DEVICE_ABSENT_POLLS consecutive
@@ -89,7 +104,8 @@ def _check_aio_device_presence(node) -> list:
     aio_devs = [dev for dev in node.nvme_devices
                 if dev.bdev_type == "aio"
                 and dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_UNAVAILABLE,
-                                   NVMeDevice.STATUS_READONLY, NVMeDevice.STATUS_CANNOT_ALLOCATE]]
+                                   NVMeDevice.STATUS_READONLY, NVMeDevice.STATUS_CANNOT_ALLOCATE]
+                and not _not_local(dev, node)]
     if not aio_devs:
         return []
     try:
@@ -162,6 +178,7 @@ def _sweep_aio_devices(node) -> None:
 def main():
     logger.info("Starting Device monitor...")
     while True:
+        control_plane_controller.wait_until_services_enabled("device-monitor")
         try:
             db.get_clusters()
         except Exception as e:

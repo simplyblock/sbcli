@@ -29,6 +29,11 @@ class VaultKMSSettings(BaseModel):
     transit_mount: str = "simplyblock/transit"
     kv_mount: str = "simplyblock/kv"
     cert_role: str = "simplyblock-webappapi"
+    #: Vault cert-auth role used for credentials of external systems (storage
+    #: arrays, ...) instead of ``cert_role``, so a Vault policy can grant those
+    #: paths separately from volume encryption keys. ``None`` reuses
+    #: ``cert_role``.
+    credentials_cert_role: str | None = None
 
     #: Same convention as BackupLocation._serialize_endpoint: the field owns
     #: its own JSON-safety, so plain model_dump() is enough here too.
