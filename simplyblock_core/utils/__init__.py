@@ -2225,18 +2225,25 @@ def detect_nics():
 
 def get_nvme_pci_devices():
     try:
-        # Step 1: Get all NVMe devices that mounted or have partitions
+        # Step 1: Get all NVMe devices that mounted or have partitions.
+        # KNAME, not NAME: a dm device's NAME is its mapped name, which has no /dev node.
         lsblk_output = subprocess.check_output(
-            ["lsblk", "-dn", "-o", "NAME,MOUNTPOINT"],
+            ["lsblk", "-dn", "-o", "KNAME,MOUNTPOINT"],
             text=True
         )
         blocked_devices = []
         for line in lsblk_output.strip().splitlines():
             name = line.strip().split()
-            partitions = subprocess.check_output(
-                ["lsblk", "-n", f"/dev/{name[0]}"],
-                text=True
-            ).strip().splitlines()
+            try:
+                partitions = subprocess.check_output(
+                    ["lsblk", "-n", f"/dev/{name[0]}"],
+                    text=True
+                ).strip().splitlines()
+            except subprocess.CalledProcessError:
+                # Its partitions are unknown, so it must not be offered for formatting.
+                logger.warning(f"Could not query block device /dev/{name[0]}, treating it as busy")
+                blocked_devices.append(name[0])
+                continue
 
             if len(name) > 1 or len(partitions) > 1:
                 blocked_devices.append(name[0])
