@@ -2178,6 +2178,17 @@ def set_jm_device_state(device_id, state):
 
 
 def remove_jm_device(device_id, force=False):
+    """Take the node's journal device out of service and tear its whole stack
+    down, the raid0 legs included (_delete_jm_stack).
+
+    The legs used to be left behind: only the top raid was deleted. A leg
+    keeps its member partitions claimed, and bdev_raid_create answers with the
+    bdev that already has the name, so the next build of the node's JM got
+    the old leg with its old members.
+
+    When the teardown fails, the JM stays unavailable and False is returned;
+    with ``force`` the record is set removed all the same (a node that is
+    being removed, whose SPDK may no longer answer)."""
     db_controller = DBController()
 
     try:
@@ -2189,29 +2200,15 @@ def remove_jm_device(device_id, force=False):
     set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
 
     if snode.status == StorageNode.STATUS_ONLINE:
-        rpc_client = snode.rpc_client()
-        # delete jm stack
-        if snode.enable_ha_jm:
-            try:
-                rpc_client.subsystem_delete(snode.jm_device.nvmf_nqn)
-            except RPCException as e:
-                logger.error("Failed to remove JM subsystem %s: %s", snode.jm_device.nvmf_nqn, e)
-
-        if snode.jm_device.pt_bdev:
-            rpc_client.bdev_PT_NoExcl_delete(snode.jm_device.pt_bdev)
-
-        rpc_client.bdev_jm_delete(snode.jm_device.jm_bdev, safe_removal=snode.enable_ha_jm)
-
         try:
-            rpc_client.bdev_alceml_delete(snode.jm_device.alceml_bdev)
-        except RPCRemoteError as e:
-            logger.warning(f"Failed to remove bdev {snode.jm_device.alceml_bdev}: {e}")
-
-        # if snode.jm_device.testing_bdev:
-        #     rpc_client.bdev_passtest_delete(snode.jm_device.testing_bdev)
-
-        # if len(snode.jm_device.jm_nvme_bdev_list) == 2:
-        rpc_client.bdev_raid_delete(snode.jm_device.raid_bdev)
+            _delete_jm_stack(snode, snode.rpc_client())
+        except RPCException as e:
+            if not force:
+                logger.error("Failed to tear down the JM stack of node %s, the JM device stays "
+                             "unavailable: %s", snode.get_id(), e)
+                return False
+            logger.warning("Failed to tear down the JM stack of node %s (forced removal "
+                           "goes on): %s", snode.get_id(), e)
 
     set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_REMOVED)
     return True

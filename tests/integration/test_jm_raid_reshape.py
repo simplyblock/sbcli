@@ -700,3 +700,43 @@ def test_a_restart_with_a_member_of_one_of_three_legs_missing_runs_on_the_other_
     assert jm.raid_bdev == f"raid_jm_{NODES[0]}"
     assert jm.jm_leg_members == legs                    # the full geometry stays on record
     assert jm.stale_jm_legs == [f"raid_jm_{NODES[0]}_l1"]
+
+
+# -- removing the journal device ----------------------------------------------
+
+def test_removing_the_jm_device_takes_the_raid0_legs_down_with_the_raid(env):
+    """The legs used to stay: only the top raid was deleted, and the next
+    build of the node's JM was handed the old legs with their old members."""
+    jm_id = env.node().jm_device.get_id()
+    assert len(env.raids[NODES[0]]) == 3
+
+    assert device_controller.remove_jm_device(jm_id)
+
+    assert env.raids[NODES[0]] == []
+    assert env.raids[NODES[1]] == [f"raid_jm_{NODES[1]}_l0", f"raid_jm_{NODES[1]}_l1",
+                                   f"raid_jm_{NODES[1]}"]
+    assert env.node().jm_device.status == JMDevice.STATUS_REMOVED
+    mock = env.rpcs[NODES[0]].mock
+    mock.bdev_jm_delete.assert_called_once()
+    mock.bdev_alceml_delete.assert_called_once()
+
+
+def test_a_teardown_that_fails_leaves_the_jm_unavailable_unless_forced(env):
+    jm_id = env.node().jm_device.get_id()
+    env.rpcs[NODES[0]].mock.bdev_raid_delete.side_effect = RPCException("raid is busy")
+
+    assert device_controller.remove_jm_device(jm_id) is False
+    assert env.node().jm_device.status == JMDevice.STATUS_UNAVAILABLE
+
+    assert device_controller.remove_jm_device(jm_id, force=True)
+    assert env.node().jm_device.status == JMDevice.STATUS_REMOVED
+
+
+def test_a_node_that_is_not_online_has_its_jm_record_removed_without_a_teardown(env):
+    jm_id = env.node().jm_device.get_id()
+    env.set_node(0, status=StorageNode.STATUS_OFFLINE)
+
+    assert device_controller.remove_jm_device(jm_id)
+
+    assert env.node().jm_device.status == JMDevice.STATUS_REMOVED
+    env.rpcs[NODES[0]].mock.bdev_raid_delete.assert_not_called()
