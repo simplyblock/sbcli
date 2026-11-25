@@ -222,6 +222,10 @@ def _add_grafana_user_or_disable_monitoring(cluster: Cluster, grafana_secret: Se
         cluster.disable_monitoring = True
 
 
+#: Graylog extractor condition: the message starts with a JSON object.
+JSON_MESSAGE_CONDITION = r"^\s*\{"
+
+
 def _add_graylog_input(cluster_ip, password: SecretStr):
     base_url = f"{cluster_ip}/api"
     input_url = f"{base_url}/system/inputs"
@@ -294,6 +298,12 @@ def _add_graylog_input(cluster_ip, password: SecretStr):
         return False
 
     extractor_url = f"{input_url}/{input_id}/extractors"
+    # Only a message that IS a JSON document is parsed. Without the condition
+    # Graylog ran the JSON extractor on every line, and every plain line (all
+    # of SPDK's and spdk-proxy's) threw a NullPointerException inside it: on
+    # the EKS bed bf34 (2026-11-24, ten storage nodes) that per-line exception
+    # was a large part of why Graylog fell 13 minutes behind and never caught
+    # up. fluent-bit already sends the kubernetes fields structured.
     extractor_payload = {
         "title": "Extract Kubernetes JSON",
         "extractor_type": "json",
@@ -303,8 +313,8 @@ def _add_graylog_input(cluster_ip, password: SecretStr):
         "source_field": "message",
         "target_field": "",
         "extractor_config": {},
-        "condition_type": "none",
-        "condition_value": ""
+        "condition_type": "regex",
+        "condition_value": JSON_MESSAGE_CONDITION,
     }
 
     extractor_response = session.post(extractor_url, headers=headers, data=json.dumps(extractor_payload))
