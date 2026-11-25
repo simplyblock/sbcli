@@ -1702,10 +1702,15 @@ class DBController(metaclass=Singleton):
         node being added. The reservation makes the chosen port visible to
         concurrent allocators until the node record itself is persisted (after
         which the node's own port fields keep it reserved and the reservation
-        ages out by TTL).
+        ages out).
 
         ``slot`` names what the port is for. A reservation for a slot that
-        already holds one returns that port again; see PortReservation."""
+        already holds one returns that port again; see PortReservation.
+
+        The two kinds age out differently: an unnamed reservation after
+        ``PORT_RESERVATION_TTL_SEC``, a slot's after
+        ``PORT_RESERVATION_SLOT_TTL_SEC``, and a slot's never by a reservation
+        for the same slot."""
         from simplyblock_core import utils
         base_port = utils.get_nvmf_base_port(cluster_id)
         node_used = utils.get_node_nvmf_ports(cluster_id)

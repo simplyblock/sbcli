@@ -407,6 +407,12 @@ PORT_RESERVATION_TTL_SEC = 600
 # between two attempts, which on OpenShift spans a whole MachineConfig rollout.
 PORT_RESERVATION_SLOT_TTL_SEC = 24 * 3600
 
+# How the node agent's spdk_process_start begins its error when it declined to
+# create the pod because a later request for the same pod had arrived. The
+# request that gets this answer started nothing, so its caller must not tear
+# the pod down on the way out: the pod on that port is the later request's.
+SPDK_START_SUPERSEDED = "spdk_process_start superseded"
+
 # add_node_add_task's dedup check (by node_addr) is itself a plain
 # read-then-write: two concurrent posts for one host can both pass it before
 # either commits, queuing two FN_NODE_ADD tasks for the same host (the
