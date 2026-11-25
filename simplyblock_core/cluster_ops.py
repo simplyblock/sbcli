@@ -507,6 +507,14 @@ def _validate_integrity_flags(inline_checksum, atomic_4k):
         raise ValueError("atomic_4k requires inline_checksum")
 
 
+def _validate_flex_geometry(flex_geometry, page_size_in_blocks):
+    """A flex-geometry lvstore cluster must be a whole number of pages."""
+    size = constants.FLEX_GEOMETRY_LVS_CLUSTER_SIZE
+    if flex_geometry and (not page_size_in_blocks or size % int(page_size_in_blocks)):
+        raise ValueError(f"flex_geometry needs a page size that divides {size >> 20} MiB "
+                         f"(got {page_size_in_blocks})")
+
+
 def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    cap_warn, cap_crit, prov_cap_warn, prov_cap_crit, ifname, mgmt_ip, log_del_interval, metrics_retention_period,
                    contact_point, grafana_endpoint, distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, mode,
@@ -523,6 +531,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    alert_config: dict[str, t.Any] | None = None,
                    inline_checksum=False,
                    atomic_4k=False,
+                   flex_geometry=False,
                    cluster_vip=None,
                    sync_replication=False,
                    page_copy=False,
@@ -543,6 +552,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     if (distr_ndcs, distr_npcs) not in SUPPORTED_ERASURE_CODING_SCHEMES:
         raise ValueError("Unsupported erasure coding scheme")
     _validate_integrity_flags(inline_checksum, atomic_4k)
+    _validate_flex_geometry(flex_geometry, page_size_in_blocks)
 
     _validate_sync_replication(sync_replication, ha_type, is_single_node)
     if stretched_control_plane and not leader_site:
@@ -717,6 +727,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.full_page_unmap = False
     cluster.inline_checksum = bool(inline_checksum)
     cluster.atomic_4k = bool(atomic_4k)
+    cluster.flex_geometry = bool(flex_geometry)
     cluster.page_copy = bool(page_copy)
     cluster.md_journal = bool(md_journal)
     cluster.raid_devices = bool(raid_devices)
@@ -872,6 +883,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
                 device_mode=constants.DEVICE_MODE_NVME,
                 inline_checksum=False,
                 atomic_4k=False,
+                flex_geometry=False,
                 sync_replication=False,
                 leader_site="",
                 page_copy=False,
@@ -918,6 +930,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
         device_mode=device_mode,
         inline_checksum=inline_checksum,
         atomic_4k=atomic_4k,
+        flex_geometry=flex_geometry,
         sync_replication=sync_replication,
         leader_site=leader_site,
         page_copy=page_copy,
@@ -964,6 +977,7 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
                 device_mode=constants.DEVICE_MODE_NVME,
                 inline_checksum=False,
                 atomic_4k=False,
+                flex_geometry=False,
                 sync_replication=False,
                 leader_site="",
                 page_copy=False,
@@ -982,6 +996,7 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
                 container_image_prefix: str | None = None,
 ) -> str:
     _validate_integrity_flags(inline_checksum, atomic_4k)
+    _validate_flex_geometry(flex_geometry, page_size_in_blocks)
 
     clusters = db_controller.get_clusters()
     if name and clusters:
@@ -1136,6 +1151,7 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
     cluster.full_page_unmap = False
     cluster.inline_checksum = bool(inline_checksum)
     cluster.atomic_4k = bool(atomic_4k)
+    cluster.flex_geometry = bool(flex_geometry)
     cluster.page_copy = bool(page_copy)
     cluster.md_journal = bool(md_journal)
     cluster.raid_devices = bool(raid_devices)

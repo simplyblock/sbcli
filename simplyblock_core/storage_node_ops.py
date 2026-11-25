@@ -19793,10 +19793,15 @@ def create_lvstore(snode: StorageNode, ndcs, npcs, distr_bs, distr_chunk_bs, pag
     # distribution layer had to read the rest back to compute parity.
     #
     # ndcs is the cluster's data-chunk count, so 2+2 gives 4 MiB, 1+x gives
-    # 2 MiB and 4+x gives 8 MiB, off the same 2 MiB page.
-    cluster_sz = page_size_in_blocks * ndcs
-    strip_size_kb = int((ndcs + npcs) * 2048)
-    strip_size_kb = utils.nearest_upper_power_of_2(strip_size_kb)
+    # 2 MiB and 4+x gives 8 MiB, off the same 2 MiB page; a flex-geometry
+    # cluster uses 8 MiB for every scheme (utils.lvstore_cluster_size).
+    cluster_sz = utils.lvstore_cluster_size(cluster.flex_geometry is True, ndcs, page_size_in_blocks)
+    # The raid0 strip is the lvstore cluster, so each cluster lies on one
+    # distrib. It used to be (ndcs + npcs) * 2 MiB rounded up to a power of two
+    # (8 MiB for 1+2), counting parity chunks that never appear in the raid's
+    # address space: four consecutive 1+2 clusters on one distrib. Only new
+    # lvstores take it; an existing one keeps the strip its stack recorded.
+    strip_size_kb = utils.nearest_upper_power_of_2(cluster_sz // 1024)
     jm_vuid = 1
     jm_ids = []
     if snode.enable_ha_jm:

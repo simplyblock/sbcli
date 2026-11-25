@@ -483,6 +483,9 @@ class Cluster(BaseModel):
     # sends force_4k_atomic so the data plane skips its >=4K block-size gate for
     # fallback-mode inline checksum. Frozen at cluster create time.
     atomic_4k: bool = False
+    # Flex geometry: the lvstore cluster size (and the raid0 strip under it) is
+    # a fixed 8 MiB instead of ndcs pages. Frozen at cluster create time.
+    flex_geometry: bool = False
     # Journal blobstore metadata pages so a write torn by a power loss cannot
     # leave a half-written page behind. Needed when a device is not 4K-write
     # atomic. The lvstore records it in its super block at creation, so it is
@@ -540,6 +543,12 @@ class Cluster(BaseModel):
     # and it is used for gelf address in the storage nodes' containers.
     # If not defined, then gelf address will be the first mgmt node's address
     cluster_vip: str = ""
+
+    def lvs_cluster_size(self) -> int:
+        """The lvstore cluster size this cluster creates its lvstores with
+        (utils.lvstore_cluster_size); also their raid0 strip."""
+        from simplyblock_core.utils import lvstore_cluster_size
+        return lvstore_cluster_size(self.flex_geometry, self.distr_ndcs, self.page_size_in_blocks)
 
     def get_status_code(self):
         if self.status in self.STATUS_CODE_MAP:

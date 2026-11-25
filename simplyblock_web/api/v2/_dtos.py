@@ -210,6 +210,7 @@ class ClusterDTO(BaseModel):
     device_mode: str
     inline_checksum: bool
     atomic_4k: bool
+    flex_geometry: bool = False
     page_copy: bool = False
     md_journal: bool = False
     raid_devices: bool = False
@@ -269,6 +270,7 @@ class ClusterDTO(BaseModel):
             device_mode=model.device_mode,
             inline_checksum=model.inline_checksum,
             atomic_4k=model.atomic_4k,
+            flex_geometry=model.flex_geometry,
             page_copy=model.page_copy,
             md_journal=model.md_journal,
             raid_devices=model.raid_devices,

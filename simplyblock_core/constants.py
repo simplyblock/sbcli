@@ -172,6 +172,10 @@ LBLK_MIN_DEVICES_PER_NODE = 2
 # total selected capacity, floored here, and never more than
 # LBLK_JM_SPLIT_MAX_FRACTION of the unit being split.
 LBLK_JM_MIN_SIZE = 2 * 1024 * 1024 * 1024
+#: lvstore cluster size of a flex-geometry cluster (Cluster.flex_geometry): the
+#: same for every erasure-coding scheme, so its volumes and snapshots keep one
+#: cluster size whatever geometry they are placed with.
+FLEX_GEOMETRY_LVS_CLUSTER_SIZE = 8 * 1024 * 1024
 LBLK_JM_SPLIT_MAX_FRACTION = 0.5
 
 PMEM_DIR = '/tmp/pmem'
