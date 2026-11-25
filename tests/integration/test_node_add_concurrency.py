@@ -216,6 +216,27 @@ class TestPortReservationTx(unittest.TestCase):
         self.assertEqual(port, 4421)
         self.assertNotIn(self._res_key("c1", 4420), tr.store)
 
+    def test_a_second_reservation_for_a_slot_frees_its_port(self):
+        """One slot holds one port. A second reservation under the same name
+        is dropped, so its port goes back to the pool."""
+        db = _new_db()
+        store = {}
+        for port in (4420, 4421):
+            res = PortReservation()
+            res.cluster_id = "c1"
+            res.port = port
+            res.owner = "earlier"
+            res.created_at = 1000
+            res.slot = "rpc/w2/0/0xf"
+            store[self._res_key("c1", port)] = res.to_dict()
+        tr = FakeTx(store)
+        mine = db._reserve_next_nvmf_port_tx(tr, "c1", 4420, set(), "attempt-2", now=1100, slot="rpc/w2/0/0xf")
+        self.assertIn(mine, (4420, 4421))
+        left = [v["port"] for v in tr.store.values() if v.get("slot") == "rpc/w2/0/0xf"]
+        self.assertEqual(left, [mine])
+        other = db._reserve_next_nvmf_port_tx(tr, "c1", 4420, set(), "x", now=1100, slot="rpc/w3/0/0xf")
+        self.assertEqual({mine, other}, {4420, 4421})
+
     def test_a_reservation_without_a_slot_is_never_handed_back(self):
         """The node's nvmf port is reserved without a slot and must stay
         distinct from its rpc port and from every other unnamed reservation."""

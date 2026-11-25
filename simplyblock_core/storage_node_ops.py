@@ -4071,10 +4071,11 @@ def _abort_started_spdk(snode_api, rpc_port, cluster_id, reason, cluster_mode=No
     fallback, and the only path in docker mode, where the control plane has
     no way to reach the container itself.
 
-    The rpc_port reservation is deliberately NOT released: it has no release
-    API and ages out by TTL (see reserve_cluster_nvmf_port), and dropping it
-    here would hand the port to a concurrent add while this pod is still
-    shutting down.
+    The rpc_port reservation is deliberately NOT released. It is held for the
+    slot (see ``_rpc_port_slot`` and PortReservation), so the retry of this add
+    gets the same port back, and dropping it here would hand the port to a
+    concurrent add while this pod is still shutting down. A slot nobody
+    retries ages out after ``PORT_RESERVATION_SLOT_TTL_SEC``.
     """
     logger.error(f"add_node aborting after SPDK start: {reason}")
 

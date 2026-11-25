@@ -1672,6 +1672,11 @@ class DBController(metaclass=Singleton):
                     # here means nobody else was handed the port, however old
                     # it is, so it is not aged out.
                     held = res
+                else:
+                    # A second reservation for this slot. One slot holds one
+                    # port, so this one frees its port instead of keeping it
+                    # out of the pool under a name that will never ask for it.
+                    del tr[res.get_db_id().encode()]
                 continue
             if res.expired(now):
                 del tr[res.get_db_id().encode()]
