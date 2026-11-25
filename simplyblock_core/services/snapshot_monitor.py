@@ -1071,7 +1071,8 @@ def take_due_internal_snapshots(cluster_id, now_ts):
                 continue
             logger.info("Taking consistency-group snapshot for group %s "
                         "(%d members)", group_id, len(members))
-            _seq, err = consistency_group_controller.create_group_snapshot_for_group(group)
+            _seq, err = consistency_group_controller.create_group_snapshot_for_group(
+                group, delete_wait=0)
             if err:
                 logger.warning("Group snapshot for group %s failed: %s",
                                group_id, err)
@@ -1112,8 +1113,11 @@ def take_due_internal_snapshots(cluster_id, now_ts):
                 continue
             name = f"repl_internal_{lvol.get_id()[:8]}_{now_ts}"
             logger.info(f"Taking internal replication snapshot for lvol {lvol.get_id()}: {name}")
+            # delete_wait=0: this loop runs the sync deletes a wait would be
+            # waiting for; a volume whose newest snapshot is still being
+            # deleted is skipped and taken on a later pass.
             _id, err = replication_delta.add_snapshot(
-                lvol, name, snap_type=SnapShot.TYPE_INTERNAL)
+                lvol, name, snap_type=SnapShot.TYPE_INTERNAL, delete_wait=0)
             if err:
                 logger.warning(f"Internal snapshot for {lvol.get_id()} failed: {err}")
         except Exception as e:
