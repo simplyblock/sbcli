@@ -1614,10 +1614,11 @@ def _jm_journals(snode: StorageNode) -> list[dict]:
       busy          the JMs the leader reports as not ready or replicating
                     (jc_get_jm_status), None when the leader cannot be asked
                     or names no JM at all
-      held          whether the JM of ``snode`` holds the journal
-                    (bdev_jm_get_status on its node), None when it cannot be
-                    asked
-      error         why leader, busy or held is unknown, or ""
+      error         why leader or busy is unknown, or ""
+
+    jc_get_jm_status on the leader is the only status asked. The JM's own
+    bdev_jm_get_status is a debugging call and says nothing about whether the
+    journal is on the JM's disks.
     """
     from simplyblock_core.controllers import lvol_controller
 
@@ -1632,7 +1633,7 @@ def _jm_journals(snode: StorageNode) -> list[dict]:
         if owner.get_id() != snode.get_id() and jm_id not in owner.jm_ids:
             continue
         journal: dict = {"lvs": owner.lvstore, "jm_vuid": owner.jm_vuid, "leader": None,
-                         "busy": None, "held": None, "error": ""}
+                         "busy": None, "error": ""}
         journals.append(journal)
         hosts = [owner] + [by_id[i] for i in (owner.secondary_node_id, owner.tertiary_node_id)
                            if i in by_id]
@@ -1643,7 +1644,6 @@ def _jm_journals(snode: StorageNode) -> list[dict]:
             continue
         try:
             status = journal["leader"].rpc_client(timeout=10, retry=1).jc_get_jm_status(owner.jm_vuid)
-            held = snode.rpc_client(timeout=10, retry=1).bdev_jm_get_status(owner.jm_vuid)
         except RPCException as e:
             journal["error"] = str(e)
             continue
@@ -1651,19 +1651,17 @@ def _jm_journals(snode: StorageNode) -> list[dict]:
             journal["error"] = "no JM reported"
             continue
         journal["busy"] = sorted(name for name, ready in status.items() if ready is False)
-        journal["held"] = bool(held) and held.get("res", 0) > 0
     return journals
 
 
-def jm_resync_pending(snode: StorageNode, require_held: bool = True) -> list[str]:
+def jm_resync_pending(snode: StorageNode) -> list[str]:
     """The journals the JM of ``snode`` is a copy of that are not known to be
     in sync, each with the reason; empty when all of them are.
 
     In sync means the LVS leader reports every JM of the journal ready and no
-    replication running, and, unless ``require_held`` is off, that the JM of
-    ``snode`` reports the journal as held. Both are necessary and neither is
-    proof that a rebuilt JM was brought up to date: see start_jm_resync, which
-    is what makes it so. A journal whose state cannot be established counts as
+    replication running (jc_get_jm_status). That alone does not show that a
+    JM rebuilt empty was brought up to date: see start_jm_resync, which is
+    what makes it so. A journal whose state cannot be established counts as
     pending: an unknown answer is not "in sync"."""
     pending = []
     for journal in _jm_journals(snode):
@@ -1671,8 +1669,6 @@ def jm_resync_pending(snode: StorageNode, require_held: bool = True) -> list[str
             pending.append(f"{journal['lvs']}: {journal['error']}")
         elif journal["busy"]:
             pending.append(f"{journal['lvs']}: {journal['busy']}")
-        elif require_held and not journal["held"]:
-            pending.append(f"{journal['lvs']}: not on the JM of node {snode.get_id()}")
     return pending
 
 
@@ -1681,15 +1677,14 @@ def start_jm_resync(snode: StorageNode, synced=()) -> list[str]:
     is a copy of, on their LVS leaders, and return the LVS names it was
     started for.
 
-    Every journal is synchronised explicitly once after a rebuild (``synced``
-    names the ones already done), and again whenever the JM reports that it
-    does not hold it. The journal coordinator brings a JM it reaches over the
-    network up to date by itself when the JM reconnects; it does not do so
-    for the leader's own local JM, and neither status RPC tells: after a
-    rebuild the leader reported that JM ready (jc_get_jm_status) and the JM
-    reported the journal as held (bdev_jm_get_status) while nothing had been
-    replicated to it, and a restart of the node then found the journal not on
-    its disks (lab, 2026-11-23). jc_explicit_synchronization on the leader
+    Every journal is synchronised explicitly once after a rebuild; ``synced``
+    names the ones already done. The journal coordinator replicates to a JM
+    by itself only when the JM was away for at least 15 seconds between its
+    disconnect and its reconnect. A rebuild takes the JM away for about five,
+    so nothing is replicated to the empty JM, while the leader reports it
+    ready (jc_get_jm_status): a restart of the node then finds the journal
+    not on its disks (lab, 2026-11-23 and 2026-11-24, 24 minutes of client IO
+    without a replication). jc_explicit_synchronization on the leader
     replicates it within seconds, and that copy reads back after a restart.
 
     Only ever on the confirmed leader of the LVS: explicit synchronisation
@@ -1700,14 +1695,12 @@ def start_jm_resync(snode: StorageNode, synced=()) -> list[str]:
     synced = set(synced)
     started = []
     for journal in _jm_journals(snode):
-        if journal["error"] or journal["busy"]:
-            continue
-        if journal["held"] and journal["lvs"] in synced:
+        if journal["error"] or journal["busy"] or journal["lvs"] in synced:
             continue
         leader = journal["leader"]
         logger.info("Synchronising the journal of %s (jm_vuid %s) to the JM of node %s on the "
-                    "LVS leader %s (held by the JM: %s)", journal["lvs"], journal["jm_vuid"],
-                    snode.get_id(), leader.get_id(), journal["held"])
+                    "LVS leader %s", journal["lvs"], journal["jm_vuid"],
+                    snode.get_id(), leader.get_id())
         try:
             leader.rpc_client(timeout=10, retry=0).jc_explicit_synchronization(journal["jm_vuid"])
         except RPCException as e:

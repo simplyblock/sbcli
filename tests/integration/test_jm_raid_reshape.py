@@ -3,8 +3,8 @@
 A device that fails and is migrated out takes its journal partition with it
 for good. The raid over the node's journal partitions cannot give a member up
 in place, so a ``jm_raid_reshape`` task builds it anew, empty, over the
-members the node's devices call for, and waits until the new JM holds every
-journal it is a copy of again.
+members the node's devices call for, has every journal it is a copy of
+synchronised to it and waits until they are in sync.
 
 These tests run the flow against the real FoundationDB: the device change
 queues the task, the restart runner's spec drives it, and the node record is
@@ -49,9 +49,8 @@ def _members(count):
 
 class Rpc:
     """The SPDK side of one node: what the control plane asked of it, and the
-    answers a healthy node gives. ``journals_missing`` are the jm_vuids its JM
-    does not hold; an explicit synchronisation of one, called on any node,
-    puts it there when ``sync_works``."""
+    answers a healthy node gives. bdev_jm_get_status, the JM's debugging
+    status, is not part of the flow: asking for it fails the test."""
 
     def __init__(self, env, node_id):
         self.env, self.node_id = env, node_id
@@ -65,7 +64,7 @@ class Rpc:
         self.mock.bdev_jm_create.return_value = True
         self.mock.subsystem_get.return_value = None
         self.mock.jc_get_jm_status.side_effect = self._jc_status
-        self.mock.bdev_jm_get_status.side_effect = self._jm_status
+        self.mock.bdev_jm_get_status.side_effect = AssertionError("bdev_jm_get_status is a debugging call")
         self.mock.jc_explicit_synchronization.side_effect = self._explicit_sync
 
     def _raid_create(self, name, members, level, *args, **kwargs):
@@ -80,16 +79,8 @@ class Rpc:
             raise RPCException("leader does not answer")
         return {"jm_local": jm_vuid not in self.env.replicating, "remote_jm_n1": True}
 
-    def _jm_status(self, jm_vuid):
-        if jm_vuid in self.env.journals_missing[self.node_id]:
-            return {"res": -1, "njournals": 2}
-        return {"res": 1, "njournals": 3, "jm_vuid": jm_vuid, "total_records": 14}
-
     def _explicit_sync(self, jm_vuid):
         self.env.synced.append((self.node_id, jm_vuid))
-        if self.env.sync_works:
-            for missing in self.env.journals_missing.values():
-                missing.discard(jm_vuid)
         return {"res": 1}
 
 
@@ -100,11 +91,9 @@ class Env:
         self.failing_raids: set = set()
         self.replicating: set = set()
         self.unreachable: set = set()
-        self.sync_works = True
         self.created: list = []
         self.synced: list = []
         self.raids = {node_id: [] for node_id in NODES}
-        self.journals_missing = {node_id: set() for node_id in NODES}
         self.leaders: dict = {}
         self.rpcs = {node_id: Rpc(self, node_id) for node_id in NODES}
 
@@ -401,39 +390,18 @@ def test_a_legacy_mirror_is_rebuilt_as_a_legacy_mirror(env):
 
 # -- the resync --------------------------------------------------------------
 
-def test_every_journal_is_synchronised_even_when_the_jm_says_it_holds_it(env):
-    """Lab, 2026-11-23: after a rebuild the leader reported its own JM ready
-    and the JM reported the journal as held, nothing had been replicated to
-    it, and a restart of the node found the journal not on its disks."""
+def test_every_journal_is_synchronised_although_its_leader_reports_the_jm_ready(env):
+    """Lab, 2026-11-24: the JM was away for five seconds during the rebuild,
+    under the 15 the journal coordinator needs to replicate by itself. The
+    leader reported the empty JM ready, nothing was replicated to it in 24
+    minutes of client IO, and a restart of the node found the journal not on
+    its disks."""
     env.set_device(0, 1, MIGRATED)
 
     task = env.run_to_done(env.queue())
 
     assert sorted(env.synced) == ALL_SYNCED
     assert task.function_params["sync_calls"] == 1
-
-
-def test_a_journal_the_jm_does_not_hold_is_synchronised_again(env):
-    """Lab, 2026-11-23, first run: the leader reported every JM of its journal
-    ready while its own rebuilt JM did not hold that journal."""
-    env.set_device(0, 1, MIGRATED)
-    task_id = env.queue()
-    env.sync_works = False
-    env.journals_missing[NODES[0]] = {1}
-
-    task = env.drive(task_id)                           # every journal once
-    assert sorted(env.synced) == ALL_SYNCED
-    task = env.drive(task_id)                           # the missing one again
-    assert env.synced.count((NODES[0], 1)) == 2
-    assert len(env.synced) == 4
-    assert task.status == JobSchedule.STATUS_RUNNING
-    assert task.function_params["sync_calls"] == 2
-    assert task.function_params["ready_polls"] == 0
-
-    env.sync_works = True
-    task = env.run_to_done(task_id)
-    assert env.synced.count((NODES[0], 1)) == 3
-    assert len(env.synced) == 5                         # the others were not repeated
 
 
 def test_the_sync_goes_to_the_node_that_leads_the_lvs(env):
@@ -450,16 +418,24 @@ def test_no_sync_without_a_confirmed_leader(env):
     """On a follower an explicit synchronisation takes the leadership away."""
     env.set_device(0, 1, MIGRATED)
     task_id = env.queue()
-    env.drive(task_id)
-    assert sorted(env.synced) == ALL_SYNCED
-    env.journals_missing[NODES[0]] = {1}
-    del env.leaders["LVS_1"]
+    original = device_controller.reshape_jm_raid
 
+    def _reshape_then_lose_the_leader(node_id):
+        members = original(node_id)
+        del env.leaders["LVS_1"]
+        return members
+
+    with patch.object(device_controller, "reshape_jm_raid", side_effect=_reshape_then_lose_the_leader):
+        env.drive(task_id)
     task = env.drive(task_id)
 
-    assert sorted(env.synced) == ALL_SYNCED             # nothing more was started
+    assert sorted(env.synced) == [(NODES[1], 2), (NODES[2], 3)]
     assert task.status == JobSchedule.STATUS_RUNNING
     assert "no leader found" in task.function_result
+
+    env.leaders["LVS_1"] = NODES[0]
+    env.run_to_done(task_id)
+    assert sorted(env.synced) == ALL_SYNCED
 
 
 def test_a_journal_being_replicated_is_synchronised_once_that_is_over(env):
@@ -486,23 +462,6 @@ def test_a_journal_being_replicated_is_synchronised_once_that_is_over(env):
     env.replicating.clear()
     task = env.run_to_done(task_id)
     assert sorted(env.synced) == ALL_SYNCED
-
-
-def test_a_journal_that_never_arrives_costs_retries(env):
-    env.set_device(0, 1, MIGRATED)
-    env.journals_missing[NODES[0]] = {1}
-    env.sync_works = False
-    task_id = env.queue()
-
-    for _ in range(tasks_runner_restart.JM_RESHAPE_MAX_SYNC_CALLS):
-        task = env.drive(task_id)
-        assert task.retry == 0
-    task = env.drive(task_id)
-
-    assert task.retry == 1
-    assert task.status == JobSchedule.STATUS_SUSPENDED
-    assert "still not on the rebuilt JM" in task.function_result
-    assert len(_raids_built(env)) == 2                 # the raid itself is not rebuilt again
 
 
 # -- when the rebuild must not start -----------------------------------------
@@ -561,15 +520,6 @@ def test_it_waits_while_a_leader_cannot_be_asked(env):
     env.set_device(0, 1, MIGRATED)
     env.unreachable.add(1)
     _assert_untouched(env, env.drive(env.queue()), "leader does not answer")
-
-
-def test_a_journal_the_old_jm_lacks_does_not_hold_the_rebuild_up(env):
-    env.set_device(0, 1, MIGRATED)
-    env.journals_missing[NODES[0]] = {1}
-
-    task = env.drive(env.queue())
-
-    assert task.function_params["phase"] == "resync"
 
 
 def test_it_waits_while_a_member_it_needs_is_absent(env):
