@@ -32,7 +32,11 @@ from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.replica_chain_pending import ReplicaChainPending
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.rpc_client import RPCException
+from simplyblock_core.rpc_client import (
+    RPCException,
+    RPCRemoteError,
+    transfer_base_unreachable,
+)
 
 logger = utils.get_logger(__name__)
 utils.init_sentry_sdk(__name__)
@@ -1339,7 +1343,8 @@ def process_snap_replicate_start(task, snapshot):
         task.function_params.pop("cow_landing", None)
         task.write_to_db()
         applied: dict = {}
-        snode.rpc_client().bdev_lvol_transfer(
+        _submit_transfer(
+            task, snode.rpc_client(),
             name=snapshot.snap_bdev,
             offset=offset,
             # SPDK sends every replication request in pieces of at most 64 KiB
@@ -1386,6 +1391,36 @@ def process_snap_replicate_start(task, snapshot):
     # the budget expires, in which case the pass-based path picks it up as
     # before.
     _await_transfer_completion(task, snapshot, snode)
+
+
+def _submit_transfer(task, rpc, *, allow_partial, partial_base, cow_landing, applied, **kw):
+    """Start the snapshot's transfer; a delta SPDK refuses goes again as a full send.
+
+    SPDK refuses a delta whose base it cannot reach from the snapshot through
+    snapshots open on the sending node (simplyblock/spdk#108: the full-cluster
+    fallback would otherwise miss the clusters of the snapshots in between).
+    Nothing was sent then. Sending the same delta again would be refused for
+    ever, so the transfer goes without a base: whole clusters, as for any
+    transfer this runner declines a delta for. The verdict is recorded on the
+    task (allow_partial / partial_base, still keyed to this landing volume),
+    so a resumed attempt stays full and the finish does not merge.
+    """
+    try:
+        return rpc.bdev_lvol_transfer(allow_partial=allow_partial, partial_base=partial_base,
+                                      cow_landing=cow_landing, applied=applied, **kw)
+    except RPCRemoteError as e:
+        if not (allow_partial and partial_base and transfer_base_unreachable(e)):
+            raise
+        logger.warning("Replication task %s: SPDK refused the delta of %s against base "
+                       "%#x (the base is not reachable from the snapshot through open "
+                       "snapshots: %s); sending it in full instead",
+                       task.uuid, kw.get("name"), int(partial_base), e)
+    task.function_params["allow_partial"] = False
+    task.function_params["partial_base"] = 0
+    task.write_to_db()
+    applied.clear()
+    return rpc.bdev_lvol_transfer(allow_partial=False, partial_base=0, cow_landing=False,
+                                  applied=applied, **kw)
 
 
 def _counterpart_on_destination(snapshot, remote_node):

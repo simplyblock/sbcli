@@ -37,7 +37,11 @@ from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol, LVolReplication
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.rpc_client import RPCConnectionError, RPCRemoteError
+from simplyblock_core.rpc_client import (
+    RPCConnectionError,
+    RPCRemoteError,
+    transfer_base_unreachable,
+)
 from simplyblock_core.services import replication_final_step
 from simplyblock_core.services.task_runner_base import (
     RunnerSpec,
@@ -1735,13 +1739,27 @@ def _submit_direct_round(task, lvol):
                     rnd, why or f"base {base.get_id()} has no blob id")
     read_class = (constants.QOS_REPLICATION_WIRE_CLASS
                   if snapshot_replication._replication_class_on(snap.cluster_id) else 0)
+    xfer = dict(name=snap.snap_bdev, offset=0,
+                batch_size=constants.REPL_XFER_PARTIAL_BATCH, bdev_name=hub_bdev,
+                operation="replicate", lvol_id=params["tgt_map_id"],
+                priority_class=read_class, dest_clone=True)
     try:
-        src_rpc.bdev_lvol_transfer(
-            name=snap.snap_bdev, offset=0,
-            batch_size=constants.REPL_XFER_PARTIAL_BATCH, bdev_name=hub_bdev,
-            operation="replicate", lvol_id=params["tgt_map_id"],
-            allow_partial=bool(partial_base), partial_base=partial_base,
-            priority_class=read_class, dest_clone=True)
+        try:
+            src_rpc.bdev_lvol_transfer(allow_partial=bool(partial_base),
+                                       partial_base=partial_base, **xfer)
+        except RPCRemoteError as e:
+            if not (partial_base and transfer_base_unreachable(e)):
+                raise
+            # simplyblock/spdk#108: the round's base is not reachable from its
+            # snapshot through snapshots open on the source; SPDK sent nothing.
+            # The same delta would be refused on every resubmit: send the
+            # round in whole clusters now.
+            logger.warning("cutover for lvol %s: SPDK refused round %s's delta against "
+                           "base %#x (not reachable through open snapshots: %s); "
+                           "sending it in whole clusters", lvol.get_id(), rnd,
+                           partial_base, e)
+            partial_base = 0
+            src_rpc.bdev_lvol_transfer(allow_partial=False, partial_base=0, **xfer)
     except RPCRemoteError as e:
         if "decode" in str(e):
             return None, _direct_unsupported(task, lvol, snap, e)
