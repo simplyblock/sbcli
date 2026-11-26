@@ -1008,13 +1008,7 @@ def process_snap_replicate_start(task, snapshot):
         # Spares need both clusters' records in one database: they are kept
         # when this control plane manages the destination, not across a peer.
         if _target_is_local(snapshot.lvol):
-            rep_name = f"REP_{snapshot.snap_name}"
-            with contextlib.suppress(KeyError):
-                db.get_lvol_by_name(rep_name, include_deleted=True)
-                rep_name = ""                   # the name is taken: nothing to adopt
-            if rep_name and replication_spare.adopt(snapshot, rep_name) is not None:
-                xfer_timing.stamp("landing_spare_adopted", snap=snapshot.get_id(),
-                                  lvol=snapshot.lvol.get_id())
+            _adopt_spare(snapshot, f"REP_{snapshot.snap_name}")
         try:
             landing = _peer_for(dest_lvol, destination_cluster_id).prepare_landing(LandingRequest(
                 source_cluster_id=snode.cluster_id, snapshot_id=snapshot.get_id(),
@@ -1806,6 +1800,21 @@ def merge_backlog(source_lvol, cluster_id, exclude_snapshot_id=""):
                    f"{landing} landing copies merging"), len(pending)
 
 
+def _adopt_spare(snapshot, rep_name):
+    """Rename the volume's spare landing volume to *rep_name*, unless a volume
+    wears that name already. Best effort: a spare is an optimisation and never
+    stops a transfer, which then creates its landing volume as before."""
+    try:
+        with contextlib.suppress(KeyError):
+            db.get_lvol_by_name(rep_name, include_deleted=True)
+            return                              # the name is taken: nothing to adopt
+        if replication_spare.adopt(snapshot, rep_name) is not None:
+            xfer_timing.stamp("landing_spare_adopted", snap=snapshot.get_id(),
+                              lvol=snapshot.lvol.get_id())
+    except Exception as e:                                # noqa: BLE001
+        logger.warning("Adopting a spare landing volume as %s failed: %s", rep_name, e)
+
+
 def _create_spare_landing(name, snapshot, remote_node, pool_uuid):
     """replication_spare.prestage's landing-volume factory: create *name* on the
     destination, through its prepare_landing (create_only), so the create is
@@ -1836,6 +1845,12 @@ def _target_is_local(source_lvol):
             return True
         target = db.get_replication_target_by_id(policy.target_id)
     except KeyError:
+        return True
+    except Exception as e:                                # noqa: BLE001
+        # Unreadable: local. What runs only for a local destination reads its
+        # records here and finds none of a peer's, so it does nothing then.
+        logger.warning("Replication target of %s unreadable (%s); taken as local",
+                       source_lvol.get_id(), e)
         return True
     return target.has_peer() is not True
 

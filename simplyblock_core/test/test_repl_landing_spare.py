@@ -104,12 +104,13 @@ class TestRunnerUsesTheSpare:
 
     def test_the_start_adopts_a_spare_before_creating_a_landing_volume(self):
         src = inspect.getsource(sr.process_snap_replicate_start)
-        adopt = src.index("replication_spare.adopt(snapshot, rep_name)")
+        adopt = src.index("_adopt_spare(snapshot, f\"REP_{snapshot.snap_name}\")")
         # the destination creates the landing volume (prepare_landing) after
         create = src.index("landing = _peer_for(dest_lvol, destination_cluster_id).prepare_landing(")
         assert adopt < create
         # spares only where one database holds both clusters
         assert src.rindex("if _target_is_local(snapshot.lvol):", 0, adopt) < adopt
+        assert "replication_spare.adopt(snapshot, rep_name)" in inspect.getsource(sr._adopt_spare)
 
     def test_the_spare_is_prestaged_after_the_submit_outside_an_endgame(self):
         src = inspect.getsource(sr.process_snap_replicate_start)
