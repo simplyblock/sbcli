@@ -2688,7 +2688,10 @@ def _prechain_landing_volume(task, snapshot, replicate_to_source, remote_lv,
             logger.info("Landing volume %s stays a full-transfer target: %s %s "
                         "could not be chained (%s)", remote_lv.top_bdev, role,
                         node.get_id(), why)
-            _note_member_blocks_delta(node, remote_lv_node.lvstore, why)
+            try:
+                _note_member_blocks_delta(node, remote_lv.lvs_name, why)
+            except Exception as e:                          # noqa: BLE001 - reporting only
+                logger.debug("full-copy report failed: %s", e)
             return False
         prechained.append(node.get_id())
         return True

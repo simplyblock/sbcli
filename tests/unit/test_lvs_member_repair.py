@@ -231,5 +231,5 @@ def test_full_copies_caused_by_a_member_are_reported_once_per_period(clean_sr):
 def test_the_delta_still_needs_every_member():
     # the full copy stays: an unchained member could lead (IO-driven) and read zeros
     src = inspect.getsource(sr._prechain_landing_volume)
-    assert "_note_member_blocks_delta(node, remote_lv_node.lvstore, why)" in src
+    assert "_note_member_blocks_delta(node, remote_lv.lvs_name, why)" in src
     assert "if not (primary_ok and secondary_ok):" in src
