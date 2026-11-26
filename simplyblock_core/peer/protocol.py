@@ -165,6 +165,14 @@ class EnsureHubRequest(BaseModel):
     """Get the target ready to receive a transfer into ``landing_lvol_id``."""
 
     landing_lvol_id: str
+    #: The source has waited REPL_TARGET_LEADERLESS_RECOVER_SEC for a settled
+    #: leader: when the lvstore is still leaderless, run the target's guarded
+    #: leadership recovery (storage_node_ops.restore_healthy_lvs_leadership).
+    #: The recovery itself decides whether a grant is safe; the source never
+    #: grants or forces anything.
+    recover_leadership: bool = False
+    #: Why the source asks, for the target's log (the task and how long it waited).
+    recover_reason: str = ""
 
 
 class EnsureHubResponse(BaseModel):
@@ -184,6 +192,9 @@ class EnsureHubResponse(BaseModel):
     #: land on every member of the pair.
     pair_online: bool = False
     converted_on: list[str] = Field(default_factory=list)
+    #: With ``unsettled``: "<id8> <status>" of every member of the lvstore, in
+    #: role order, for the source's message and REPLICATION_STALLED event.
+    members: str = ""
 
 
 class ChainRequest(BaseModel):

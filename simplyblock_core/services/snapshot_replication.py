@@ -115,6 +115,65 @@ class _Landing(NamedTuple):
         return self.lvol_id
 
 
+def _leadership_recovery_due(task, now):
+    """Whether this pass asks the target to recover its lvstore's leadership:
+    the leaderless wait has lasted REPL_TARGET_LEADERLESS_RECOVER_SEC, and the
+    last ask is REPL_TARGET_LEADERLESS_RECOVER_EVERY_SEC ago. Records the ask."""
+    params = task.function_params
+    since = params.get("target_leaderless_since")
+    if not since or now - since < constants.REPL_TARGET_LEADERLESS_RECOVER_SEC:
+        return False
+    tried = params.get("target_recover_tried_at") or 0
+    if now - tried < constants.REPL_TARGET_LEADERLESS_RECOVER_EVERY_SEC:
+        return False
+    params["target_recover_tried_at"] = now
+    return True
+
+
+def _wait_for_target_leader(task, remote_lv, hub, now):
+    """Suspend a transfer whose target lvstore has no settled leader, and say
+    for how long and why.
+
+    Replication never makes a leader itself. A target lvstore has no client
+    IO, so no member promotes itself when its primary goes down; the target's
+    node monitor gives it a leader, during the down member's restart too
+    (bf24 2026-11-14, LVS_22: the transfer waited ~110 s for the crashed
+    primary). Once the wait lasts REPL_TARGET_LEADERLESS_RECOVER_SEC the next
+    ensure_hub asks the target's guarded recovery (_leadership_recovery_due).
+    The wait is polled every REPL_RETRY_BACKOFF_BASE_SEC, costs no retry, and
+    raises a REPLICATION_STALLED event once it lasts
+    REPL_TARGET_LEADERLESS_ALERT_SEC, then at most every
+    REPL_MERGE_ALERT_EVERY_SEC."""
+    params = task.function_params
+    since = params.get("target_leaderless_since") or now
+    params["target_leaderless_since"] = since
+    waited = int(now - since)
+    msg = f"{hub.reason} for {waited}s [{hub.members}], retrying"
+    alerted = params.get("target_leaderless_alerted_at") or 0
+    if (waited >= constants.REPL_TARGET_LEADERLESS_ALERT_SEC
+            and now - alerted >= constants.REPL_MERGE_ALERT_EVERY_SEC):
+        params["target_leaderless_alerted_at"] = now
+        try:
+            src = db.get_snapshot_by_id(params["snapshot_id"]).lvol
+            lvol_events.replication_target_leaderless(
+                src, remote_lv.lvs_name, waited, f"{hub.reason}; members: {hub.members}")
+        except Exception as e:                            # noqa: BLE001
+            logger.error("Replication task %s: could not log the leaderless-target "
+                         "event: %s", task.uuid, e)
+    _suspend_for_retry(task, msg, backoff=True, count=_switches_exhausted(task),
+                       backoff_step=0)
+
+
+def _target_leader_found(task):
+    """End a leaderless-target wait: log how long it lasted."""
+    since = task.function_params.pop("target_leaderless_since", None)
+    task.function_params.pop("target_leaderless_alerted_at", None)
+    task.function_params.pop("target_recover_tried_at", None)
+    if since:
+        logger.info("Replication task %s: target leadership settled after %ds without "
+                    "a leader", task.uuid, int(time.time() - since))
+
+
 def _landing_of(task):
     """The landing volume of *task* (see _Landing).
 
@@ -1010,14 +1069,22 @@ def process_snap_replicate_start(task, snapshot):
     # volume's map id, and the checks that the volume is not a snapshot yet and
     # the leader still leads. A leaderless target is waited out, not failed:
     # the transfer stays suspended and the RPO grows.
-    hub = _landing_peer(snapshot, remote_lv).ensure_hub(
-        EnsureHubRequest(landing_lvol_id=task.function_params["remote_lvol_id"]))
+    # A wait that outlasts REPL_TARGET_LEADERLESS_RECOVER_SEC asks the target's
+    # guarded recovery (see _leadership_recovery_due); that recovery, not
+    # replication, decides whether a grant is safe.
+    now = time.time()
+    recover = _leadership_recovery_due(task, now)
+    waited = int(now - (task.function_params.get("target_leaderless_since") or now))
+    hub = _landing_peer(snapshot, remote_lv).ensure_hub(EnsureHubRequest(
+        landing_lvol_id=task.function_params["remote_lvol_id"],
+        recover_leadership=recover,
+        recover_reason=f"replication task {task.uuid} waited {waited}s" if recover else ""))
     if hub.state == "unsettled":
         # Waiting, not failing: the target's leadership is not this transfer's
         # fault, and counting it let a leaderless window kill the task.
-        _suspend_for_retry(task, f"{hub.reason}, retrying",
-                           backoff=True, count=_switches_exhausted(task))
+        _wait_for_target_leader(task, remote_lv, hub, now)
         return
+    _target_leader_found(task)
     _note_switch(task, "target_node_id", hub.leader_node_id, "target leader")
     if hub.state == "failed":
         logger.error(hub.reason)
@@ -1273,102 +1340,6 @@ def _stable_target_leader(remote_lv):
     finish path calls it here until it moves behind the peer client."""
     return peer_service.stable_leader(db, remote_lv)
 
-
-def _target_member_states(remote_lv):
-    """"<id8> <status>" of every member of the target lvstore, role order."""
-    states = []
-    for node_id in _source_members(remote_lv):
-        try:
-            states.append(f"{node_id[:8]} {db.get_storage_node_by_id(node_id).status}")
-        except KeyError:
-            states.append(f"{node_id[:8]} unknown")
-    return ", ".join(states)
-
-
-def _wait_for_target_leader(task, remote_lv, lead_why):
-    """Suspend a transfer whose target lvstore has no settled leader, and say
-    for how long and why.
-
-    Replication never makes a leader itself. A target lvstore has no client
-    IO, so no member promotes itself when its primary goes down; the node
-    monitor's proven takeover gives it a leader, during the down member's
-    restart too while that member's SPDK is down (bf24 2026-11-14, LVS_22:
-    the transfer waited ~110 s for the crashed primary to come back). With
-    every member online the wait asks the control plane's guarded recovery
-    (_ask_target_leadership_recovery) once it lasts
-    REPL_TARGET_LEADERLESS_RECOVER_SEC. The wait is polled every REPL_RETRY_BACKOFF_BASE_SEC (step 0, whatever the
-    task's earlier retries), costs no retry, and raises a REPLICATION_STALLED
-    event once it lasts REPL_TARGET_LEADERLESS_ALERT_SEC, then at most every
-    REPL_MERGE_ALERT_EVERY_SEC."""
-    params = task.function_params
-    now = time.time()
-    since = params.get("target_leaderless_since") or now
-    params["target_leaderless_since"] = since
-    waited = int(now - since)
-    members = _target_member_states(remote_lv)
-    msg = (f"target leadership not established ({lead_why}) for {waited}s "
-           f"[{members}], retrying")
-    alerted = params.get("target_leaderless_alerted_at") or 0
-    if (waited >= constants.REPL_TARGET_LEADERLESS_ALERT_SEC
-            and now - alerted >= constants.REPL_MERGE_ALERT_EVERY_SEC):
-        params["target_leaderless_alerted_at"] = now
-        try:
-            src = db.get_snapshot_by_id(params["snapshot_id"]).lvol
-            lvol_events.replication_target_leaderless(
-                src, remote_lv.lvs_name, waited, f"{lead_why}; members: {members}")
-        except Exception as e:                            # noqa: BLE001
-            logger.error("Replication task %s: could not log the leaderless-target "
-                         "event: %s", task.uuid, e)
-    _ask_target_leadership_recovery(task, remote_lv, waited, now)
-    _suspend_for_retry(task, msg, backoff=True, count=_switches_exhausted(task),
-                       backoff_step=0)
-
-
-def _ask_target_leadership_recovery(task, remote_lv, waited, now):
-    """Once a leaderless-target wait has lasted REPL_TARGET_LEADERLESS_RECOVER_SEC,
-    ask the control plane to restore the target's leadership, at most every
-    REPL_TARGET_LEADERLESS_RECOVER_EVERY_SEC per task.
-
-    Replication still grants nothing itself and never forces: the recovery
-    (storage_node_ops.restore_healthy_lvs_leadership) acts only when EVERY
-    member of the target lvstore is online, answers and reports non-leader,
-    and then through the guarded reload-then-grant every object path uses.
-    A member that is down or restarting leaves it to the node monitor's
-    offline takeover and to the restart, as before (bf8 2026-11-02: the
-    unguarded grant from here during a forced shutdown made two leaders).
-    bf32 2026-11-21: both target lvstores (LVS_7, LVS_10) lost their leader to
-    an SPDK self-demotion on a failed write; every member was back online
-    minutes later, nothing restored the leadership, and the transfers waited
-    76 min."""
-    params = task.function_params
-    if waited < constants.REPL_TARGET_LEADERLESS_RECOVER_SEC:
-        return
-    tried = params.get("target_recover_tried_at") or 0
-    if now - tried < constants.REPL_TARGET_LEADERLESS_RECOVER_EVERY_SEC:
-        return
-    params["target_recover_tried_at"] = now
-    try:
-        from simplyblock_core import storage_node_ops
-        leader, why = storage_node_ops.restore_healthy_lvs_leadership(
-            remote_lv.node_id, remote_lv.lvs_name,
-            reason=f"replication task {task.uuid} waited {waited}s")
-    except Exception as e:                                # noqa: BLE001
-        logger.error("Replication task %s: leadership recovery of %s failed: %s",
-                     task.uuid, remote_lv.lvs_name, e)
-        return
-    logger.info("Replication task %s: leadership recovery of target %s: %s",
-                task.uuid, remote_lv.lvs_name, why if leader is None
-                else f"{why} (leader {leader.get_id()})")
-
-
-def _target_leader_found(task):
-    """End a leaderless-target wait: log how long it lasted."""
-    since = task.function_params.pop("target_leaderless_since", None)
-    task.function_params.pop("target_leaderless_alerted_at", None)
-    task.function_params.pop("target_recover_tried_at", None)
-    if since:
-        logger.info("Replication task %s: target leadership settled after %ds without "
-                    "a leader", task.uuid, int(time.time() - since))
 
 
 def _attached_hub_ctrl(task, hub_node):

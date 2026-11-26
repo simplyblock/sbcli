@@ -26,6 +26,8 @@ from unittest.mock import MagicMock, patch
 from simplyblock_core import constants, storage_node_ops
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.peer import service as peer_service
+from simplyblock_core.peer.protocol import EnsureHubResponse
 from simplyblock_core.rpc_client import RPCConnectionError
 from simplyblock_core.services import snapshot_replication as sr
 from simplyblock_core.services import storage_node_monitor as mon
@@ -275,8 +277,16 @@ class TestReplicationWaitIsObservable(unittest.TestCase):
         self.addCleanup(pt.stop)
 
     def _wait(self):
-        sr._wait_for_target_leader(self.task, self.remote_lv,
-                                   "0 members of LVS_22 report leadership")
+        """One pass with a leaderless target: the target reports its members'
+        states (peer.service.member_states, what ensure_hub answers for an
+        unsettled lvstore), the source records the wait."""
+        sr._wait_for_target_leader(
+            self.task, self.remote_lv,
+            EnsureHubResponse(state="unsettled",
+                              reason="target leadership not established "
+                                     "(0 members of LVS_22 report leadership)",
+                              members=peer_service.member_states(sr.db, self.remote_lv)),
+            time.time())
 
     def test_waits_without_spending_retries_and_polls_at_the_base_interval(self):
         before = time.time()

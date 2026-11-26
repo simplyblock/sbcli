@@ -7,6 +7,7 @@ control plane, so both paths run the same code.
 """
 import contextlib
 import logging
+import threading
 import time
 from uuid import UUID, uuid5
 
@@ -442,6 +443,7 @@ def lvs_leaders(db, lvol):
 # volumes sent into one lvstore in quick succession; another process simply
 # settles again.
 _SETTLED_LEADER: dict = {}
+_SETTLED_LEADER_LOCK = threading.Lock()
 
 
 def stable_leader(db, lvol):
@@ -460,25 +462,72 @@ def stable_leader(db, lvol):
     first = lvs_leaders(db, lvol)
     key = (getattr(lvol, "cluster_id", ""), lvol.lvs_name)
     if len(first) != 1:
-        _SETTLED_LEADER.pop(key, None)
+        with _SETTLED_LEADER_LOCK:
+            _SETTLED_LEADER.pop(key, None)
         return None, (f"{len(first)} members of {lvol.lvs_name} report leadership"
                       + (f" ({', '.join(n.get_id()[:8] for n in first)})" if first else ""))
     # Many volumes' snapshots go into one lvstore: settling every one of them
     # would add the settle time per transfer. A leader confirmed settled
     # moments ago and seen alone again now is still settled.
-    cached = _SETTLED_LEADER.get(key)
+    with _SETTLED_LEADER_LOCK:
+        cached = _SETTLED_LEADER.get(key)
     if (cached and cached[0] == first[0].get_id()
             and time.time() - cached[1] < constants.REPL_LEADER_SETTLED_FOR_SEC):
         return first[0], ""
     time.sleep(constants.REPL_LEADER_SETTLE_SEC)
     second = lvs_leaders(db, lvol)
     if len(second) != 1 or second[0].get_id() != first[0].get_id():
-        _SETTLED_LEADER.pop(key, None)
+        with _SETTLED_LEADER_LOCK:
+            _SETTLED_LEADER.pop(key, None)
         return None, (f"leadership of {lvol.lvs_name} is moving "
                       f"({first[0].get_id()[:8]} -> "
                       f"{', '.join(n.get_id()[:8] for n in second) or 'none'})")
-    _SETTLED_LEADER[key] = (second[0].get_id(), time.time())
+    with _SETTLED_LEADER_LOCK:
+        _SETTLED_LEADER[key] = (second[0].get_id(), time.time())
     return second[0], ""
+
+
+def lvstore_members(lvol):
+    """Ids of the members of *lvol*'s lvstore in role order: primary,
+    secondary, tertiary (``lvol.nodes`` lists them with the primary first)."""
+    order = []
+    for node_id in [lvol.node_id] + list(getattr(lvol, "nodes", None) or []):
+        if node_id and node_id not in order:
+            order.append(node_id)
+    return order
+
+
+def member_states(db, lvol):
+    """"<id8> <status>" of every member of *lvol*'s lvstore, role order."""
+    states = []
+    for node_id in lvstore_members(lvol):
+        try:
+            states.append(f"{node_id[:8]} {db.get_storage_node_by_id(node_id).status}")
+        except KeyError:
+            states.append(f"{node_id[:8]} unknown")
+    return ", ".join(states)
+
+
+def _recover_leadership(lvol, reason):
+    """Ask this control plane's guarded recovery to give *lvol*'s leaderless
+    lvstore a leader again; logs what it did.
+
+    The recovery acts only when EVERY member is online, answers and reports
+    non-leader, through the guarded reload-then-grant every object path uses;
+    a member down or restarting is left to the node monitor's takeover and the
+    restart (bf8 2026-11-02: an unguarded grant during a forced shutdown made
+    two leaders). bf32 2026-11-21: both target lvstores lost their leader to
+    an SPDK self-demotion, every member was back minutes later, nothing
+    restored leadership, and the transfers waited 76 min."""
+    try:
+        from simplyblock_core import storage_node_ops
+        leader, why = storage_node_ops.restore_healthy_lvs_leadership(
+            lvol.node_id, lvol.lvs_name, reason=reason)
+    except Exception as e:                                # noqa: BLE001
+        logger.error("Leadership recovery of %s failed: %s", lvol.lvs_name, e)
+        return
+    logger.info("Leadership recovery of %s (%s): %s", lvol.lvs_name, reason,
+                why if leader is None else f"{why} (leader {leader.get_id()})")
 
 
 def converted_members(db, lvol):
@@ -555,7 +604,9 @@ def ensure_hub(cluster_id: str, request: EnsureHubRequest) -> EnsureHubResponse:
 
     leader, why = stable_leader(db, lvol)
     if leader is None:
-        return EnsureHubResponse(state="unsettled",
+        if request.recover_leadership:
+            _recover_leadership(lvol, request.recover_reason)
+        return EnsureHubResponse(state="unsettled", members=member_states(db, lvol),
                                  reason=f"target leadership not established ({why})")
     try:
         lvs_primary = db.get_storage_node_by_id(lvol.node_id)
