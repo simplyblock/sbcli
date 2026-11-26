@@ -2,6 +2,7 @@ import errno
 import hashlib
 import http.client
 import json
+import os
 import threading
 from collections import OrderedDict
 from enum import IntEnum
@@ -183,11 +184,27 @@ class RPCProtocolError(RPCException):
     """Response wasn't valid/well-formed JSON-RPC."""
 
 
+# strerror text -> errno, for SPDK handlers that answer with a generic
+# JSON-RPC code and carry the errno only as spdk_strerror() in the message.
+_ERRNO_BY_STRERROR = {os.strerror(n): n for n in errno.errorcode}
+
+
 class RPCRemoteError(RPCException):
     def __init__(self, message: str, code: int, data: Any = None):
         super().__init__(message)
         self.code = code
         self.data = data
+
+    @property
+    def posix_errno(self) -> int | None:
+        """The errno SPDK failed with, or None when it cannot be told (backport from main).
+
+        SPDK reports it as the code itself (``-errno``) or under a generic
+        JSON-RPC code with ``spdk_strerror(errno)`` as the message. ``-1`` is
+        ``RPCErrorCode.invalid_state``, not EPERM."""
+        if self.code < -1 and -self.code in errno.errorcode:
+            return -self.code
+        return _ERRNO_BY_STRERROR.get(str(self))
 
 
 def request_reached_remote(err: BaseException) -> bool:
