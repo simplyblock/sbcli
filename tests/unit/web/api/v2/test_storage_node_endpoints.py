@@ -186,6 +186,22 @@ class TestGetStorageNode:
 
         assert client.get(f'{BASE}/{STORAGE_NODE_ID}/').json()['site'] == ''
 
+    def test_the_node_socket_is_reported(self, client, db, storage_node):
+        """Regression: simplyblock-operator#408. A multi-socket host runs one node
+        per socket, and the operator told them apart by where each node's RPC
+        port fell in the host's port-sorted list; a node missing on one socket,
+        or re-added on a lower port, put another socket's node in its slot. The
+        model carried the socket and the DTO dropped it."""
+        storage_node.socket = 1
+
+        assert client.get(f'{BASE}/{STORAGE_NODE_ID}/').json()['socket'] == 1
+
+    def test_the_socket_is_in_the_node_list(self, client, db, storage_node):
+        storage_node.socket = 1
+
+        nodes = client.get(f'{BASE}/').json()
+        assert [node['socket'] for node in nodes] == [1]
+
 
 class TestDeleteStorageNode:
 
