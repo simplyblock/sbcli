@@ -6379,6 +6379,60 @@ class K8sSbcliUtils:
                 claimed[parts[1]] = parts[0]
         return claimed
 
+    #: An lvol the product made for itself, matched on its name. A PVC claim
+    #: is not the only thing that makes a volume somebody else's.
+    PRODUCT_LVOL_PATTERNS = (
+        ("pnfs-mds", "the pNFS metadata server's state volume"),
+    )
+
+    def _product_owned_lvols(self, lvol_names):
+        """Return ``{lvol_name: why}`` for volumes the product owns.
+
+        Keyed on the name, because the claim-based guard below is not enough
+        any more and the way it stopped being enough is the whole point.
+
+        Run 45799538743: the MDS state volume used to be an ordinary PVC
+        (``state-simplyblock-pnfs-mds-<cluster>-0``), so
+        ``_lvols_claimed_by_live_pvcs`` covered it. The operator now creates
+        it straight through the control plane -- same volume, same job, but
+        ``pvc_name`` is ``''`` -- and the guard went on reporting success
+        while protecting nothing. The first test's teardown deleted
+        ``simplyblock-pnfs-mds-<cluster>-state`` at 10:53:53, the active MDS
+        lost both NVMe paths and was killed by its 90s unhealthy deadline,
+        the operator failed the standby forward to epoch 2, and that
+        promotion can never land because the state volume it must attach is
+        gone. 15 of 18 S3 cases then died of one thing: ``s3bucket/<n> never
+        reached Ready in 900s``.
+
+        So this does not ask how the volume is attached. It asks whether the
+        name says the product made it, and it tells us when it cannot find
+        what it expects -- a guard that silently protects nothing is worse
+        than no guard, because it reads as coverage.
+        """
+        protected = {}
+        for name in lvol_names:
+            for needle, why in self.PRODUCT_LVOL_PATTERNS:
+                if needle in name:
+                    protected[name] = why
+                    break
+
+        # Loud when a pNFS cluster is up and nothing matched: that is exactly
+        # the shape of the failure this guard exists to stop, one naming
+        # change later.
+        if not protected:
+            out, _ = self.k8s._exec_kubectl(
+                f"kubectl get statefulset -n {self.k8s.namespace} "
+                f"-o custom-columns=NAME:.metadata.name --no-headers "
+                f"2>/dev/null || true", supress_logs=True)
+            if any("pnfs-mds" in ln for ln in (out or "").splitlines()):
+                self.logger.warning(
+                    "[lvol] a pNFS MDS StatefulSet is running but no lvol "
+                    "matched %r -- the product may have renamed its state "
+                    "volume. Protecting nothing and about to sweep: check "
+                    "this before trusting the run.",
+                    [n for n, _ in self.PRODUCT_LVOL_PATTERNS])
+        return protected
+
     def delete_all_lvols(self):
         """Delete the lvols no PVC still claims. Not every lvol there is.
 
@@ -6404,14 +6458,26 @@ class K8sSbcliUtils:
         runs, so what remains protected is other people's -- and anything of
         ours still claimed is reclaimed by CSI, which is the correct path on
         this platform anyway.
+
+        That rule alone was not enough. Run 45799538743 lost 15 of 18 S3
+        cases to this same accident, because the MDS state volume stopped
+        being a PVC and became a bare control-plane lvol -- the guard kept
+        passing while protecting nothing. ``_product_owned_lvols`` adds the
+        second half: a volume whose *name* says the product made it is not
+        ours either, however it happens to be attached.
         """
-        protected = self._lvols_claimed_by_live_pvcs()
+        claimed = self._lvols_claimed_by_live_pvcs()
         lvols = self.list_lvols()
+        owned = self._product_owned_lvols(list(lvols.keys()))
         for name in list(lvols.keys()):
-            if name in protected:
+            if name in claimed:
                 self.logger.info(
                     "[lvol] leaving %s: PVC %s still claims it",
-                    name, protected[name])
+                    name, claimed[name])
+                continue
+            if name in owned:
+                self.logger.info(
+                    "[lvol] leaving %s: %s", name, owned[name])
                 continue
             self.logger.info(f"Deleting lvol: {name}")
             self.delete_lvol(lvol_name=name)
