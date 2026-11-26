@@ -205,6 +205,36 @@ def snode_distrib_io_error(node, vuid, error, count, reported_by,
         node_id=node.get_id())
 
 
+def snode_lvs_member_register_failing(node, lvs_name, lvol_count, window_sec, last_error,
+                                      caused_by=ec.CAUSED_BY_MONITOR):
+    """``node``'s copy of ``lvs_name`` keeps failing to register volumes the
+    leader created.
+
+    LEVEL_ERROR: every volume created on the lvstore since lacks this replica,
+    and replication into the lvstore cannot send deltas (a delta needs the
+    landing volume on every member), so each cycle copies the volume in full.
+    bf36 (2026-11-25): a tertiary that had been shut down read the leader's
+    reused metadata pages as zero after it came back ("Metadata page is all
+    zero", "Invalid blobid according to used_blobids") and failed every
+    registration for 10 hours.
+    """
+    ec.log_event_cluster(
+        cluster_id=node.cluster_id,
+        domain=ec.DOMAIN_CLUSTER,
+        event=ec.EVENT_LVS_MEMBER_REGISTER_FAILING,
+        db_object=node,
+        caused_by=caused_by,
+        event_level=EventObj.LEVEL_ERROR,
+        message=(f"{lvol_count} volumes created on {lvs_name} could not be registered on "
+                 f"this node within {window_sec}s (last error: {last_error}). Its copy of "
+                 f"{lvs_name} does not see metadata the leader wrote: those volumes lack "
+                 f"this replica, and replication into {lvs_name} copies volumes in full "
+                 f"instead of sending deltas. Restarting the node rebuilds its copy of "
+                 f"the lvstore; check the SPDK log of this node for blobstore metadata "
+                 f"errors first."),
+        node_id=node.get_id())
+
+
 def snode_fence_loop_detected(node, port, lvstore, releases, window_sec,
                               caused_by=ec.CAUSED_BY_MONITOR):
     """The control plane stopped reopening a client port SPDK keeps fencing.
