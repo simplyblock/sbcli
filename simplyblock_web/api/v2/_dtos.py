@@ -158,6 +158,7 @@ TaskFunctionName = Literal[
     "sync_promote",
     "sync_resync",
     "sync_site_fence",
+    "jm_raid_reshape",
 ]
 
 

@@ -10,10 +10,12 @@ from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.rpc_client import RPCException
 from simplyblock_core.services.task_runner_base import (
     RunnerSpec,
     TaskAbort,
     TaskDefer,
+    TaskProgress,
     TaskRetry,
     checkpoint,
     serve,
@@ -245,6 +247,119 @@ def task_runner(task):
         return task_runner_device(task)
     if task.function_name == JobSchedule.FN_NODE_RESTART:
         return task_runner_node(task)
+    if task.function_name == JobSchedule.FN_JM_RAID_RESHAPE:
+        return task_runner_jm_reshape(task)
+
+
+# Consecutive polls, one runner cycle apart, that must find every journal in
+# sync before a rebuilt JM raid counts as resynchronised: the journal
+# coordinator starts its replication a few seconds after the new JM connects,
+# and a poll that lands before that reads "in sync" too.
+JM_RESHAPE_READY_POLLS = 3
+
+
+def _jm_reshape_blocker(task, node) -> str:
+    """Why the JM raid rebuild of ``node`` must not start now, or "".
+
+    The rebuild leaves the node without a journal copy of its own until the
+    resync is done, so it starts only when nothing else is in the way: every
+    node online, the cluster active, no data movement or restart queued, no
+    other node being rebuilt, every journal this JM belongs to in sync, and
+    every member of the new raid present."""
+    cluster = db.get_cluster_by_id(task.cluster_id)
+    if cluster.status != Cluster.STATUS_ACTIVE:
+        return f"cluster is {cluster.status}"
+    for peer in db.get_storage_nodes_by_cluster_id(task.cluster_id):
+        if peer.status not in (StorageNode.STATUS_ONLINE, StorageNode.STATUS_REMOVED):
+            return f"node {peer.get_id()} is {peer.status}"
+    blocking = tasks_controller.get_jm_raid_reshape_blocking_tasks(task.cluster_id)
+    if blocking:
+        return f"task {blocking[0].function_name} {blocking[0].uuid} is open"
+    for other in tasks_controller.get_active_jm_raid_reshape_tasks(task.cluster_id):
+        if other.uuid != task.uuid and other.function_params.get("phase"):
+            return f"the JM raid of node {other.node_id} is being rebuilt"
+    pending = device_controller.jm_resync_pending(node)
+    if pending:
+        return f"journal not in sync: {'; '.join(pending)}"
+    return device_controller.jm_raid_reshape_not_ready(node)
+
+
+def task_runner_jm_reshape(task):
+    """Rebuild the JM raid of the task's node over its current devices and
+    wait for the journal resync (device_controller.reshape_jm_raid).
+
+    Three stages, recorded in function_params["phase"] so that a runner that
+    dies in between carries on where it was: not started (every precondition
+    is checked, nothing was touched), "rebuild" (the old JM stack is being or
+    was taken down; the build is repeated until it succeeds), "resync" (the
+    new JM is up; every journal it is a copy of is synchronised on its LVS
+    leader once, then polled until all of them are in sync)."""
+    try:
+        node = db.get_storage_node_by_id(task.node_id)
+    except KeyError:
+        raise TaskAbort("node not found")
+    if node.status == StorageNode.STATUS_REMOVED:
+        raise TaskAbort("node is removed")
+    if node.status != StorageNode.STATUS_ONLINE:
+        raise TaskDefer(f"node is {node.status}")
+
+    phase = task.function_params.get("phase")
+    if not phase:
+        if not device_controller.jm_raid_reshape_needed(node):
+            set_result(task, "JM raid already matches the node's devices")
+            return
+        blocker = _jm_reshape_blocker(task, node)
+        if blocker:
+            raise TaskDefer(f"JM raid rebuild waits: {blocker}")
+        task = checkpoint(task, phase="rebuild")
+        if task is None:
+            raise TaskAbort("canceled before the JM raid rebuild started")
+        phase = "rebuild"
+
+    if phase == "rebuild":
+        try:
+            members = device_controller.reshape_jm_raid(node.get_id())
+        except device_controller.JMReshapeNotReady as e:
+            raise TaskRetry(f"JM raid rebuild not possible yet: {e}")
+        except (device_controller.JMReshapeError, RPCException) as e:
+            raise TaskRetry(f"JM raid rebuild failed: {e}")
+        task = checkpoint(task, phase="resync", members=members, ready_polls=0)
+        if task is None:
+            # The JM is rebuilt and online either way; only the wait is dropped.
+            raise TaskAbort("canceled after the JM raid was rebuilt")
+        # The journal coordinator needs a few seconds to see the new JM and
+        # start replicating to it; a poll before that reads "in sync".
+        time.sleep(5)
+
+    node = db.get_storage_node_by_id(task.node_id)
+    # Every journal the new JM is a copy of is synchronised on its LVS leader
+    # once: the journal coordinator does not replicate by itself to a JM that
+    # was away for less than 15 seconds, and a rebuild is faster than that
+    # (device_controller.start_jm_resync).
+    # A node that did not connect to the new JM is connected now: a journal
+    # is synchronised only over a connection, and the task does not end
+    # while one is missing (device_controller.jm_resync_pending).
+    try:
+        device_controller.connect_peers_to_jm(node.get_id())
+    except RPCException as e:
+        raise TaskProgress(f"connecting the other nodes to the rebuilt JM: {e}")
+    synced = list(task.function_params.get("synced", []))
+    started = device_controller.start_jm_resync(node, synced)
+    if started:
+        sync_calls = int(task.function_params.get("sync_calls", 0)) + 1
+        checkpoint(task, ready_polls=0, sync_calls=sync_calls,
+                   synced=sorted(set(synced) | set(started)))
+        raise TaskProgress(f"journal synchronisation started for {started}")
+    pending = device_controller.jm_resync_pending(node)
+    if pending:
+        if task.function_params.get("ready_polls"):
+            checkpoint(task, ready_polls=0)
+        raise TaskProgress(f"journal resync running: {'; '.join(pending)}")
+    polls = int(task.function_params.get("ready_polls", 0)) + 1
+    if polls < JM_RESHAPE_READY_POLLS:
+        checkpoint(task, ready_polls=polls)
+        raise TaskProgress(f"journals in sync ({polls}/{JM_RESHAPE_READY_POLLS} polls)")
+    set_result(task, f"JM raid rebuilt over {task.function_params.get('members')}; journals in sync")
 
 
 def task_runner_device(task):
@@ -308,6 +423,11 @@ def _abandon_task(task):
     raises itself — leaves the target alone.
     """
     ceiling_reached = 0 <= task.max_retry <= task.retry
+
+    if task.function_name == JobSchedule.FN_JM_RAID_RESHAPE:
+        # Nothing to give up on: the node keeps the JM it has, or none until
+        # its next restart builds one.
+        return
 
     if task.function_name == JobSchedule.FN_NODE_RESTART:
         if ceiling_reached and not task.canceled:
@@ -728,7 +848,8 @@ def _watchdog_orphaned_transitional_nodes(cluster_id):
 
 SPEC = RunnerSpec(
     name="tasks-runner-restart",
-    function_names=[JobSchedule.FN_DEV_RESTART, JobSchedule.FN_NODE_RESTART],
+    function_names=[JobSchedule.FN_DEV_RESTART, JobSchedule.FN_NODE_RESTART,
+                    JobSchedule.FN_JM_RAID_RESHAPE],
     handler=task_runner,
     on_finish=_abandon_task,
     on_cycle=lambda cluster: _watchdog_orphaned_transitional_nodes(cluster.get_id()),

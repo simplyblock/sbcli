@@ -2338,8 +2338,11 @@ class RPCClient:
         entries = blocked.get("blocked_ports", []) if isinstance(blocked, dict) else []
         return {int(e.get("port", -1)) for e in entries}
 
-    def bdev_raid_get_bdevs(self):
-        return self._request("bdev_raid_get_bdevs", category="online")
+    def bdev_raid_get_bdevs(self, category="online"):
+        """The raid bdevs of ``category``: "online" (the default), "configuring",
+        "offline" or "all". A raid that lost a member it cannot run without is
+        not online, and is still there to be deleted."""
+        return self._request("bdev_raid_get_bdevs", category=category)
 
     def rpc_get_methods(self):
         """Names of every RPC method the node's running SPDK app exposes

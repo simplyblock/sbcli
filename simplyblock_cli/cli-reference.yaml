@@ -93,7 +93,7 @@ commands:
             type: str
             default: ""
           - name: "--lblk"
-            help: "Configure the node with Linux block devices (lblk cluster mode) instead of NVMe PCIe devices: eligible whole disks or partitions (unmounted, unheld; disks additionally unpartitioned) are wrapped in SPDK AIO bdevs. Select devices with --blk-names, --blk-names-exclude or --blk-serials; without a selector, every eligible whole disk is used (partitions must be selected explicitly). Each storage node gets its journal from its own devices: every selected partition is split in two, and every whole disk is partitioned, into a journal partition and a data partition. The journal partitions of a node are all the same size and are mirrored (RAID 0+1), so the journal survives the loss of a device; --jm-percent of the node's capacity is the journal the node can use. A node of a single device carries one journal partition. A device that carries simplyblock data is never partitioned; a node on such disks keeps the journal layout it has. Use --lblk-journal-device for a dedicated journal device on whole disks. Minimum 2 partitions or SSDs per node, or a single whole disk."
+            help: "Configure the node with Linux block devices (lblk cluster mode) instead of NVMe PCIe devices: eligible whole disks or partitions (unmounted, unheld; disks additionally unpartitioned) are wrapped in SPDK AIO bdevs. Select devices with --blk-names, --blk-names-exclude or --blk-serials; without a selector, every eligible whole disk is used (partitions must be selected explicitly). Each storage node gets its journal from its own devices: every selected partition is split in two, and every whole disk is partitioned, into a journal partition and a data partition. The journal partitions of a node are all the same size, --jm-percent of the smallest device, and are mirrored (RAID 0+1), so the journal survives the loss of a device. A node of a single device carries one journal partition. A device that carries simplyblock data is never partitioned; a node on such disks keeps the journal layout it has. Use --lblk-journal-device for a dedicated journal device on whole disks. Minimum 2 partitions or SSDs per node, or a single whole disk."
             dest: lblk
             type: bool
             action: store_true
@@ -131,7 +131,7 @@ commands:
             type: bool
             action: store_true
           - name: "--jm-percent"
-            help: "Usable journal size in percent of the node's total selected capacity when the journal is carved from the selected partitions or disks (requires --lblk, not with --lblk-journal-device). On a node of several devices the journal is mirrored, so the space taken is larger: each device gives a journal partition of that size divided by half the number of devices, rounded down. Default: `3`."
+            help: "Size of the journal partition each device gives, in percent of the node's smallest selected device, when the journal is carved from the selected partitions or disks (requires --lblk, not with --lblk-journal-device). On a node of several devices the journal is mirrored, so the journal the node can use is about half of what its devices give. Default: `3`."
             dest: jm_percent
             required: false
             type: int

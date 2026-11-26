@@ -2804,25 +2804,25 @@ def lblk_journal_raid_member_size(unit_sizes, jm_percent=3) -> int:
     """Size of each journal raid member of a node whose devices have
     ``unit_sizes``, in bytes, a whole number of MiB.
 
-    The journal the node can use is ``jm_percent`` of its total selected
-    capacity, floored at LBLK_JM_MIN_SIZE. Every device contributes a member
-    of the same size (jm_raid.member_size_for_usable gives it), and none
-    more than LBLK_JM_SPLIT_MAX_FRACTION of itself. Pure."""
-    from simplyblock_core import jm_raid
-
+    Every device gives a journal partition of the same size: ``jm_percent``
+    of the smallest device, floored at LBLK_JM_MIN_SIZE, and never more than
+    LBLK_JM_SPLIT_MAX_FRACTION of that device. The size depends on no other
+    device and not on their number, so a device that joins the node later is
+    split to the same size and none of the existing partitions has to change.
+    The journal the node can use is that size times the devices of the
+    smallest raid0 leg (jm_raid.usable_members): mirrored, about half of what
+    the devices give. Pure."""
     sizes = [int(s) for s in unit_sizes]
-    total_size = sum(sizes)
-    usable = max(total_size * int(jm_percent) // 100, constants.LBLK_JM_MIN_SIZE)
-    member = jm_raid.member_size_for_usable(usable, len(sizes))
+    smallest = min(sizes)
+    member = max(smallest * int(jm_percent) // 100, constants.LBLK_JM_MIN_SIZE)
     member = -(-member // _MIB) * _MIB
-    max_member = int(min(sizes) * constants.LBLK_JM_SPLIT_MAX_FRACTION)
+    max_member = int(smallest * constants.LBLK_JM_SPLIT_MAX_FRACTION)
     if member > max_member:
         raise ValueError(
-            f"journal needs {usable} bytes ({jm_percent}% of {total_size}, "
-            f"min {constants.LBLK_JM_MIN_SIZE}), which takes {member} bytes of each of "
-            f"the node's {len(sizes)} devices, but the smallest one ({min(sizes)} bytes) "
-            f"may contribute at most {max_member}; provide larger devices or lower "
-            f"--jm-percent")
+            f"each device gives a journal partition of {member} bytes ({jm_percent}% of "
+            f"the smallest of the node's {len(sizes)} devices, min "
+            f"{constants.LBLK_JM_MIN_SIZE}), but that device ({smallest} bytes) may "
+            f"contribute at most {max_member}; provide larger devices")
     return member
 
 
@@ -2914,9 +2914,8 @@ def lblk_node_journal_layout(lblk_entries, jm_percent=3, journal_device=False,
     - A node of two or more devices, partitions and whole disks alike, carves
       it from all of them: every device gets a journal partition of the same
       size, and the journal is the RAID 0+1 over those members
-      (split_lblk_journal_raid). ``jm_percent`` of the node's capacity is the
-      journal the node can use, not the space taken: see
-      lblk_journal_raid_member_size.
+      (split_lblk_journal_raid). Each one is ``jm_percent`` of the smallest
+      device: see lblk_journal_raid_member_size.
     - A node whose devices already carry such members (an earlier split,
       reused by detect_lblk_devices) keeps them. A device of it without one
       -- a split that failed half way, a device added to the selection -- is

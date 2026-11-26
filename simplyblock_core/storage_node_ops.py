@@ -1758,7 +1758,12 @@ class JMRaidNoCurrentLeg(Exception):
 
 
 def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode: StorageNode, after_restart,
-                             missing=()):
+                             missing=(), layout=""):
+    # ``layout`` names the geometry for a caller that builds the raid over a
+    # member list other than the recorded one (device_controller.
+    # reshape_jm_raid), where the shape of the record no longer tells it. A
+    # layout pinned on the cluster still wins.
+    #
     # ``jm_nvme_bdevs`` is always the JM's full member list, in the order it
     # was first built in. ``missing`` names the members that are not there
     # (a node restart with a drive gone): the geometry is still planned over
@@ -1769,10 +1774,11 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode: StorageNode, afte
     # RAID 0+1 journal layout (see simplyblock_core/jm_raid.py):
     #   1 device   -> no raid (bare device)
     #   2 devices  -> raid1 over two single-device legs  (a 2-way mirror)
-    #   > 2 devices-> two ±1 balanced raid0 legs, mirrored by a top raid1
+    #   > 2 devices-> ±1 balanced raid0 legs of at most four devices each, two
+    #                 of them up to eight devices, mirrored by a top raid1
     # The top raid bdev keeps the name raid_jm_<node> so the alceml/jm stack
-    # above is unchanged; the two raid0 legs are raid_jm_<node>_l{0,1}. This
-    # caps journal write amplification at 2x/node instead of N-way mirroring.
+    # above is unchanged; the raid0 legs are raid_jm_<node>_l<index>. A journal
+    # write costs one device write per leg instead of one per device.
     node = snode.get_id()
 
     # Resolve the JM RAID geometry to build. It is NOT recorded on disk (raid
@@ -1791,7 +1797,7 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode: StorageNode, afte
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
     jm_dev = snode.jm_device
-    layout = (getattr(cluster, "jm_raid_layout", "") or "").strip()
+    layout = (getattr(cluster, "jm_raid_layout", "") or "").strip() or layout
     if not layout:
         prior_legs = list(getattr(jm_dev, "jm_leg_bdevs", None) or []) if jm_dev else []
         prior_raid = getattr(jm_dev, "raid_bdev", "") if jm_dev else ""
@@ -1802,7 +1808,10 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode: StorageNode, afte
     logger.info("JM RAID geometry for %s: %s (%d member(s))",
                 node[:8], layout, len(jm_nvme_bdevs))
 
-    plan = jm_raid.plan_topology(jm_nvme_bdevs, layout=layout)
+    # A JM that holds a journal keeps the legs it was built with; one that is
+    # formatted is planned anew (jm_raid.plan_topology).
+    recorded_legs = list(jm_dev.jm_leg_members or []) if after_restart and jm_dev else None
+    plan = jm_raid.plan_topology(jm_nvme_bdevs, layout=layout, legs=recorded_legs)
     missing = set(missing)
     leg_bdevs = []
     leg_members = []
@@ -9525,8 +9534,14 @@ def _reconcile_discovered_devices(snode, nvme_devs):
     # The members of an lblk journal raid are block devices of their own. The
     # JM record keeps them by bdev name, which for an AIO device is derived
     # from its serial (utils.aio_bdev_name_for_serial); they are journal, and
-    # never a new data device.
+    # never a new data device. That holds for every journal partition the node
+    # record knows, in the raid or not: the one of a device that was migrated
+    # out leaves the raid (device_controller.reshape_jm_raid) and may still be
+    # on the host, and one that has not joined yet is not in the list either.
     jm_raid_members = set(snode.jm_device.jm_nvme_bdev_list) if snode.jm_device else set()
+    jm_raid_members.update(
+        utils.aio_bdev_name_for_serial(e["serial"]) for e in snode.lblk_devices or []
+        if e.get("journal_raid") and e.get("serial"))
 
     for dev in nvme_devs:
         if dev.serial_number == jm_dev_sn:

@@ -428,6 +428,14 @@ def _add_task(function_name, cluster_id, node_id, device_id,
             logger.info(f"Task found, skip adding new task: {task_id}")
             return False
 
+    elif function_name == JobSchedule.FN_JM_RAID_RESHAPE:
+        # The task rebuilds over whatever the node's devices call for when it
+        # runs, so one open task covers every change queued behind it.
+        open_tasks = [t for t in get_active_jm_raid_reshape_tasks(cluster_id) if t.node_id == node_id]
+        if open_tasks:
+            logger.info(f"Task found, skip adding new task: {open_tasks[0].uuid}")
+            return False
+
     task_obj = JobSchedule()
     task_obj.uuid = str(uuid.uuid4())
     task_obj.cluster_id = cluster_id
@@ -1397,6 +1405,35 @@ def get_port_allow_tasks(cluster_id, node_id, port_number):
                 if "port_number" in task.function_params and task.function_params["port_number"] == port_number:
                     return task.uuid
     return False
+
+
+def add_jm_raid_reshape_task(cluster_id, node_id):
+    return _add_task(JobSchedule.FN_JM_RAID_RESHAPE, cluster_id, node_id, "")
+
+
+def get_active_jm_raid_reshape_tasks(cluster_id):
+    """The open JM raid rebuilds of the cluster."""
+    return [task for task in db.get_job_tasks(cluster_id)
+            if task.function_name == JobSchedule.FN_JM_RAID_RESHAPE
+            and task.status != JobSchedule.STATUS_DONE and task.canceled is False]
+
+
+#: Work that moves data or takes a node's journal away. A JM raid rebuild
+#: leaves a node without a journal copy of its own until the resync is done,
+#: so it waits for all of it, cluster-wide.
+_JM_RAID_RESHAPE_WAITS_FOR = (
+    JobSchedule.FN_DEV_MIG, JobSchedule.FN_FAILED_DEV_MIG, JobSchedule.FN_NEW_DEV_MIG,
+    JobSchedule.FN_NODE_RESTART, JobSchedule.FN_DEV_RESTART, JobSchedule.FN_NODE_ADD,
+    JobSchedule.FN_NODE_REMOVAL, JobSchedule.FN_CLUSTER_EXPAND,
+    JobSchedule.FN_LVOL_MIG, JobSchedule.FN_LVOL_BATCH_MIG,
+)
+
+
+def get_jm_raid_reshape_blocking_tasks(cluster_id):
+    """The open tasks of the cluster a JM raid rebuild waits for."""
+    return [task for task in db.get_job_tasks(cluster_id)
+            if task.function_name in _JM_RAID_RESHAPE_WAITS_FOR
+            and task.status != JobSchedule.STATUS_DONE and task.canceled is False]
 
 
 def add_jc_comp_resume_task(cluster_id, node_id, jm_vuid):

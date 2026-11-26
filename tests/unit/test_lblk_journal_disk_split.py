@@ -106,8 +106,8 @@ class TestNodeJournalLayout(unittest.TestCase):
         result, disk_calls, _ = self._layout(entries)
         self.assertEqual(result, {"split-raid": True})
         self.assertEqual(disk_calls, [])
-        # 3% of 300G usable, on a two-member mirror: 9G on each disk.
-        self.assertEqual(self.raid_calls, [(["sdb", "sdc"], 9 * GIB)])
+        # 3% of the smaller disk, on each disk.
+        self.assertEqual(self.raid_calls, [(["sdb", "sdc"], 3 * GIB)])
 
     def test_single_partition_is_split(self):
         _, disk_calls, part_calls = self._layout({"sdb1": _entry("sdb1", GIB, type="part")})
@@ -118,7 +118,7 @@ class TestNodeJournalLayout(unittest.TestCase):
         entries = {"sdb1": _entry("sdb1", 100 * GIB, type="part"),
                    "sdc": _entry("sdc", 100 * GIB)}
         self._layout(entries)
-        self.assertEqual(self.raid_calls, [(["sdb1", "sdc"], 6 * GIB)])
+        self.assertEqual(self.raid_calls, [(["sdb1", "sdc"], 3 * GIB)])
 
     # A node whose devices already carry journal raid members.
 
@@ -187,7 +187,7 @@ class TestNodeJournalLayout(unittest.TestCase):
         entries = {"sdb1": _entry("sdb1", 100 * GIB, type="part"),
                    "sdb2": _entry("sdb2", 100 * GIB, type="part")}
         _, disk_calls, part_calls = self._layout(entries, journal_device=True)
-        self.assertEqual(self.raid_calls, [(["sdb1", "sdb2"], 6 * GIB)])
+        self.assertEqual(self.raid_calls, [(["sdb1", "sdb2"], 3 * GIB)])
         self.assertEqual((disk_calls, part_calls), ([], []))
 
     def test_empty(self):
@@ -322,8 +322,8 @@ class TestGenerateConfigsPerNode(unittest.TestCase):
         for jm, data in (("sdb1", "sdb2"), ("sdc1", "sdc2")):
             self.assertTrue(devices[jm]["journal"] and devices[jm]["journal_raid"])
             self.assertEqual(devices[jm]["data_serial"], devices[data]["serial"])
-            # 3% of 150G usable on a two-member mirror: the same on both disks.
-            self.assertEqual(devices[jm]["size"], 150 * GIB * 3 // 100)
+            # The floor (3% of the 50G disk is less): the same on both disks.
+            self.assertEqual(devices[jm]["size"], constants.LBLK_JM_MIN_SIZE)
             self.assertFalse(devices[data].get("journal"))
         # The members are one journal device, not an alceml each.
         self.assertEqual(config["nodes"][0]["number_of_alcemls"], 3)
@@ -335,11 +335,11 @@ class TestGenerateConfigsPerNode(unittest.TestCase):
         self.assertEqual(sorted(calls), ["sdb", "sdc", "sdd", "sde"])
         self.assertEqual(self._names(config), [["sdb1", "sdb2", "sdd1", "sdd2"],
                                                ["sdc1", "sdc2", "sde1", "sde2"]])
-        for node, total in zip(config["nodes"], (400, 600)):
+        for node, smallest in zip(config["nodes"], (100, 200)):
             members = [e for e in node["lblk_devices"] if e.get("journal")]
             self.assertEqual(len(members), 2)
             self.assertTrue(all(e.get("journal_raid") for e in members))
-            self.assertEqual({e["size"] for e in members}, {total * GIB * 3 // 100})
+            self.assertEqual({e["size"] for e in members}, {smallest * GIB * 3 // 100})
 
     def test_journal_device_opt_out(self):
         config, calls = self._run({"sdb": _entry("sdb", 100 * GIB),

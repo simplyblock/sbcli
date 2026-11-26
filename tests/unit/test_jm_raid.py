@@ -1,6 +1,6 @@
 """
 Unit tests for simplyblock_core/jm_raid.py — the Journal-Manager RAID topology
-and reconfiguration planner.
+planner.
 
 Background: the per-node JM device used to be an N-way RAID1 mirror across the
 JM partition (`p1`) of every drive, which costs N physical writes per journal
@@ -8,13 +8,14 @@ record (× 4 JM copies at FTT=2 ⇒ up to 40×). The new layout is RAID 0+1:
 
   - 1 device  -> no raid (test-only single-device node)
   - 2 devices -> raid1 over two single-device legs  == a 2-way mirror
-  - >2 devices-> split drives into two ±1 balanced groups, raid0 each group,
-                 raid1 over the two raid0 legs
+  - >2 devices-> split drives into ±1 balanced groups of at most four (two
+                 groups up to eight drives), raid0 each group, raid1 over
+                 the raid0 legs
 
-That caps amplification at 2× per node regardless of drive count, and avoids
+That costs one device write per leg instead of one per drive, and avoids
 SPDK's raid5f full-stripe-write constraint. These tests pin the pure planning
-logic that decides the topology and the per-leg rebuild actions for the drive
-lifecycle (fail / add / re-insert / both-legs-lost).
+logic that decides the topology. What happens when a node's drives change is
+in test_jm_raid_reshape.py.
 """
 
 import importlib.util
@@ -34,25 +35,39 @@ def _load():
 JM = _load()
 
 
-class TestSplitTwoGroups(unittest.TestCase):
-    def test_sizes_balanced_within_one(self):
-        # (input length) -> expected (len groupA, len groupB)
+class TestSplitGroups(unittest.TestCase):
+    def test_group_sizes(self):
+        # (input length) -> expected group sizes: at most four devices per
+        # group, at least two groups, sizes within one of each other.
         expected = {2: (1, 1), 3: (2, 1), 4: (2, 2), 5: (3, 2),
-                    6: (3, 3), 7: (4, 3), 8: (4, 4), 10: (5, 5)}
-        for n, (la, lb) in expected.items():
-            a, b = JM.split_two_groups(list(range(n)))
-            self.assertEqual((len(a), len(b)), (la, lb), f"n={n}")
-            self.assertLessEqual(abs(len(a) - len(b)), 1, f"n={n}")
+                    6: (3, 3), 7: (4, 3), 8: (4, 4),
+                    9: (3, 3, 3), 10: (4, 3, 3), 11: (4, 4, 3), 12: (4, 4, 4),
+                    13: (4, 3, 3, 3), 16: (4, 4, 4, 4), 17: (4, 4, 3, 3, 3)}
+        for n, sizes in expected.items():
+            groups = JM.split_groups(list(range(n)))
+            self.assertEqual(tuple(len(g) for g in groups), sizes, f"n={n}")
 
-    def test_partition_is_complete_and_disjoint(self):
-        items = [f"d{i}" for i in range(7)]
-        a, b = JM.split_two_groups(items)
-        self.assertEqual(sorted(a + b), sorted(items))
-        self.assertFalse(set(a) & set(b))
+    def test_no_group_wider_than_the_cap_and_never_fewer_than_two(self):
+        for n in range(2, 40):
+            groups = JM.split_groups(list(range(n)))
+            self.assertGreaterEqual(len(groups), 2, f"n={n}")
+            self.assertLessEqual(max(len(g) for g in groups), JM.GROUP_MAX_DEVICES, f"n={n}")
+            self.assertLessEqual(max(map(len, groups)) - min(map(len, groups)), 1, f"n={n}")
 
-    def test_larger_group_first(self):
-        a, b = JM.split_two_groups([1, 2, 3, 4, 5])  # 5 -> (3,2)
-        self.assertGreaterEqual(len(a), len(b))
+    def test_up_to_eight_devices_it_is_the_split_into_two_halves(self):
+        """Every RAID 0+1 JM built before the groups were capped was split
+        into two halves, the first one taking the odd device. The capped
+        split must give the same two legs for the same member list, or a
+        restart would read those journals back scrambled."""
+        for n in range(2, 9):
+            items = [f"d{i}" for i in range(n)]
+            half = (n + 1) // 2
+            self.assertEqual(JM.split_groups(items), [items[:half], items[half:]], f"n={n}")
+
+    def test_partition_is_complete_in_order_and_disjoint(self):
+        items = [f"d{i}" for i in range(11)]
+        groups = JM.split_groups(items)
+        self.assertEqual([m for g in groups for m in g], items)
 
 
 class TestPlanTopology(unittest.TestCase):
@@ -80,58 +95,6 @@ class TestPlanTopology(unittest.TestCase):
         self.assertEqual([len(x) for x in p["legs"]], [3, 3])
         # all members present exactly once across the two legs
         self.assertEqual(sorted(p["legs"][0] + p["legs"][1]), list("abcdef"))
-
-
-class TestLegHelpers(unittest.TestCase):
-    def test_is_balanced(self):
-        self.assertTrue(JM.is_balanced([["a", "b"], ["c"]]))      # 2,1
-        self.assertTrue(JM.is_balanced([["a"], ["b"]]))           # 1,1
-        self.assertFalse(JM.is_balanced([["a", "b", "c"], ["d"]]))  # 3,1
-
-    def test_smaller_leg_index(self):
-        self.assertEqual(JM.smaller_leg_index([["a", "b"], ["c"]]), 1)
-        self.assertEqual(JM.smaller_leg_index([["a"], ["b", "c"]]), 0)
-        # tie -> leg 0
-        self.assertEqual(JM.smaller_leg_index([["a"], ["b"]]), 0)
-
-
-class TestPlanReconfigure(unittest.TestCase):
-    def test_failed_device_rebuilds_only_its_leg(self):
-        legs = [["a", "b"], ["c", "d"]]
-        r = JM.plan_reconfigure(legs, failed="b")
-        self.assertEqual(r["rebuild"], [0])
-        self.assertEqual(r["legs"], [["a"], ["c", "d"]])
-
-    def test_added_device_goes_to_smaller_leg(self):
-        legs = [["a", "b"], ["c"]]   # leg 1 is smaller
-        r = JM.plan_reconfigure(legs, added="x")
-        self.assertEqual(r["rebuild"], [1])
-        self.assertEqual(r["legs"], [["a", "b"], ["c", "x"]])
-
-    def test_failure_on_both_legs_rebuilds_both(self):
-        legs = [["a", "b"], ["c", "d"]]
-        r = JM.plan_reconfigure(legs, failed=["b", "d"])
-        self.assertEqual(r["rebuild"], [0, 1])
-        self.assertEqual(r["legs"], [["a"], ["c"]])
-
-    def test_reinserted_device_is_added_to_smaller_leg(self):
-        # a device that is no longer part of any leg's raid0 is re-incorporated
-        legs = [["a", "b", "c"], ["d", "e"]]
-        r = JM.plan_reconfigure(legs, added="f")
-        self.assertEqual(r["rebuild"], [1])
-        self.assertEqual(r["legs"], [["a", "b", "c"], ["d", "e", "f"]])
-
-    def test_no_event_no_rebuild(self):
-        legs = [["a", "b"], ["c", "d"]]
-        r = JM.plan_reconfigure(legs)
-        self.assertEqual(r["rebuild"], [])
-        self.assertEqual(r["legs"], legs)
-
-    def test_failed_device_not_present_is_noop(self):
-        legs = [["a", "b"], ["c", "d"]]
-        r = JM.plan_reconfigure(legs, failed="zzz")
-        self.assertEqual(r["rebuild"], [])
-        self.assertEqual(r["legs"], legs)
 
 
 if __name__ == "__main__":
