@@ -24,10 +24,14 @@ from simplyblock_core.controllers import (
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol, LVolReplication
 from simplyblock_core.models.pool import Pool
-from simplyblock_core.models.replication import ReplicationPolicy, ReplicationTarget
+from simplyblock_core.models.replication import (
+    ConsistencyGroup,
+    ReplicationPolicy,
+    ReplicationTarget,
+)
 from simplyblock_core.models.snapshot import SnapShot
-from simplyblock_core.peer.client import HttpPeerClient
-from simplyblock_core.peer.protocol import PEER_API_VERSION
+from simplyblock_core.peer.client import HttpPeerClient, PeerError, peer_for_target
+from simplyblock_core.peer.protocol import PEER_API_VERSION, REPLICATION_CAPABILITIES
 
 logger = utils.get_logger(__name__)
 db = db_module.DBController()
@@ -137,6 +141,29 @@ def _check_peer(target_cluster_id, peer: PeerConnection):
             f"this control plane speaks {PEER_API_VERSION}")
 
 
+def _check_peer_replicates(target):
+    """Confirm the peer of *target* serves every step replication drives on it.
+
+    A policy on a peer target makes the source run its transfers through the
+    peer API; a peer on an older version that lacks one of those calls would
+    fail mid-replication instead, so it is refused here, when the policy is made.
+
+    Raises:
+        ReplicationConfigError: the peer cannot be asked, or lacks a call.
+    """
+    try:
+        info = peer_for_target(target).info()
+    except PeerError as e:
+        raise ReplicationConfigError(
+            f"Replication target {target.target_name}: the peer control plane at "
+            f"{target.peer_endpoint} cannot be asked what it serves: {e}") from e
+    missing = sorted(REPLICATION_CAPABILITIES - set(info.capabilities))
+    if missing:
+        raise ReplicationConfigError(
+            f"Replication target {target.target_name}: the peer control plane at "
+            f"{target.peer_endpoint} does not serve {', '.join(missing)}; upgrade it first")
+
+
 def list_targets(cluster_id=None):
     return db.get_replication_targets(cluster_id)
 
@@ -166,8 +193,8 @@ def add_policy(cluster_id, policy_name, target, interval_min=1, mode=None, keep_
     Raises:
         KeyError: *cluster_id* or *target* is unknown.
         ReplicationConfigError: the target belongs to another cluster or is on
-            a peer control plane (not supported yet), the name is taken, or a
-            setting is out of range.
+            a peer control plane that does not serve every replication call, the
+            name is taken, or a setting is out of range.
     """
     db.get_cluster_by_id(cluster_id)
     try:
@@ -178,13 +205,7 @@ def add_policy(cluster_id, policy_name, target, interval_min=1, mode=None, keep_
         raise ReplicationConfigError(
             f"Replication target {target} belongs to cluster {tgt.cluster_id}")
     if tgt.has_peer():
-        # Every replication path starts from a policy, and those paths still
-        # read and write the target cluster's records in this control plane's
-        # database, where a peer's cluster has none. Refused here, up front,
-        # until the replication steps go through the peer client.
-        raise ReplicationConfigError(
-            f"Replication target {tgt.target_name} is on a peer control plane "
-            f"({tgt.peer_endpoint}); replication to a peer control plane is not supported yet")
+        _check_peer_replicates(tgt)
 
     for existing in db.get_replication_policies(cluster_id):
         if existing.policy_name == policy_name:
@@ -326,7 +347,7 @@ def _refuse_encrypted(lvol):
             lvol_controller.ENCRYPTED_REPLICATION_REFUSAL.format(lvol.get_id()))
 
 
-def start_member_replication(lvol_id, pol, target):
+def start_member_replication(lvol_id, pol, target, defer_peer_placement=False):
     """Point one volume at *pol* and start replicating to *target*, WITHOUT
     touching consistency-group membership.
 
@@ -337,6 +358,8 @@ def start_member_replication(lvol_id, pol, target):
     calls this for members that ALREADY belong to the group, so re-adding them
     would reset their generation epochs (``add_member_to_group`` stamps a fresh
     ``joined_seq``) and tear the group's snapshot history.
+
+    ``defer_peer_placement`` is passed to replication_start.
     """
     lvol = db.get_lvol_by_id(lvol_id)
     _refuse_encrypted(lvol)
@@ -348,6 +371,7 @@ def start_member_replication(lvol_id, pol, target):
         mode=pol.mode,
         interval_min=pol.interval_min,
         from_policy=True,
+        defer_peer_placement=defer_peer_placement,
     )
     if not ret:
         fresh = db.get_lvol_by_id(lvol_id)
@@ -1051,15 +1075,24 @@ def resolve_group(group):
     }
 
 
-def _failover_group_from_target_copies(group):
+def _failover_group_from_target_copies(group, on_cluster="", source_cut_off=False):
     """Fail *group* over from its newest complete replicated generation, cloning
     every member from its copy on the peer (replication_recovery_points). The
     template of each clone is the volume record embedded in the member's source
     snapshot, so the clone keeps the volume's identity; when that snapshot is
-    gone too, the copy's own record stands in. Idempotent: a member whose copy
-    already has a live clone reports that clone."""
+    gone, the source volume's record the copy carries stands in, and failing
+    that the copy's own record. Idempotent: a member whose copy already has a
+    live clone reports that clone.
+
+    *on_cluster* limits the copies to that cluster. *source_cut_off* is the
+    fail-over ordered on the target with the source cluster unreachable
+    (failover_replicated_group): no source snapshot is readable there, and a
+    copy that carries no source volume is refused rather than cloned as its
+    landing volume, which would give the clone the wrong name and NQN."""
     seq, origins, copies = replication_recovery_points.newest_group_generation(group.get_id(), db=db)
     copies = [c for c in copies if getattr(c, "cluster_id", "") != group.cluster_id]
+    if on_cluster:
+        copies = [c for c in copies if getattr(c, "cluster_id", "") == on_cluster]
     if not copies:
         logger.error("Fail-over of consistency group %s: no complete replicated generation "
                      "on a peer cluster to fail over from", group.group_name)
@@ -1086,7 +1119,18 @@ def _failover_group_from_target_copies(group):
                 origin = db.get_snapshot_by_id(copy.source_replicated_snap_uuid)
             except KeyError:
                 origin = None
-        template = origin.lvol if origin is not None and origin.lvol else copy.lvol
+        if origin is not None and origin.lvol:
+            template = origin.lvol
+        elif getattr(copy, "source_volume", None):
+            template = LVol().from_dict(copy.source_volume)
+        elif source_cut_off:
+            results.append({"lvol_id": copy.get_id(), "status": "failed",
+                            "detail": f"replicated copy {copy.get_id()} carries no source volume "
+                                      "record; the source cluster sent none, so the clone's "
+                                      "identity is unknown here"})
+            continue
+        else:
+            template = copy.lvol
         if template is None:
             results.append({"lvol_id": copy.get_id(), "status": "failed",
                             "detail": "replicated copy names no volume"})
@@ -1107,6 +1151,65 @@ def _failover_group_from_target_copies(group):
             continue
         results.append(_clone_result(template.get_id(), ret))
     return results
+
+
+def failover_replicated_group(cluster_id, group_id):
+    """Fail the source cluster's consistency group *group_id*
+    (``<source cluster>/<group>``) over on *cluster_id*, from the copies here.
+
+    The manual fail-over with the source cluster cut off, on a split control
+    plane: this cluster's database holds no record of the source volumes, their
+    snapshots, or the group, only the copies and the metadata each carries
+    (``source_volume``, ``source_group``). The newest generation with a copy of
+    every member is cloned, each clone keeping its source volume's identity, and
+    the clones rejoin a group of the same name here.
+
+    Whether to fail over is not decided here: the caller (the DR hub through
+    the operator, or a person) ordered it, and fencing the old source when it
+    returns is the hub's work. Returns per-member result dicts; empty when no
+    complete generation is on this cluster. Idempotent: a member already cloned
+    reports its clone.
+
+    Raises:
+        ValueError: *group_id* does not name the source cluster.
+    """
+    source_cluster_id, _, gid = group_id.rpartition("/")
+    if not source_cluster_id or not gid:
+        raise ValueError(f"group id {group_id!r} must be <source cluster>/<group>")
+    group = ConsistencyGroup()
+    group.uuid, group.cluster_id, group.group_name = gid, source_cluster_id, gid
+    results = _failover_group_from_target_copies(group, on_cluster=cluster_id, source_cut_off=True)
+    # Replicate back toward the source, as the central fail-over does: csi-addons
+    # calls no Enable after a promote, so without it the clones' group ran
+    # unprotected once the source returned (bed run 20261112-1712-ebs-splitdr).
+    # Until the source answers, its replication retries as during the partition.
+    _attach_promoted_peer(group, results, "")
+    return results
+
+
+def resolve_replicated_group(group_id):
+    """resolve_group for the source cluster's group *group_id*
+    (``<source cluster>/<group>``) on a control plane that holds only its
+    copies (control-plane split). After failover_replicated_group, the group
+    lives here as the clones' group of the same name, and each clone's
+    relationship leads back to its source volume. Before that, nothing here
+    serves the group: ``active_group_id`` is empty and the source's own control
+    plane is the one to ask.
+
+    The group's name comes from the metadata its copies carry; with no copy of
+    the group here, nothing resolves."""
+    source_cluster_id, _, gid = group_id.rpartition("/")
+    name = ""
+    for snap in db.get_snapshots():
+        if (getattr(snap, "group_id", "") or "").split("/")[-1] == gid:
+            name = (getattr(snap, "source_group", None) or {}).get("group_name", "")
+            if name:
+                break
+    if not (source_cluster_id and gid and name):
+        return {"active_cluster_id": "", "active_group_id": "", "members": []}
+    group = ConsistencyGroup()
+    group.uuid, group.cluster_id, group.group_name = gid, source_cluster_id, name
+    return resolve_group(group)
 
 
 def _failback_group(group, policy, peer=None):
@@ -1266,8 +1369,11 @@ def _failed_home_relationship(lvol_id):
     return None
 
 
-def _resolve_group_failover_generation(policy, volumes):
+def _resolve_group_failover_generation(policy, volumes, peer=None):
     """The one generation every pending member fails over to.
+
+    With *peer* (the policy's target is on another control plane), whether a
+    copy still exists on the target is the peer's answer, not this database's.
 
     A consistency group restores as ONE crash-consistent cut, so every member
     must clone from a snapshot of the SAME group generation. Selecting per
@@ -1345,7 +1451,7 @@ def _resolve_group_failover_generation(policy, volumes):
         and task.status == JobSchedule.STATUS_DONE
     }
 
-    by_seq: dict = {}
+    shipped = []
     # `group_id` carries no index of its own; the cluster scope is what keeps
     # this off a cluster-wide snapshot scan.
     for snap in db.get_snapshots(group.cluster_id):
@@ -1357,14 +1463,26 @@ def _resolve_group_failover_generation(policy, volumes):
             continue
         if snap.get_id() not in replicated or not snap.target_replicated_snap_uuid:
             continue
-        try:
-            target_copy = db.get_snapshot_by_id(snap.target_replicated_snap_uuid)
-        except KeyError:
-            continue
-        if (target_copy.status == SnapShot.STATUS_IN_DELETION
-                or getattr(target_copy, "deleted", False)):
-            continue
-        by_seq.setdefault(seq, {})[lvol_id] = snap.get_id()
+        shipped.append((seq, lvol_id, snap))
+
+    if peer is not None:
+        usable = set(lvol_controller.peer_usable_copies(
+            peer, [snap.target_replicated_snap_uuid for _, _, snap in shipped]))
+    else:
+        usable = set()
+        for _, _, snap in shipped:
+            try:
+                target_copy = db.get_snapshot_by_id(snap.target_replicated_snap_uuid)
+            except KeyError:
+                continue
+            if (target_copy.status != SnapShot.STATUS_IN_DELETION
+                    and not getattr(target_copy, "deleted", False)):
+                usable.add(snap.target_replicated_snap_uuid)
+
+    by_seq: dict = {}
+    for seq, lvol_id, snap in shipped:
+        if snap.target_replicated_snap_uuid in usable:
+            by_seq.setdefault(seq, {})[lvol_id] = snap.get_id()
 
     candidates = (sorted(incumbent_seqs) if incumbent_seqs
                   else sorted(by_seq, reverse=True))
@@ -1386,6 +1504,16 @@ def _resolve_group_failover_generation(policy, volumes):
         f"No group generation of policy {policy.policy_name} is fully "
         f"replicated for all {len(pending_ids)} pending member(s); refusing a "
         f"mixed-generation fail-over{missing}")
+
+
+def _policy_target_peer(policy):
+    """The peer client of *policy*'s target when that target is on another
+    control plane; None for a target in this control plane (or none at all)."""
+    try:
+        target = db.get_replication_target_by_id(policy.target_id)
+    except KeyError:
+        return None
+    return peer_for_target(target) if target.has_peer() else None
 
 
 def latest_replicated_generation(policy_id: str) -> tuple[int, dict[str, SnapShot]]:
@@ -1417,13 +1545,26 @@ def latest_replicated_generation(policy_id: str) -> tuple[int, dict[str, SnapSho
     if not group_members:
         raise ReplicationConfigError(
             f"Policy {policy.policy_name} has no consistency group")
-    seq, covered = _resolve_group_failover_generation(policy, group_members)
+    peer = _policy_target_peer(policy)
+    seq, covered = _resolve_group_failover_generation(policy, group_members, peer=peer)
     if not covered:
         raise ReplicationConfigError(
             f"Policy {policy.policy_name} has no member left to resolve a "
             f"generation for; every member has already failed over")
 
     members = {}
+    if peer is not None:
+        # The copies live in the peer's control plane: asked again for the
+        # same reason the local branch re-fetches (retention may have run).
+        wanted = {lvol_id: db.get_snapshot_by_id(sid).target_replicated_snap_uuid
+                  for lvol_id, sid in covered.items()}
+        copies = lvol_controller.peer_usable_copies(peer, list(wanted.values()))
+        gone = sorted(lvol_id for lvol_id, cid in wanted.items() if cid not in copies)
+        if gone:
+            raise ReplicationConfigError(
+                f"Generation {seq} of policy {policy.policy_name} lost the copies of "
+                f"{', '.join(gone)} on peer cluster {peer.cluster_id}; try again")
+        return seq, {lvol_id: copies[cid] for lvol_id, cid in wanted.items()}
     for lvol_id, source_snap_id in covered.items():
         source_snap = db.get_snapshot_by_id(source_snap_id)
         # Re-fetched rather than carried from the scan above: the scan proved

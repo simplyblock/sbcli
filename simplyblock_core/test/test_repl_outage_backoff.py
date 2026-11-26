@@ -9,9 +9,13 @@ crashed node was back after ~85 s, so the transfer was never repeated on the
 new target leader while the old one was down.
 """
 import time
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
+from simplyblock_core.peer import service as peer_service
+from simplyblock_core.peer.protocol import ChainRequest
 from simplyblock_core.services import snapshot_replication as sr
 
 
@@ -83,21 +87,32 @@ class _Node:
         return self._id
 
 
-@pytest.fixture
-def chain(monkeypatch):
+def _chain_on(leader_id):
+    """The destination chaining a landing volume onto COPY with *leader_id*
+    leading (peer.service.chain_landing); the leader has no secondary here."""
     copy = _Snap("COPY", _Lvol("PRIMARY", ["PRIMARY", "SECONDARY", "TERTIARY"]))
-    prev = _Snap("PREV", None)
-    monkeypatch.setattr(sr, "_previous_replicated_snapshot", lambda snap, to_src: prev)
-    monkeypatch.setattr(sr.db, "get_snapshot_by_id", lambda uid: copy)
-    return copy
+    leader = MagicMock()
+    leader.get_id.return_value = leader_id
+    leader.secondary_node_id = ""
+    leader.rpc_client.return_value.bdev_get.return_value = None
+    leader.rpc_client.return_value.bdev_lvol_add_clone.return_value = True
+    db = MagicMock()
+    db.get_lvol_by_id.return_value = SimpleNamespace(top_bdev="LVS_16/REP_NEW")
+    db.get_snapshot_by_id.return_value = copy
+    db.get_storage_node_by_id.return_value = leader
+    return peer_service.chain_landing(db, ChainRequest(
+        landing_lvol_id="LANDING", leader_node_id=leader_id, predecessor_id="COPY")), leader
 
 
 @pytest.mark.parametrize("leader", ["PRIMARY", "SECONDARY", "TERTIARY"])
-def test_any_member_of_the_copys_lvstore_can_chain(chain, leader):
-    target, prev_db, ok = sr._resolve_chain_target(object(), False, _Node(leader))
-    assert ok and target == {"snap_bdev": chain.snap_bdev} and prev_db is chain
+def test_any_member_of_the_copys_lvstore_can_chain(leader):
+    answer, node = _chain_on(leader)
+    assert answer.state == "chained"
+    node.rpc_client.return_value.bdev_lvol_add_clone.assert_called_once_with(
+        "LVS_16/REP_NEW", "LVS_16/SNAP_COPY")
 
 
-def test_a_node_outside_the_lvstore_still_cannot(chain):
-    target, prev_db, ok = sr._resolve_chain_target(object(), False, _Node("OTHER"))
-    assert (target, prev_db, ok) == (None, None, False)
+def test_a_node_outside_the_lvstore_still_cannot():
+    answer, node = _chain_on("OTHER")
+    assert answer.state == "unresolvable"
+    node.rpc_client.return_value.bdev_lvol_add_clone.assert_not_called()

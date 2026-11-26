@@ -163,7 +163,7 @@ class TestHubLock:
         import inspect
         src = inspect.getsource(sr.process_snap_replicate_start)
         i = src.index("with _hub_lock(")
-        assert src.index("ensure_hub_attached(", i) > i
+        assert src.index("attach_hub_address(", i) > i
         assert src.index("task.status = JobSchedule.STATUS_RUNNING", i) > i
         # the long inline wait for the transfer is outside the lock
         assert src.index("_await_transfer_completion(task, snapshot, snode)") > \
@@ -171,7 +171,9 @@ class TestHubLock:
 
     def test_the_finish_decides_the_detach_under_the_hub_lock(self):
         import inspect
-        src = inspect.getsource(sr.process_snap_replicate_finish)
+        # the finish closes the session through _close_hub
+        assert "_close_hub(" in inspect.getsource(sr.process_snap_replicate_finish)
+        src = inspect.getsource(sr._close_hub)
         i = src.index("with _hub_lock(")
         assert src.index("_other_active_transfers_to_node(", i) > i
         assert src.index("bdev_nvme_detach_controller(hub_ctrl)", i) > i

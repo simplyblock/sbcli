@@ -82,6 +82,17 @@ class SnapShot(BaseModel):
     #: this snapshot belongs to (0 = not a group snapshot).
     group_id: str = ""
     group_seq: int = 0
+    #: On a replicated copy: the source volume's record when the snapshot was
+    #: taken (``LVol.to_dict()``, host keys under ``allowed_hosts`` as the volume
+    #: holds them). It is the template a fail-over on the copy's cluster clones
+    #: the copy as when the source cluster is cut off. Empty on a source snapshot
+    #: and on a copy whose source did not send it.
+    source_volume: dict = default_factory(dict)
+    #: On a replicated copy of a group snapshot: the source group's
+    #: ``group_name``, ``policy_id`` and the source volume ids of this
+    #: generation (``members``), so the copy's cluster can tell a complete
+    #: generation and name the group without the source.
+    source_group: dict = default_factory(dict)
     #: the caller's request id for the group generation this snapshot belongs
     #: to, stamped on every member snapshot of it, so a retried take with the
     #: same id answers with this generation instead of taking another.

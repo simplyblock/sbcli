@@ -101,11 +101,22 @@ def creation_response(
 #: caller acts from. Required on a sync-replication cluster (require_site),
 #: ignored on any other.
 SiteParameter = Annotated[str | None, Query(description='Sync replication: the site the caller acts from')]
+SupersededParameter = Annotated[bool, Query(description=(
+    'The caller says the volume or group was failed over elsewhere: fence it and stop '
+    'its replication, with no demote cut'))]
 
 
 def sync_error(status_code: int, message: str, **extra: Any) -> HTTPException:
     """A sync-replication refusal: ``{"detail": {"message": ..., **extra}}``."""
     return HTTPException(status_code, {"message": message, **extra})
+
+
+def refuse_superseded_on_sync(superseded: bool) -> None:
+    """A superseded demote on a sync-replication cluster is a 400: both sites
+    of such a cluster share one control plane, so there is no failover record
+    elsewhere for the caller to stand in for."""
+    if superseded:
+        raise sync_error(400, 'superseded applies to asynchronous replication only')
 
 
 def require_site(site: str | None) -> str:

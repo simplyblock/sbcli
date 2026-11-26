@@ -295,7 +295,7 @@ def test_group_snapshot_is_one_rpc_and_bumps_seq_only_on_full_success():
     src = inspect.getsource(cgc.create_group_snapshot_for_group)
     assert "bdev_lvol_snapshot_group" in src
     rpc_at = src.index("bdev_lvol_snapshot_group")
-    seq_at = src.index("group.last_group_seq = group_seq")
+    seq_at = src.index("_update_group(group, _counted)")
     assert rpc_at < seq_at, "the generation counter moves only after the whole tick"
     assert "_rollback_all" in src
 
@@ -320,7 +320,7 @@ def test_group_snapshot_serializes_concurrent_takes_on_the_group():
     assert "group.get_id()" in lock_line or "group.uuid" in lock_line, \
         "the outer lock must be keyed on the group's identity, not a member's"
     seq_claim_at = src.index("group.last_group_seq + 1", lock_at)
-    seq_write_at = src.index("group.last_group_seq = group_seq")
+    seq_write_at = src.index("_update_group(group, _counted)")
     assert lock_at < seq_claim_at, "the seq is claimed OUTSIDE the serialize lock"
     assert lock_at < seq_write_at, "the counter write is OUTSIDE the serialize lock"
 
@@ -333,10 +333,16 @@ def test_failover_result_carries_membership_warnings():
 
 
 def test_target_snapshot_copy_inherits_group_provenance():
+    """The source sends the group provenance and the destination records it
+    on the copy (control-plane split: the copy is written by peer.service)."""
+    from simplyblock_core.peer import service
     from simplyblock_core.services import snapshot_replication as sr
-    src = inspect.getsource(sr)
-    assert 'new_snapshot.group_id = getattr(snapshot, "group_id", "")' in src
-    assert 'new_snapshot.group_seq = getattr(snapshot, "group_seq", 0)' in src
+    runner = inspect.getsource(sr.process_snap_replicate_finish)
+    assert 'group_id=getattr(snapshot, "group_id", "")' in runner
+    assert 'group_seq=getattr(snapshot, "group_seq", 0)' in runner
+    record = inspect.getsource(service._record_copy)
+    assert "copy.group_id = source.group_id" in record
+    assert "copy.group_seq = source.group_seq" in record
 
 
 # --------------------------------------------------------------------------- #

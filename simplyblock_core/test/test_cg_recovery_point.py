@@ -255,10 +255,13 @@ def test_retention_keeps_the_groups_newest_complete_generation(monkeypatch):
     monkeypatch.setattr(sr, "db", db)
     monkeypatch.setattr(sr, "_keep_replicated_for", lambda lv: 2)
     monkeypatch.setattr(sr, "_retention_schedule_for", lambda lv: [])
-    monkeypatch.setattr(sr, "_successor_is_chained_to", lambda a, b: True)
-    monkeypatch.setattr(sr, "_has_dependent_clone", lambda sid: False)
+    # The target copies exist, are chained and have no clone (one peer call).
+    monkeypatch.setattr(sr, "_copy_state", lambda lv, target, successor: sr._CopyState(
+        exists=True, chained=True, has_dependent_clone=False))
     deleted: list[str] = []
     monkeypatch.setattr(sr.snapshot_controller, "delete", _recorder(deleted))
+    # the copies are deleted on the destination, through its peer client
+    monkeypatch.setattr(sr, "_delete_copy", lambda lvol, uuid: _recorder(deleted)(uuid))
     sr._prune_internal_snapshots(m1)
     assert "S15_M1" not in deleted and "T15_M1" not in deleted, deleted
     assert "S16_M1" in deleted and "T16_M1" in deleted, "an ordinary superseded pair still goes"
@@ -302,7 +305,7 @@ def test_failover_from_a_copy_records_the_relationship_and_rejoins_the_group(mon
     monkeypatch.setattr(LVolReplication, "write_to_db", lambda self, kv=None: written.append(self))
     monkeypatch.setattr(lvol_controller, "connect_lvol", lambda lid: ([], None))
     monkeypatch.setattr(cgc, "reconstitute_group_after_handoff",
-                        lambda s, d, c: rejoined.append((s.get_id(), d.get_id(), c)))
+                        lambda s, d, c, **kw: rejoined.append((s.get_id(), d.get_id(), c)))
     ret = lvol_controller.failover_from_replicated_copy(src, copy, SRC)
     assert ret["lvol_id"] == "CLONE"
     rep = written[0]
@@ -364,7 +367,7 @@ def _clone_into(db, peer):
 def _record_attach(monkeypatch):
     attached: list[tuple[str, str]] = []
 
-    def attach(group, policy_id):
+    def attach(group, policy_id, defer_peer_placement=False):
         attached.append((group.get_id(), policy_id))
         return group
     monkeypatch.setattr(cgc, "attach_group_policy", attach)

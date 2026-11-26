@@ -31,7 +31,11 @@ import itertools
 
 import pytest
 
+from simplyblock_core.controllers import (
+    snapshot_controller as snapshot_controller_module,
+)
 from simplyblock_core.db_controller import DBController
+from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
@@ -49,6 +53,11 @@ def db():
     db = DBController()
     if db.kv_store is None:
         pytest.skip("FoundationDB is not available")
+    # Retention asks the destination through its peer client, which answers
+    # only for a cluster its control plane manages.
+    cluster = Cluster()
+    cluster.uuid = CLUSTER_ID
+    cluster.write_to_db(db.kv_store)
     return db
 
 
@@ -117,6 +126,8 @@ def _write_target_copy(db, uuid, target_lvol, prev_snap_uuid=""):
     copy.snap_bdev = f"LVS_T/{uuid}"
     copy.snap_uuid = f"uuid-{uuid}"
     copy.prev_snap_uuid = prev_snap_uuid
+    # every replicated copy names its source (finish writes it)
+    copy.source_replicated_snap_uuid = f"source-of-{uuid}"
     copy.size = target_lvol.size
     copy.lvol = target_lvol
     copy.write_to_db(db.kv_store)
@@ -187,6 +198,8 @@ def _seed(db, monkeypatch, source_snaps, existing_targets, chain=None,
 
     snapctl = _RecordingSnapshotController(db)
     monkeypatch.setattr(sr, "snapshot_controller", snapctl)
+    # the copies are deleted on the destination (peer.service.delete_snapshot)
+    monkeypatch.setattr(snapshot_controller_module, "delete", snapctl.delete)
     return snapctl
 
 

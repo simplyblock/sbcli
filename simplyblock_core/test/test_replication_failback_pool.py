@@ -12,11 +12,8 @@ them do.
 """
 import pytest
 
-from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.pool import Pool
-from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.services import snapshot_replication as sr
 
 
 class _FakeDB:
@@ -64,45 +61,9 @@ def _pool(uuid, status=Pool.STATUS_ACTIVE):
     return p
 
 
-def test_configured_replication_pool_wins(monkeypatch):
-    """...but only for the direction it describes — see
-    test_replication_destination_resolution for the cross-direction cases."""
-    monkeypatch.setattr(sr, "db", _FakeDB(configured_pool="POOL_CFG",
-                                          configured_cluster="CL1",
-                                          pools=[_pool("POOL_OTHER")]))
-    assert sr._destination_pool_uuid(_node(), source_cluster_id="CL0") == "POOL_CFG"
-
-
-def test_falls_back_to_first_active_pool(monkeypatch):
-    monkeypatch.setattr(sr, "db", _FakeDB(
-        pools=[_pool("POOL_INACTIVE", status=Pool.STATUS_INACTIVE), _pool("POOL_OK")]))
-    assert sr._destination_pool_uuid(_node(), source_cluster_id="CL0") == "POOL_OK"
-
-
-def test_no_pool_available_returns_none(monkeypatch):
-    monkeypatch.setattr(sr, "db", _FakeDB(pools=[]))
-    assert sr._destination_pool_uuid(_node(), source_cluster_id="CL0") is None
-
-
-def test_blank_counterpart_uuid_is_never_looked_up(monkeypatch):
-    """The regression itself: a blank uuid must not reach get_snapshot_by_id."""
-    db = _FakeDB(configured_pool="POOL_DEST", configured_cluster="CL1")
-    monkeypatch.setattr(sr, "db", db)
-
-    snap = SnapShot()
-    snap.uuid = "SNAP_NEW"
-    snap.source_replicated_snap_uuid = ""          # no counterpart yet
-    lv = LVol()
-    lv.uuid = "LV1"
-    snap.lvol = lv
-
-    # Mirrors the guarded branch in process_snap_replicate_start.
-    pool = None
-    if snap.source_replicated_snap_uuid:
-        pool = db.get_snapshot_by_id(snap.source_replicated_snap_uuid).lvol.pool_uuid
-    if not pool:
-        pool = sr._destination_pool_uuid(_node(), lvol=lv, source_cluster_id="CL0")
-    assert pool == "POOL_DEST"
+# The pool rules of a fail-back (configured pool for its direction, first
+# active pool, a snapshot without a counterpart resolving like the forward
+# direction) are in tests/integration/test_landing_preparation.py.
 
 
 def test_blank_id_lookup_raises_rather_than_matching_everything():

@@ -15,13 +15,29 @@ from typing import Any, Protocol
 from urllib.parse import quote
 
 import requests
-from pydantic import SecretStr, ValidationError
+from pydantic import BaseModel, SecretStr, ValidationError
 from requests.adapters import HTTPAdapter
 from urllib3 import Retry
 
+from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.models.replication import ReplicationTarget
 from simplyblock_core.peer import service
-from simplyblock_core.peer.protocol import PeerInfo
+from simplyblock_core.peer.protocol import (
+    ChainRequest,
+    ChainResponse,
+    DeleteSnapshotResponse,
+    DescribeRequest,
+    DescribeResponse,
+    EnsureHubRequest,
+    EnsureHubResponse,
+    FinishRequest,
+    FinishResponse,
+    LandingRequest,
+    LandingResponse,
+    PeerInfo,
+    PlaceRequest,
+    PlaceResponse,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +61,10 @@ class PeerNotFoundError(PeerError):
     """The peer does not manage the addressed cluster, or the addressed object (HTTP 404)."""
 
 
+class PeerRefusedError(PeerError):
+    """The peer refused the step on its side: a precondition does not hold (HTTP 409)."""
+
+
 class PeerProtocolError(PeerError):
     """The peer answered with a status or body this control plane does not understand."""
 
@@ -61,6 +81,79 @@ class PeerClient(Protocol):
 
         Raises:
             PeerError: the target's control plane cannot answer for the cluster.
+        """
+
+    def discard_landing(self, lvol_id: str) -> None:
+        """Delete the replication landing volume *lvol_id*; one already gone is success.
+
+        Raises:
+            PeerNotFoundError: the cluster is unknown, or the volume is on another cluster.
+            PeerRefusedError: the volume is not a landing volume, or the delete is refused.
+            PeerError: the target's control plane cannot be reached or understood.
+        """
+
+    def describe(self, request: DescribeRequest) -> DescribeResponse:
+        """Read-only answers about the target side: lvstore leadership of a landing
+        volume, whether copies exist or have dependent clones, chain links.
+
+        Raises:
+            PeerNotFoundError: the cluster is unknown.
+            PeerError: the target's control plane cannot be reached or understood.
+        """
+
+    def prepare_landing(self, request: LandingRequest) -> LandingResponse:
+        """Make a replicated snapshot's landing volume ready on the target: adopt
+        one a previous request made, report a copy of the same data, or create it.
+
+        Raises:
+            PeerNotFoundError: the cluster is unknown, or the node hint is not on it.
+            PeerRefusedError: no member or pool can take the volume, or the create failed.
+            PeerError: the target's control plane cannot be reached or understood.
+        """
+
+    def ensure_hub(self, request: EnsureHubRequest) -> EnsureHubResponse:
+        """Get the target ready to receive a transfer into the landing volume: its
+        settled leader, the receiving hub's attach address and the map id.
+
+        Raises:
+            PeerNotFoundError: the cluster or the landing volume is unknown.
+            PeerError: the target's control plane cannot be reached or understood.
+        """
+
+    def chain(self, request: ChainRequest) -> ChainResponse:
+        """Chain the landing volume onto the predecessor's copy on the leader and
+        its secondary, so the transfer can ship only the delta.
+
+        Raises:
+            PeerNotFoundError: the cluster, the landing volume or the leader is unknown.
+            PeerError: the target's control plane cannot be reached or understood.
+        """
+
+    def finish(self, request: FinishRequest) -> FinishResponse:
+        """Make the landing volume the copy of the source snapshot after its
+        transfer: chain, merge and convert it, record the copy, retire it.
+
+        Raises:
+            PeerNotFoundError: the cluster is unknown.
+            PeerError: the target's control plane cannot be reached or understood.
+        """
+
+    def delete_snapshot(self, snapshot_id: str) -> DeleteSnapshotResponse:
+        """Delete a replicated copy (retention); one already gone counts as deleted.
+
+        Raises:
+            PeerNotFoundError: the cluster is unknown, or the snapshot is on another cluster.
+            PeerRefusedError: the snapshot is not a replicated copy.
+            PeerError: the target's control plane cannot be reached or understood.
+        """
+
+    def place(self, request: PlaceRequest) -> PlaceResponse:
+        """Pick the member a volume's copies land on, when its replication starts.
+
+        Raises:
+            PeerNotFoundError: the cluster is unknown.
+            PeerRefusedError: no member can take the volume.
+            PeerError: the target's control plane cannot be reached or understood.
         """
 
 
@@ -84,6 +177,106 @@ class LocalPeerClient:
             return service.info(self._cluster_id)
         except KeyError as e:
             raise PeerNotFoundError(str(e)) from e
+
+    def discard_landing(self, lvol_id: str) -> None:
+        """Delete the replication landing volume *lvol_id*; one already gone is success.
+
+        Raises:
+            PeerNotFoundError: the cluster is unknown, or the volume is on another cluster.
+            PeerRefusedError: the volume is not a landing volume, or the delete is refused.
+        """
+        try:
+            service.discard_landing(self._cluster_id, lvol_id)
+        except KeyError as e:
+            raise PeerNotFoundError(str(e)) from e
+        except PreconditionError as e:
+            raise PeerRefusedError(str(e)) from e
+
+    def describe(self, request: DescribeRequest) -> DescribeResponse:
+        """Read-only answers about the target side (see ``PeerClient.describe``).
+
+        Raises:
+            PeerNotFoundError: this control plane does not manage the cluster.
+        """
+        try:
+            return service.describe(self._cluster_id, request)
+        except KeyError as e:
+            raise PeerNotFoundError(str(e)) from e
+
+    def prepare_landing(self, request: LandingRequest) -> LandingResponse:
+        """Make the landing volume ready (see ``PeerClient.prepare_landing``).
+
+        Raises:
+            PeerNotFoundError: the cluster is unknown, or the node hint is not on it.
+            PeerRefusedError: no member or pool can take the volume, or the create failed.
+        """
+        try:
+            return service.prepare_landing(self._cluster_id, request)
+        except KeyError as e:
+            raise PeerNotFoundError(str(e)) from e
+        except PreconditionError as e:
+            raise PeerRefusedError(str(e)) from e
+
+    def ensure_hub(self, request: EnsureHubRequest) -> EnsureHubResponse:
+        """Get the target ready to receive (see ``PeerClient.ensure_hub``).
+
+        Raises:
+            PeerNotFoundError: the cluster or the landing volume is unknown.
+        """
+        try:
+            return service.ensure_hub(self._cluster_id, request)
+        except KeyError as e:
+            raise PeerNotFoundError(str(e)) from e
+
+    def chain(self, request: ChainRequest) -> ChainResponse:
+        """Chain the landing volume (see ``PeerClient.chain``).
+
+        Raises:
+            PeerNotFoundError: the cluster, the landing volume or the leader is unknown.
+        """
+        try:
+            return service.chain(self._cluster_id, request)
+        except KeyError as e:
+            raise PeerNotFoundError(str(e)) from e
+
+    def finish(self, request: FinishRequest) -> FinishResponse:
+        """Finish the copy (see ``PeerClient.finish``).
+
+        Raises:
+            PeerNotFoundError: the cluster is unknown.
+        """
+        try:
+            return service.finish(self._cluster_id, request)
+        except KeyError as e:
+            raise PeerNotFoundError(str(e)) from e
+
+    def delete_snapshot(self, snapshot_id: str) -> DeleteSnapshotResponse:
+        """Delete a replicated copy (see ``PeerClient.delete_snapshot``).
+
+        Raises:
+            PeerNotFoundError: the cluster is unknown, or the snapshot is on another cluster.
+            PeerRefusedError: the snapshot is not a replicated copy.
+        """
+        try:
+            return service.delete_snapshot(self._cluster_id, snapshot_id)
+        except KeyError as e:
+            raise PeerNotFoundError(str(e)) from e
+        except PreconditionError as e:
+            raise PeerRefusedError(str(e)) from e
+
+    def place(self, request: PlaceRequest) -> PlaceResponse:
+        """Pick the member (see ``PeerClient.place``).
+
+        Raises:
+            PeerNotFoundError: the cluster is unknown.
+            PeerRefusedError: no member can take the volume.
+        """
+        try:
+            return service.place(self._cluster_id, request)
+        except KeyError as e:
+            raise PeerNotFoundError(str(e)) from e
+        except PreconditionError as e:
+            raise PeerRefusedError(str(e)) from e
 
 
 # Process-local on purpose: each process writes the bundles it uses into its own
@@ -138,10 +331,11 @@ class HttpPeerClient:
         if ca_cert:
             self._session.verify = _ca_bundle_path(ca_cert)
         # Retries cover a peer that is restarting or briefly overloaded. Only
-        # idempotent methods are retried; each write endpoint carries its own
-        # idempotency key, so the caller decides when to send it again.
+        # idempotent methods are retried (a DELETE of something already gone
+        # succeeds); each other write endpoint carries its own idempotency key,
+        # so the caller decides when to send it again.
         retry = Retry(total=retries, connect=retries, read=retries, backoff_factor=0.5,
-                      status_forcelist=(502, 503, 504), allowed_methods=frozenset({"GET"}),
+                      status_forcelist=(502, 503, 504), allowed_methods=frozenset({"GET", "DELETE"}),
                       raise_on_status=False)
         self._session.mount("http://", HTTPAdapter(max_retries=retry))
         self._session.mount("https://", HTTPAdapter(max_retries=retry))
@@ -150,14 +344,15 @@ class HttpPeerClient:
     def cluster_id(self) -> str:
         return self._cluster_id
 
-    def _request(self, method: str, path: str) -> Any:
-        """Send one call to the peer and return its JSON body.
+    def _request(self, method: str, path: str, body: BaseModel | None = None) -> Any:
+        """Send one call to the peer, with *body* as its JSON, and return its JSON body.
 
         Raises:
             PeerUnreachableError: no answer (connection refused, timeout) or a 5xx
                 after the retries.
             PeerAuthError: the peer refused the credential (401/403).
             PeerNotFoundError: the peer does not know the cluster or object (404).
+            PeerRefusedError: the peer refused the step (409).
             PeerProtocolError: any other status, or a body that is not JSON.
         """
         url = f"{self._base}/{path}"
@@ -165,6 +360,7 @@ class HttpPeerClient:
         try:
             response = self._session.request(
                 method, url, timeout=self._timeout,
+                json=body.model_dump(mode="json") if body is not None else None,
                 # Unwrapped here, at the send, and nowhere earlier.
                 headers={"Authorization": f"Bearer {self._secret.get_secret_value()}"})
         except (requests.ConnectionError, requests.Timeout) as e:
@@ -178,10 +374,14 @@ class HttpPeerClient:
             raise PeerAuthError(f"{method} {url}: refused with {status}")
         if status == 404:
             raise PeerNotFoundError(f"{method} {url}: {self._detail(response)}")
+        if status == 409:
+            raise PeerRefusedError(f"{method} {url}: {self._detail(response)}")
         if status >= 500:
             raise PeerUnreachableError(f"{method} {url}: {status} {self._detail(response)}")
         if not 200 <= status < 300:
             raise PeerProtocolError(f"{method} {url}: {status} {self._detail(response)}")
+        if status == 204:
+            return None
         try:
             return response.json()
         except ValueError as e:
@@ -207,6 +407,110 @@ class HttpPeerClient:
             return PeerInfo.model_validate(self._request("GET", "info"))
         except ValidationError as e:
             raise PeerProtocolError(f"Unexpected info response from {self._base}: {e}") from e
+
+    def discard_landing(self, lvol_id: str) -> None:
+        """Delete the replication landing volume *lvol_id*; one already gone is success.
+
+        Raises:
+            PeerError: as for every peer call (see ``_request``).
+        """
+        self._request("DELETE", f"landing-volumes/{quote(lvol_id, safe='')}")
+
+    def describe(self, request: DescribeRequest) -> DescribeResponse:
+        """Read-only answers about the target side (see ``PeerClient.describe``).
+
+        Raises:
+            PeerError: as for every peer call (see ``_request``), and
+                PeerProtocolError when the answer is not a DescribeResponse.
+        """
+        try:
+            return DescribeResponse.model_validate(self._request("POST", "describe", request))
+        except ValidationError as e:
+            raise PeerProtocolError(f"Unexpected describe response from {self._base}: {e}") from e
+
+    def prepare_landing(self, request: LandingRequest) -> LandingResponse:
+        """Make the landing volume ready (see ``PeerClient.prepare_landing``).
+
+        Not retried by the transport: a lost answer is resent by the runner's
+        next pass with the same request, which adopts what the first one made.
+
+        Raises:
+            PeerError: as for every peer call (see ``_request``), and
+                PeerProtocolError when the answer is not a LandingResponse.
+        """
+        try:
+            return LandingResponse.model_validate(self._request("POST", "landing-volumes", request))
+        except ValidationError as e:
+            raise PeerProtocolError(f"Unexpected landing response from {self._base}: {e}") from e
+
+    def ensure_hub(self, request: EnsureHubRequest) -> EnsureHubResponse:
+        """Get the target ready to receive (see ``PeerClient.ensure_hub``).
+
+        Raises:
+            PeerError: as for every peer call (see ``_request``), and
+                PeerProtocolError when the answer is not an EnsureHubResponse.
+        """
+        path = f"landing-volumes/{quote(request.landing_lvol_id, safe='')}/hub"
+        try:
+            return EnsureHubResponse.model_validate(self._request("POST", path))
+        except ValidationError as e:
+            raise PeerProtocolError(f"Unexpected hub response from {self._base}: {e}") from e
+
+    def chain(self, request: ChainRequest) -> ChainResponse:
+        """Chain the landing volume (see ``PeerClient.chain``).
+
+        Not retried by the transport: the runner's next pass resends it with the
+        members the first answer reported, so none is chained twice.
+
+        Raises:
+            PeerError: as for every peer call (see ``_request``), and
+                PeerProtocolError when the answer is not a ChainResponse.
+        """
+        try:
+            return ChainResponse.model_validate(self._request("POST", "chain", request))
+        except ValidationError as e:
+            raise PeerProtocolError(f"Unexpected chain response from {self._base}: {e}") from e
+
+    def finish(self, request: FinishRequest) -> FinishResponse:
+        """Finish the copy (see ``PeerClient.finish``).
+
+        Not retried by the transport: a lost answer is resent by the runner's
+        next pass; the copy's record id is derived from the request, so the
+        repeat answers done with the record the first one wrote.
+
+        Raises:
+            PeerError: as for every peer call (see ``_request``), and
+                PeerProtocolError when the answer is not a FinishResponse.
+        """
+        try:
+            return FinishResponse.model_validate(self._request("POST", "finish", request))
+        except ValidationError as e:
+            raise PeerProtocolError(f"Unexpected finish response from {self._base}: {e}") from e
+
+    def delete_snapshot(self, snapshot_id: str) -> DeleteSnapshotResponse:
+        """Delete a replicated copy (see ``PeerClient.delete_snapshot``).
+
+        Raises:
+            PeerError: as for every peer call (see ``_request``), and
+                PeerProtocolError when the answer is not a DeleteSnapshotResponse.
+        """
+        path = f"snapshots/{quote(snapshot_id, safe='')}"
+        try:
+            return DeleteSnapshotResponse.model_validate(self._request("DELETE", path))
+        except ValidationError as e:
+            raise PeerProtocolError(f"Unexpected delete response from {self._base}: {e}") from e
+
+    def place(self, request: PlaceRequest) -> PlaceResponse:
+        """Pick the member (see ``PeerClient.place``).
+
+        Raises:
+            PeerError: as for every peer call (see ``_request``), and
+                PeerProtocolError when the answer is not a PlaceResponse.
+        """
+        try:
+            return PlaceResponse.model_validate(self._request("POST", "place", request))
+        except ValidationError as e:
+            raise PeerProtocolError(f"Unexpected place response from {self._base}: {e}") from e
 
 
 def peer_for_target(target: ReplicationTarget) -> PeerClient:

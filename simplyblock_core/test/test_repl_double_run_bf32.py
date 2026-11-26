@@ -26,6 +26,7 @@ from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.peer import service as peer_service
 from simplyblock_core.services import snapshot_replication as sr
 
 SNAP = "4d20399d-acad-4a11-a1e1-7d8ebd9a44d8"
@@ -86,13 +87,6 @@ def _recorder(ran):
         return True
     return run
 
-
-def _snapshot_creating(seen):
-    """A create stand-in that records the in-flight registry while it runs."""
-    def create(*_a):
-        seen.append(dict(sr._LANDING_CREATING))
-        return ("id", None)
-    return create
 
 def test_bf32_second_task_of_a_snapshot_is_refused_by_the_claim(dbc):
     first, created = dbc.ensure_snapshot_replication_task(_repl_task("5571400c"))
@@ -238,20 +232,29 @@ def _node(nid, status=StorageNode.STATUS_ONLINE, rpc=None, **kw):
     return n
 
 
-class _StartDB:
-    """Enough of the DB for process_snap_replicate_start to reach the
-    landing-volume probe."""
+class _TargetDB:
+    """Enough of the destination's records for peer.service.prepare_landing to
+    reach the landing-volume probe (the destination's side of the cleanup)."""
 
-    def __init__(self, landing, tasks, nodes):
-        self.landing, self.tasks, self.nodes = landing, tasks, nodes
+    def __init__(self, landing, nodes):
+        self.landing, self.nodes = landing, nodes
         self.deleted = False
+
+    def get_cluster_by_id(self, cluster_id):
+        return SimpleNamespace(get_id=lambda: cluster_id)
+
+    def get_lvol_replication_objects(self):
+        return []
+
+    def get_pools(self, cluster_id):
+        return [SimpleNamespace(get_id=lambda: "POOL", status="active")]
 
     def get_storage_node_by_id(self, nid):
         if nid not in self.nodes:
             raise KeyError(nid)
         return self.nodes[nid]
 
-    def get_lvol_by_name(self, name, include_deleted=False):
+    def get_lvol_by_name(self, name, pool_id=None, include_deleted=False):
         if name != REP_NAME or self.deleted:
             raise KeyError(name)
         return self.landing
@@ -261,82 +264,82 @@ class _StartDB:
             raise KeyError(lvol_id)
         return self.landing
 
+    def get_snapshots(self, cluster_id):
+        return []
+
+
+def _prepare(tdb, source_busy=""):
+    """The destination's prepare_landing for the bf32 snapshot; returns the
+    answer, the delete mock and the durable-delete mock."""
+    from simplyblock_core.controllers import lvol_controller
+    from simplyblock_core.peer.protocol import LandingRequest
+
+    delete = MagicMock(side_effect=lambda lv, **kw: setattr(tdb, "deleted", True))
+    request = LandingRequest(
+        source_cluster_id="SRCCL", snapshot_id=SNAP, landing_name=REP_NAME, size=10 << 30,
+        ha_type="ha", node_hint="9154330e", pool_hints=["POOL"], source_busy=source_busy)
+    with patch.object(peer_service, "DBController", return_value=tdb), \
+            patch.object(lvol_controller, "delete_lvol", delete), \
+            patch.object(lvol_controller, "add_lvol_ha") as create, \
+            patch("simplyblock_core.controllers.tasks_controller.add_lvol_sync_del_task") as queued:
+        answer = peer_service.prepare_landing("70edb423", request)
+    create.assert_not_called()
+    return answer, delete, queued
+
+
+class _SourceTasks:
+    def __init__(self, tasks):
+        self.tasks = tasks
+
     def get_replication_tasks_for_snapshot(self, snapshot_id):
         return [t for t in self.tasks if t.function_params.get("snapshot_id") == snapshot_id]
 
 
-def _run_start(task, sdb):
-    snapshot = SimpleNamespace(
-        snap_name="repl_internal_7438cbe8_1795231066", source_replicated_snap_uuid="",
-        target_replicated_snap_uuid="", cluster_id="70edb423", size=10 << 30,
-        lvol=SimpleNamespace(node_id="SRC", get_id=lambda: "7438cbe8"),
-        get_id=lambda: SNAP)
-    delete = MagicMock(side_effect=lambda lv, **kw: setattr(sdb, "deleted", True))
-    suspended = []
-    with patch.object(sr, "db", sdb), \
-            patch.object(sr, "_lvs_transfer_hold", return_value=None), \
-            patch.object(sr, "_merge_behind_hold", return_value=None), \
-            patch.object(sr, "_select_source_node",
-                         return_value=(SimpleNamespace(get_id=lambda: "SRC", cluster_id="SRCCL"),
-                                       "primary")), \
-            patch.object(sr, "_unreplicated_local_ancestor", return_value=("ok", None, "")), \
-            patch.object(sr, "_destination_pool_uuid", return_value="POOL"), \
-            patch.object(sr, "_counterpart_on_destination", return_value=None), \
-            patch.object(sr, "_create_landing_volume") as create, \
-            patch.object(sr, "_suspend_for_retry",
-                         side_effect=lambda t, msg, **kw: suspended.append(msg)), \
-            patch.object(sr.lvol_controller, "delete_lvol", delete),             patch.object(JobSchedule, "write_to_db"), \
-            patch("simplyblock_core.controllers.tasks_controller.add_lvol_sync_del_task") as queued:
-        sr.process_snap_replicate_start(task, snapshot)
-    create.assert_not_called()
-    return delete, suspended, queued
-
-
 def test_bf32_cleanup_does_not_delete_a_landing_volume_another_task_creates():
     """The exact bf32 state: a6f9b7b7 meets 5eeb989b in_creation, 2 s old,
-    while 5571400c (live) creates it."""
+    while 5571400c (live) creates it. The source knows of the live sibling
+    and says so; the destination then leaves the volume alone."""
     me = _repl_task("a6f9b7b7", status=JobSchedule.STATUS_SUSPENDED)
     creator = _repl_task("5571400c")
-    sdb = _StartDB(_landing(age_sec=2), [me, creator],
-                   {"node": _node("node"), "9154330e": _node("9154330e")})
-    delete, suspended, _ = _run_start(me, sdb)
+    with patch.object(sr, "db", _SourceTasks([me, creator])):
+        busy = sr._landing_busy_here(me)
+    assert "5571400c" in busy
+    tdb = _TargetDB(_landing(age_sec=2), {"9154330e": _node("9154330e")})
+    answer, delete, _ = _prepare(tdb, source_busy=busy)
     delete.assert_not_called()
-    assert "5571400c" in suspended[0] and "under creation" in suspended[0]
+    assert answer.state == "retry" and answer.waiting
+    assert "5571400c" in answer.reason and "under creation" in answer.reason
 
 
 def test_bf32_cleanup_does_not_delete_a_landing_volume_this_runner_creates():
-    me = _repl_task("a6f9b7b7", status=JobSchedule.STATUS_SUSPENDED)
-    sdb = _StartDB(_landing(age_sec=constants.REPL_LANDING_ABANDON_SEC * 2), [me],
-                   {"node": _node("node"), "9154330e": _node("9154330e")})
-    with sr._LANDING_CREATING_GUARD:
-        sr._LANDING_CREATING[REP_NAME] = 1
+    tdb = _TargetDB(_landing(age_sec=constants.REPL_LANDING_ABANDON_SEC * 2),
+                    {"9154330e": _node("9154330e")})
+    with peer_service._LANDING_CREATING_GUARD:
+        peer_service._LANDING_CREATING[REP_NAME] = 1
     try:
-        delete, suspended, _ = _run_start(me, sdb)
+        answer, delete, _ = _prepare(tdb)
     finally:
-        with sr._LANDING_CREATING_GUARD:
-            sr._LANDING_CREATING.pop(REP_NAME, None)
+        with peer_service._LANDING_CREATING_GUARD:
+            peer_service._LANDING_CREATING.pop(REP_NAME, None)
     delete.assert_not_called()
-    assert "running in this runner" in suspended[0]
+    assert answer.waiting and "running in this runner" in answer.reason
 
 
 def test_bf32_cleanup_does_not_delete_a_young_landing_volume():
     """No live sibling and nothing here creating it -- but a create in another
     process (a runner pod being replaced) cannot be seen: age decides."""
-    me = _repl_task("a6f9b7b7", status=JobSchedule.STATUS_SUSPENDED)
-    sdb = _StartDB(_landing(age_sec=30), [me],
-                   {"node": _node("node"), "9154330e": _node("9154330e")})
-    delete, suspended, _ = _run_start(me, sdb)
+    tdb = _TargetDB(_landing(age_sec=30), {"9154330e": _node("9154330e")})
+    answer, delete, _ = _prepare(tdb)
     delete.assert_not_called()
-    assert "old" in suspended[0]
+    assert answer.waiting and "old" in answer.reason
 
 
 def test_bf32_a_landing_volume_mid_create_is_registered_while_add_lvol_ha_runs():
     seen: list[dict] = []
-    with patch.object(sr, "_create_landing_volume_unguarded",
-                      side_effect=_snapshot_creating(seen)):
-        assert sr._create_landing_volume(REP_NAME, None, None, None) == ("id", None)
+    with peer_service._landing_creating(REP_NAME):
+        seen.append(dict(peer_service._LANDING_CREATING))
     assert seen == [{REP_NAME: 1}]
-    assert REP_NAME not in sr._LANDING_CREATING
+    assert REP_NAME not in peer_service._LANDING_CREATING
 
 
 class _Rpc:
@@ -357,30 +360,28 @@ def test_bf32_cleanup_deletes_an_abandoned_landing_volume_on_the_secondaries_too
     """Abandoned: deleted -- and confirmed gone on every lvstore member, even
     the ones the record did not list yet. The secondary that kept LVOL_2398
     registered gets a sync delete; an offline tertiary a durable task."""
-    me = _repl_task("a6f9b7b7", status=JobSchedule.STATUS_SUSPENDED)
     prim_rpc, sec_rpc = _Rpc(False), _Rpc(True)
     nodes = {
-        "node": _node("node"),
         "9154330e": _node("9154330e", rpc=prim_rpc),
         "8de868b9": _node("8de868b9", rpc=sec_rpc),
         "2aa1550c": _node("2aa1550c", status=StorageNode.STATUS_OFFLINE),
     }
     nodes["9154330e"].secondary_node_id = "8de868b9"
     nodes["9154330e"].tertiary_node_id = "2aa1550c"
-    sdb = _StartDB(_landing(age_sec=constants.REPL_LANDING_ABANDON_SEC + 60), [me], nodes)
-    delete, suspended, queued = _run_start(me, sdb)
+    tdb = _TargetDB(_landing(age_sec=constants.REPL_LANDING_ABANDON_SEC + 60), nodes)
+    answer, delete, queued = _prepare(tdb)
     delete.assert_called_once()
     assert delete.call_args.kwargs == {"force_delete": True}
     assert prim_rpc.deleted == []
     assert sec_rpc.deleted == [("LVS_10/LVOL_2398", True)]
     queued.assert_called_once_with("70edb423", "2aa1550c", "LVS_10/LVOL_2398", "9154330e")
-    assert "cleared stale landing volume" in suspended[0]
+    assert answer.state == "retry" and not answer.waiting
+    assert "cleared stale landing volume" in answer.reason
 
 
 def test_bf32_a_record_still_in_deletion_is_left_to_the_monitor():
     lv = _landing(age_sec=9999, status=LVol.STATUS_IN_DELETION)
     rpc = _Rpc(True)
-    sdb = _StartDB(lv, [], {"9154330e": _node("9154330e", rpc=rpc)})
-    with patch.object(sr, "db", sdb):
-        assert sr._confirm_landing_gone(lv, ["9154330e"]) == []
+    tdb = _TargetDB(lv, {"9154330e": _node("9154330e", rpc=rpc)})
+    assert peer_service._confirm_landing_gone(tdb, lv, ["9154330e"]) == []
     assert rpc.deleted == []

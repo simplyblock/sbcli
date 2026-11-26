@@ -692,7 +692,7 @@ class TestAsyncClusterUnchanged:
         response = client.post(REPLICATION_URL + f'demote?site={SITE}')
 
         assert response.status_code == 204
-        lvol_controller.demote_lvol.assert_called_once_with(VOLUME_ID)
+        lvol_controller.demote_lvol.assert_called_once_with(VOLUME_ID, superseded=False)
         assert sync_controller.method_calls == []
 
     def test_status_without_site(self, client, sync_controller, lvol_controller):

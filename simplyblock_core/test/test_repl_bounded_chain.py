@@ -86,6 +86,9 @@ class _World:
     def get_lvol_by_id(self, lvol_id):
         return LVOL
 
+    def get_replication_policy_for_lvol(self, lvol):
+        return None     # one control plane manages both clusters
+
 
 @pytest.fixture
 def world(monkeypatch):
@@ -320,10 +323,11 @@ def test_a_retired_snapshot_is_never_a_counterpart(monkeypatch):
     fresh = SimpleNamespace(get_id=lambda: "F", data_uuid="D", deleted=False,
                             status=ONLINE, lvol=lvol)
     node = SimpleNamespace(lvstore="LVS_1", cluster_id="CL_b")
-    snap = SimpleNamespace(get_id=lambda: "S", data_uuid="D")
+    # the destination looks for the counterpart (peer.service._counterpart)
+    from simplyblock_core.peer import service as peer_service
+    request = SimpleNamespace(snapshot_id="S", data_uuid="D")
     db = MagicMock()
     db.get_snapshots.return_value = [retired]
-    monkeypatch.setattr(sr, "db", db)
-    assert sr._counterpart_on_destination(snap, node) is None
+    assert peer_service._counterpart(db, "CL_b", node, request) is None
     db.get_snapshots.return_value = [retired, fresh]
-    assert sr._counterpart_on_destination(snap, node) is fresh
+    assert peer_service._counterpart(db, "CL_b", node, request) is fresh

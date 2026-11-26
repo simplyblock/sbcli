@@ -317,7 +317,8 @@ def commit(request: Request, cluster: Cluster, pool: StoragePool, volume: Volume
 @api.post('/demote', name='clusters:storage-pools:volumes:replication:demote',
           status_code=204, responses={204: {"content": None}, 202: {"content": None}})
 def demote(cluster: Cluster, pool: StoragePool, volume: Volume,
-           site: util.SiteParameter = None) -> Response:
+           site: util.SiteParameter = None,
+           superseded: util.SupersededParameter = False) -> Response:
     """Fence the source and confirm the last write replicated (P0-3).
 
     Synchronous and re-drivable, not queued: each call does only the work its
@@ -329,13 +330,19 @@ def demote(cluster: Cluster, pool: StoragePool, volume: Volume,
     On a sync-replication cluster: fence the volume on ``site`` (required),
     synchronously - 204 (also when it is not served there), 409 when the gate
     fails (the replicas are not in sync).
+
+    ``superseded=true`` is the fence order for a volume failed over elsewhere
+    (control-plane split): it is fenced and its replication stopped, with no
+    demote cut, and the route answers 204. The caller decides it, never this
+    control plane.
     """
     if cluster.sync_replication:
+        util.refuse_superseded_on_sync(superseded)
         site = util.require_site(site)
         with util.sync_http_errors():
             sync_replication_controller.sync_demote_lvol(volume.get_id(), site)
         return Response(status_code=204)
-    result = lvol_controller.demote_lvol(volume.get_id())
+    result = lvol_controller.demote_lvol(volume.get_id(), superseded=superseded)
     if isinstance(result, tuple):  # (False, error)
         logger.error("demote of volume %s failed: %s", volume.get_id(), result[1])
         raise HTTPException(500, 'demote failed')

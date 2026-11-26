@@ -15,6 +15,13 @@ import pytest
 from simplyblock_core import constants
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.peer import service as peer_service
+from simplyblock_core.peer.protocol import (
+    DescribeResponse,
+    EnsureHubResponse,
+    FinishRequest,
+    SourceSnapshot,
+)
 from simplyblock_core.services import snapshot_replication as sr
 
 ONLINE = StorageNode.STATUS_ONLINE
@@ -212,6 +219,24 @@ def test_a_recently_settled_leader_needs_no_second_wait(monkeypatch):
     assert len(slept) == 1
 
 
+def _target_unsettled(why):
+    """The destination answering ensure_hub that leadership of the landing
+    volume's lvstore is not settled (the settle runs on the destination)."""
+    peer = MagicMock()
+    peer.ensure_hub.return_value = EnsureHubResponse(
+        state="unsettled", reason=f"target leadership not established ({why})")
+    return patch.object(sr, "_landing_peer", return_value=peer)
+
+
+def _target_reports_leaders(*leaders):
+    """The destination answering ``describe`` with *leaders* as the landing
+    volume's lvstore leaders: the runner asks the destination's peer client,
+    not the target's nodes (control-plane split)."""
+    peer = MagicMock()
+    peer.describe.return_value = DescribeResponse(landing_leaders=list(leaders))
+    return patch.object(sr, "_landing_peer", return_value=peer)
+
+
 def test_failed_transfer_after_target_leadership_moved_restarts_on_the_new_leader():
     task = _task(source_node_id="P", target_node_id="TP", remote_lvol_id="R", offset=8192)
     src = _node("P")
@@ -219,7 +244,7 @@ def test_failed_transfer_after_target_leadership_moved_restarts_on_the_new_leade
                                                              "offset": 8192}
     db = _DB([src, _node("S"), _node("T")] + [_node(i) for i in ("TP", "TS", "TT")],
              lvols={"R": _remote()})
-    with patch(IS_LEADER, side_effect=lambda node, lvs: node.get_id() == "TS"):
+    with _target_reports_leaders("TS"):
         assert _running(task, db) is False
     assert task.status == JobSchedule.STATUS_SUSPENDED
     assert task.retry == 0
@@ -233,22 +258,27 @@ def test_failed_transfer_with_unchanged_leader_is_an_ordinary_retry():
     src.rpc_client().bdev_lvol_transfer_stat.return_value = {"transfer_state": "Failed",
                                                              "offset": 0}
     db = _DB([src] + [_node(i) for i in ("TP", "TS", "TT")], lvols={"R": _remote()})
-    with patch(IS_LEADER, side_effect=lambda node, lvs: node.get_id() == "TP"):
+    with _target_reports_leaders("TP"):
         _running(task, db)
     assert task.retry == 1
     assert "transfer failed at offset 0" in task.function_result
 
 
 def test_finish_waits_while_target_leadership_is_unsettled():
-    task = _task(remote_lvol_id="R", target_node_id="TP")
+    """Pending, not failed: no retry backoff while the target has no leader,
+    and nothing is resolved, chained or converted meanwhile. The destination
+    decides it (peer.service.finish_landing)."""
     db = MagicMock()
+    db.get_snapshot_by_id.side_effect = KeyError("no copy recorded yet")
     db.get_lvol_by_id.return_value = _remote()
-    with patch.object(sr, "db", db), \
-            patch.object(sr, "_stable_target_leader", return_value=(None, "leadership moving")), \
-            patch.object(sr, "_resolve_chain_target") as chain:
-        # Pending, not failed: no retry backoff while the target has no leader.
-        assert sr.process_snap_replicate_finish(task, MagicMock()) == sr.FINISH_PENDING
-    chain.assert_not_called()
+    db.get_lvol_by_id.return_value.status = "online"
+    with patch.object(peer_service, "stable_leader", return_value=(None, "leadership moving")):
+        answer = peer_service.finish_landing(db, FinishRequest(
+            source_cluster_id="CL", landing_lvol_id="R", predecessor_id="P", link="source",
+            snapshot=SourceSnapshot(snapshot_id="S", snap_name="S", size=1)))
+    assert answer.state == "pending" and answer.waiting_for_leader
+    assert "leadership moving" in answer.reason
+    db.get_snapshot_by_id.assert_called_once()     # its own record only, not the predecessor
 
 
 def test_start_never_transfers_without_a_settled_target_leader():
@@ -264,9 +294,7 @@ def test_start_never_transfers_without_a_settled_target_leader():
             patch.object(sr, "_lvs_transfer_hold", return_value=None), \
             patch.object(sr, "_select_source_node", return_value=(src, "primary P")), \
             patch.object(sr, "_unreplicated_local_ancestor", return_value=("ok", None, "")), \
-            patch.object(sr, "_stable_target_leader",
-                         return_value=(None, "2 members of LVS_9 report leadership")), \
-            patch.object(sr, "_leaders_of", return_value=[MagicMock(), MagicMock()]), \
+            _target_unsettled("2 members of LVS_9 report leadership"), \
             patch("simplyblock_core.storage_node_ops.find_leader_with_failover") as recover:
         sr.process_snap_replicate_start(task, snap)
     recover.assert_not_called()
@@ -289,8 +317,7 @@ def test_a_leaderless_target_is_waited_out_never_recovered_by_replication():
             patch.object(sr, "_lvs_transfer_hold", return_value=None), \
             patch.object(sr, "_select_source_node", return_value=(src, "primary P")), \
             patch.object(sr, "_unreplicated_local_ancestor", return_value=("ok", None, "")), \
-            patch.object(sr, "_stable_target_leader", return_value=(None, "0 members")), \
-            patch.object(sr, "_leaders_of", return_value=[]), \
+            _target_unsettled("0 members"), \
             patch("simplyblock_core.storage_node_ops.find_leader_with_failover") as recover, \
             patch("simplyblock_core.storage_node_ops._recover_leaderless_lvs") as grant:
         sr.process_snap_replicate_start(task, _snapshot())
@@ -300,3 +327,17 @@ def test_a_leaderless_target_is_waited_out_never_recovered_by_replication():
     assert task.status == JobSchedule.STATUS_SUSPENDED
     assert "target leadership not established" in task.function_result
 
+
+
+def test_the_landing_volume_comes_from_the_task_not_the_destination():
+    """prepare_landing's answer is kept on the task: later steps name the
+    landing volume and reach its cluster without reading the destination's
+    records, which a split control plane does not have."""
+    task = _task(remote_lvol_id="R", landing={
+        "lvol_id": "R", "top_bdev": "LVS_9/REP_s", "node_id": "TP", "pool_uuid": "P",
+        "lvs_name": "LVS_9", "cluster_id": "CL2"})
+    db = MagicMock()
+    with patch.object(sr, "db", db):
+        landing = sr._landing_of(task)
+    assert (landing.get_id(), landing.top_bdev, landing.cluster_id) == ("R", "LVS_9/REP_s", "CL2")
+    db.get_lvol_by_id.assert_not_called()

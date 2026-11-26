@@ -98,18 +98,16 @@ def _lvs_cutover_owner(task, lvs_name, tasks):
 def _group_id_for_lvol(lvol):
     """The consistency group *lvol* belongs to, or "".
 
-    A group is owned by a replication policy and pinned to one node/LVS, so a
-    volume's group is the group of its policy.
+    A member carries its group (group_id). Only a volume recorded before that
+    field existed is resolved through its policy, to the group the policy owns
+    if any: several standalone groups can follow one policy (bed run
+    20261113-2112-ebs-splitdr: every replication task logged "Multiple values
+    present" and the members counted as in no group).
     """
-    policy_id = getattr(lvol, "replication_policy_id", "")
-    if not policy_id:
-        return ""
-    try:
-        group = db.get_consistency_group_for_policy(policy_id)
-    except Exception as e:                              # noqa: BLE001
-        logger.warning("Could not resolve the consistency group of %s: %s",
-                       lvol.get_id(), e)
-        return ""
+    gid = getattr(lvol, "group_id", "")
+    if gid:
+        return gid
+    group = db.get_consistency_group_for_policy(getattr(lvol, "replication_policy_id", ""))
     return group.get_id() if group else ""
 
 

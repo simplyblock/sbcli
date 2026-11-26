@@ -1,3 +1,4 @@
+import logging
 from typing import Annotated
 from uuid import UUID
 
@@ -16,6 +17,8 @@ from simplyblock_core.peer.client import PeerError
 from .. import util
 from .._dependencies import Cluster, ReplicationPolicy, ReplicationTarget
 from .._dtos import (
+    ConsistencyGroupLineageMemberDTO,
+    ConsistencyGroupResolutionDTO,
     FailoverResultDTO,
     ReplicatedGenerationDTO,
     ReplicatedSnapshotDTO,
@@ -116,6 +119,8 @@ def get_latest_replicated_snapshot(cluster: Cluster, lvol_id: UUID) -> Replicate
         snap = lvol_controller.latest_replicated_snapshot(str(lvol_id))
     except KeyError as e:
         raise HTTPException(404, str(e))
+    except PeerError as e:
+        raise HTTPException(status_code=502, detail=f"Peer control plane: {e}")
     if snap is None:
         raise HTTPException(404, f"Volume {lvol_id} has no replicated snapshot yet")
     return ReplicatedSnapshotDTO.from_model(snap)
@@ -270,13 +275,74 @@ def get_latest_replicated_generation(cluster: Cluster,
             policy.get_id())
     except ReplicationConfigError as e:
         raise _config_error(e)
+    except PeerError as e:
+        raise HTTPException(status_code=502, detail=f"Peer control plane: {e}")
     return ReplicatedGenerationDTO(
         group_seq=seq,
         members=[ReplicatedSnapshotDTO.from_model(snap) for snap in members.values()],
     )
 
 
+replicated_groups_api = APIRouter()
+logger = logging.getLogger(__name__)
+
+
+@replicated_groups_api.post('/{source_cluster_id}/{group_id}/failover',
+                            name='clusters:replication:replicated-groups:failover')
+def failover_replicated_group(cluster: Cluster, source_cluster_id: UUID, group_id: UUID) -> dict:
+    """Fail the source cluster's consistency group over onto this cluster, from
+    the copies here, with the source cluster cut off (control-plane split).
+
+    Unlike ``consistency-groups/{id}/replication/failover`` this needs no record
+    of the group, its volumes, or the source cluster in this control plane:
+    every copy carries what its clone needs. The response matches that
+    endpoint: ``{"members": [...]}``; 409 when no generation with a copy of
+    every member is here, or when a member failed (retryable).
+    """
+    members = replication_policy_controller.failover_replicated_group(
+        cluster.get_id(), f"{source_cluster_id}/{group_id}")
+    if not members:
+        raise HTTPException(
+            409, f'no complete replicated generation of group {source_cluster_id}/{group_id} '
+                 f'on cluster {cluster.get_id()}')
+    failed = [m for m in members if m.get("status") == "failed"]
+    if failed:
+        # The member details may name internal topology: log identifiers only.
+        logger.error("replicated group fail-over incomplete for %s/%s: failed_members=%d lvol_ids=%s",
+                     source_cluster_id, group_id, len(failed), [m.get("lvol_id") for m in failed])
+        raise HTTPException(409, 'replicated group fail-over incomplete; retry')
+    return {"members": [{
+        "lvol_id": m.get("lvol_id", ""),
+        "status": m.get("status", ""),
+        "target_lvol_id": m.get("target_lvol_id", ""),
+        "connection_strings": m.get("connection_strings", []),
+        "warnings": m.get("warnings", []),
+    } for m in members]}
+
+
+@replicated_groups_api.get('/{source_cluster_id}/{group_id}/resolution',
+                           name='clusters:replication:replicated-groups:resolution',
+                           response_model=ConsistencyGroupResolutionDTO)
+def resolve_replicated_group(cluster: Cluster, source_cluster_id: UUID,
+                             group_id: UUID) -> ConsistencyGroupResolutionDTO:
+    """Where the source cluster's consistency group lives now, from this
+    control plane's own records (control-plane split): the group a fail-over
+    made here from the copies, and each protected volume's original handle with
+    the clone serving it. The same shape as
+    ``consistency-groups/{id}/replication/resolution``, which needs the group
+    record and so is answered only by the source's control plane, which may be
+    cut off. ``active_group_id`` is empty while the group was not failed over
+    here: the source's control plane still serves it.
+    """
+    res = replication_policy_controller.resolve_replicated_group(f"{source_cluster_id}/{group_id}")
+    return ConsistencyGroupResolutionDTO(
+        cluster_id=str(source_cluster_id), group_id=str(group_id),
+        active_cluster_id=res["active_cluster_id"], active_group_id=res["active_group_id"],
+        members=[ConsistencyGroupLineageMemberDTO(**m) for m in res["members"]],
+    )
+
 targets_api.include_router(target_instance_api)
 policies_api.include_router(policy_instance_api)
 api.include_router(targets_api, prefix='/targets')
 api.include_router(policies_api, prefix='/policies')
+api.include_router(replicated_groups_api, prefix='/replicated-groups')

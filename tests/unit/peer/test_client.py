@@ -22,10 +22,19 @@ from simplyblock_core.peer.client import (
     PeerAuthError,
     PeerNotFoundError,
     PeerProtocolError,
+    PeerRefusedError,
     PeerUnreachableError,
     peer_for_target,
 )
-from simplyblock_core.peer.protocol import PEER_API_VERSION
+from simplyblock_core.peer.protocol import (
+    PEER_API_VERSION,
+    ChainCheck,
+    ChainRequest,
+    DescribeRequest,
+    EnsureHubRequest,
+    LandingRequest,
+    PlaceRequest,
+)
 
 CLUSTER_ID = "6f9ad3a2-5b0e-4d55-9a84-0d3c3b1f2e10"
 SECRET = "peer-plaintext"
@@ -187,3 +196,155 @@ class TestPeerForTarget:
 
         assert isinstance(client, HttpPeerClient)
         assert client.cluster_id == CLUSTER_ID
+
+
+class TestDiscardLanding:
+
+    LVOL_ID = "0b6f4a8e-1c2d-4e3f-9a0b-1c2d3e4f5a99"
+
+    def test_deletes_the_landing_volume_under_the_cluster(self, session_request):
+        session_request.return_value = _response(status=204)
+
+        assert _client().discard_landing(self.LVOL_ID) is None
+
+        method, url = session_request.call_args.args
+        assert method == "DELETE"
+        assert url == (f"https://cp-b.example:8443/api/v2/_peer/clusters/{CLUSTER_ID}"
+                       f"/landing-volumes/{self.LVOL_ID}")
+
+    def test_an_empty_answer_is_not_read_as_json(self, session_request):
+        session_request.return_value = _response(status=204, json_error=True)
+
+        _client().discard_landing(self.LVOL_ID)
+
+    def test_a_volume_on_another_cluster_is_not_found(self, session_request):
+        session_request.return_value = _response(status=404, body={"detail": "not on cluster"})
+
+        with pytest.raises(PeerNotFoundError, match="not on cluster"):
+            _client().discard_landing(self.LVOL_ID)
+
+    def test_a_refusal_is_its_own_error(self, session_request):
+        session_request.return_value = _response(status=409, body={"detail": "not a landing volume"})
+
+        with pytest.raises(PeerRefusedError, match="not a landing volume"):
+            _client().discard_landing(self.LVOL_ID)
+
+
+class TestDescribe:
+
+    def test_posts_the_question_and_reads_the_answer(self, session_request):
+        session_request.return_value = _response(body={
+            "landing_leaders": ["TS"],
+            "snapshots": [{"snapshot_id": "T1", "exists": True, "has_dependent_clone": True}],
+            "chains": [{"successor_id": "T2", "predecessor_id": "T1", "chained": True}]})
+
+        answer = _client().describe(DescribeRequest(
+            landing_lvol_id="R", snapshot_ids=["T1"],
+            chain_checks=[ChainCheck(successor_id="T2", predecessor_id="T1")]))
+
+        method, url = session_request.call_args.args
+        assert method == "POST"
+        assert url == f"https://cp-b.example:8443/api/v2/_peer/clusters/{CLUSTER_ID}/describe"
+        assert session_request.call_args.kwargs["json"] == {
+            "landing_lvol_id": "R", "snapshot_ids": ["T1"],
+            "chain_checks": [{"successor_id": "T2", "predecessor_id": "T1"}]}
+        assert answer.landing_leaders == ["TS"]
+        assert answer.snapshots[0].has_dependent_clone
+        assert answer.chains[0].chained
+
+    def test_an_answer_of_the_wrong_shape_is_a_protocol_error(self, session_request):
+        session_request.return_value = _response(body={"snapshots": [{"exists": "maybe"}]})
+
+        with pytest.raises(PeerProtocolError, match="describe"):
+            _client().describe(DescribeRequest(snapshot_ids=["T1"]))
+
+
+class TestPrepareLanding:
+
+    REQUEST = LandingRequest(source_cluster_id="SRC", snapshot_id="S1", landing_name="REP_s1",
+                             size=1 << 30, ha_type="ha", node_hint="N1", pool_hints=["P1"])
+
+    def test_posts_the_request_and_reads_the_answer(self, session_request):
+        session_request.return_value = _response(body={"state": "ready", "lvol_id": "L1",
+                                                       "adopted": True})
+
+        answer = _client().prepare_landing(self.REQUEST)
+
+        method, url = session_request.call_args.args
+        assert method == "POST"
+        assert url == f"https://cp-b.example:8443/api/v2/_peer/clusters/{CLUSTER_ID}/landing-volumes"
+        assert session_request.call_args.kwargs["json"]["landing_name"] == "REP_s1"
+        assert (answer.state, answer.lvol_id, answer.adopted) == ("ready", "L1", True)
+
+    def test_a_refused_create_carries_its_cause(self, session_request):
+        session_request.return_value = _response(status=409,
+                                                 body={"detail": "Storage node is not online"})
+
+        with pytest.raises(PeerRefusedError, match="Storage node is not online"):
+            _client().prepare_landing(self.REQUEST)
+
+
+class TestEnsureHub:
+
+    def test_asks_for_the_landing_volume_and_reads_the_address(self, session_request):
+        session_request.return_value = _response(body={
+            "state": "ready", "leader_node_id": "TS", "map_id": 7,
+            "hub": {"bdev_name": "b", "remote_bdev_name": "rb", "nqn": "nqn:h", "port": 4430,
+                    "paths": [{"ip": "10.0.0.2", "trtype": "TCP"}]}})
+
+        answer = _client().ensure_hub(EnsureHubRequest(landing_lvol_id="R1"))
+
+        method, url = session_request.call_args.args
+        assert method == "POST"
+        assert url == (f"https://cp-b.example:8443/api/v2/_peer/clusters/{CLUSTER_ID}"
+                       f"/landing-volumes/R1/hub")
+        assert (answer.state, answer.map_id, answer.hub.paths[0].ip) == ("ready", 7, "10.0.0.2")
+
+    def test_an_unknown_landing_volume_is_not_found(self, session_request):
+        session_request.return_value = _response(status=404, body={"detail": "LVol R1 not found"})
+
+        with pytest.raises(PeerNotFoundError):
+            _client().ensure_hub(EnsureHubRequest(landing_lvol_id="R1"))
+
+
+class TestChain:
+
+    def test_posts_the_request_and_reads_the_answer(self, session_request):
+        session_request.return_value = _response(body={"state": "declined", "chained_on": ["TP"],
+                                                       "reason": "secondary failed"})
+
+        answer = _client().chain(ChainRequest(landing_lvol_id="R1", leader_node_id="TP",
+                                              predecessor_id="C1", chained_on=[]))
+
+        method, url = session_request.call_args.args
+        assert method == "POST"
+        assert url == f"https://cp-b.example:8443/api/v2/_peer/clusters/{CLUSTER_ID}/chain"
+        assert session_request.call_args.kwargs["json"]["predecessor_id"] == "C1"
+        assert (answer.state, answer.chained_on) == ("declined", ["TP"])
+
+
+class TestDeleteSnapshot:
+
+    def test_deletes_the_copy_and_reads_the_answer(self, session_request):
+        session_request.return_value = _response(body={"deleted": False, "reason": "cloned"})
+
+        answer = _client().delete_snapshot("T1")
+
+        method, url = session_request.call_args.args
+        assert method == "DELETE"
+        assert url == f"https://cp-b.example:8443/api/v2/_peer/clusters/{CLUSTER_ID}/snapshots/T1"
+        assert (answer.deleted, answer.reason) == (False, "cloned")
+
+
+class TestPlace:
+
+    def test_posts_the_request_and_reads_the_answer(self, session_request):
+        session_request.return_value = _response(body={"node_id": "TS", "rule": "preferred"})
+
+        answer = _client().place(PlaceRequest(size=1, preferred_node="TS", data_uuids=["D"]))
+
+        method, url = session_request.call_args.args
+        assert method == "POST"
+        assert url == f"https://cp-b.example:8443/api/v2/_peer/clusters/{CLUSTER_ID}/place"
+        assert session_request.call_args.kwargs["json"]["preferred_node"] == "TS"
+        assert (answer.node_id, answer.rule) == ("TS", "preferred")

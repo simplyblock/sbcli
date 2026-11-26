@@ -201,8 +201,9 @@ def add_member_to_group(group, lvol):
             f"{group.node_id[:8]}/{group.lvs_name}; all members of a "
             f"consistency group must share one LVS")
 
-    if not pin_is_live and (group.node_id != lvol.node_id
-                            or group.lvs_name != lvol.lvs_name):
+    repin = not pin_is_live and (group.node_id != lvol.node_id
+                                 or group.lvs_name != lvol.lvs_name)
+    if repin:
         if group.lvs_name:
             logger.info("Consistency group %s re-pinned from %s/%s to %s/%s "
                         "(no live members; stale pin reset)", group.uuid[:8],
@@ -212,17 +213,28 @@ def add_member_to_group(group, lvol):
             logger.info("Consistency group %s pinned to node %s / %s by its "
                         "first member %s", group.uuid[:8], lvol.node_id[:8],
                         lvol.lvs_name, lvol.get_id())
-        group.node_id = lvol.node_id
-        group.lvs_name = lvol.lvs_name
 
-    members[lvol.get_id()] = {"joined_seq": group.last_group_seq + 1,
-                              "removed_seq": 0}
-    group.members = members
-    group.write_to_db(db.kv_store)
+    # Written onto the record as stored: the caller's copy may predate another
+    # member's join (a fail-back reconstitutes the group one clone at a time)
+    # or a generation, and a whole-record write of it drops what landed since.
+    def _join(fresh):
+        if repin:
+            fresh.node_id = lvol.node_id
+            fresh.lvs_name = lvol.lvs_name
+        fresh_members = dict(fresh.members or {})
+        fresh_members[lvol.get_id()] = {"joined_seq": fresh.last_group_seq + 1,
+                                        "removed_seq": 0}
+        fresh.members = fresh_members
+        return True
+
+    written = _update_group(group, _join)
+    if written is None:
+        raise ConsistencyGroupError(f"consistency group {group.uuid[:8]} no longer exists; "
+                                    f"volume {lvol.get_id()} cannot join")
     logger.info("Volume %s joined consistency group %s at generation %d "
                 "(effective from the next group snapshot)",
-                lvol.get_id(), group.uuid[:8], group.last_group_seq + 1)
-    return group
+                lvol.get_id(), written.uuid[:8], written.last_group_seq + 1)
+    return written
 
 
 def join_new_volume(cluster_id, lvol, name):
@@ -306,7 +318,7 @@ def add_member(policy, lvol):
     return add_member_to_group(group, lvol)
 
 
-def reconstitute_group_after_handoff(source_lvol, dest_lvol, dest_cluster_id):
+def reconstitute_group_after_handoff(source_lvol, dest_lvol, dest_cluster_id, group_name=""):
     """Re-form the consistency group on the destination cluster after a
     fail-over / fail-back / migration hand-off, so the group stays crash-
     consistent across it (design-csi-addons-replication.md §14.4).
@@ -328,6 +340,10 @@ def reconstitute_group_after_handoff(source_lvol, dest_lvol, dest_cluster_id):
     one replication node, and delta fail-back lands on the original node), which
     satisfies ``add_member_to_group``'s single-LVS pin.
 
+    *group_name* names the group when the source group's record is not readable
+    here: on a split control plane it lives on the source cluster, and the
+    replicated copy carries its name.
+
     No-op when the source is not a group member. The caller invokes this
     best-effort: a failure here must never undo the promote/cutover that already
     succeeded.
@@ -336,20 +352,21 @@ def reconstitute_group_after_handoff(source_lvol, dest_lvol, dest_cluster_id):
     if not src_group_id:
         return None
     try:
-        src_group = db.get_consistency_group_by_id(src_group_id)
+        group_name = db.get_consistency_group_by_id(src_group_id).group_name
     except KeyError:
-        logger.warning(
-            "Group reconstitution skipped: source group %s of %s not found",
-            src_group_id, dest_lvol.get_id())
-        return None
-    group = ensure_group(dest_cluster_id, src_group.group_name)
+        if not group_name:
+            logger.warning(
+                "Group reconstitution skipped: source group %s of %s not found",
+                src_group_id, dest_lvol.get_id())
+            return None
+    group = ensure_group(dest_cluster_id, group_name)
     add_member_to_group(group, dest_lvol)
     dest_lvol.group_id = group.get_id()
     dest_lvol.write_to_db(db.kv_store)
     logger.info(
         "Consistency group %s (%s) reconstituted on cluster %s: %s rejoined so "
         "the group stays crash-consistent across the hand-off",
-        group.uuid[:8], src_group.group_name, dest_cluster_id, dest_lvol.get_id())
+        group.uuid[:8], group_name, dest_cluster_id, dest_lvol.get_id())
     return group
 
 
@@ -641,7 +658,7 @@ def aggregate_group_replication_info(member_infos):
     }
 
 
-def attach_group_policy(group, policy_id):
+def attach_group_policy(group, policy_id, defer_peer_placement=False):
     """Attach a standalone consistency group to a group replication policy so the
     whole group replicates as one unit (design-csi-addons-replication.md §14.4).
 
@@ -653,6 +670,8 @@ def attach_group_policy(group, policy_id):
     membership is what makes the group crash-consistent, so the snapshot monitor
     ships one GROUP snapshot per interval for its members regardless of a policy
     flag.
+
+    ``defer_peer_placement`` is passed to each member's replication_start.
     """
     from simplyblock_core.controllers import replication_policy_controller
     try:
@@ -671,7 +690,7 @@ def attach_group_policy(group, policy_id):
     open_members = [m for m in list_members(group) if not m.get("removed_seq")]
     for member in open_members:
         replication_policy_controller.start_member_replication(
-            member["lvol_id"], pol, target)
+            member["lvol_id"], pol, target, defer_peer_placement=defer_peer_placement)
     logger.info("Consistency group %s attached to replication policy %s "
                 "(%d member(s) replicating)", group.uuid[:8], pol.policy_name,
                 len(open_members))
@@ -739,7 +758,9 @@ def attach_reverse_replication(group, toward_cluster_id, former_policy_name=""):
                        group.group_name, group.cluster_id, toward_cluster_id)
         return None
     try:
-        attach_group_policy(group, pol.get_id())
+        # A promote does not wait on the peer, which after a fail-over is
+        # likely still cut off: the members' replication tasks place them.
+        attach_group_policy(group, pol.get_id(), defer_peer_placement=True)
     except Exception as e:                          # noqa: BLE001 -- the promote stands
         logger.error("Consistency group %s promoted, but attaching it to %s failed: %s",
                      group.group_name, pol.policy_name, e)
@@ -863,9 +884,15 @@ def _peer_group_is_being_served(members):
     return False
 
 
-def demote_group(group):
+def demote_group(group, superseded=False):
     """Demote the whole consistency group as ONE crash-consistent unit
     (design-csi-addons-replication.md §14.4).
+
+    ``superseded``: the caller says this group was failed over elsewhere (the
+    control-plane split's fence order, decided by the layer above). Every
+    member of THIS group is demoted as superseded: fenced, its replication
+    stopped, no group cut. No peer group is resolved: the order names this
+    site's group, and the failover record is on the other site.
 
     The demote generation is a SINGLE ``bdev_lvol_snapshot_group`` -- one atomic
     cut across every member, carrying one ``group_seq`` -- NOT a per-member
@@ -898,6 +925,11 @@ def demote_group(group):
             members.append(db.get_lvol_by_id(m["lvol_id"]))
         except KeyError:
             continue
+
+    if superseded:
+        return aggregate_group_demote(
+            [(m.get_id(), lvol_controller.demote_lvol(m.get_id(), superseded=True))
+             for m in members])
 
     # Relocate fail-back: the demote is issued against THIS (origin) group via its
     # origin-pinned handle (cg:<origin>:<id>), but after a fail-over the current
@@ -1356,8 +1388,25 @@ def create_group_snapshot_for_group(group, snap_type=SnapShot.TYPE_INTERNAL, loc
 
         # The generation exists in full: bump the counter, then enqueue the
         # per-member replication tasks (transfer machinery is per-snapshot).
-        group.last_group_seq = group_seq
-        group.write_to_db(db.kv_store)
+        # Only the counter is written, onto the record as stored: the copy read
+        # under the lock predates any member that joined during the take, and
+        # writing it back whole dropped that member, so it never replicated and
+        # the next fail-over was refused (bed run 20261117-1534). A member that
+        # joined during the take expects this generation but is not in it; its
+        # epoch starts at the next one.
+        planned = {p["lvol"].get_id() for p in plan}
+
+        def _counted(fresh):
+            fresh.last_group_seq = max(fresh.last_group_seq, group_seq)
+            fresh_members = dict(fresh.members or {})
+            for lvol_id, entry in fresh_members.items():
+                if (lvol_id not in planned and entry.get("removed_seq", 0) == 0
+                        and entry.get("joined_seq", 0) == group_seq):
+                    fresh_members[lvol_id] = {**entry, "joined_seq": group_seq + 1}
+            fresh.members = fresh_members
+            return True
+
+        _update_group(group, _counted)
 
         for p in plan:
             lvol = p["lvol"]

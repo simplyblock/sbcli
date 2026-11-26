@@ -1,3 +1,4 @@
+import contextlib
 import copy
 import errno
 import random
@@ -50,6 +51,12 @@ from simplyblock_core.models.lvol_model import LVol, LVolReplication
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.peer.client import (
+    PeerError,
+    PeerUnreachableError,
+    peer_for_target,
+)
+from simplyblock_core.peer.protocol import DescribeRequest, PlaceRequest
 from simplyblock_core.prom_client import PromClient
 from simplyblock_core.rpc_client import RPCException, RPCRemoteError
 from simplyblock_core.services import replication_final_step
@@ -4829,8 +4836,14 @@ def _reset_demote_state(new_lvol):
     new_lvol.replication_demote_snapshot_id = ""
 
 
-def demote_lvol(lvol_id):
+def demote_lvol(lvol_id, superseded=False):
     """Fence the source and confirm the last write replicated (P0-3).
+
+    ``superseded``: the caller says this volume was failed over elsewhere (the
+    fence order of the control-plane split; the layer above decides it, never
+    this control plane). The volume's replication is stopped and it is demoted
+    at once with no demote cut: its data is stale, and the record
+    of the failover is on the other site. See :func:`_demote_superseded`.
 
     The lossless half of a planned swap (design-csi-addons-replication.md
     §5.2): after this returns {"demoted": True}, the peer's planned promote
@@ -4853,6 +4866,9 @@ def demote_lvol(lvol_id):
     except KeyError as e:
         logger.error(e)
         return False, str(e)
+
+    if superseded:
+        return _demote_superseded(db_controller, lvol)
 
     if lvol.replication_demote_state == LVol.REPLICATION_DEMOTE_DONE:
         return {"demoted": True}
@@ -4952,6 +4968,88 @@ def demote_lvol(lvol_id):
     return {"demoted": True}
 
 
+def _demote_superseded(db_controller, lvol):
+    """Demote a volume the caller says was failed over elsewhere: stop its
+    replication and mark it demoted, with no demote cut and no path cut.
+
+    The control-plane split's fence order (Michael, 2026-11-16): the returning
+    old source does not detect its own supersession; the layer above orders it.
+    Centrally, demote_lvol takes the same branch when it finds the failover
+    record itself; in split mode that record is on the new primary's site.
+
+    Overrides a normal demote already started (Ramen's DemoteVolume can arrive
+    first): its demote cut waits on a transfer the new primary refuses, so its
+    task is cancelled with the volume's other transfers. Idempotent: a volume
+    already demoted with nothing replicating is left alone.
+    """
+    source_node = db_controller.get_storage_node_by_id(lvol.node_id)
+    if (lvol.replication_demote_state == LVol.REPLICATION_DEMOTE_DONE
+            and not lvol.do_replicate):
+        # A repeated order finishes a withdrawal a member missed.
+        _withdraw_namespace(lvol, source_node)
+        return {"demoted": True}
+
+    def _demoted(fresh):
+        # Cleared before the tasks are cancelled: the cadence reads
+        # do_replicate, so no new transfer is queued behind the cancel.
+        fresh.do_replicate = False
+        fresh.replication_demote_state = LVol.REPLICATION_DEMOTE_DONE
+        return True
+
+    db_controller.atomic_update(lvol, _demoted)
+    tasks = db_controller.get_job_tasks(source_node.cluster_id)
+    _cancel_snapshot_replication_tasks(db_controller, lvol.get_id(), tasks)
+    _cancel_replication_cutover(lvol.get_id(), tasks)
+    _withdraw_namespace(lvol, source_node)
+    logger.info("Volume %s demoted as superseded (failed over elsewhere): "
+                "replication stopped, no demote cut, namespace withdrawn", lvol.get_id())
+    return {"demoted": True}
+
+
+def _withdraw_namespace(lvol, primary_node):
+    """Remove *lvol*'s namespace from its subsystem on every member that may
+    still serve it: the superseded source's I/O cut.
+
+    The cut has to fail the I/O, not queue it. The order arrives when the site
+    reconnects, while its copy of the application may still run. An ANA cut
+    (every path inaccessible) leaves the client's multipath with live
+    controllers, so it queues the guest's I/O indefinitely: the guest hangs on
+    shutdown, the site is never cleaned up, and Ramen never makes it secondary
+    (bed run 20261117-0616). With the namespace gone from every controller the
+    client has no path left and fails the I/O, so the guest gets an error and
+    can stop.
+
+    The subsystem itself stays: it may carry other volumes' namespaces, and
+    the volume's delete removes it as usual. Peers first, the primary last,
+    as in the ANA fence. A member that is offline is skipped; one that cannot
+    be reached is logged and left for a repeated order. A node restart before
+    the cleanup adds the namespace back (the restart recreates it from the
+    record), which leaves the volume as a replication-only fence.
+    """
+    members = replication_final_step._lvs_members(primary_node)
+    for member in members[1:] + members[:1]:
+        if member.status not in replication_final_step._FENCEABLE:
+            continue
+        try:
+            rpc_client = member.rpc_client()
+            subsystem = rpc_client.subsystem_get(lvol.nqn)
+            for ns in (subsystem or {}).get("namespaces", []):
+                if ns.get("uuid") != lvol.get_ns_uuid():
+                    continue
+                rpc_client.nvmf_subsystem_remove_ns(lvol.nqn, ns["nsid"])
+                confirmed, _ = _confirm_namespace_removed(rpc_client, lvol.nqn, ns["nsid"])
+                if confirmed:
+                    logger.info("Superseded %s: namespace %s withdrawn on %s",
+                                lvol.get_id(), ns["nsid"], member.get_id()[:8])
+                else:
+                    logger.error("Superseded %s: namespace %s still listed on %s after "
+                                 "the remove; a repeated order retries it",
+                                 lvol.get_id(), ns["nsid"], member.get_id()[:8])
+        except (RPCException, OSError) as e:
+            logger.error("Superseded %s: namespace not withdrawn on %s (%s); a repeated "
+                         "order retries it", lvol.get_id(), member.get_id()[:8], e)
+
+
 def is_lvol_removal_deferred_for_pending_failover(db_controller, lvol):
     """True while *lvol* is demoted and awaiting a fail-over addressed by
     this same id.
@@ -5020,11 +5118,15 @@ def replication_start_error(lvol_id, replication_cluster_id=None, replication_po
     if replication_pool_id and not replication_cluster_id:
         return "a replication pool needs replication_cluster_id naming its cluster"
 
+    # A destination on a peer control plane is not in this database: add_target
+    # confirmed it through the peer's /info, and the peer checks a pool hint.
+    peer = _destination_peer(db_controller, lvol, replication_cluster_id)
     if replication_cluster_id:
-        try:
-            db_controller.get_cluster_by_id(replication_cluster_id)
-        except KeyError:
-            return f"replication cluster {replication_cluster_id} does not exist"
+        if peer is None:
+            try:
+                db_controller.get_cluster_by_id(replication_cluster_id)
+            except KeyError:
+                return f"replication cluster {replication_cluster_id} does not exist"
         source_node = db_controller.get_storage_node_by_id(lvol.node_id)
         if source_node.cluster_id == replication_cluster_id:
             return f"replication cluster {replication_cluster_id} is the volume's own cluster"
@@ -5037,7 +5139,7 @@ def replication_start_error(lvol_id, replication_cluster_id=None, replication_po
                 return (f"volume {lvol_id} already replicates to cluster {current}; "
                         f"it cannot be started towards {replication_cluster_id}")
 
-    if replication_pool_id:
+    if replication_pool_id and peer is None:
         try:
             pool = db_controller.get_pool_by_id(replication_pool_id)
         except KeyError:
@@ -5068,8 +5170,111 @@ def requested_destination_pool(db_controller, lvol, cluster_id):
     return pool_uuid if pool.cluster_id == cluster_id else ""
 
 
+def _destination_peer(db_controller, lvol, replication_cluster_id):
+    """The peer client of *replication_cluster_id* when the volume's policy
+    target puts it on a peer control plane; None for a destination in this
+    control plane (the only kind a volume without a policy can have)."""
+    if not (replication_cluster_id and getattr(lvol, "replication_policy_id", "")):
+        return None
+    try:
+        policy = db_controller.get_replication_policy_by_id(lvol.replication_policy_id)
+        target = db_controller.get_replication_target_by_id(policy.target_id)
+    except KeyError:
+        return None
+    if target.target_cluster_id != replication_cluster_id or not target.has_peer():
+        return None
+    return peer_for_target(target)
+
+
+def _place_on_peer(db_controller, lvol, peer, preferred_node):
+    """The node of a peer destination the volume's copies land on: the peer
+    applies the placement rules to its own members (peer.service.place).
+
+    Raises:
+        PeerError: the peer cannot answer, or no member can take the volume.
+    """
+    exclude_copy_id = ""
+    if lvol.cloned_from_snap:
+        with contextlib.suppress(KeyError):
+            exclude_copy_id = (db_controller.get_snapshot_by_id(lvol.cloned_from_snap)
+                               .source_replicated_snap_uuid or "")
+    all_snaps = db_controller.get_snapshots()
+    data_uuids = sorted({s.data_uuid for s in replication_backlog(db_controller, lvol, all_snaps)
+                         if s.data_uuid})
+    answer = peer.place(PlaceRequest(size=lvol.size, preferred_node=preferred_node or "",
+                                     data_uuids=data_uuids, exclude_copy_id=exclude_copy_id))
+    logger.info("Replicating on node %s of the peer destination (%s)", answer.node_id, answer.rule)
+    return answer.node_id
+
+
+def _place_on_peer_preferring(db_controller, lvol, peer):
+    """_place_on_peer, preferring the co-location this cluster can see: a
+    subsystem sibling or a group member already replicating. The peer keeps
+    that node when it is online.
+
+    Raises:
+        PeerError: as _place_on_peer.
+    """
+    snode = db_controller.get_storage_node_by_id(lvol.node_id)
+    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+    preferred = (_sibling_replication_node(lvol, cluster)
+                 or _group_replication_node_for(lvol, db_controller))
+    return _place_on_peer(db_controller, lvol, peer, preferred)
+
+
+def place_on_peer_destination(lvol):
+    """Place *lvol* on its peer destination, when it replicates there but has
+    no node yet (replication_start deferred the placement). Returns the volume
+    as stored, with its node set, or None when it does not replicate to a
+    peer destination.
+
+    *lvol* may be stale: a replication task holds the copy embedded in its
+    snapshot's record, taken before any placement. So the stored record
+    decides, and a volume another task already placed is returned as stored,
+    without asking the peer again (bed run 20261113-2112-ebs-splitdr placed
+    each member twice). Two tasks asking at once both get the node stored
+    first: the peer may answer each differently, and a volume whose node
+    changes mid-chain lands its copies apart.
+
+    Raises:
+        PeerUnreachableError: the peer still does not answer.
+        PeerError: the peer answers but cannot place the volume.
+    """
+    db_controller = DBController()
+    try:
+        lvol = db_controller.get_lvol_by_id(lvol.get_id())
+    except KeyError:
+        return None
+    if lvol.replication_node_id:
+        return lvol
+    if not lvol.do_replicate:
+        return None
+    peer = _destination_peer(db_controller, lvol, _policy_target_cluster(db_controller, lvol))
+    if peer is None:
+        return None
+    node_id = _place_on_peer_preferring(db_controller, lvol, peer)
+
+    def _store_unless_placed(fresh):
+        if fresh.replication_node_id:
+            return False
+        fresh.replication_node_id = node_id
+        return True
+
+    stored = db_controller.atomic_update(lvol, _store_unless_placed)
+    if stored is None:
+        return None
+    if stored.replication_node_id == node_id:
+        logger.info("LVol %s placed on node %s of its peer destination", lvol.get_id(), node_id)
+    else:
+        logger.info("LVol %s was placed on node %s of its peer destination meanwhile; "
+                    "keeping it (the peer answered %s)", lvol.get_id(),
+                    stored.replication_node_id, node_id)
+    return stored
+
+
 def replication_start(lvol_id, replication_cluster_id=None, mode=None, interval_min=None,
-                      from_policy=False, replication_pool_id=None, placement_load=None):
+                      from_policy=False, replication_pool_id=None, placement_load=None,
+                      defer_peer_placement=False):
     """Enable replication for a volume and pick its destination node.
 
     This is the step a replication POLICY performs for you: attaching a policy
@@ -5080,6 +5285,11 @@ def replication_start(lvol_id, replication_cluster_id=None, mode=None, interval_
 
     ``placement_load`` is a _replication_node_load map shared by a batch (a
     migration plan): each pick is reserved in it, so the batch spreads.
+
+    A destination on a peer control plane that does not answer does not fail
+    the start: the volume's first replication task places it once the peer
+    answers. ``defer_peer_placement`` skips asking the peer here at all, for
+    a caller that must not wait on it (the reverse attach of a fail-over).
     """
     db_controller = DBController()
     try:
@@ -5132,6 +5342,27 @@ def replication_start(lvol_id, replication_cluster_id=None, mode=None, interval_
     # Persist do_replicate/mode/interval regardless of whether a replication
     # node still needs to be selected below.
     lvol.write_to_db()
+    peer = _destination_peer(db_controller, lvol, replication_cluster_id)
+    if not lvol.replication_node_id and peer is not None:
+        # The destination's members are on a peer control plane, so the peer
+        # picks one (peer.service.place). Until it has, the volume replicates
+        # with no node: its first replication task places it
+        # (place_on_peer_destination), and waits while the peer does not answer.
+        if defer_peer_placement:
+            logger.info("LVol %s replicates to the peer destination %s; its first "
+                        "replication task places it there", lvol.get_id(), replication_cluster_id)
+            return True
+        try:
+            lvol.replication_node_id = _place_on_peer_preferring(db_controller, lvol, peer)
+        except PeerUnreachableError as e:
+            logger.warning("The peer destination of lvol %s does not answer (%s); its "
+                           "replication task places it once the peer does", lvol.get_id(), e)
+            return True
+        except PeerError as e:
+            logger.error("Replication node not found for lvol %s on the peer destination: %s",
+                         lvol.get_id(), e)
+            return False
+        lvol.write_to_db()
     if not lvol.replication_node_id:
         excluded_nodes = []
         if lvol.cloned_from_snap:
@@ -5237,7 +5468,9 @@ def replication_start(lvol_id, replication_cluster_id=None, mode=None, interval_
     for snap in replication_backlog(db_controller, lvol, all_snaps):
         if not snap.target_replicated_snap_uuid:
             matched = False
-            for sn in all_snaps:
+            # A peer's copies are not in this database: its prepare_landing
+            # links a copy of the same data when the snapshot's task runs.
+            for sn in (all_snaps if peer is None else []):
                 if (sn.data_uuid == snap.data_uuid and sn.get_id() != snap.get_id()
                         and (sn.lvol.node_id == lvol.replication_node_id
                              or (_repl_lvs and sn.lvol.lvs_name == _repl_lvs
@@ -5512,8 +5745,13 @@ def replication_stop(lvol_id, delete=False, from_policy=False):
 
     snode = db_controller.get_storage_node_by_id(lvol.node_id)
     tasks = db_controller.get_job_tasks(snode.cluster_id)
+    _cancel_snapshot_replication_tasks(db_controller, lvol.uuid, tasks)
+    _cancel_replication_cutover(lvol_id, tasks)
+    return True
 
 
+def _cancel_snapshot_replication_tasks(db_controller, lvol_uuid, tasks):
+    """Cancel every transfer of the volume's snapshots that has not finished."""
     for task in tasks:
         if task.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION and task.status != JobSchedule.STATUS_DONE:
             # A task whose snapshot is gone replicates nothing and belongs to
@@ -5525,11 +5763,8 @@ def replication_stop(lvol_id, delete=False, from_policy=False):
                 logger.warning("replication task %s names snapshot %s, which no longer exists; skipped",
                                task.uuid, task.function_params.get("snapshot_id"))
                 continue
-            if snap.lvol.uuid == lvol.uuid:
+            if snap.lvol.uuid == lvol_uuid:
                 tasks_controller.cancel_task(task.uuid)
-
-    _cancel_replication_cutover(lvol_id, tasks)
-    return True
 
 
 def _cancel_replication_cutover(lvol_id, tasks):
@@ -6037,8 +6272,69 @@ def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snaps
     return new_lvol, None
 
 
+def peer_usable_copies(peer, copy_ids):
+    """The copies among *copy_ids* that exist on *peer*'s cluster and are not
+    in deletion, as {copy_id: detached SnapShot}.
+
+    The copies' records live in the peer's control plane, so one describe call
+    asks about all of them. The returned records are never written here.
+    """
+    if not copy_ids:
+        return {}
+    answer = peer.describe(DescribeRequest(snapshot_ids=list(copy_ids)))
+    usable = {}
+    for state in answer.snapshots:
+        if not state.exists:
+            logger.warning(f"Copy {state.snapshot_id} is gone from peer cluster {peer.cluster_id}")
+            continue
+        if state.in_deletion:
+            logger.warning(f"Copy {state.snapshot_id} on peer cluster {peer.cluster_id} is in deletion")
+            continue
+        copy_ = SnapShot()
+        copy_.uuid = state.snapshot_id
+        copy_.cluster_id = peer.cluster_id
+        copy_.pool_uuid = state.pool_id
+        copy_.size = state.size
+        copy_.used_size = state.used_size
+        copy_.created_at = state.created_at
+        copy_.group_id = state.group_id
+        copy_.group_seq = state.group_seq
+        copy_.status = SnapShot.STATUS_ONLINE
+        if state.lvol_id:
+            copy_.lvol = LVol()
+            copy_.lvol.uuid = state.lvol_id
+        usable[state.snapshot_id] = copy_
+    return usable
+
+
+def _newest_peer_copy(peer, snaps):
+    """The first of *snaps* (newest first) whose copy on *peer*'s cluster exists
+    and is not in deletion, as a detached SnapShot of that copy; or None."""
+    copies = peer_usable_copies(peer, [s.target_replicated_snap_uuid for s in snaps])
+    for snap in snaps:
+        copy_ = copies.get(snap.target_replicated_snap_uuid)
+        if copy_ is not None:
+            return copy_
+        logger.warning(f"Fail-over candidate {snap.get_id()}: no usable copy on peer cluster "
+                       f"{peer.cluster_id}; trying an older snapshot")
+    return None
+
+
+def _policy_peer(db_controller, lvol):
+    """The peer client of *lvol*'s policy target when that target is on a peer
+    control plane; None otherwise (no policy, or a target in this control plane)."""
+    if not getattr(lvol, "replication_policy_id", ""):
+        return None
+    try:
+        policy = db_controller.get_replication_policy_by_id(lvol.replication_policy_id)
+        target = db_controller.get_replication_target_by_id(policy.target_id)
+    except KeyError:
+        return None
+    return peer_for_target(target) if target.has_peer() else None
+
+
 def last_replicated_target_snapshot(db_controller, lvol_id, cluster_id, generation=0,
-                                     pin_snapshot_id=None):
+                                     pin_snapshot_id=None, peer=None):
     """Return the target-cluster copy of the most recent FULLY replicated
     snapshot of *lvol_id*, or None.
 
@@ -6055,6 +6351,10 @@ def last_replicated_target_snapshot(db_controller, lvol_id, cluster_id, generati
 
     Candidates are walked newest-first so an incomplete or disappearing newest
     snapshot falls back to the last good one rather than failing the fail-over.
+
+    With *peer* (the target is on another control plane), the copies are
+    judged by the peer's answer instead of this database, and the result is a
+    detached record of the peer's copy: good for reading, not for writing.
     """
     snaps = []
     for task in db_controller.get_job_tasks(cluster_id):
@@ -6089,6 +6389,8 @@ def last_replicated_target_snapshot(db_controller, lvol_id, cluster_id, generati
                 f"{len(snaps)} replicated point(s)-in-time exist")
             return None
         snaps = snaps[generation:]
+    if peer is not None:
+        return _newest_peer_copy(peer, snaps)
     for snap in snaps:
         try:
             target_snap = db_controller.get_snapshot_by_id(snap.target_replicated_snap_uuid)
@@ -6132,7 +6434,9 @@ def latest_replicated_snapshot(lvol_id: str) -> SnapShot | None:
         lvol_id = rel["active_lvol_id"]
     lvol = db_controller.get_lvol_by_id(lvol_id)
     node = db_controller.get_storage_node_by_id(lvol.node_id)
-    return last_replicated_target_snapshot(db_controller, lvol_id, node.cluster_id)
+    # Split control planes: the copies are recorded on the peer's.
+    return last_replicated_target_snapshot(db_controller, lvol_id, node.cluster_id,
+                                           peer=_policy_peer(db_controller, lvol))
 
 
 def _evict_stale_namespace(new_lvol, target_node, superseded=None):
@@ -6559,7 +6863,8 @@ def failover_from_replicated_copy(template, copy, source_cluster_id):
         try:
             from simplyblock_core.controllers import consistency_group_controller
             consistency_group_controller.reconstitute_group_after_handoff(
-                template, new_lvol, target_node.cluster_id)
+                template, new_lvol, target_node.cluster_id,
+                group_name=(getattr(copy, "source_group", None) or {}).get("group_name", ""))
         except Exception as e:                               # noqa: BLE001
             logger.warning("Group reconstitution after fail-over of %s failed: %s",
                            template.get_id(), e)

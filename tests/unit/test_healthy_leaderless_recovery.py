@@ -26,6 +26,8 @@ from unittest.mock import MagicMock, patch
 from simplyblock_core import constants, storage_node_ops
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.peer import service as peer_service
+from simplyblock_core.peer.protocol import EnsureHubResponse
 from simplyblock_core.services import snapshot_replication as sr
 from simplyblock_core.services import storage_node_monitor as mon
 
@@ -234,10 +236,21 @@ class TestReplicationAsksForRecovery(unittest.TestCase):
         self.addCleanup(pt.stop)
 
     def _wait(self, age=None):
+        """One pass with a leaderless target. The source decides whether to ask
+        for recovery (_leadership_recovery_due); the target, asked, runs it
+        (what peer.service.ensure_hub does for an unsettled lvstore); the
+        source records the wait."""
         if age is not None:
             self.task.function_params["target_leaderless_since"] -= age
-        sr._wait_for_target_leader(self.task, self.remote_lv,
-                                   "0 members of LVS_7 report leadership")
+        now = __import__("time").time()
+        if sr._leadership_recovery_due(self.task, now):
+            peer_service._recover_leadership(self.remote_lv, "asked by the source")
+        sr._wait_for_target_leader(
+            self.task, self.remote_lv,
+            EnsureHubResponse(state="unsettled", members="484ff828 online",
+                              reason="target leadership not established "
+                                     "(0 members of LVS_7 report leadership)"),
+            now)
 
     def test_not_before_the_recover_delay(self):
         self._wait()

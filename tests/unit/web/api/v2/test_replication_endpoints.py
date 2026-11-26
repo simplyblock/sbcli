@@ -487,6 +487,15 @@ class TestLatestReplicatedSnapshot:
 
         assert response.status_code == 404
 
+    def test_unreachable_peer_is_a_502(self, client, db, cluster, lvol_controller):
+        """Split control planes: the copies are on the peer's, which is down."""
+        lvol_controller.latest_replicated_snapshot.side_effect = PeerUnreachableError('connection refused')
+
+        response = client.get(RELATIONSHIPS_URL + f'{VOLUME_ID}/latest-snapshot')
+
+        assert response.status_code == 502
+        assert 'Peer control plane' in response.json()['detail']
+
 
 class TestLatestReplicatedGeneration:
     """The consistency-group form of the latest-replicated-snapshot read:
@@ -521,3 +530,98 @@ class TestLatestReplicatedGeneration:
         response = client.get(POLICIES_URL + f'{REPLICATION_POLICY_ID}/latest-generation')
 
         assert response.status_code == 400
+
+    def test_unreachable_peer_is_a_502(self, client, db, cluster, replication_policy,
+                                       replication_policy_controller):
+        """Split control planes: the copies are on the peer's, which is down."""
+        replication_policy_controller.latest_replicated_generation.side_effect = \
+            PeerUnreachableError('connection refused')
+
+        response = client.get(POLICIES_URL + f'{REPLICATION_POLICY_ID}/latest-generation')
+
+        assert response.status_code == 502
+        assert 'Peer control plane' in response.json()['detail']
+
+
+SOURCE_GROUP = '11111111-2222-3333-4444-555555555555/66666666-7777-8888-9999-aaaaaaaaaaaa'
+REPLICATED_GROUPS_URL = f'/api/v2/clusters/{CLUSTER_ID}/replication/replicated-groups/'
+
+
+class TestFailoverReplicatedGroup:
+    """The fail-over of a source cluster's group on this cluster, from the
+    copies here, with no record of the group or the source cluster."""
+
+    def test_returns_the_members_like_the_group_promote(self, client, db, cluster,
+                                                        replication_policy_controller):
+        replication_policy_controller.failover_replicated_group.return_value = [
+            {"lvol_id": "M1", "status": "failed_over", "target_lvol_id": "C1",
+             "connection_strings": [], "warnings": []}]
+
+        response = client.post(REPLICATED_GROUPS_URL + f'{SOURCE_GROUP}/failover')
+
+        assert response.status_code == 200
+        assert response.json() == {"members": [
+            {"lvol_id": "M1", "status": "failed_over", "target_lvol_id": "C1",
+             "connection_strings": [], "warnings": []}]}
+        replication_policy_controller.failover_replicated_group.assert_called_once_with(
+            CLUSTER_ID, SOURCE_GROUP)
+
+    def test_no_complete_generation_here_is_a_409(self, client, db, cluster,
+                                                  replication_policy_controller):
+        replication_policy_controller.failover_replicated_group.return_value = []
+
+        response = client.post(REPLICATED_GROUPS_URL + f'{SOURCE_GROUP}/failover')
+
+        assert response.status_code == 409
+        assert 'no complete replicated generation' in response.json()['detail']
+
+    def test_a_failed_member_is_a_409_without_its_detail(self, client, db, cluster,
+                                                         replication_policy_controller):
+        replication_policy_controller.failover_replicated_group.return_value = [
+            {"lvol_id": "M1", "status": "failed", "detail": "node 10.0.0.7 offline"}]
+
+        response = client.post(REPLICATED_GROUPS_URL + f'{SOURCE_GROUP}/failover')
+
+        assert response.status_code == 409
+        assert '10.0.0.7' not in response.text
+
+    def test_a_group_id_that_is_not_a_uuid_is_a_422(self, client, db, cluster,
+                                                    replication_policy_controller):
+        response = client.post(REPLICATED_GROUPS_URL + 'not-a-cluster/g/failover')
+
+        assert response.status_code == 422
+        replication_policy_controller.failover_replicated_group.assert_not_called()
+
+
+class TestResolveReplicatedGroup:
+    """Where a source cluster's group lives now, answered by this control plane
+    from its own records, for a VolumeGroupReplication that keeps the source's
+    group handle after a fail-over with the source cut off."""
+
+    def test_returns_the_group_here_and_each_members_volume(self, client, db, cluster,
+                                                           replication_policy_controller):
+        source_cluster, group = SOURCE_GROUP.split('/')
+        replication_policy_controller.resolve_replicated_group.return_value = {
+            "active_cluster_id": CLUSTER_ID, "active_group_id": "GB",
+            "members": [{"origin_handle": f"{source_cluster}:P:M1",
+                         "active_handle": f"{CLUSTER_ID}:P:C1"}]}
+
+        response = client.get(REPLICATED_GROUPS_URL + f'{SOURCE_GROUP}/resolution')
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "cluster_id": source_cluster, "group_id": group,
+            "active_cluster_id": CLUSTER_ID, "active_group_id": "GB",
+            "members": [{"origin_handle": f"{source_cluster}:P:M1",
+                         "active_handle": f"{CLUSTER_ID}:P:C1"}]}
+        replication_policy_controller.resolve_replicated_group.assert_called_once_with(SOURCE_GROUP)
+
+    def test_a_group_not_failed_over_here_is_not_a_404(self, client, db, cluster,
+                                                       replication_policy_controller):
+        replication_policy_controller.resolve_replicated_group.return_value = {
+            "active_cluster_id": "", "active_group_id": "", "members": []}
+
+        response = client.get(REPLICATED_GROUPS_URL + f'{SOURCE_GROUP}/resolution')
+
+        assert response.status_code == 200
+        assert response.json()["active_group_id"] == ""

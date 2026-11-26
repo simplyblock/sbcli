@@ -3,7 +3,8 @@ cluster-level field that describes the other direction.
 
 Two defects are pinned here, both observed in the 2026-08-19 replication lab:
 
-  * ``snapshot_replication._destination_pool_uuid`` placed an INCOMING copy
+  * the landing pool resolution (now ``_pool_hints`` plus the destination's
+    ``prepare_landing``) placed an INCOMING copy
     using the DESTINATION cluster's own OUTGOING config
     (``snapshot_replication_target_pool`` = "the pool I replicate into on my
     target"). Any cluster that is itself a source therefore handed out a pool
@@ -22,7 +23,6 @@ import pytest
 from simplyblock_core.controllers import lvol_controller
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.services import snapshot_replication as sr
 
 SRC, TGT = "CL_SRC", "CL_TGT"
 POOL_SRC, POOL_TGT = "POOL_SRC", "POOL_TGT"
@@ -99,69 +99,10 @@ def _target(target_cluster, target_pool, uuid="T1"):
     })()
 
 
-# --- snapshot_replication._destination_pool_uuid -------------------------
-
-
-def _sr_db(src_target_cluster="", src_target_pool="", tgt_target_pool="",
-           policy=None, target=None):
-    return _FakeDB(
-        clusters={
-            SRC: _cluster(SRC, src_target_cluster, src_target_pool),
-            TGT: _cluster(TGT, "", tgt_target_pool),
-        },
-        pools=[_pool(POOL_SRC, SRC), _pool(POOL_TGT, TGT)],
-        policy=policy, target=target)
-
-
-def test_incoming_copy_ignores_the_destinations_outgoing_pool(monkeypatch):
-    """The regression: failing BACK into src must not use src's outgoing pool.
-
-    src is configured to replicate into POOL_TGT on the tgt cluster. Data coming
-    the other way belongs in a pool of src, never in POOL_TGT.
-    """
-    monkeypatch.setattr(sr, "db", _sr_db(src_target_cluster=TGT,
-                                         src_target_pool=POOL_TGT))
-    assert sr._destination_pool_uuid(_node(SRC), lvol=_lvol(),
-                                     source_cluster_id=TGT) == POOL_SRC
-
-
-def test_policy_target_pool_wins(monkeypatch):
-    monkeypatch.setattr(sr, "db", _sr_db(
-        policy=_policy(), target=_target(TGT, "POOL_FROM_TARGET")))
-    assert sr._destination_pool_uuid(_node(TGT), lvol=_lvol("P1"),
-                                     source_cluster_id=SRC) == "POOL_FROM_TARGET"
-
-
-def test_policy_target_for_another_cluster_is_not_used(monkeypatch):
-    """A target naming a third cluster's pool must not be applied here."""
-    monkeypatch.setattr(sr, "db", _sr_db(
-        policy=_policy(), target=_target("CL_OTHER", "POOL_ELSEWHERE")))
-    assert sr._destination_pool_uuid(_node(TGT), lvol=_lvol("P1"),
-                                     source_cluster_id=SRC) == POOL_TGT
-
-
-def test_legacy_field_still_used_for_the_direction_it_describes(monkeypatch):
-    """Forward replication with no policy: the source's config is authoritative."""
-    monkeypatch.setattr(sr, "db", _sr_db(src_target_cluster=TGT,
-                                         src_target_pool="POOL_CONFIGURED"))
-    assert sr._destination_pool_uuid(_node(TGT), lvol=_lvol(),
-                                     source_cluster_id=SRC) == "POOL_CONFIGURED"
-
-
-def test_falls_back_to_first_active_pool_on_the_destination(monkeypatch):
-    db = _FakeDB(clusters={SRC: _cluster(SRC), TGT: _cluster(TGT)},
-                 pools=[_pool("POOL_DEAD", TGT, status=Pool.STATUS_INACTIVE),
-                        _pool(POOL_TGT, TGT)])
-    monkeypatch.setattr(sr, "db", db)
-    assert sr._destination_pool_uuid(_node(TGT), lvol=_lvol(),
-                                     source_cluster_id=SRC) == POOL_TGT
-
-
-def test_no_pool_on_the_destination_returns_none(monkeypatch):
-    monkeypatch.setattr(sr, "db", _FakeDB(
-        clusters={SRC: _cluster(SRC), TGT: _cluster(TGT)}, pools=[]))
-    assert sr._destination_pool_uuid(_node(TGT), lvol=_lvol(),
-                                     source_cluster_id=SRC) is None
+# The landing pool of an incoming copy (formerly _destination_pool_uuid) is
+# decided by snapshot_replication._pool_hints on the source and
+# peer.service.prepare_landing on the destination; its cases, including the
+# 2026-08-19 regression, are in tests/integration/test_landing_preparation.py.
 
 
 # --- lvol_controller.resolve_replication_destination ---------------------

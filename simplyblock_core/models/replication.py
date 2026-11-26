@@ -141,9 +141,12 @@ class ConsistencyGroup(BaseModel):
     ``last_group_seq + 1``, i.e. the first group snapshot taken AFTER the
     attach, because earlier group snapshots simply do not contain them.
 
-    ``policy_id`` is optional: it is set for the legacy path where a
-    replication policy owns the group, and empty for a standalone group. The
-    membership and generation model is identical either way.
+    ``policy_id`` is the policy the group replicates under, or empty. A group
+    a consistency-group policy owns (the legacy path, create_group_for_policy)
+    has no ``group_name``; a standalone group always has one, and gets a
+    ``policy_id`` when attached to a policy (attach_group_policy), which any
+    number of standalone groups may share. The membership and generation
+    model is identical either way.
     """
 
     _INDEXES: ClassVar[tuple] = (

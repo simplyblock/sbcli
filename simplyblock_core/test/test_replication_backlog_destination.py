@@ -20,6 +20,7 @@ from simplyblock_core.controllers import lvol_controller
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.snapshot import SnapShot
+from simplyblock_core.peer.client import PeerRefusedError
 from simplyblock_core.services import snapshot_replication as sr
 
 
@@ -64,30 +65,9 @@ def test_backlog_skips_snapshots_whose_volume_has_no_destination():
     assert skip_at < enqueue_at
 
 
-def test_undeliverable_forward_task_is_ended_not_retried(monkeypatch):
-    """A task for a destination-less volume must be completed, so it cannot
-    starve the runner or block deletes behind its snapshot."""
-    task = _Task()
-    snap = _snap("S1", _lvol("REP_LV", repl_node=""))
-
-    # A blank id must never reach the node lookup.
-    def _boom(_id):
-        raise AssertionError("looked up a storage node with a blank id")
-
-    monkeypatch.setattr(sr.db, "get_storage_node_by_id", _boom)
-    monkeypatch.setattr(sr, "_select_source_node",
-                        lambda s, exclude=(): (SimpleNamespace(get_id=lambda: "N_SRC"), "primary"))
-    # The chain-completeness gate has its own suite
-    # (test_replication_chain_completeness); this test is about the
-    # destination guard behind it.
-    monkeypatch.setattr(sr, "_unreplicated_local_ancestor",
-                        lambda snode, snapshot, to_source: ("ok", None, ""))
-
-    sr.process_snap_replicate_start(task, snap)
-
-    assert task.status == JobSchedule.STATUS_DONE, "the task must end, not retry"
-    assert "no replication destination" in task.function_result
-    assert task.retry == 0, "ending a doomed task must not consume the retry budget"
+# The task-side defence (a task that exists anyway ends instead of retrying) is
+# tests/integration/test_replication_backlog_destination.py: it reads the
+# volume's stored record, which needs the real database.
 
 
 def test_volume_with_a_destination_is_still_processed(monkeypatch):
@@ -116,12 +96,17 @@ def test_volume_with_a_destination_is_still_processed(monkeypatch):
 def test_landing_copy_inherits_source_subsystem_packing(monkeypatch):
     """Regression (2026-09-30): the REP_* landing copy a transfer creates was
     added WITHOUT the source's namespaced/max_namespace_per_subsys, so it
-    defaulted to a one-namespace subsystem. Every replicated copy — and every
-    clone taken from it (test-failover, fail-over) — then landed in its own
+    defaulted to a one-namespace subsystem. Every replicated copy -- and every
+    clone taken from it (test-failover, fail-over) -- then landed in its own
     subsystem at NSID 1, ignoring a max_namespace_per_subsys=10 storage class:
     a namespaced subsystem capped at one namespace can never be joined, so the
     packing silently degenerates to one-subsystem-per-volume. The landing copy
-    must carry the source volume's subsystem-packing capacity."""
+    must carry the source volume's subsystem-packing capacity.
+
+    The runner asks the destination for the landing volume; this pins that the
+    request carries the source's packing. That the destination creates it
+    namespaced with that capacity is in
+    tests/integration/test_landing_preparation.py."""
     lvol = _lvol("LV1", repl_node="N_DEST")
     lvol.max_namespace_per_subsys = 10
     lvol.ha_type = "ha"
@@ -140,27 +125,23 @@ def test_landing_copy_inherits_source_subsystem_packing(monkeypatch):
     monkeypatch.setattr(sr, "_select_source_node", lambda s, exclude=(): (_Node(), "primary"))
     monkeypatch.setattr(sr, "_unreplicated_local_ancestor",
                         lambda snode, snapshot, to_source: ("ok", None, ""))
-    monkeypatch.setattr(sr.db, "get_storage_node_by_id", lambda _id: _Node())
-    monkeypatch.setattr(sr, "_destination_pool_uuid", lambda *a, **k: "POOL_REMOTE")
-
-    def _no_existing(name, include_deleted=False):
-        raise KeyError(name)
-
-    monkeypatch.setattr(sr.db, "get_lvol_by_name", _no_existing)
+    monkeypatch.setattr(sr, "_destination_cluster_of", lambda lv: "CL_DST")
+    monkeypatch.setattr(sr, "_pool_hints", lambda lv, src, dst: ["POOL_REMOTE"])
 
     captured = {}
 
-    def _fake_add(*args, **kwargs):
-        captured["kwargs"] = kwargs
-        return None, "stop"          # end the function cleanly after the call
+    class _Peer:
+        def prepare_landing(self, request):
+            captured["request"] = request
+            raise PeerRefusedError("stop")   # end the function cleanly after the call
 
-    monkeypatch.setattr(sr.lvol_controller, "add_lvol_ha", _fake_add)
+    monkeypatch.setattr(sr, "_peer_for", lambda lv, cluster_id: _Peer())
 
     sr.process_snap_replicate_start(task, snap)
 
-    assert captured, "never reached the landing-copy creation"
-    kw = captured["kwargs"]
-    assert kw.get("max_namespace_per_subsys") == 10, \
+    assert captured, "never reached the landing-copy request"
+    request = captured["request"]
+    assert request.max_namespace_per_subsys == 10, \
         "the landing copy must inherit the source's max_namespace_per_subsys"
-    assert kw.get("namespaced") is True, \
-        "a source with a shareable subsystem must produce a namespaced landing copy"
+    assert (request.landing_name, request.size, request.node_hint, request.pool_hints) == (
+        "REP_snap1", 1073741824, "N_DEST", ["POOL_REMOTE"])

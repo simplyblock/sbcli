@@ -32,3 +32,32 @@ runners for the two uses.
 `tests/unit/tasks/test_retry_ceiling.py` checks this behaviourally, per runner, by driving each
 one's real loop with its work mocked to fail forever: a newly-added retry-driven runner shows up
 there as a failing case until it is covered.
+
+## Replication: the destination goes through the peer client
+
+`snapshot_replication.py` runs on the **source** cluster's control plane. Everything it does on the
+destination goes through the peer client (`simplyblock_core.peer.client`), and the destination's
+side runs in `simplyblock_core/peer/service.py`. That covers:
+
+- creating or clearing a landing volume;
+- chaining, merging or converting it;
+- settling or recovering the destination's leadership;
+- reading the destination's records.
+
+The same code serves both deployments:
+
+- **One control plane manages both clusters:** `LocalPeerClient` calls `peer.service` in process.
+- **The destination is a peer control plane (the control-plane split):** `HttpPeerClient` calls it
+  over `/api/v2/_peer`. This control plane cannot reach the destination's nodes or read its records.
+
+A destination-side call written straight into `snapshot_replication` passes every unit test and
+works when one control plane manages both clusters. It fails only across a split. So:
+
+- **Put the operation in `peer/service.py`.** If the source must pass something, add an optional
+  field to the request in `peer/protocol.py`, with a default that keeps the old behavior. If the
+  source must decide something, give it a field in the response.
+- **State that needs both clusters' records in one database runs only behind `_target_is_local`.**
+  Spare landing volumes are an example. List it as a gap of the split.
+
+`tests/unit/test_replication_split_boundary.py` enforces this by rejecting destination-side calls
+in `snapshot_replication`. `tests/integration/test_peer_service.py` runs the peer API end to end.

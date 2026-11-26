@@ -256,6 +256,32 @@ class TestGroupDemote:
         assert resp.status_code == 500
 
 
+    def test_a_superseded_demote_is_passed_on(self, client, db, cluster,
+                                              consistency_group_controller):
+        db.get_consistency_group_by_id.return_value = factories.make_consistency_group()
+        consistency_group_controller.demote_group.return_value = {
+            "demoted": True, "members": [], "error": None}
+        resp = client.post(f'{BASE}/replication/demote?superseded=true')
+        assert resp.status_code == 204
+        assert consistency_group_controller.demote_group.call_args.kwargs == {"superseded": True}
+
+    def test_a_plain_demote_is_not_superseded(self, client, db, cluster,
+                                              consistency_group_controller):
+        db.get_consistency_group_by_id.return_value = factories.make_consistency_group()
+        consistency_group_controller.demote_group.return_value = {
+            "demoted": True, "members": [], "error": None}
+        client.post(f'{BASE}/replication/demote')
+        assert consistency_group_controller.demote_group.call_args.kwargs == {"superseded": False}
+
+    def test_a_superseded_demote_on_a_sync_cluster_is_400(self, client, db, cluster,
+                                                          consistency_group_controller):
+        cluster.sync_replication = True
+        db.get_consistency_group_by_id.return_value = factories.make_consistency_group()
+        resp = client.post(f'{BASE}/replication/demote?superseded=true&site=a')
+        assert resp.status_code == 400
+        consistency_group_controller.demote_group.assert_not_called()
+
+
 class TestGroupFailback:
 
     def test_configures_failback_for_the_whole_group(self, client, db, cluster,
