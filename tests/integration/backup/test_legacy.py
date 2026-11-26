@@ -136,6 +136,7 @@ def _lvol(uuid="lvol-1", pool_uuid="pool-1"):
 
 
 def _attach_policy(db, policy, lvol):
+    policy.write_to_db(db.kv_store)
     att = BackupPolicyAttachment()
     att.uuid = f"attachment-{policy.uuid}-{lvol.get_id()}"
     att.cluster_id = policy.cluster_id
