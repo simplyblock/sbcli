@@ -954,6 +954,44 @@ ALL_TESTS = [
     PnfsTwoNamespacesK8s,
     PnfsClaimCeilingK8s,
     PnfsNoMetadataServerK8s,
+    # Being in a group is NOT enough: --testname <ClassName> resolves
+    # against ALL_TESTS only (e2e.py:338), so a class listed in a group
+    # and omitted here can be run as part of its group and not on its
+    # own. Track C/D/E/F were all in that state -- 29 classes that
+    # e2e.py would have answered "not found" for, after the bring-up.
+    # Track C: the metadata server.
+    PnfsMdsDefaultTopologyK8s,
+    PnfsMdsActiveDeletedK8s,
+    PnfsMdsLockAcrossTakeoverK8s,
+    PnfsMdsExportGrownBeforeTakeoverK8s,
+    PnfsMdsManyExportsTakeoverK8s,
+    PnfsMdsSecondTakeoverK8s,
+    PnfsMdsOperatorRestartNoTakeoverK8s,
+    PnfsMdsRestartWithClientDownK8s,
+    PnfsMdsNodeDrainedK8s,
+    PnfsMdsNodeRebootK8s,
+    PnfsMdsStandbyScaleK8s,
+    PnfsMdsNoStandbyRecoversK8s,
+    PnfsMdsStandbyMissingK8s,
+    # Track D: security.
+    PnfsGuestHoldsNoCredentialsK8s,
+    PnfsRootSquashK8s,
+    PnfsExportAllowListK8s,
+    PnfsPodCidrDirectMountK8s,
+    PnfsUnauthorizedNqnRefusedK8s,
+    PnfsGuestFencingPreemptsOldEpochK8s,
+    # Track E: failure injection.
+    PnfsUnalignedDirectIoReportK8s,
+    PnfsProvisioningChurnK8s,
+    PnfsCsiKilledMidOperationK8s,
+    PnfsGuestCrashInPlaceK8s,
+    PnfsClientPathLossK8s,
+    PnfsMdsPartitionedFromClientK8s,
+    PnfsClientNodeRebootK8s,
+    # Track F: load, scale and soak.
+    PnfsManyClientsLoadK8s,
+    PnfsExportCeilingK8s,
+    PnfsRestartRebootSoakK8s,
 ]
 
 def get_all_tests(custom=True, ha_test=False):

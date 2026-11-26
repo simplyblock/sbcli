@@ -36,6 +36,7 @@ import itertools
 import time
 
 from e2e_tests.pnfs.test_pnfs_rwx import _PnfsBase
+from exceptions.custom_exception import SkippedTestsException
 from utils.common_utils import sleep_n_sec
 from utils.pnfs_utils import (
     ANNO_MDS_EPOCH,
@@ -43,12 +44,15 @@ from utils.pnfs_utils import (
     EVENT_MDS_PROMOTED,
     EVENT_MDS_PROMOTION_CONFLICT,
     EVENT_MDS_STANDBY_MISSING,
+    MDS_CRD,
+    MDS_STANDBYS_FIELD,
     MDS_TERMINATION_GRACE,
     NFS_LEASE_DEFAULT,
     PnfsEvidenceError,
     PnfsProbeError,
     mds_pods,
     mds_record,
+    mds_standby_supported,
     mds_statefulset,
     mountstats,
     nfsexport_status,
@@ -103,11 +107,37 @@ class _MdsBase(_PnfsBase):
         active, epoch = mds_record(sts)
 
         if want_standbys and replicas < 2:
+            # Two very different reasons to be here, and reporting them as
+            # one is how an unbuilt feature arrives as eleven product
+            # defects. The runner puts a PnfsProbeError in `errors` (it is
+            # an AssertionError), so every takeover case would come back
+            # red against an operator that never claimed to fail over.
+            supported = mds_standby_supported(self.k8s_utils)
+            if supported is False:
+                raise SkippedTestsException(
+                    f"this operator implements no warm standby: the "
+                    f"{MDS_CRD} CRD has no spec.pnfs.mds.{MDS_STANDBYS_FIELD} "
+                    f"field, and the MDS StatefulSet is one replica "
+                    f"('One, and never more' in mds.go). A takeover cannot "
+                    f"happen and is not supposed to, so this case is NOT "
+                    f"APPLICABLE here rather than failing. The single-MDS "
+                    f"recovery path is covered by PnfsMdsNodeRebootK8s and "
+                    f"PnfsMdsNodeDrainedK8s, which do not need a standby. "
+                    f"When the standby lands, the CRD gains the field and "
+                    f"this case starts applying again with no change here.")
+            if supported is None:
+                raise PnfsProbeError(
+                    f"StatefulSet {self.sts_name} runs {replicas} "
+                    f"replica(s) and the {MDS_CRD} CRD could not be read, so "
+                    f"whether this operator even implements a standby is "
+                    f"unknown. That is not a verdict on the product.")
             raise PnfsProbeError(
                 f"StatefulSet {self.sts_name} runs {replicas} replica(s), so "
-                f"there is no standby to promote. Set "
-                f"spec.pnfs.mds.standbys >= 1 on driver {self.DRIVER}, and "
-                f"note each standby needs its own kvm-capable node.")
+                f"there is no standby to promote -- but this operator does "
+                f"support one. Set spec.pnfs.mds.{MDS_STANDBYS_FIELD} >= 1 on "
+                f"driver {self.DRIVER}, and note each standby needs its own "
+                f"kvm-capable node. This is the deployment's configuration, "
+                f"not a defect.")
 
         nodes = {n for _, n, _, _ in pods if n and n != "<none>"}
         if want_standbys and len(nodes) < len(pods):

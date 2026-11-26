@@ -740,6 +740,59 @@ def resv_registrants(report):
 # functions are what F-18 needs: take that path away, give it back, and see
 # whether the client's I/O went back to being direct on its own.
 
+#: The CRD that would carry the warm standby, and the field that says the
+#: deployed operator implements one.
+MDS_CRD = "simplyblockdrivers.storage.simplyblock.io"
+MDS_STANDBYS_FIELD = "standbys"
+
+
+def mds_standby_supported(k8s):
+    """Does the *deployed* operator implement a warm standby at all?
+
+    Asked of the CRD schema, never of an operator source tree. The
+    harness and the cluster run independently selected versions
+    (``e2e/AGENTS.md``), so reading the runner's checkout would answer
+    for the wrong operator -- and the answer decides whether a case is a
+    failure or is simply not applicable here, which is the worst possible
+    thing to get wrong.
+
+    ``spec.pnfs.mds.standbys`` absent means no standby concept exists:
+    on operator ``main`` the MDS StatefulSet is ``Replicas: 1`` with the
+    comment "One, and never more", there is no such field on
+    ``DriverPNFSMDS``, and no ``mds-epoch`` annotation is ever published.
+    A takeover case cannot pass against that and is not meant to -- it is
+    testing something the deployment does not claim to do.
+
+    Present, and the cases apply again with no change here: a cluster
+    that has the field but is configured with none is a configuration
+    problem the caller should report as one.
+
+    Returns None when the CRD cannot be read at all, so the caller can
+    tell "no standby" from "could not tell".
+    """
+    out, _err = k8s._exec_kubectl(
+        f"kubectl get crd {MDS_CRD} -o json 2>/dev/null || true",
+        supress_logs=True)
+    if not (out or "").strip():
+        return None
+    try:
+        crd = json.loads(out)
+    except ValueError:
+        return None
+    # Walk every served version: a field added in a newer one still means
+    # the operator implements it.
+    for ver in ((crd.get("spec") or {}).get("versions") or []):
+        node = (((ver.get("schema") or {}).get("openAPIV3Schema") or {})
+                .get("properties") or {})
+        for step in ("spec", "pnfs", "mds"):
+            node = (node.get(step) or {}).get("properties") or {}
+            if not node:
+                break
+        if MDS_STANDBYS_FIELD in node:
+            return True
+    return False
+
+
 #: The kernel's default NFSv4 lease, and so the default grace period a
 #: restarted nfsd runs. Mirrored, not imported: it is the kernel's
 #: `nfsd4_lease` and the operator sets nothing else, and the value is read
