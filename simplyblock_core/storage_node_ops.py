@@ -11110,7 +11110,8 @@ def _target_is_reconnect_eligible(target_node: StorageNode):
     return target_node.status in _PEER_RECONNECT_ELIGIBLE_STATUSES
 
 
-def _detach_remote_controllers_from_peers(snode: StorageNode, db_controller):
+def _detach_remote_controllers_from_peers(snode: StorageNode, db_controller,
+                                          handed_over=frozenset()):
     """Loop 2 of graceful shutdown.
 
     For every peer in {online, down, in_restart}, detach the remote
@@ -11133,6 +11134,11 @@ def _detach_remote_controllers_from_peers(snode: StorageNode, db_controller):
     # lead to that node, not to this one; they stay.
     served_elsewhere_ids = {d.get_id() for d in snode.nvme_devices
                             if multi_attach.served_elsewhere(d, shutting_down_id)}
+    # Multi-attach: the controllers to the LUNs this shutdown hands over stay
+    # too. They hold the peers' I/O until the takeover adds the standby's
+    # export as their new path; a detached one would drop the device from
+    # the peers' distribs.
+    served_elsewhere_ids |= set(handed_over)
     peers = [
         p for p in all_peers
         if p.get_id() != shutting_down_id
@@ -11341,7 +11347,7 @@ def check_node_shutdown_preconditions(node_id, force=False, current_restart_task
     return True, ""
 
 
-def _broadcast_devices_unavailable(snode):
+def _broadcast_devices_unavailable(snode, handed_over=frozenset()):
     """Shutdown Loop 1: mark the node's JM and NVMe devices unavailable.
 
     The underlying device_set_unavailable() / set_jm_device_state()
@@ -11349,6 +11355,10 @@ def _broadcast_devices_unavailable(snode):
     fans out to all peers and skips offline/removed, so the peers update
     their cluster maps and DISTRIB stops routing IO toward these devices.
     Best effort: a failure is logged and the shutdown continues.
+
+    ``handed_over``: ids of multi-attach devices whose LUN the shutdown
+    hands over to a standby (_hand_over_luns); they are never marked
+    unavailable (empty on any other cluster).
     """
     if snode.jm_device and snode.jm_device.status != JMDevice.STATUS_REMOVED:
         logger.info("Loop 1: setting JM unavailable on peers")
@@ -11374,6 +11384,11 @@ def _broadcast_devices_unavailable(snode):
             # Multi-attach: another node serves this LUN; it is not lost
             # with this node.
             continue
+        if dev.get_id() in handed_over:
+            # Multi-attach: a standby takes this LUN over; the device stays
+            # online. On 1+0 every lvstore stripes over it, so an unavailable
+            # device fails reads on every node (2026-11-26 bed).
+            continue
         try:
             # Default cause (CAUSE_OTHER): a node-driven shutdown
             # must not count against the per-device flap budget.
@@ -11384,8 +11399,118 @@ def _broadcast_devices_unavailable(snode):
                 dev.get_id(), e)
 
 
+#: Device states whose multi-attach LUN a shutdown hands over to a standby
+#: (the states the monitor's node-loss takeover acts on).
+_LUN_HANDOVER_STATES = (NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY,
+                        NVMeDevice.STATUS_CANNOT_ALLOCATE)
+#: How long a shutdown waits for the takeovers of the LUNs it hands over:
+#: one takeover deadline plus a margin for the path switch and a warm
+#: standby's activation. A takeover still running then finishes in the
+#: background; the monitor's stopped-node backstop
+#: (storage_node_monitor._take_over_luns_of_stopped_node) covers a process
+#: that exits before it does.
+LUN_HANDOVER_WAIT_SEC = constants.MULTI_ATTACH_TAKEOVER_DEADLINE_SEC + 30
+LUN_HANDOVER_POLL_SEC = 1.0
+
+
+def _lun_handover_devices(snode, cluster, db_controller) -> list:
+    """Multi-attach clusters (only): the devices whose LUN ``snode`` serves
+    (its own and LUNs it took over) in a serving state; their LUNs are taken
+    over by a standby when the node is shut down. Empty on any other
+    cluster, without a DB read."""
+    if not multi_attach.is_multi_attach(cluster):
+        return []
+    try:
+        nodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
+    except Exception as e:                                  # noqa: BLE001
+        logger.error("LUN handover of %s: nodes not read (%s); its LUNs are "
+                     "left to the node monitor", snode.get_id(), e)
+        return []
+    return [dev for _owner, dev in multi_attach.devices_served_by(nodes, snode.get_id())
+            if dev.status in _LUN_HANDOVER_STATES]
+
+
+def _lun_handover_pending(db_controller, device_id, node_id) -> bool:
+    """Whether the LUN of ``device_id`` is still served by ``node_id`` in a
+    serving state: neither taken over nor given up (set unavailable)."""
+    try:
+        dev = db_controller.get_storage_device_by_id(device_id)
+    except KeyError:
+        return False
+    return dev.serving_node() == node_id and dev.status in _LUN_HANDOVER_STATES
+
+
+def _hand_over_luns(snode, devices, reason, wait_sec=None) -> list:
+    """Planned LUN handover of a node being shut down (multi-attach only).
+
+    Takes over every LUN in ``devices`` with the node-loss machinery
+    (storage_node_monitor._lun_takeover_worker -> lun_takeover: fence at the
+    array or by reservation first, standby export, record, path switch on
+    every ONLINE node), all LUNs in parallel, and waits until each is served
+    by another node or was given up, at most ``wait_sec``. A LUN that is not
+    taken over is set unavailable by the worker, as when its node is lost
+    (after the peers' hold when no standby can read it).
+
+    Called once the node's SPDK is stopped, as after a crash: the fence then
+    cuts off nothing that still serves, and the peers' controllers hold the
+    I/O until the standby's path is added. Returns the ids of the devices
+    not settled within the wait (logged and raised as events); never
+    raises."""
+    if not devices:
+        return []
+    try:
+        from simplyblock_core.controllers import lun_takeover
+        from simplyblock_core.services import storage_node_monitor
+    except Exception as e:                                  # noqa: BLE001
+        logger.error("LUN handover of %s not started: %s; its LUNs are left to the "
+                     "node monitor", snode.get_id(), e)
+        return [dev.get_id() for dev in devices]
+    wait_sec = LUN_HANDOVER_WAIT_SEC if wait_sec is None else wait_sec
+    node_id = snode.get_id()
+    started = time.monotonic()
+    end = started + wait_sec
+    ids = [dev.get_id() for dev in devices]
+    by_id = {dev.get_id(): dev for dev in devices}
+    logger.info("LUN handover of node %s (%s): taking over %d LUN(s): %s",
+                node_id, reason, len(ids), ids)
+    for dev in devices:
+        lun_takeover._event(snode.cluster_id, dev,
+                            f"Planned handover of LUN {dev.lun_wwn} (device {dev.get_id()}) "
+                            f"from node {node_id}: {reason}")
+    threads = []
+    for device_id in ids:
+        t = threading.Thread(target=storage_node_monitor._lun_takeover_worker,
+                             args=(device_id, node_id, reason, started),
+                             name=f"lun-handover-{device_id[:8]}", daemon=True)
+        t.start()
+        threads.append(t)
+    for t in threads:
+        t.join(timeout=max(0.0, end - time.monotonic()))
+    # The record decides: a takeover another process runs (IN_PROGRESS here)
+    # counts once it has recorded the new serving node.
+    try:
+        db_controller = DBController()
+        pending = [d for d in ids if _lun_handover_pending(db_controller, d, node_id)]
+        while pending and time.monotonic() < end:
+            time.sleep(LUN_HANDOVER_POLL_SEC)
+            pending = [d for d in pending if _lun_handover_pending(db_controller, d, node_id)]
+    except Exception as e:                                  # noqa: BLE001
+        logger.error("LUN handover of %s: outcome not read: %s", node_id, e)
+        return ids
+    logger.info("LUN handover of node %s: %d of %d LUN(s) settled in %.1fs",
+                node_id, len(ids) - len(pending), len(ids), time.monotonic() - started)
+    for device_id in pending:
+        msg = (f"LUN {by_id[device_id].lun_wwn} (device {device_id}) not handed over from node "
+               f"{node_id} within {int(wait_sec)}s of its shutdown; the takeover goes on in the "
+               f"background and the node monitor retries it")
+        logger.error(msg)
+        lun_takeover._event(snode.cluster_id, by_id[device_id], msg,
+                            lun_takeover.EventObj.LEVEL_CRITICAL)
+    return pending
+
+
 def shutdown_storage_node(node_id, force=False, keep_auto_restart=False,
-                          current_restart_task_id=None):
+                          current_restart_task_id=None, hand_over_luns=True):
     """Gracefully terminate a storage node.
 
     current_restart_task_id: bare uuid of the caller's own NODE_RESTART task
@@ -11398,6 +11523,16 @@ def shutdown_storage_node(node_id, force=False, keep_auto_restart=False,
     existing auto-restart brings it back. A genuine operator `sn shutdown`
     (CLI/API) leaves the default (False) and stays stopped until an explicit
     restart.
+
+    hand_over_luns (multi-attach clusters only): the LUNs the node serves are
+    taken over by a standby right after its SPDK is stopped, and the shutdown
+    waits for that (bounded, _hand_over_luns), instead of marking their
+    devices unavailable: on 1+0 every lvstore stripes over every device, so
+    an unavailable device fails reads cluster-wide (2026-11-26 bed: LVS_2 and
+    LVS_8 went leaderless and the cluster suspended after one `sn shutdown`).
+    The same with force. Whole-cluster stops pass False: with every node
+    going down a handover would only chase the LUNs from node to node. No
+    effect on any other cluster.
 
     Flow (graceful, force=False):
       1. FTT / concurrency guards, set node status to in_shutdown.
@@ -11547,9 +11682,17 @@ def shutdown_storage_node(node_id, force=False, keep_auto_restart=False,
         JobSchedule.FN_NEW_DEV_MIG,
     ])
 
+    # Multi-attach: the LUNs this node serves, handed over to a standby once
+    # its SPDK is stopped (_hand_over_luns). Never marked unavailable, their
+    # peers' controllers never detached. Empty on any other cluster.
+    handover = _lun_handover_devices(snode, _cluster, db_controller) if hand_over_luns else []
+    # Passed to the loops only when there is one: any other shutdown calls
+    # them exactly as before.
+    handover_arg = (frozenset(dev.get_id() for dev in handover),) if handover else ()
+
     if not force:
         # Step 3 (Loop 1): broadcast device-unavailable events.
-        _broadcast_devices_unavailable(snode)
+        _broadcast_devices_unavailable(snode, *handover_arg)
 
         # Step 4 (Loop 2): detach remote_alceml / remote_jm controllers
         # on every peer still capable of receiving an RPC. Detach (vs.
@@ -11558,7 +11701,7 @@ def shutdown_storage_node(node_id, force=False, keep_auto_restart=False,
         snode = db_controller.get_storage_node_by_id(node_id)
         logger.info("Loop 2: detaching remote controllers on peers")
         try:
-            count = _detach_remote_controllers_from_peers(snode, db_controller)
+            count = _detach_remote_controllers_from_peers(snode, db_controller, *handover_arg)
             logger.info("Loop 2: detached %d controller(s) total", count)
         except Exception as e:
             logger.warning(
@@ -11608,6 +11751,9 @@ def shutdown_storage_node(node_id, force=False, keep_auto_restart=False,
     except SNodeClientException:
         logger.error('Failed to kill SPDK')
         return False
+    if handover:
+        # Multi-attach: the planned handover, as after a crash of the node.
+        _hand_over_luns(snode, handover, "node shutdown" + (" (forced)" if force else ""))
     if force:
         # Loop 1 after the kill: the devices are gone now. Without it the
         # peers keep routing writes to them until the node's restart brings
@@ -11617,7 +11763,7 @@ def shutdown_storage_node(node_id, force=False, keep_auto_restart=False,
         # the queued IO as EIO: 2026-10-29 page copy soak, iteration 21,
         # forced shutdown + restart, LVS_1 leader on a peer failed client
         # writes after 10s of writes to the dead node's devices.
-        _broadcast_devices_unavailable(snode)
+        _broadcast_devices_unavailable(snode, *handover_arg)
     pci_address = []
     for dev in snode.nvme_devices:
         if dev.bdev_type == "aio":

@@ -1174,8 +1174,9 @@ def _spawn_recovery_shutdown(node):
     def _run():
         try:
 
+            # hand_over_luns=False: the whole cluster drains to offline.
             storage_node_ops.shutdown_storage_node(
-                node_id, force=True, keep_auto_restart=True)
+                node_id, force=True, keep_auto_restart=True, hand_over_luns=False)
         except Exception as e:
             logger.error("Suspend-recovery shutdown of %s failed: %s", node_id, e)
 
@@ -2136,6 +2137,76 @@ def _take_over_luns_of_unreachable(node):
             _start_lun_takeover(dev.get_id(), node_id, "node unreachable")
 
 
+#: device id -> time.monotonic() the stopped-node backstop last started its
+#: takeover; it starts one at most every STOPPED_NODE_TAKEOVER_INTERVAL_SEC.
+_stopped_node_takeover_last: dict = {}
+STOPPED_NODE_TAKEOVER_INTERVAL_SEC = 60
+#: An IN_SHUTDOWN node's LUNs are left this long to its own shutdown, which
+#: hands them over right after it stops SPDK (shutdown_storage_node).
+STOPPED_NODE_IN_SHUTDOWN_GRACE_SEC = 30
+
+
+def _take_over_luns_of_stopped_node(node) -> list:
+    """Multi-attach clusters (only): backstop for a node that is OFFLINE, or
+    IN_SHUTDOWN with its SPDK stopped, and still the serving node of a LUN in
+    a serving state: start that LUN's takeover, as when the node is lost.
+
+    The node-loss takeovers run only when the monitor itself declares the
+    node lost (set_node_offline, set_node_unreachable, the LUN watchdog); a
+    node whose OFFLINE is written by anything else -- a planned shutdown
+    whose handover did not complete (its process exited, a takeover failed
+    to settle), the failed-restart cleanup of restart_storage_node -- left
+    its LUN unserved for good (2026-11-26 bed: one `sn shutdown` on a 1+0
+    cluster, LVS_2/LVS_8 leaderless, cluster suspended).
+
+    Never while a restart owns the node: RESTARTING is not acted on, nor an
+    OFFLINE / IN_SHUTDOWN node with a live restart claim (the restart may be
+    building the LUN's stack this moment). A restart that comes after the
+    takeover finds the LUN served elsewhere and comes back as a standby
+    (multi_attach.not_servable_here, lun_takeover.reintegrate_fenced_node),
+    as after a crash. A device that is already unavailable (a whole-cluster
+    stop, a takeover given up) is left alone. Idempotent: one takeover
+    thread per LUN (_start_lun_takeover) and one lease across processes
+    (lun_takeover). Returns the ids of the devices whose takeover it
+    started."""
+    if node.status not in (StorageNode.STATUS_OFFLINE, StorageNode.STATUS_IN_SHUTDOWN):
+        return []
+    node_id = node.get_id()
+    try:
+        cluster = db.get_cluster_by_id(node.cluster_id)
+    except Exception as e:                                  # noqa: BLE001
+        logger.debug("LUN backstop of %s: cluster not read: %s", node_id, e)
+        return []
+    if not multi_attach.is_multi_attach(cluster) or cluster.status == Cluster.STATUS_IN_ACTIVATION:
+        return []
+    served = [dev for _owner, dev in multi_attach.devices_served_by(
+        db.get_storage_nodes_by_cluster_id(node.cluster_id), node_id)
+        if dev.status in _DEV_SERVING_STATES]
+    if not served:
+        return []
+    holder = db_controller.restart_claim_active(node)
+    if holder:
+        logger.info("LUN backstop of %s: a restart owns the node (%s); its LUNs are left to it",
+                    node_id, holder)
+        return []
+    if node.status == StorageNode.STATUS_IN_SHUTDOWN and not (
+            _in_shutdown_longer_than(node, STOPPED_NODE_IN_SHUTDOWN_GRACE_SEC)
+            and _spdk_is_dead(node)):
+        return []
+    now = time.monotonic()
+    started = []
+    for dev in served:
+        device_id = dev.get_id()
+        if now - _stopped_node_takeover_last.get(device_id, -1e9) < STOPPED_NODE_TAKEOVER_INTERVAL_SEC:
+            continue
+        _stopped_node_takeover_last[device_id] = now
+        logger.warning("LUN %s (device %s) is still served by node %s, which is %s; taking it over",
+                       dev.lun_wwn, device_id, node_id, node.status)
+        _start_lun_takeover(device_id, node_id, f"node {node.status}, still serving the LUN")
+        started.append(device_id)
+    return started
+
+
 def set_node_unreachable(node):
     # Same rationale as set_node_offline: when the runner owns the node's
     # status transitions (IN_SHUTDOWN → OFFLINE → IN_RESTART → ONLINE), the
@@ -3056,6 +3127,14 @@ def check_node(snode):
     # OFFLINE once SPDK is confirmed dead so the node is restartable again.
     # auto_restart_disabled (set at shutdown) stays set, so this does NOT trigger
     # an unwanted auto-restart of an intentionally-stopped node.
+    if snode.status in (StorageNode.STATUS_OFFLINE, StorageNode.STATUS_IN_SHUTDOWN):
+        # Multi-attach: a stopped node must not stay the serving node of a LUN.
+        try:
+            _take_over_luns_of_stopped_node(snode)
+        except Exception as e:                              # noqa: BLE001
+            logger.error("LUN backstop for %s node %s failed: %s",
+                         snode.status, snode.get_id(), e)
+
     if snode.status == StorageNode.STATUS_IN_SHUTDOWN:
         if _in_shutdown_longer_than(snode, IN_SHUTDOWN_RECONCILE_GRACE_SEC) and _spdk_is_dead(snode):
             logger.warning(
