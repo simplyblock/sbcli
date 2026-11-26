@@ -326,6 +326,11 @@ class _RestartParams(BaseModel):
     reattach_volume: bool = False
     node_address: str | None = None
     new_ssd_pcie: builtins.list[str] = []
+    # The images to start the node on. Unset or empty keeps the images the node
+    # was last started with. The control plane stores what it starts a node
+    # with, so a later restart of its own keeps them as well.
+    spdk_image: str | None = None
+    spdk_proxy_image: str | None = None
 
 
 @instance_api.post('/start', name='clusters:storage-nodes:start', status_code=202, responses={202: {"content": None}})  # Same as restart for now
@@ -339,6 +344,8 @@ def restart(cluster: Cluster, storage_node: StorageNode, parameters: _RestartPar
             "node_address": parameters.node_address,
             "reattach_volume": parameters.reattach_volume,
             "new_ssd_pcie": parameters.new_ssd_pcie,
+            "spdk_image": parameters.spdk_image or None,
+            "spdk_proxy_image": parameters.spdk_proxy_image or None,
         }
     ).start()
 
