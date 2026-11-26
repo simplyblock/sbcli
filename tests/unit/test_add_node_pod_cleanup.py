@@ -20,7 +20,7 @@ from unittest.mock import MagicMock, patch
 from kubernetes.client import ApiException
 from tenacity import Retrying
 
-from simplyblock_core import storage_node_ops
+from simplyblock_core import constants, storage_node_ops
 
 # The confirm-gone poll waits 3s between attempts; a test that exercises the
 # 'pod never disappears' path must not actually sleep 30s for it.
@@ -49,6 +49,17 @@ class TestAbortStartedSpdk(unittest.TestCase):
         api.spdk_process_kill = MagicMock(side_effect=RuntimeError("api down"))
         storage_node_ops._abort_started_spdk(api, 4420, "cluster-1", "boom")
         api.spdk_process_kill.assert_called_once()
+
+    def test_leaves_the_pod_of_the_request_that_superseded_this_one(self):
+        """The agent created nothing for a superseded request. The pod on the
+        port is the later request's, and belongs to an add that is running."""
+        api = MagicMock()
+        reason = f"Failed to start spdk: {constants.SPDK_START_SUPERSEDED}: a later request arrived"
+        with patch.object(storage_node_ops, "_delete_spdk_pod_via_k8s") as direct:
+            for mode in (None, "docker", "kubernetes"):
+                storage_node_ops._abort_started_spdk(api, 4420, "cluster-1", reason, cluster_mode=mode)
+        api.spdk_process_kill.assert_not_called()
+        direct.assert_not_called()
 
 
 class TestAbortStartedSpdkInKubernetes(unittest.TestCase):

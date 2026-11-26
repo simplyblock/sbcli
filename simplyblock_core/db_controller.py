@@ -1653,41 +1653,70 @@ class DBController(metaclass=Singleton):
 
     # ---- Node-add port reservation (Single FDB Transaction) ----
 
-    def _reserve_next_nvmf_port_tx(self, tr, cluster_id, base_port, node_used, owner, now):
+    def _reserve_next_nvmf_port_tx(self, tr, cluster_id, base_port, node_used, owner, now, slot=""):
         used = set(node_used)
+        held = None
         # Read this cluster's reservations transactionally so concurrent
         # reservers conflict-retry instead of picking the same port. Drop
         # stale ones (abandoned by a crashed add) in the same transaction.
         for res in PortReservation().read_from_db(tr, id=cluster_id):
             if res.cluster_id != cluster_id:
                 continue
-            if (now - res.created_at) > constants.PORT_RESERVATION_TTL_SEC:
+            if slot and res.slot == slot:
+                if res.port in used:
+                    # A node record took the port since: the reservation has
+                    # done its work and this slot needs a new one.
+                    del tr[res.get_db_id().encode()]
+                elif held is None:
+                    # An earlier attempt for this slot. The record still being
+                    # here means nobody else was handed the port, however old
+                    # it is, so it is not aged out.
+                    held = res
+                else:
+                    # A second reservation for this slot. One slot holds one
+                    # port, so this one frees its port instead of keeping it
+                    # out of the pool under a name that will never ask for it.
+                    del tr[res.get_db_id().encode()]
+                continue
+            if res.expired(now):
                 del tr[res.get_db_id().encode()]
                 continue
             used.add(res.port)
-        port = base_port
-        while port in used:
-            port += 1
+        if held is not None:
+            port = held.port
+        else:
+            port = base_port
+            while port in used:
+                port += 1
         res = PortReservation()
         res.cluster_id = cluster_id
         res.port = port
         res.owner = owner
         res.created_at = now
+        res.slot = slot
         tr[res.get_db_id().encode()] = json.dumps(res.to_dict()).encode()
         return port
 
-    def reserve_cluster_nvmf_port(self, cluster_id, owner):
+    def reserve_cluster_nvmf_port(self, cluster_id, owner, slot=""):
         """Atomically allocate and reserve the next free NVMe-oF port for a
         node being added. The reservation makes the chosen port visible to
         concurrent allocators until the node record itself is persisted (after
         which the node's own port fields keep it reserved and the reservation
-        ages out by TTL)."""
+        ages out).
+
+        ``slot`` names what the port is for. A reservation for a slot that
+        already holds one returns that port again; see PortReservation.
+
+        The two kinds age out differently: an unnamed reservation after
+        ``PORT_RESERVATION_TTL_SEC``, a slot's after
+        ``PORT_RESERVATION_SLOT_TTL_SEC``, and a slot's never by a reservation
+        for the same slot."""
         from simplyblock_core import utils
         base_port = utils.get_nvmf_base_port(cluster_id)
         node_used = utils.get_node_nvmf_ports(cluster_id)
         now = int(time.time())
         transactional = fdb.transactional(DBController._reserve_next_nvmf_port_tx)
-        return transactional(self, self.kv_store, cluster_id, base_port, node_used, owner, now)
+        return transactional(self, self.kv_store, cluster_id, base_port, node_used, owner, now, slot)
 
     # ---- Namespaced-subsystem slot claim/release (Single FDB Transaction) ----
 

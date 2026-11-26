@@ -3931,6 +3931,22 @@ def reserve_cluster_hugepages(snode_api, nodes, cluster):
     return True
 
 
+def _rpc_port_slot(node_addr, socket, cpu_mask) -> str:
+    """The name the rpc port of one storage node is reserved under. A storage
+    node's identity on a host is (api_endpoint, socket, cpu_mask), the same
+    triple add_node matches an earlier attempt's record on."""
+    return f"rpc/{node_addr}/{socket}/{cpu_mask or ''}"
+
+
+def _slot_record(db_controller, cluster_id, node_addr, socket, cpu_mask):
+    """The storage node recorded for one slot of a host, or None. The slot is
+    the triple ``_rpc_port_slot`` names."""
+    for n in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
+        if n.api_endpoint == node_addr and n.socket == socket and (n.spdk_cpu_mask or "") == (cpu_mask or ""):
+            return n
+    return None
+
+
 class _SpdkPodStillPresent(Exception):
     """The SPDK pod has not disappeared from the API server yet."""
 
@@ -4064,12 +4080,21 @@ def _abort_started_spdk(snode_api, rpc_port, cluster_id, reason, cluster_mode=No
     fallback, and the only path in docker mode, where the control plane has
     no way to reach the container itself.
 
-    The rpc_port reservation is deliberately NOT released: it has no release
-    API and ages out by TTL (see reserve_cluster_nvmf_port), and dropping it
-    here would hand the port to a concurrent add while this pod is still
-    shutting down.
+    The rpc_port reservation is deliberately NOT released. It is held for the
+    slot (see ``_rpc_port_slot`` and PortReservation), so the retry of this add
+    gets the same port back, and dropping it here would hand the port to a
+    concurrent add while this pod is still shutting down. A slot nobody
+    retries ages out after ``PORT_RESERVATION_SLOT_TTL_SEC``.
     """
     logger.error(f"add_node aborting after SPDK start: {reason}")
+
+    if constants.SPDK_START_SUPERSEDED in str(reason):
+        # The agent started nothing for this request: a later request for the
+        # same pod arrived while this one was preparing the host. The pod on
+        # this port is that request's, and tearing it down here would take a
+        # running add's SPDK away from under it.
+        logger.warning(f"Leaving the SPDK pod on port {rpc_port} to the later add that superseded this one")
+        return
 
     if cluster_mode == "kubernetes":
         # A pod-network add created a Service before the pod, and nothing names
@@ -4670,11 +4695,8 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         # Generate the node uuid up front so it can own the port reservations
         # made before the node record itself is persisted (the new node isn't
         # written to the DB until after SPDK boots, so two concurrent adds would
-        # otherwise read the same "next free" port). reserve_cluster_nvmf_port
-        # allocates and reserves the port atomically against other concurrent
-        # node adds.
+        # otherwise read the same "next free" port).
         node_uuid = str(uuid.uuid4())
-        rpc_port = db_controller.reserve_cluster_nvmf_port(cluster_id, node_uuid)
         logger.info(f"mgmt interface is {mgmt_iface}")
 
         spdk_image = cluster.prefixed_image(spdk_image or constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
@@ -4708,7 +4730,10 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         # record is persisted only after spdk_cpu_mask is set (below), so a
         # persisted IN_CREATION orphan always carries its mask and a
         # deterministic config re-gen reproduces the same value on retry.
-        incoming_cpu_mask = node_config.get("cpu_mask")
+        # Normalised the way the record stores it (spdk_cpu_mask or ""), so a
+        # configuration without a mask matches the record an earlier attempt
+        # wrote for it, here and in the name its rpc port is reserved under.
+        incoming_cpu_mask = node_config.get("cpu_mask") or ""
         existing_healthy = None
         for n in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
             if not (n.api_endpoint == node_addr and n.socket == node_socket
@@ -4762,6 +4787,36 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                 f"socket {node_socket} (status {existing_healthy.status}); skipping duplicate add "
                 f"for this slot and checking the rest")
             continue
+
+        # The rpc port is reserved for the slot, not for this attempt, so a
+        # retry gets the port of the attempt before it. The SPDK pod is named
+        # after the port and the agent removes a pod of that name before it
+        # starts one, so the retry replaces whatever the earlier attempt left
+        # running. An attempt can die between starting its pod and writing the
+        # node record (the tasks runner is rescheduled, the agent's caller
+        # times out while the host waits on a MachineConfig rollout); with a
+        # new port each time the retry started a second pod beside the first,
+        # which no record named and which held the host's huge pages, so the
+        # retry stayed Pending on "Insufficient hugepages-2Mi" (OpenShift,
+        # 2026-11-25: pods on 4420, 4421 and 4422 for one node). Reserved here,
+        # after the cleanup above, so that a port freed by a removed
+        # IN_CREATION record is the one handed back.
+        rpc_port = db_controller.reserve_cluster_nvmf_port(
+            cluster_id, node_uuid, slot=_rpc_port_slot(node_addr, node_socket, incoming_cpu_mask))
+
+        # The cleanup above saw no record for this slot, or removed the one it
+        # saw. One that is here now was written since, by another attempt at
+        # this same slot that is still running. The reservation just made saw
+        # that record's port as taken and moved the slot to a new one, so
+        # going on would start a second pod beside the other attempt's. This
+        # attempt gives way; a retry finds the record and cleans it up or
+        # skips the slot, as the cleanup above decides.
+        overlapping = _slot_record(db_controller, cluster_id, node_addr, node_socket, incoming_cpu_mask)
+        if overlapping is not None:
+            logger.error(
+                f"Another add of {node_addr} socket {node_socket} wrote node {overlapping.get_id()} "
+                f"(status {overlapping.status}) while this one was starting; failing this add for retry")
+            return False
 
         total_mem = minimum_hp_memory
         for n in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
