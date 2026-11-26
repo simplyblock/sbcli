@@ -12962,7 +12962,7 @@ def hand_back_lvs_leadership_after_abort(snode):
     Not on sync-replication clusters nor on two-node arbitrated ones, as the
     node monitor. Never raises."""
     db = DBController()
-    out = []
+    out: list[tuple[str, str | None]] = []
     try:
         snode = db.get_storage_node_by_id(snode.get_id())
         if _sync_site(snode) or _cluster_two_node_arbitrated(snode.cluster_id, db=db):
