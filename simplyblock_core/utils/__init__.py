@@ -1757,6 +1757,8 @@ def resolve_lblk_entries(configured_entries, host_devices, *, name_fallback=True
             resolved_entry["partuuid"] = live.get("partuuid") or entry.get("partuuid", "")
         if entry.get("journal"):
             resolved_entry["journal"] = True
+        if entry.get("journal_raid"):
+            resolved_entry["journal_raid"] = True
         # A LUN the cluster's array plugin created (multi-attach): its
         # identity at the array, for multi_attach.mark_lun_devices.
         for key in ("lun_wwn", "array_lun_id"):
@@ -2541,11 +2543,37 @@ def _paired_entries(jm_dev, data_dev):
         unsafe = _unsafe_live_device_reason(part)
         if unsafe:
             raise ValueError(f"simplyblock partition {part['name']} is {unsafe}")
-    jm_entry = _lblk_entry_from_inventory(jm_dev)
-    jm_entry["journal"] = True
-    data_entry = _lblk_entry_from_inventory(data_dev)
+    jm_entry, data_entry = _journal_and_data_entries(
+        jm_dev, data_dev, journal_raid=node_utils.is_journal_raid_member(jm_dev["name"]))
     jm_entry["_pair"] = data_entry["name"]
     return jm_entry, data_entry
+
+
+def _journal_and_data_entries(jm_dev, data_dev, journal_raid=False):
+    """Config entries of the journal and the data partition of one split.
+
+    The journal entry is flagged ``journal``, and ``journal_raid`` when it is
+    a member of the node's journal raid rather than the whole journal. It
+    names the data partition that shares the device with it
+    (``data_serial``): the two are lost together, which is how the loss of a
+    data device is traced to the journal raid member that went with it."""
+    jm_entry = _lblk_entry_from_inventory(jm_dev)
+    jm_entry["journal"] = True
+    if journal_raid:
+        jm_entry["journal_raid"] = True
+    data_entry = _lblk_entry_from_inventory(data_dev)
+    jm_entry["data_serial"] = data_entry["serial"]
+    return jm_entry, data_entry
+
+
+def lblk_journal_raid_member_bdev(lblk_entries, data_serial) -> str:
+    """AIO bdev name of the journal raid member that shares its device with
+    the data device of serial ``data_serial``, or "" when there is none."""
+    for entry in lblk_entries or []:
+        if (entry.get("journal_raid") and entry.get("serial")
+                and data_serial and entry.get("data_serial") == data_serial):
+            return aio_bdev_name_for_serial(entry["serial"])
+    return ""
 
 
 def detect_lblk_devices(include_names=None, exclude_names=None,
@@ -2639,6 +2667,8 @@ def detect_lblk_devices(include_names=None, exclude_names=None,
             entry["type"] = "part"
             entry["partuuid"] = dev.get("partuuid", "")
             entry["parent_serial"] = dev.get("parent_serial", "")
+            if dev.get("legacy_serial"):
+                entry["legacy_serial"] = dev["legacy_serial"]
         result[dev["name"]] = entry
     if len(result) < min_units:
         raise ValueError(
@@ -2674,6 +2704,8 @@ def _lblk_entry_from_inventory(dev) -> dict:
         entry["type"] = "part"
         entry["partuuid"] = dev.get("partuuid", "")
         entry["parent_serial"] = dev.get("parent_serial", "")
+        if dev.get("legacy_serial"):
+            entry["legacy_serial"] = dev["legacy_serial"]
     return entry
 
 
@@ -2718,12 +2750,10 @@ def split_lblk_journal_partition(lblk_entries, jm_percent=3):
     return _replace_with_pair(lblk_entries, target_name, jm_dev, data_dev)
 
 
-def _replace_with_pair(lblk_entries, target_name, jm_dev, data_dev):
+def _replace_with_pair(lblk_entries, target_name, jm_dev, data_dev, journal_raid=False):
     """``lblk_entries`` with the entry ``target_name`` replaced, at its
     position, by the journal and the data partition it was split into."""
-    jm_entry = _lblk_entry_from_inventory(jm_dev)
-    jm_entry["journal"] = True
-    data_entry = _lblk_entry_from_inventory(data_dev)
+    jm_entry, data_entry = _journal_and_data_entries(jm_dev, data_dev, journal_raid=journal_raid)
     result = {}
     for name, entry in lblk_entries.items():
         if name == target_name:
@@ -2765,6 +2795,69 @@ def split_lblk_journal_disk(lblk_entries, jm_percent=3):
                 f"journal partition and a data partition")
     jm_dev, data_dev = node_utils.partition_disk_for_journal(target_name, jm_bytes)
     return _replace_with_pair(lblk_entries, target_name, jm_dev, data_dev)
+
+
+_MIB = 1024 * 1024
+
+
+def lblk_journal_raid_member_size(unit_sizes, jm_percent=3) -> int:
+    """Size of each journal raid member of a node whose devices have
+    ``unit_sizes``, in bytes, a whole number of MiB.
+
+    The journal the node can use is ``jm_percent`` of its total selected
+    capacity, floored at LBLK_JM_MIN_SIZE. Every device contributes a member
+    of the same size (jm_raid.member_size_for_usable gives it), and none
+    more than LBLK_JM_SPLIT_MAX_FRACTION of itself. Pure."""
+    from simplyblock_core import jm_raid
+
+    sizes = [int(s) for s in unit_sizes]
+    total_size = sum(sizes)
+    usable = max(total_size * int(jm_percent) // 100, constants.LBLK_JM_MIN_SIZE)
+    member = jm_raid.member_size_for_usable(usable, len(sizes))
+    member = -(-member // _MIB) * _MIB
+    max_member = int(min(sizes) * constants.LBLK_JM_SPLIT_MAX_FRACTION)
+    if member > max_member:
+        raise ValueError(
+            f"journal needs {usable} bytes ({jm_percent}% of {total_size}, "
+            f"min {constants.LBLK_JM_MIN_SIZE}), which takes {member} bytes of each of "
+            f"the node's {len(sizes)} devices, but the smallest one ({min(sizes)} bytes) "
+            f"may contribute at most {max_member}; provide larger devices or lower "
+            f"--jm-percent")
+    return member
+
+
+def split_lblk_journal_raid(lblk_entries, member_bytes, names=None):
+    """Give the devices ``names`` of a node (all of them by default) a journal
+    raid member each: every one is split into a journal partition of
+    ``member_bytes`` and a data partition covering the remainder, a partition
+    within its own bounds and a whole disk with a new partition table.
+
+    The node's journal is the RAID 0+1 over those equal members
+    (simplyblock_core/jm_raid.py), so it survives the loss of a device and
+    its writes are spread over all of them.
+
+    Runs on the storage node during `sn configure`. Returns the updated
+    ``{name: entry}`` dict, each split device replaced at its position by its
+    journal entry (flagged ``journal`` and ``journal_raid``) and its data
+    entry. A device that fails to split raises ValueError and leaves the ones
+    before it split; a configure that runs again recognises those
+    (detect_lblk_devices) and lblk_node_journal_layout splits the rest to the
+    same size."""
+    result = dict(lblk_entries)
+    for name in list(names if names is not None else lblk_entries):
+        entry = result[name]
+        if entry.get("type") == "part":
+            logger.info(f"Splitting partition {name} into a {member_bytes}-byte "
+                        f"journal raid member and a data partition")
+            jm_dev, data_dev = node_utils.split_partition_for_journal(
+                name, member_bytes, journal_name=node_utils.SB_JOURNAL_RAID_PARTITION_NAME)
+        else:
+            logger.info(f"Partitioning disk {name} into a {member_bytes}-byte "
+                        f"journal raid member and a data partition")
+            jm_dev, data_dev = node_utils.partition_disk_for_journal(
+                name, member_bytes, journal_name=node_utils.SB_JOURNAL_RAID_PARTITION_NAME)
+        result = _replace_with_pair(result, name, jm_dev, data_dev, journal_raid=True)
+    return result
 
 
 def previous_lblk_dedicated_journal_serials(config_paths=None) -> set:
@@ -2818,12 +2911,23 @@ def lblk_node_journal_layout(lblk_entries, jm_percent=3, journal_device=False,
 
     The default is a journal partition carved from the node's own devices:
 
-    - A node that already has a journal-flagged entry (an earlier split,
-      reused by detect_lblk_devices) keeps it.
-    - A node with partitions gets its smallest partition split into a journal
-      and a data partition (split_lblk_journal_partition).
-    - A node of whole disks gets its smallest disk partitioned into a journal
-      and a data partition (split_lblk_journal_disk).
+    - A node of two or more devices, partitions and whole disks alike, carves
+      it from all of them: every device gets a journal partition of the same
+      size, and the journal is the RAID 0+1 over those members
+      (split_lblk_journal_raid). ``jm_percent`` of the node's capacity is the
+      journal the node can use, not the space taken: see
+      lblk_journal_raid_member_size.
+    - A node whose devices already carry such members (an earlier split,
+      reused by detect_lblk_devices) keeps them. A device of it without one
+      -- a split that failed half way, a device added to the selection -- is
+      split to the size of the existing members.
+    - A node of a single device has nothing to mirror to: its partition
+      (split_lblk_journal_partition) or disk (split_lblk_journal_disk) is
+      split into the node's one journal partition and a data partition.
+    - A node that already has a single journal partition keeps it, whatever
+      the number of its devices. That is the layout of every node configured
+      before the journal raid, whose other devices hold data from their first
+      block on.
 
     A node of whole disks keeps a dedicated journal device instead -- the
     smallest disk, chosen at add-node -- when that was asked for
@@ -2835,15 +2939,47 @@ def lblk_node_journal_layout(lblk_entries, jm_percent=3, journal_device=False,
     block of its disks, invisible to blkid.
 
     Returns the updated ``{name: entry}`` dict of the node."""
-    if not lblk_entries or any(e.get("journal") for e in lblk_entries.values()):
+    if not lblk_entries:
         return lblk_entries
+    journal = {n: e for n, e in lblk_entries.items() if e.get("journal")}
+    members = {n: e for n, e in journal.items() if e.get("journal_raid")}
+    if journal and not members:
+        return lblk_entries
+    if members:
+        if len(members) != len(journal):
+            raise ValueError(
+                f"devices {sorted(journal)} mix journal raid members with a single "
+                f"journal partition; they do not belong to one node")
+        paired = {e.get("data_serial") for e in members.values()}
+        unsplit = [n for n, e in lblk_entries.items()
+                   if n not in members and e.get("serial") not in paired]
+        if not unsplit:
+            return lblk_entries
+        in_use = sorted(n for n in unsplit
+                        if node_utils.simplyblock_data_signature(n) is not False)
+        if in_use:
+            raise ValueError(
+                f"devices {in_use} carry simplyblock data or cannot be read, but have no "
+                f"journal raid member like the node's other devices {sorted(members)}; "
+                f"they are not split")
+        member_bytes = min(e["size"] for e in members.values())
+        logger.info(f"devices {unsplit} join a node whose devices carry journal raid "
+                    f"members of {member_bytes} bytes; splitting them to match")
+        return split_lblk_journal_raid(lblk_entries, member_bytes, names=unsplit)
+
+    mirrored = len(lblk_entries) >= 2
     if any(e.get("type") == "part" for e in lblk_entries.values()):
         for name, entry in lblk_entries.items():
-            if entry.get("type") == "part" and node_utils.simplyblock_data_signature(name) is not False:
+            if not (mirrored or entry.get("type") == "part"):
+                continue
+            if node_utils.simplyblock_data_signature(name) is not False:
                 raise ValueError(
-                    f"partition {name} carries simplyblock data or cannot be read, but "
+                    f"device {name} carries simplyblock data or cannot be read, but "
                     f"is not a journal or data partition of a previous split; it is not "
                     f"split")
+        if mirrored:
+            return split_lblk_journal_raid(lblk_entries, lblk_journal_raid_member_size(
+                [e["size"] for e in lblk_entries.values()], jm_percent=jm_percent))
         return split_lblk_journal_partition(lblk_entries, jm_percent=jm_percent)
     if journal_device:
         logger.info(f"devices {sorted(lblk_entries)}: dedicated journal device requested")
@@ -2862,17 +2998,25 @@ def lblk_node_journal_layout(lblk_entries, jm_percent=3, journal_device=False,
             f"such a disk for a new node, clear its first MiB (blkdiscard or dd) "
             f"before the configure")
         return lblk_entries
+    if mirrored:
+        return split_lblk_journal_raid(lblk_entries, lblk_journal_raid_member_size(
+            [e["size"] for e in lblk_entries.values()], jm_percent=jm_percent))
     return split_lblk_journal_disk(lblk_entries, jm_percent=jm_percent)
 
 
 def node_config_device_count(node) -> int:
     """Number of storage devices a node-config entry carries — ssd_pcis for
-    nvme mode, lblk_devices for lblk mode. A node configured with
+    nvme mode, lblk_devices for lblk mode. The members of an lblk journal
+    raid count as the one journal device they form. A node configured with
     --lblk-array-only carries none: its array plugin creates its journal LUN
     and data LUN at add-node, so it counts those two."""
     if node.get("lblk_array_only"):
         return 2
-    return len(node.get("lblk_devices") or []) or len(node.get("ssd_pcis") or [])
+    lblk = node.get("lblk_devices") or []
+    members = sum(1 for e in lblk if e.get("journal_raid"))
+    if members:
+        return len(lblk) - members + 1
+    return len(lblk) or len(node.get("ssd_pcis") or [])
 
 
 def lblk_device_serials(lblk_devices) -> set[str]:
@@ -2884,8 +3028,25 @@ def lblk_device_serials(lblk_devices) -> set[str]:
 
     Takes the list itself, so it serves both a node-config entry's
     ``lblk_devices`` and a StorageNode record's.
+
+    A partition counts under every id it is known by (utils/lblk_identity.py),
+    because the two sides of a comparison may hold different ones: a node that
+    recorded a partition under a made-up id sends that id, while the node
+    config the agent rewrote carries the PARTUUID-based serial. So an entry
+    also counts under the made-up id it had (``legacy_serial``), and under
+    the PARTUUID-based serial that its recorded disk serial and PARTUUID give
+    -- the only id left in common once a reboot renamed the partition and
+    changed the made-up id the agent computes.
     """
-    return {e["serial"] for e in (lblk_devices or []) if e.get("serial")}
+    serials = set()
+    for entry in lblk_devices or []:
+        if entry.get("serial"):
+            serials.add(entry["serial"])
+        if entry.get("legacy_serial"):
+            serials.add(entry["legacy_serial"])
+        if entry.get("type") == "part" and entry.get("parent_serial") and entry.get("partuuid"):
+            serials.add(f"{entry['parent_serial']}-part-{entry['partuuid'].lower()}")
+    return serials
 
 
 def node_config_min_sys_memory(node, extra_capacity=0) -> int:
@@ -3980,11 +4141,19 @@ def validate_node_config(node):
                 f"partitions or SSDs per node; node {node.get('socket')} carries "
                 f"{len(lblk_devices)}")
             return False
+        # One journal partition, or the members of one journal raid.
         journal_entries = [e.get("name") for e in lblk_devices if e.get("journal")]
-        if len(journal_entries) > 1:
+        raid_members = [e.get("name") for e in lblk_devices if e.get("journal_raid")]
+        if len(journal_entries) > 1 and raid_members != journal_entries:
             logger.error(
                 f"lblk_devices carries more than one journal-flagged entry "
-                f"{journal_entries} in node: {node.get('socket')}")
+                f"{journal_entries} that is not a journal raid member "
+                f"('journal_raid') in node: {node.get('socket')}")
+            return False
+        if len(raid_members) == 1:
+            logger.error(
+                f"lblk_devices carries a single journal raid member {raid_members} "
+                f"in node: {node.get('socket')}; a journal raid needs at least two")
             return False
 
     if not node["isolated"]:

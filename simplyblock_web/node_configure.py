@@ -235,16 +235,17 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         '--lblk-journal-device',
         help='With --lblk and whole disks: dedicate each node\'s smallest disk to the '
-             'journal instead of partitioning it into a journal partition and a data '
-             'partition (the default). Needs at least two disks per node',
+             'journal instead of partitioning every disk into a journal partition and a '
+             'data partition (the default). Needs at least two disks per node',
         action='store_true',
         dest='lblk_journal_device',
     )
     parser.add_argument(
         '--jm-percent',
-        help='Journal size in percent of the node\'s total selected capacity when the '
-             'journal is carved from a selected partition or disk (requires --lblk, not with '
-             '--lblk-journal-device)',
+        help='Usable journal size in percent of the node\'s total selected capacity when '
+             'the journal is carved from the selected partitions or disks (requires --lblk, '
+             'not with --lblk-journal-device). On a node of several devices the journal is '
+             'mirrored over a journal partition of the same size on every device',
         type=int,
         default=3,
         dest='jm_percent',

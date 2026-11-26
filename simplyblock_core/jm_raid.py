@@ -87,6 +87,22 @@ def plan_topology(members: list[str], layout: str = LAYOUT_RAID01) -> dict:
     return {"level": RAID_0PLUS1, "base": None, "legs": [a, b]}
 
 
+def member_size_for_usable(usable_bytes: int, member_count: int) -> int:
+    """Size every member must have for a RAID 0+1 JM of ``usable_bytes``.
+
+    The members are all of one size (a raid uses each member only up to the
+    size of its smallest one). The top raid1 is as large as its smaller leg,
+    and that leg stripes ``member_count // 2`` members, so the usable size is
+    ``member_size * (member_count // 2)``: 2 members of S give S, 3 give S (the
+    third one's S is unused), 4 give 2S, 5 give 2S. A single member is the
+    journal itself.
+    """
+    if member_count < 1:
+        raise ValueError("cannot size a JM RAID over zero devices")
+    width = max(1, member_count // 2)
+    return -(-int(usable_bytes) // width)
+
+
 def is_balanced(legs: list[list]) -> bool:
     """True if the two legs' member counts differ by at most one."""
     return abs(len(legs[0]) - len(legs[1])) <= 1
@@ -148,6 +164,37 @@ def leg_of(member: str, leg_bdevs: list[str], leg_members: list[list[str]]) -> s
         if member in members:
             return leg
     return member
+
+
+def mountable_top_legs(top_legs: list[str], missing: list[str], stale: list[str]) -> list[str]:
+    """The top-raid1 base bdevs a JM can be assembled from when some of them
+    cannot be built, in their planned order; empty when none holds the
+    current journal.
+
+    ``top_legs`` are the base bdevs of the planned geometry, ``missing`` those
+    of them that cannot be built because a member drive is absent, ``stale``
+    those recorded as having missed writes. The geometry is never re-planned
+    over the drives that happen to be there: the raid has no superblock, so
+    the surviving drives only read back correctly in the positions they were
+    written in. A leg of a mirror is a complete copy on its own, so the JM
+    runs on what is left -- unless every leg left is stale, in which case
+    there is no current copy on this node at all.
+    """
+    present = [leg for leg in top_legs if leg not in missing]
+    if len(present) == len(top_legs):
+        return present
+    if all(leg in stale for leg in present):
+        return []
+    return present
+
+
+def runs_on_single_leg(raid_bdev: str, members: list[str], leg_bdevs: list[str]) -> bool:
+    """True if a multi-drive JM was assembled on one surviving leg alone, with
+    no top raid1 (see mountable_top_legs): its ``raid_bdev`` is then that leg
+    -- a member partition or a raid0 -- and not a mirror a leg can be added
+    to or removed from. The mirror comes back on the next node restart that
+    finds every member."""
+    return len(members) > 1 and (raid_bdev in members or raid_bdev in leg_bdevs)
 
 
 def leg_in_sync(raid_info: dict, leg: str) -> bool:

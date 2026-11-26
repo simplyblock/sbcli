@@ -18,6 +18,7 @@ from simplyblock_core.models.nvme_device import JMDevice, NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.prom_client import PromClient
 from simplyblock_core.rpc_client import RPCClient, RPCException, RPCRemoteError
+from simplyblock_core.snode_client import SNodeClientException
 from simplyblock_core.utils.helpers import single_or_none
 
 # Debounce window for the per-device flap counter: two countable
@@ -1039,8 +1040,14 @@ def restart_device(device_id, force=False):
         else:
             # looking for jm partition
             rpc_client = snode.rpc_client()
-            jm_dev_part = f"{dev.nvme_bdev[:-1]}1"
-            ret = rpc_client.bdev_get(jm_dev_part)
+            if dev.bdev_type == "aio":
+                # lblk: the journal partition of the device is an AIO bdev of
+                # its own, dropped when the device went away.
+                jm_dev_part = _jm_raid_member_of_device(snode, dev)
+                ret = bool(jm_dev_part) and _ensure_aio_jm_member(snode, dev, jm_dev_part, rpc_client)
+            else:
+                jm_dev_part = f"{dev.nvme_bdev[:-1]}1"
+                ret = rpc_client.bdev_get(jm_dev_part)
             if ret:
                 logger.info(f"JM part found: {jm_dev_part}")
                 jm_down = snode.jm_device.status in [JMDevice.STATUS_UNAVAILABLE, JMDevice.STATUS_REMOVED]
@@ -1283,35 +1290,149 @@ def _remove_jm_raid_leg_of_device(snode: StorageNode, device: NVMeDevice, rpc_cl
     without a superblock on node restart, so the stale leg is then mounted as
     current and the JM alceml fails to load (SFAM-2843).
     """
-    dev_to_remove = None
-    for part in snode.jm_device.jm_nvme_bdev_list:
-        if _on_controller(part, device.nvme_controller):
-            dev_to_remove = part
-            break
-
+    dev_to_remove = _jm_raid_member_of_device(snode, device)
     if not dev_to_remove:
         return
 
     if len(snode.jm_device.jm_nvme_bdev_list) == 1:
         # Single-drive JM: raid_bdev is the bare partition, not a raid.
-        if not rpc_client.bdev_get(dev_to_remove):
+        if not _jm_raid_member_present(snode, device, dev_to_remove, rpc_client):
             set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
         return
 
+    jm = snode.jm_device
+    if jm_raid.runs_on_single_leg(jm.raid_bdev, jm.jm_nvme_bdev_list, jm.jm_leg_bdevs):
+        # No mirror to take a leg out of: the JM runs on the one leg a restart
+        # found complete. Losing a member of that leg is losing the JM; a
+        # member of the other leg was not in use.
+        surviving = jm_raid.leg_of(dev_to_remove, jm.jm_leg_bdevs, jm.jm_leg_members) == jm.raid_bdev
+        if surviving and not _jm_raid_member_present(snode, device, dev_to_remove, rpc_client):
+            set_jm_device_state(jm.get_id(), JMDevice.STATUS_UNAVAILABLE)
+        return
+    # The top raid1 holds the member itself, or the raid0 leg it sits in. Only
+    # an lblk member is looked up by its leg: the NVMe path matches the
+    # partition name alone, as it always has, so a drive lost from a raid0 leg
+    # of three or more NVMe drives is left to the raid.
+    leg = dev_to_remove
+    if device.bdev_type == "aio":
+        leg = jm_raid.leg_of(dev_to_remove, jm.jm_leg_bdevs, jm.jm_leg_members)
     raid_found = False
     for raid_info in rpc_client.bdev_raid_get_bdevs():
         if raid_info["name"] == snode.jm_device.raid_bdev:
             raid_found = True
             base_bdevs = raid_info.get("base_bdevs_list", [])
-            if any(bdev["name"] == dev_to_remove for bdev in base_bdevs):
-                if rpc_client.bdev_get(dev_to_remove):
+            if any(bdev["name"] in (dev_to_remove, leg) for bdev in base_bdevs):
+                if _jm_raid_member_present(snode, device, dev_to_remove, rpc_client):
                     logger.info(
                         "JM partition %s is still present: keeping it in %s",
                         dev_to_remove, snode.jm_device.raid_bdev)
                 else:
                     remove_from_jm_device(snode.jm_device.get_id(), dev_to_remove)
+                    _delete_gone_aio_jm_member(device, dev_to_remove, rpc_client)
     if not raid_found:
         set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
+
+
+def _jm_raid_member_of_device(snode: StorageNode, device: NVMeDevice) -> str:
+    """The JM raid member that shares the physical device with ``device``, or
+    "" when the JM raid has none on it.
+
+    On an NVMe drive it is the JM partition of the same controller. On an
+    lblk node the journal partition and the data partition of a device are
+    two block devices, each an AIO bdev of its own, and the node's device
+    list (StorageNode.lblk_devices) records which belong together."""
+    members = snode.jm_device.jm_nvme_bdev_list
+    if device.bdev_type == "aio":
+        member = utils.lblk_journal_raid_member_bdev(snode.lblk_devices, device.serial_number)
+        return member if member in members else ""
+    for part in members:
+        if _on_controller(part, device.nvme_controller):
+            return part
+    return ""
+
+
+def _jm_raid_member_present(snode: StorageNode, device: NVMeDevice, member: str,
+                            rpc_client: RPCClient) -> bool:
+    """Whether the JM raid member ``member`` on the device of ``device`` is
+    still physically there.
+
+    SPDK unregisters the bdevs of a hot-removed NVMe drive, so the bdev tells.
+    An AIO bdev outlives its block device, so for an lblk node the host's
+    block-device inventory tells. A member whose presence cannot be
+    determined counts as present: taking a present member out of the raid is
+    the hazard (SFAM-2843), leaving a gone one in is not -- the raid drops a
+    member that fails its IO."""
+    if device.bdev_type != "aio":
+        return bool(rpc_client.bdev_get(member))
+    serials = {e.get("serial") for e in snode.lblk_devices or []
+               if e.get("journal_raid") and e.get("data_serial") == device.serial_number}
+    try:
+        inventory, _ = snode.client(timeout=10, retry=1).get_blockdevices()
+    except SNodeClientException as e:
+        logger.warning("block-device inventory of node %s failed, keeping JM raid member %s: %s",
+                       snode.get_id(), member, e)
+        return True
+    if not inventory:
+        return True
+    return any(d.get("serial") in serials for d in inventory)
+
+
+def _delete_gone_aio_jm_member(device: NVMeDevice, member: str, rpc_client: RPCClient) -> None:
+    """Drop the AIO bdev of a JM raid member whose block device is gone. It
+    still holds the device node that went away; a member that comes back is
+    opened anew (_ensure_aio_jm_member)."""
+    if device.bdev_type != "aio":
+        return
+    try:
+        # By the engine the bdev was opened with (aio, or uring for a
+        # device-mapper node); a bdev that does not say is an aio one.
+        io_engine = utils.bdev_io_engine(rpc_client.bdev_get(member)) or constants.LBLK_IO_ENGINE_AIO
+        utils.delete_lblk_bdev(rpc_client, member, io_engine)
+    except RPCException as e:
+        logger.warning("Failed to delete the AIO bdev of gone JM raid member %s: %s", member, e)
+
+
+def _ensure_aio_jm_member(snode: StorageNode, device: NVMeDevice, member: str,
+                          rpc_client: RPCClient) -> bool:
+    """Make sure the AIO bdev of the JM raid member on the device of
+    ``device`` exists, opening its block device again when it was dropped
+    (_delete_gone_aio_jm_member). Returns whether the bdev is there."""
+    if rpc_client.bdev_get(member):
+        return True
+    entry = next((e for e in snode.lblk_devices or []
+                  if e.get("journal_raid") and e.get("data_serial") == device.serial_number), None)
+    if entry is None:
+        return False
+    try:
+        inventory, _ = snode.client(timeout=30, retry=1).get_blockdevices()
+    except SNodeClientException as e:
+        logger.warning("block-device inventory of node %s failed, JM raid member %s "
+                       "stays out of the raid: %s", snode.get_id(), member, e)
+        return False
+    live = next((d for d in inventory or [] if d.get("serial") == entry.get("serial")), None)
+    if live is None:
+        logger.warning("JM raid member %s (serial %s) is not on the host", member, entry.get("serial"))
+        return False
+    filename = entry.get("path") or live.get("by_id_path") or live.get("device_path")
+    # The member holds a part of the journal raid: it is opened again with the
+    # block size and the I/O engine it was created with (utils.addAioDevices
+    # recorded both on the node's lblk_devices entry).
+    serial = entry.get("serial")
+    io_engine = utils.choose_lblk_io_engine(
+        utils.recorded_lblk_io_engine(snode, serial),
+        utils.lblk_io_engine_for({**live, "filename": filename}),
+        what=f"JM raid member {member}")
+    try:
+        utils.create_aio_bdev(rpc_client, member, filename,
+                              utils.recorded_aio_block_size(snode, serial) or 0,
+                              io_engine=io_engine)
+    except Exception as e:  # create_aio_bdev raises a plain Exception for every failure
+        logger.warning("JM raid member %s could not be opened on %s, it stays out of the "
+                       "raid: %s", member, filename, e)
+        return False
+    rpc_client.bdev_examine(member)
+    rpc_client.bdev_wait_for_examine()
+    return bool(rpc_client.bdev_get(member))
 
 
 def _on_controller(bdev_name: str, nvme_controller: str) -> bool:
@@ -1344,6 +1465,13 @@ def _readd_jm_raid_leg(snode: StorageNode, member: str, rpc_client: RPCClient) -
     from the surviving leg. The leg stays in stale_jm_legs until
     clear_rebuilt_jm_legs() sees the rebuild finish."""
     jm = snode.jm_device
+    if jm_raid.runs_on_single_leg(jm.raid_bdev, jm.jm_nvme_bdev_list, jm.jm_leg_bdevs):
+        # The JM runs on one leg with no raid1 above it, so there is nothing
+        # to add the returning leg to. The mirror is re-created, and this leg
+        # rebuilt as stale, by the node restart that finds every member.
+        logger.warning("JM of node %s runs on leg %s alone: the mirror with %s is "
+                       "re-created on node restart", snode.get_id(), jm.raid_bdev, member)
+        return
     leg = jm_raid.leg_of(member, jm.jm_leg_bdevs, jm.jm_leg_members)
     raid = next((r for r in rpc_client.bdev_raid_get_bdevs() if r["name"] == jm.raid_bdev), None)
     if raid is None:
@@ -1808,18 +1936,31 @@ def restart_jm_device(device_id, force=False, format_alceml=False):
     if snode.jm_device:
         rpc_client = snode.rpc_client()
         if snode.jm_device.raid_bdev:
-            jm_nvme_bdevs = []
-            for dev in snode.nvme_devices:
-                if dev.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_NEW]:
-                    continue
-                dev_part = f"{dev.nvme_bdev[:-2]}p1"
-                if rpc_client.bdev_get(dev_part):
-                    if dev_part not in jm_nvme_bdevs:
-                        jm_nvme_bdevs.append(dev_part)
+            # The raid is rebuilt over the member list it was first built
+            # with, in that order -- the list is the raid geometry -- and the
+            # members that are not there are named as missing, not left out
+            # (storage_node_ops._create_jm_stack_on_raid).
+            jm_nvme_bdevs = list(snode.jm_device.jm_nvme_bdev_list)
+            jm_missing = [m for m in jm_nvme_bdevs if not rpc_client.bdev_get(m)]
+            if not jm_nvme_bdevs:
+                # A record without a member list: the members are the JM
+                # partitions of the node's drives.
+                for dev in snode.nvme_devices:
+                    if dev.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_NEW]:
+                        continue
+                    dev_part = f"{dev.nvme_bdev[:-2]}p1"
+                    if rpc_client.bdev_get(dev_part):
+                        if dev_part not in jm_nvme_bdevs:
+                            jm_nvme_bdevs.append(dev_part)
 
-            if len(jm_nvme_bdevs) > 0:
-                new_jm = storage_node_ops._create_jm_stack_on_raid(
-                    rpc_client, jm_nvme_bdevs, snode, after_restart=not format_alceml)
+            if len(jm_nvme_bdevs) > len(jm_missing):
+                try:
+                    new_jm = storage_node_ops._create_jm_stack_on_raid(
+                        rpc_client, jm_nvme_bdevs, snode, after_restart=not format_alceml,
+                        missing=jm_missing)
+                except storage_node_ops.JMRaidNoCurrentLeg as e:
+                    logger.error("failed to create jm stack: %s", e)
+                    return False
                 if not new_jm:
                     logger.error("failed to create jm stack")
                     return False

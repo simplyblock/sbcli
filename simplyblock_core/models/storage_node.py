@@ -355,7 +355,9 @@ class StorageNode(BaseNodeObject):
         if Settings().tls_connect != "disabled":
             port = self.api_endpoint.rsplit(":", 1)[1]
             host = f"{self._k8s_service_host(self.snode_api_service)}:{port}"
-        return SNodeClient(host, **kwargs)
+        client = SNodeClient(host, **kwargs)
+        client.recorded_lblk_devices = self.lblk_devices
+        return client
 
     def from_dict(self, data):
         # lvstore_stack_secondary/_tertiary were a secondary bdev STACK

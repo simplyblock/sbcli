@@ -105,7 +105,9 @@ class TestBuildResolvesGeometry:
         src = self._src()
         i = src.index("jm_raid.RAID_1_NWAY")
         window = src[i:i + 400]
-        assert 'bdev_raid_create(raid_bdev, plan["members"], "1")' in window
+        # Every member is a base bdev of the one raid1 (built from top_legs;
+        # tests/unit/test_jm_raid_stack.py checks the calls).
+        assert 'top_legs = list(plan["members"])' in window
 
     def test_legacy_keeps_the_record_legacy_shaped(self):
         """leg_bdevs/leg_members must stay empty so the device is not
