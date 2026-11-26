@@ -41,8 +41,13 @@ comparison happens where the bytes are.
 import json
 import re
 import shlex
+import socket
+import ssl
+import subprocess
 import threading
 import time
+import urllib.error
+import urllib.request
 
 from logger_config import setup_logger
 
@@ -72,6 +77,12 @@ class S3ProbeError(S3EvidenceError):
 #: ``S3BucketFinalizer`` in ``operator/api/v1alpha2/s3bucket_types.go``.
 S3BUCKET_FINALIZER = "storage.simplyblock.io/s3bucket"
 
+#: The ObjectStore's finalizer while an S3Bucket still references it, and the
+#: condition that names those buckets (``design-objectstore.md`` §4, the
+#: deletion paragraph).
+OBJECTSTORE_BUCKETS_FINALIZER = "storage.simplyblock.io/objectstore-buckets"
+CONDITION_BUCKETS_REMAINING = "BucketsRemaining"
+
 #: ``S3BucketOwnerAnnotation``, same file. Present only on a bucket the
 #: gateway created for a ``CreateBucket`` request, absent on a bucket created
 #: directly through the CRD.
@@ -82,6 +93,14 @@ S3BUCKET_OWNER_ANNOTATION = "storage.simplyblock.io/s3-owner"
 #: and how this suite finds them without reading the Deployment
 #: (``objectstore_types.go``, the type's own doc comment).
 GATEWAY_LABEL = "storage.simplyblock.io/objectstore"
+
+#: The operator's own Deployment and the label its pods carry, from the
+#: operator chart's ``templates/simplyblock-operator.yaml``. Not
+#: ``control-plane=controller-manager``: that is kubebuilder's scaffold label,
+#: which the chart does not use for the operator, and which the csi-addons and
+#: ramen controllers in the same chart do carry.
+OPERATOR_DEPLOYMENT = "simplyblock-operator"
+OPERATOR_SELECTOR = "app=simplyblock-operator"
 
 #: ``S3BucketPhase`` / ``ObjectStorePhase`` enums. ``Deleting`` exists only on
 #: a bucket.
@@ -111,6 +130,12 @@ METRIC_BUCKET_PHASE = "simplyblock_objectstore_bucket_phase_state"
 METRIC_DELIVERY_CALLS = "simplyblock_objectstore_mount_delivery_calls_total"
 METRIC_STORE_PHASE = "simplyblock_objectstore_phase_state"
 METRIC_READY_REPLICAS = "simplyblock_objectstore_ready_replicas_count"
+
+#: Seconds between the operator's rebuilds of the two phase gauges, so a
+#: phase reads up to this stale. Mirrors ``DefaultCollectInterval`` in the
+#: operator's ``internal/controllers/objectstore/collector.go``; the two must
+#: move together.
+PHASE_COLLECT_INTERVAL = 30
 
 
 # ── The in-pod S3 client ─────────────────────────────────────────────────
@@ -581,32 +606,154 @@ def service_host(store, namespace):
 
 # ── Operator metrics ─────────────────────────────────────────────────────
 
-def scrape_operator_metrics(k8s, namespace=None, selector="control-plane=controller-manager"):
+#: The operator pod's container port for the manager's controller-runtime
+#: secure metrics endpoint (self-signed certificate). The operator chart
+#: declares it only when installed with ``operatorMetrics.enabled=true`` (off
+#: by default), and puts no Service in front of it: the metrics belong to one
+#: pod. Addressed by name so the chart's ``operatorMetrics.port`` can change.
+#: The chart always creates the ClusterRole that grants GET on the
+#: ``/metrics`` nonResourceURL. The endpoint authenticates the bearer token
+#: and authorizes it against that URL, so an anonymous scrape is refused.
+OPERATOR_METRICS_PORT = "metrics"
+OPERATOR_METRICS_READER_ROLE = "simplyblock-operator-metrics-reader"
+
+#: The identity this suite scrapes as. Created on first use and left in
+#: place: it holds no permission beyond reading ``/metrics``.
+METRICS_SCRAPER_SA = "e2e-metrics-scraper"
+
+
+def ensure_metrics_scraper(k8s, namespace):
+    """Apply the scraper's ServiceAccount and its binding. Idempotent."""
+    k8s.apply_yaml(
+        f"apiVersion: v1\n"
+        f"kind: ServiceAccount\n"
+        f"metadata:\n"
+        f"  name: {METRICS_SCRAPER_SA}\n"
+        f"  namespace: {namespace}\n",
+        namespace=namespace)
+    k8s.apply_yaml_cluster_scoped(
+        f"apiVersion: rbac.authorization.k8s.io/v1\n"
+        f"kind: ClusterRoleBinding\n"
+        f"metadata:\n"
+        f"  name: {METRICS_SCRAPER_SA}-{namespace}\n"
+        f"roleRef:\n"
+        f"  apiGroup: rbac.authorization.k8s.io\n"
+        f"  kind: ClusterRole\n"
+        f"  name: {OPERATOR_METRICS_READER_ROLE}\n"
+        f"subjects:\n"
+        f"- kind: ServiceAccount\n"
+        f"  name: {METRICS_SCRAPER_SA}\n"
+        f"  namespace: {namespace}\n")
+
+
+def scrape_operator_metrics(k8s, namespace=None):
     """Raw Prometheus text from the operator's ``/metrics``.
 
-    Scraped from inside the operator pod rather than through a Service: the
-    endpoint is commonly protected by kube-rbac-proxy, and ``curl`` from the
-    pod's own localhost skips a layer that has nothing to do with what is
-    being measured.
+    Fetched from the test host through a port-forward to the operator pod's
+    :data:`OPERATOR_METRICS_PORT`, with a bearer token for
+    :data:`METRICS_SCRAPER_SA`. Not from inside the operator pod: its image
+    is ubi-minimal and has no ``curl``, and the endpoint wants a token that
+    pod's own identity is not authorized to present.
+
+    Raises :class:`S3ProbeError` when the scrape itself fails, naming the
+    HTTP status or the transport error, and when there is not exactly one
+    live operator pod: the samples are that pod's own, so picking one of
+    several would read an arbitrary replica. An empty result is never returned,
+    so a caller can tell "the scrape failed" from "the metric family has no
+    samples".
     """
     ns = namespace or k8s.namespace
-    out, _ = k8s._exec_kubectl(
-        f"kubectl get pods -n {ns} -l {selector} "
-        f"-o jsonpath='{{.items[0].metadata.name}}' 2>/dev/null || true",
+    if not k8s.use_local_kubectl:
+        raise S3ProbeError(
+            "operator metrics scrape needs a local kubectl (K8S_LOCAL_KUBECTL=1) "
+            "to port-forward from the test host")
+    target = f"pod/{_operator_pod(k8s, ns)}"
+    ensure_metrics_scraper(k8s, ns)
+    token, err = k8s._exec_kubectl(
+        f"kubectl create token {METRICS_SCRAPER_SA} -n {ns} --duration=10m",
         supress_logs=True)
-    pod = (out or "").strip()
-    if not pod:
-        return ""
-    for port in (8080, 8443):
-        scheme = "http" if port == 8080 else "https -k"
-        text = k8s.exec_in_pod_container(
-            pod, "", f"curl -s {'-k ' if port == 8443 else ''}"
-                     f"{'https' if port == 8443 else 'http'}://127.0.0.1:{port}/metrics",
-            namespace=ns, timeout=60)
-        del scheme
-        if METRIC_BUCKET_PHASE in text or "go_goroutines" in text:
-            return text
-    return ""
+    token = (token or "").strip()
+    if not token:
+        raise S3ProbeError(
+            f"operator metrics scrape failed: no token for "
+            f"{ns}/{METRICS_SCRAPER_SA}: {(err or '').strip()[:300]}")
+
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+    proc = subprocess.Popen(
+        ["kubectl", "port-forward", "-n", ns,
+         target, f"{port}:{OPERATOR_METRICS_PORT}"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    try:
+        _wait_listening(proc, port, target, timeout=15)
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        req = urllib.request.Request(
+            f"https://127.0.0.1:{port}/metrics",
+            headers={"Authorization": f"Bearer {token}"})
+        try:
+            with urllib.request.urlopen(req, context=ctx, timeout=60) as resp:
+                text = resp.read().decode(errors="replace")
+        except urllib.error.HTTPError as exc:
+            raise S3ProbeError(
+                f"operator metrics scrape failed: HTTP {exc.code} {exc.reason} "
+                f"from {target}: "
+                f"{exc.read()[:300]!r}") from exc
+        except (urllib.error.URLError, OSError) as exc:
+            raise S3ProbeError(
+                f"operator metrics scrape failed: "
+                f"{getattr(exc, 'reason', exc)} from {target}") from exc
+    finally:
+        proc.kill()
+        proc.wait(timeout=10)
+    if not text.strip():
+        raise S3ProbeError(
+            f"operator metrics scrape failed: {target} "
+            f"answered 200 with an empty body")
+    return text
+
+
+def _operator_pod(k8s, namespace):
+    """Name of the one operator pod that is running and not being deleted."""
+    out, err = k8s._exec_kubectl(
+        f"kubectl get pods -n {namespace} -l {OPERATOR_SELECTOR} -o json",
+        supress_logs=True)
+    try:
+        items = json.loads(out or "")["items"]
+    except (ValueError, KeyError) as exc:
+        raise S3ProbeError(
+            f"operator metrics scrape failed: cannot list {OPERATOR_SELECTOR} "
+            f"pods in {namespace}: {(err or out or '').strip()[:300]}") from exc
+    live = [p["metadata"]["name"] for p in items
+            if p.get("status", {}).get("phase") == "Running"
+            and not p["metadata"].get("deletionTimestamp")]
+    if len(live) != 1:
+        raise S3ProbeError(
+            f"operator metrics scrape failed: expected one running "
+            f"{OPERATOR_SELECTOR} pod in {namespace}, found {len(live)}: {live}")
+    return live[0]
+
+
+def _wait_listening(proc, port, target, timeout):
+    """Return once *port* accepts a connection; raise if *proc* dies or times out."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            raise S3ProbeError(
+                f"operator metrics scrape failed: port-forward to "
+                f"{target} exited: "
+                f"{(proc.stderr.read() or '').strip()[:300]}")
+        try:
+            socket.create_connection(("127.0.0.1", port), timeout=0.5).close()
+            return
+        except OSError:
+            time.sleep(0.25)
+    raise S3ProbeError(
+        f"operator metrics scrape failed: port-forward to "
+        f"{target} was not listening within {timeout}s")
 
 
 def metric_samples(text, name):
@@ -698,59 +845,78 @@ class BaoUnsealer(threading.Thread):
     """
 
     def __init__(self, k8s, namespace="vault", pod="openbao-0",
-                 secret="openbao-init", interval=15):
+                 secret="openbao-unseal-keys", interval=15):
         super().__init__(daemon=True, name="bao-unsealer")
         self.k8s = k8s
         self.namespace = namespace
         self.pod = pod
         self.secret = secret
         self.interval = interval
+        #: Where ``bao`` in the server pod connects. ``setup-kms.sh`` uses the
+        #: same address: it is a SAN on the server certificate, verified
+        #: against the ``BAO_CACERT`` the chart sets in the pod. The chart's
+        #: own default, ``https://127.0.0.1:8200``, is not a SAN, so every
+        #: call against it fails TLS verification.
+        self.addr = f"https://openbao.{namespace}:8200/"
         self._stop = threading.Event()
         #: ``[(iso_time, event)]`` -- every seal observed and every unseal
         #: performed, so a case can report the window rather than just the fact.
         self.events = []
         self.unseal_count = 0
+        #: Raw stdout and stderr of the last ``bao status``, kept so a seal
+        #: state that cannot be read can say why.
+        self.last_status = ""
         self.logger = logger
 
     # -- state --------------------------------------------------------
 
+    def _bao(self, args, timeout=30):
+        """Run ``bao <args>`` in the server pod. Returns ``(stdout, stderr)``.
+
+        Through ``_exec_kubectl`` rather than ``exec_in_pod_container``: that
+        one discards stderr and the exit status, which is what made a seal
+        state that could not be read undiagnosable.
+        """
+        out, err = self.k8s._exec_kubectl(
+            f"kubectl exec -n {self.namespace} {self.pod} -- "
+            f"env BAO_ADDR={self.addr} bao {args}",
+            supress_logs=True, timeout=timeout)
+        return out or "", err or ""
+
     def sealed(self):
-        out = self.k8s.exec_in_pod_container(
-            self.pod, "", "bao status -format=json 2>/dev/null || "
-                          "vault status -format=json 2>/dev/null || true",
-            namespace=self.namespace, timeout=30)
-        for line in (out or "").splitlines():
-            try:
-                return bool(json.loads(line).get("sealed"))
-            except Exception:
-                continue
-        return None             # unknown: pod not up, or no CLI in it
+        """True or False, or None when the state cannot be read.
+
+        ``bao status`` exits 2 for a sealed server and still prints the
+        status, so the output is parsed whatever the exit status. It is one
+        indented JSON document spread over many lines, parsed as a whole.
+        """
+        out, err = self._bao("status -format=json")
+        self.last_status = f"stdout={out.strip()[:400]!r} stderr={err.strip()[:400]!r}"
+        start, end = out.find("{"), out.rfind("}")
+        if start < 0 or end < start:
+            return None         # pod not up, or bao could not reach the server
+        try:
+            return bool(json.loads(out[start:end + 1])["sealed"])
+        except (ValueError, KeyError):
+            return None
 
     def unseal_keys(self):
+        """The unseal keys, in order, from the lane's Secret.
+
+        The workflow writes the first three keys of ``bao operator init`` as
+        ``KEY1``..``KEY3``, the threshold the init default asks for.
+        """
         out, _ = self.k8s._exec_kubectl(
             f"kubectl get secret {self.secret} -n {self.namespace} -o json "
             f"2>/dev/null || true", supress_logs=True)
         try:
             data = json.loads((out or "{}").strip() or "{}").get("data") or {}
-        except Exception:
+        except ValueError:
             return []
         import base64
-        keys = []
-        for k, v in sorted(data.items()):
-            if "unseal" in k.lower() or "key" in k.lower():
-                try:
-                    text = base64.b64decode(v).decode().strip()
-                except Exception:
-                    continue
-                # The init Secret has been seen holding either the raw key or
-                # the whole `bao operator init` JSON. Take both shapes.
-                try:
-                    blob = json.loads(text)
-                    keys.extend(blob.get("unseal_keys_b64")
-                                or blob.get("keys_base64") or blob.get("keys") or [])
-                except Exception:
-                    keys.append(text)
-        return [k for k in keys if k]
+        numbered = sorted((int(k[3:]), v) for k, v in data.items()
+                          if re.fullmatch(r"KEY\d+", k))
+        return [base64.b64decode(v).decode().strip() for _, v in numbered]
 
     def unseal(self):
         keys = self.unseal_keys()
@@ -760,17 +926,14 @@ class BaoUnsealer(threading.Thread):
                 self.namespace, self.secret)
             return False
         for key in keys[:5]:
-            self.k8s.exec_in_pod_container(
-                self.pod, "",
-                f"bao operator unseal {shlex.quote(key)} >/dev/null 2>&1 || "
-                f"vault operator unseal {shlex.quote(key)} >/dev/null 2>&1 || true",
-                namespace=self.namespace, timeout=45)
+            self._bao(f"operator unseal {shlex.quote(key)}", timeout=45)
             if self.sealed() is False:
                 self.unseal_count += 1
                 self.events.append((time.strftime("%Y-%m-%d %H:%M:%S"), "unsealed"))
                 self.logger.info("[bao] unsealed (%d so far)", self.unseal_count)
                 return True
-        self.logger.warning("[bao] still sealed after trying %d key(s)", len(keys[:5]))
+        self.logger.warning("[bao] still sealed after trying %d key(s): %s",
+                            len(keys[:5]), self.last_status)
         return False
 
     # -- thread -------------------------------------------------------
