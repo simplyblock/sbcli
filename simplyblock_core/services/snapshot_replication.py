@@ -1123,91 +1123,111 @@ def process_snap_replicate_start(task, snapshot):
     # NOTE deliberately NO bdev_lvol_set_migration_flag: the flag drives the
     # distrib-level special_io machinery of INTRA-cluster migration; it has no
     # place in a cross-cluster receive.
-    from simplyblock_core.services.replication_final_step import attach_hub_address
-    xfer_timing.gap("landing_volume_create", _t_landing,
-                    snap=snapshot.get_id(), lvol=snapshot.lvol.get_id())
-    with xfer_timing.phase("hub_attach", snap=snapshot.get_id(),
-                           lvol=snapshot.lvol.get_id(), tgt=hub.leader_node_id):
-        _hub_ctrl, hub_bdev, hub_err = attach_hub_address(snode.rpc_client(), hub.hub)
-    if hub_err:
-        logger.error(f"Transfer hub attach failed: {hub_err}")
-        _suspend_for_retry(task, f"transfer hub attach failed: {hub_err}, retrying",
-                           backoff=True)
-        return
-    task.function_params["hub_ctrl"] = _hub_ctrl
-    remote_map_id = hub.map_id
-
-    allow_partial, partial_base = _partial_transfer_decision(
-        task, snapshot, replicate_to_source, remote_lv, hub, snode.get_id())
-    logger.info("Transfer of %s into %s: %s", snapshot.get_id(),
-                remote_lv.top_bdev,
-                "PARTIAL allowed (landing volume is a clone of the previous "
-                "replicated snapshot on every online member)" if allow_partial
-                else "FULL (no delta basis on every online member; see above "
-                     "for which check declined)")
-
-    offset = 0
-    if task.function_params.get("offset"):
-        offset = task.function_params["offset"]
-
-    # Flip to IN_REPLICATION under the CHAIN lock, BEFORE the transfer starts.
-    # The delete path refuses to delete a snapshot in this state AND refuses to
-    # delete its predecessor (whose swap-merge would mutate the cluster map the
-    # transfer is reading) under the same chain-root-keyed lock — setting the
-    # status after starting the transfer left a window in which a delete could
-    # slip between the check and the merge.
-    with snapshot_controller.object_mutation_lock(snapshot.cluster_id, snapshot.get_id()):
-        try:
-            fresh = db.get_snapshot_by_id(snapshot.get_id())
-        except KeyError:
-            msg = f"Snapshot {snapshot.get_id()} vanished before transfer start"
-            logger.error(msg)
-            task.function_result = msg
-            task.status = JobSchedule.STATUS_DONE
-            task.write_to_db()
+    # The attach and the RUNNING status must not interleave with another
+    # worker's detach decision on the same hub session (see _hub_lock).
+    with _hub_lock(snode.get_id(), hub.leader_node_id):
+        from simplyblock_core.services.replication_final_step import attach_hub_address
+        xfer_timing.gap("landing_volume_create", _t_landing,
+                        snap=snapshot.get_id(), lvol=snapshot.lvol.get_id())
+        with xfer_timing.phase("hub_attach", snap=snapshot.get_id(),
+                               lvol=snapshot.lvol.get_id(), tgt=hub.leader_node_id):
+            _hub_ctrl, hub_bdev, hub_err = attach_hub_address(snode.rpc_client(), hub.hub)
+        if hub_err:
+            logger.error(f"Transfer hub attach failed: {hub_err}")
+            _suspend_for_retry(task, f"transfer hub attach failed: {hub_err}, retrying",
+                               backoff=True)
             return
-        if fresh.status == SnapShot.STATUS_IN_DELETION:
-            msg = f"Snapshot {snapshot.get_id()} is being deleted; not starting a transfer"
-            logger.error(msg)
-            task.function_result = msg
-            task.status = JobSchedule.STATUS_DONE
-            task.write_to_db()
-            return
-        if fresh.status != SnapShot.STATUS_IN_REPLICATION:
-            fresh.status = SnapShot.STATUS_IN_REPLICATION
-            fresh.write_to_db()
+        task.function_params["hub_ctrl"] = _hub_ctrl
+        remote_map_id = hub.map_id
 
-    # 3 start replication
-    xfer_timing.stamp("transfer_submit", snap=snapshot.get_id(),
-                      lvol=snapshot.lvol.get_id(), size=snapshot.size)
-    task.function_params["xfer_submit_t"] = xfer_timing.now()
-    task.write_to_db()
-    # The transfer reads the snapshot in the replication class; the
-    # snapshot's own class, which client reads through it use, is untouched.
-    read_class = (constants.QOS_REPLICATION_WIRE_CLASS
-                  if _replication_class_on(snode.cluster_id) else 0)
-    snode.rpc_client().bdev_lvol_transfer(
-        name=snapshot.snap_bdev,
-        offset=offset,
-        # A full transfer keeps 16 whole clusters in flight (32 MiB). A delta
-        # sends requests of at most 64 KiB, so 16 of them were only ~1 MiB in
-        # flight and the transfer could not keep up with the writes it chases;
-        # it keeps 256 in flight (16 MiB) instead.
-        batch_size=(constants.REPL_XFER_PARTIAL_BATCH if allow_partial
-                    else constants.REPL_XFER_BATCH),
-        bdev_name=hub_bdev,
-        operation="replicate",
-        lvol_id=remote_map_id,
-        # Safe only because the landing volume was chained onto the previous
-        # replicated snapshot above; the fork independently refuses the delta
-        # path unless the snapshot's dirty generation is complete.
-        allow_partial=allow_partial,
-        partial_base=partial_base,
-        priority_class=read_class,
-    )
-    task.status = JobSchedule.STATUS_RUNNING
-    task.function_params["start_time"] = int(time.time())
-    task.write_to_db()
+        allow_partial, partial_base = _partial_transfer_decision(
+            task, snapshot, replicate_to_source, remote_lv, hub, snode.get_id())
+        logger.info("Transfer of %s into %s: %s", snapshot.get_id(),
+                    remote_lv.top_bdev,
+                    "PARTIAL allowed (landing volume is a clone of the previous "
+                    "replicated snapshot on every online member)" if allow_partial
+                    else "FULL (no delta basis on every online member; see above "
+                         "for which check declined)")
+
+        offset = 0
+        if task.function_params.get("offset"):
+            offset = task.function_params["offset"]
+
+        # Flip to IN_REPLICATION under the CHAIN lock, BEFORE the transfer starts.
+        # The delete path refuses to delete a snapshot in this state AND refuses to
+        # delete its predecessor (whose swap-merge would mutate the cluster map the
+        # transfer is reading) under the same chain-root-keyed lock — setting the
+        # status after starting the transfer left a window in which a delete could
+        # slip between the check and the merge.
+        with snapshot_controller.object_mutation_lock(snapshot.cluster_id, snapshot.get_id()):
+            try:
+                fresh = db.get_snapshot_by_id(snapshot.get_id())
+            except KeyError:
+                msg = f"Snapshot {snapshot.get_id()} vanished before transfer start"
+                logger.error(msg)
+                task.function_result = msg
+                task.status = JobSchedule.STATUS_DONE
+                task.write_to_db()
+                return
+            if fresh.status == SnapShot.STATUS_IN_DELETION:
+                msg = f"Snapshot {snapshot.get_id()} is being deleted; not starting a transfer"
+                logger.error(msg)
+                task.function_result = msg
+                task.status = JobSchedule.STATUS_DONE
+                task.write_to_db()
+                return
+            if fresh.status != SnapShot.STATUS_IN_REPLICATION:
+                fresh.status = SnapShot.STATUS_IN_REPLICATION
+                fresh.write_to_db()
+
+        # Decided before xfer_submit_t is stamped: its presence without
+        # xfer_landing_submitted marks an attempt by a control plane older than
+        # this decision (see _cow_landing_decision).
+        cow_landing = _cow_landing_decision(task, remote_lv, hub, allow_partial,
+                                            partial_base, offset)
+
+        # 3 start replication
+        xfer_timing.stamp("transfer_submit", snap=snapshot.get_id(),
+                          lvol=snapshot.lvol.get_id(), size=snapshot.size)
+        task.function_params["xfer_submit_t"] = xfer_timing.now()
+        task.write_to_db()
+        # The transfer reads the snapshot in the replication class; the
+        # snapshot's own class, which client reads through it use, is untouched.
+        read_class = (constants.QOS_REPLICATION_WIRE_CLASS
+                      if _replication_class_on(snode.cluster_id) else 0)
+        # Recorded before the submit: whatever this attempt writes, a later attempt
+        # into the same landing volume must not skip the pre-allocation (a cluster
+        # it allocated and partly filled would not be copied from the base).
+        task.function_params["xfer_landing_submitted"] = remote_lv.get_id()
+        task.function_params.pop("cow_landing", None)
+        task.write_to_db()
+        applied: dict = {}
+        snode.rpc_client().bdev_lvol_transfer(
+            name=snapshot.snap_bdev,
+            offset=offset,
+            # SPDK sends every replication request in pieces of at most 64 KiB
+            # (spdk #89: no whole-cluster requests), so every transfer, delta,
+            # full or resumed, keeps 256 in flight (16 MiB).
+            batch_size=constants.REPL_XFER_PARTIAL_BATCH,
+            bdev_name=hub_bdev,
+            operation="replicate",
+            lvol_id=remote_map_id,
+            # Safe only because the landing volume was chained onto the previous
+            # replicated snapshot above; the fork independently refuses the delta
+            # path unless the snapshot's dirty generation is complete.
+            allow_partial=allow_partial,
+            partial_base=partial_base,
+            priority_class=read_class,
+            cow_landing=cow_landing,
+            applied=applied,
+        )
+        if applied.get("cow_landing"):
+            # The landing volume is filled from its base by copy-on-write during
+            # the transfer: the finish skips bdev_lvol_merge_base.
+            task.function_params["cow_landing"] = remote_lv.get_id()
+        task.status = JobSchedule.STATUS_RUNNING
+        task.function_params["start_time"] = int(time.time())
+        task.write_to_db()
 
     # A converging cutover's next round needs a landing volume too: create it
     # now, while this transfer runs, so the next round adopts it instead of
@@ -2138,6 +2158,50 @@ def _partial_transfer_decision(task, snapshot, replicate_to_source, remote_lv,
     return allow_partial, partial_base
 
 
+def _cow_landing_applied(task, landing_id):
+    """True when the transfer into *landing_id* landed merge-free: SPDK applied
+    the cow_landing this task asked for (see _cow_landing_decision)."""
+    return task.function_params.get("cow_landing") == landing_id
+
+
+def _cow_landing_decision(task, remote_lv, hub, allow_partial, partial_base, offset):
+    """Whether this delta transfer may land merge-free (SPDK ``cow_landing``).
+
+    A delta writes only the dirty ranges of a partly covered cluster. The
+    destination pre-allocates such clusters and a merge job fills the rest
+    from the base afterwards (bf11: 7.25 GB, 66 s per cycle). With page copy
+    on the destination the first write into an unallocated cluster of a
+    chained landing volume copies it from the base by metadata, so the
+    pre-allocation and the merge can go. Only when ALL of these hold:
+
+      * a real delta (allow_partial and a partial_base);
+      * the landing volume was chained onto its base BEFORE the transfer on the
+        receiving member, *hub*.leader_node_id (a deferred chain --
+        chain_deferred_to -- happens after, and a copy-on-write before it
+        would copy zeroes);
+      * the destination cluster has page copy (*hub*.page_copy; otherwise
+        every such write copies 2 MiB inline, and the merge is cheaper);
+      * a fresh transfer (offset 0) and the first one into THIS landing
+        volume: an earlier attempt may have pre-allocated clusters and filled
+        them partly, and those would never be copied from the base.
+    """
+    if not (allow_partial and partial_base) or offset:
+        return False
+    landing = remote_lv.get_id()
+    if task.function_params.get("xfer_landing_submitted") == landing:
+        return False
+    if (task.function_params.get("xfer_submit_t")
+            and not task.function_params.get("xfer_landing_submitted")):
+        # submitted by an older control plane, into a landing volume nobody
+        # recorded: it may hold pre-allocated, partly filled clusters
+        return False
+    if task.function_params.get("chain_deferred_to"):
+        return False
+    if hub.leader_node_id not in _prechained_nodes_for(task, landing):
+        return False
+    return bool(hub.page_copy)
+
+
 def _deferred_partial_decision(task, snapshot, pred, hub, source_node_id):
     """The transfer mode while *pred*'s copy is still being merged on the
     target: the landing volume stays unchained until the finish (see
@@ -2280,16 +2344,20 @@ def _close_hub(task, snapshot, hub_node_id):
     if _cutover_owns(snapshot.lvol.get_id(), task.cluster_id):
         xfer_timing.stamp("hub_kept", snap=snapshot.get_id(), lvol=snapshot.lvol.get_id())
         return
-    if _other_active_transfers_to_node(task, hub_node_id):
-        return
-    xfer_timing.stamp("hub_detach", snap=snapshot.get_id(), lvol=snapshot.lvol.get_id())
     src_node = (_transfer_source_node(task, snapshot)
                 or db.get_storage_node_by_id(snapshot.lvol.node_id))
-    # Non-fatal: a resumed finish finds the hub already detached by the first attempt.
-    try:
-        src_node.rpc_client().bdev_nvme_detach_controller(hub_ctrl)
-    except Exception as e:                                # noqa: BLE001
-        logger.warning("Transfer hub detach on %s failed (non-fatal): %s", src_node.get_id(), e)
+    # Decide and detach under the hub's lock: a start on another worker
+    # attaches and goes RUNNING under the same lock (see _hub_lock).
+    with _hub_lock(src_node.get_id(), hub_node_id):
+        if _other_active_transfers_to_node(task, hub_node_id):
+            return
+        xfer_timing.stamp("hub_detach", snap=snapshot.get_id(), lvol=snapshot.lvol.get_id())
+        # Non-fatal: a resumed finish finds the hub already detached by the first attempt.
+        try:
+            src_node.rpc_client().bdev_nvme_detach_controller(hub_ctrl)
+        except Exception as e:                            # noqa: BLE001
+            logger.warning("Transfer hub detach on %s failed (non-fatal): %s",
+                           src_node.get_id(), e)
 
 
 def _source_volume(snapshot):
@@ -2426,7 +2494,7 @@ def process_snap_replicate_finish(task, snapshot):
         chained_on=chained,
         converted_on=list(task.function_params.get("converted_nodes") or []),
         merged=task.function_params.get("merged_landing") == landing_id,
-        cow_landing=task.function_params.get("cow_landing") == landing_id,
+        cow_landing=_cow_landing_applied(task, landing_id),
         link="none" if as_instance else ("target" if replicate_to_source else "source")))
 
     # What the destination did, so a later pass skips it (add_clone and

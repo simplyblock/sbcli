@@ -603,7 +603,7 @@ def ensure_hub(cluster_id: str, request: EnsureHubRequest) -> EnsureHubResponse:
     from simplyblock_core.services.replication_final_step import prepare_receiving_hub
 
     db = DBController()
-    db.get_cluster_by_id(cluster_id)
+    cluster = db.get_cluster_by_id(cluster_id)
     lvol = db.get_lvol_by_id(request.landing_lvol_id)
     if db.get_pool_by_id(lvol.pool_uuid).cluster_id != cluster_id:
         raise KeyError(f"LVol {request.landing_lvol_id} is not on cluster {cluster_id}")
@@ -650,7 +650,8 @@ def ensure_hub(cluster_id: str, request: EnsureHubRequest) -> EnsureHubResponse:
                                  reason=f"target node {leader.get_id()} not LVS leader of "
                                         f"{lvol.lvs_name}")
     return EnsureHubResponse(state="ready", leader_node_id=leader.get_id(), map_id=map_id, hub=hub,
-                             pair_online=_pair_online(db, leader))
+                             pair_online=_pair_online(db, leader),
+                             page_copy=bool(getattr(cluster, "page_copy", False)))
 
 
 def _pair_online(db, leader):
@@ -884,9 +885,7 @@ def finish_landing(db, request: FinishRequest) -> FinishResponse:
         return answer
     # A delta landed only its own blocks in pre-allocated clusters: fill the
     # rest from the base before the convert makes the volume a snapshot.
-    # Not after a merge-free landing (cow_landing): nothing to merge then.
-    if (leader.get_id() not in answer.converted_on and not answer.merged
-            and request.partial_base and not request.cow_landing):
+    if _merge_needed(request, answer, leader.get_id()):
         st: dict = {}
         merge = _merge_landing(landing, leader, st)
         if merge in ("pending", "retry", "restart"):
@@ -962,6 +961,15 @@ def _finish_on(answer, landing, node, predecessor, request, role, required):
     answer.reason = f"failed to chain the replicated snapshot on the {role} {node.get_id()}"
     logger.error(answer.reason)
     return False
+
+
+def _merge_needed(request, answer, leader_id):
+    """Whether the landing volume of a delta still has to be merged with its
+    base on *leader_id*: not after a merge-free landing (cow_landing: partly
+    covered clusters were copied from the base on their first write), nor
+    once merged or converted there."""
+    return (leader_id not in answer.converted_on and not answer.merged
+            and bool(request.partial_base) and not request.cow_landing)
 
 
 def _finish_on_replicas(db, answer, landing, leader, predecessor, request):

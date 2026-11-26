@@ -12,8 +12,12 @@ These tests pin when the control plane asks for that, that the finish skips
 the merge exactly then, and that an SPDK without the parameter falls back to
 the merge path.
 """
+from types import SimpleNamespace
+
 import pytest
 
+from simplyblock_core.peer import service as peer_service
+from simplyblock_core.peer.protocol import EnsureHubResponse
 from simplyblock_core.rpc_client import RPCClient, RPCRemoteError
 from simplyblock_core.services import snapshot_replication as sr
 
@@ -80,7 +84,15 @@ def _eligible_task(**extra):
 
 
 def _decide(task, allow_partial=True, partial_base=42, offset=0, lv=None, node=None):
-    return sr._cow_landing_decision(task, lv or _LV(), node or _Node(), allow_partial,
+    node = node or _Node()
+    # The destination's ensure_hub answer: the receiving member, and whether
+    # its own cluster has page copy (an unreadable cluster: no page copy).
+    try:
+        page_copy = bool(getattr(sr.db.get_cluster_by_id(node.cluster_id), "page_copy", False))
+    except KeyError:
+        page_copy = False
+    hub = EnsureHubResponse(state="ready", leader_node_id=node.get_id(), page_copy=page_copy)
+    return sr._cow_landing_decision(task, lv or _LV(), hub, allow_partial,
                                     partial_base, offset)
 
 
@@ -153,19 +165,27 @@ class _MergeRPC:
         return {"state": "done", "ms": 1}
 
 
+def _finish_request(task, landing="REP_LV"):
+    """What the source asks the destination's finish (FinishRequest fields)."""
+    return SimpleNamespace(partial_base=task.function_params.get("partial_base", 0),
+                           cow_landing=sr._cow_landing_applied(task, landing))
+
+
+_FRESH = SimpleNamespace(converted_on=[], merged=False)
+
+
 def test_merge_is_skipped_for_a_cow_landing(monkeypatch):
-    rpc = _MergeRPC()
     task = _Task(partial_base=42, cow_landing="REP_LV")
-    assert sr._merge_landing(task, _LV(), _Node(rpc=rpc)) == "ok"
-    assert rpc.calls == []
+    assert peer_service._merge_needed(_finish_request(task), _FRESH, "N_TGT") is False
 
 
 def test_merge_runs_when_cow_landing_names_another_landing(monkeypatch):
-    monkeypatch.setattr(sr, "_replication_class_on", lambda cid: False)
-    monkeypatch.setattr(sr.xfer_timing, "stamp", lambda *a, **k: None)
-    rpc = _MergeRPC()
+    monkeypatch.setattr(peer_service, "_replication_class_on", lambda cid: False)
+    monkeypatch.setattr(peer_service.xfer_timing, "stamp", lambda *a, **k: None)
     task = _Task(partial_base=42, cow_landing="OLD_LV")
-    assert sr._merge_landing(task, _LV(), _Node(rpc=rpc)) == "ok"
+    assert peer_service._merge_needed(_finish_request(task), _FRESH, "N_TGT") is True
+    rpc = _MergeRPC()
+    assert peer_service._merge_landing(_LV(), _Node(rpc=rpc)) == "ok"
     assert ("merge", "LVS_T/REP_LV") in rpc.calls
 
 
@@ -174,8 +194,10 @@ def test_discarded_landing_forgets_cow_landing(monkeypatch):
     seen = {}
     monkeypatch.setattr(sr, "_suspend_for_retry",
                         lambda task, msg, **k: seen.update(task.function_params))
+    monkeypatch.setattr(sr, "_landing_peer",
+                        lambda snapshot, landing: SimpleNamespace(discard_landing=lambda i: None))
     task = _Task(cow_landing="REP_LV", merged_landing="REP_LV")
-    sr._discard_landing_for_retry(task, _LV(), "x")
+    sr._discard_landing_for_retry(task, None, _LV(), "x")
     assert "cow_landing" not in seen
 
 

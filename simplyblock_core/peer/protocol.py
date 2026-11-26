@@ -192,6 +192,9 @@ class EnsureHubResponse(BaseModel):
     #: reached, or there is none: a delta can land on every member.
     pair_online: bool = False
     converted_on: list[str] = Field(default_factory=list)
+    #: The destination cluster copies a partly covered cluster from the base
+    #: by metadata on its first write (page copy): a delta may land merge-free.
+    page_copy: bool = False
     #: With ``unsettled``: "<id8> <status>" of every member of the lvstore, in
     #: role order, for the source's message and REPLICATION_STALLED event.
     members: str = ""
