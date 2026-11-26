@@ -1715,16 +1715,21 @@ def merge_backlog(source_lvol, cluster_id, exclude_snapshot_id=""):
     _keep, _schedule, candidates = _retention_plan(source_lvol, replicated)
     group_keep = replication_recovery_points.group_recovery_point_ids(
         {getattr(s, "group_id", "") for s in replicated}, db=db) if candidates else set()
+    # The destination's side of the backlog (copies a live clone depends on,
+    # copies being swap-merged there) is read from its records, which are in
+    # this database only when this control plane manages the destination. A
+    # destination on a peer control plane counts the source's side alone.
+    local = _target_is_local(source_lvol)
     pending = [s for _, s in candidates
                if s.get_id() not in group_keep
                and s.target_replicated_snap_uuid not in group_keep
-               and not peer_service._has_dependent_clone(db, s.target_replicated_snap_uuid)]
+               and not (local and _has_dependent_clone(s.target_replicated_snap_uuid))]
 
     replicated_ids = {s.get_id() for s in replicated}
     merging = set()
     newest_copy = None
     for s in snaps:
-        if not s.target_replicated_snap_uuid:
+        if not local or not s.target_replicated_snap_uuid:
             continue
         try:
             copy = db.get_snapshot_by_id(s.target_replicated_snap_uuid)
@@ -1755,6 +1760,27 @@ def merge_backlog(source_lvol, cluster_id, exclude_snapshot_id=""):
     count = len(pending) + len(merging) + landing
     return count, (f"{len(pending)} beyond retention, {len(merging)} being merged, "
                    f"{landing} landing copies merging"), len(pending)
+
+
+def _target_is_local(source_lvol):
+    """True when this control plane manages the destination of *source_lvol*'s
+    replication, so the destination's records are in this database. False
+    when the volume's policy target names a peer control plane (the
+    control-plane split), whose records only that peer has."""
+    try:
+        policy = db.get_replication_policy_for_lvol(source_lvol)
+        if policy is None:
+            return True
+        target = db.get_replication_target_by_id(policy.target_id)
+    except KeyError:
+        return True
+    return target.has_peer() is not True
+
+
+def _has_dependent_clone(snapshot_uuid):
+    """True when a live volume is cloned from the copy *snapshot_uuid* (see
+    peer.service._has_dependent_clone; the destination's records)."""
+    return peer_service._has_dependent_clone(db, snapshot_uuid)
 
 
 def _hold_progress(hold, value, now):

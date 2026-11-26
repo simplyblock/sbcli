@@ -367,7 +367,12 @@ def _counterpart(db, cluster_id, node, request):
 
     Copies share data_uuid (the finish copies it onto every replicated
     snapshot). Only a copy on the same lvstore counts: a chain is built only
-    on a snapshot in the same lvstore.
+    on a snapshot in the same lvstore. A retired snapshot (deleted: the
+    lineage of a migrated-away volume) is on its way out: the reaper deletes
+    it once it is a leaf, and a chain built on it either loses it under the
+    new copy or pins it for good where neither the reaper nor the orphan
+    sweep reaches it (bed bf21 2026-11-10: 25 such snapshots of earlier rounds
+    in live chains on one cluster). Such a snapshot is sent again instead.
     """
     lvstore = getattr(node, "lvstore", "")
     if not request.data_uuid or not lvstore:
@@ -375,6 +380,7 @@ def _counterpart(db, cluster_id, node, request):
     for cand in db.get_snapshots(cluster_id):
         if (cand.get_id() != request.snapshot_id
                 and cand.data_uuid == request.data_uuid
+                and not getattr(cand, "deleted", False)
                 and cand.status != SnapShot.STATUS_IN_DELETION
                 and cand.lvol and cand.lvol.lvs_name == lvstore):
             return cand
