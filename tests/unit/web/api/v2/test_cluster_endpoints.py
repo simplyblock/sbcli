@@ -558,7 +558,7 @@ class TestImagesAndWriteProtection:
 
         assert body['default_spdk_image'] == cluster.prefixed_image(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
         assert body['default_spdk_proxy_image'] == cluster.prefixed_image(constants.SIMPLY_BLOCK_DOCKER_IMAGE)
-        assert body['default_spdk_image'].startswith('mirror.example.com/')
+        assert body['default_spdk_image'].split('/', 1)[0] == 'mirror.example.com'
 
     @pytest.mark.parametrize('v2', [True, False])
     def test_reports_the_write_protection_generation(self, client, db, cluster, v2):
