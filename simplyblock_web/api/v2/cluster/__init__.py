@@ -186,6 +186,35 @@ def add(request: Request, parameters: ClusterParams, response_format: util.Creat
     )
 
 
+class HugePagesEstimateParams(BaseModel):
+    max_subsys: util.Unsigned
+    vcpu_count: util.Unsigned
+
+
+class HugePagesEstimateDTO(BaseModel):
+    minimum_hp_memory_mib: util.Unsigned
+
+
+@api.post('/sizing/hugepages-estimate', name='clusters:sizing:hugepages-estimate')
+def hugepages_estimate(parameters: HugePagesEstimateParams) -> HugePagesEstimateDTO:
+    """The huge-page memory calculate_minimum_hp_memory would compute for a
+    node with this max_subsys/vcpu_count, with no devices known yet -- the
+    figure a Preprovisioned precheck compares a worker's capacity against
+    before any StorageNode exists (design-preprovisioned-hugepages.md S:7).
+
+    Stateless and idempotent: no cluster needs to exist, and this takes no
+    hugepages_mem floor -- the caller already has it and has to apply that
+    clamp, and the MEM_MEGA rounding that follows it, itself (same design,
+    S:5 Step 1).
+    """
+    small_pool_count, large_pool_count = core_utils.calculate_pool_count(
+        0, 0, parameters.vcpu_count, parameters.vcpu_count, parameters.max_subsys)
+    minimum_hp_memory = core_utils.calculate_minimum_hp_memory(
+        small_pool_count, large_pool_count, parameters.max_subsys, 0, parameters.vcpu_count)
+    return HugePagesEstimateDTO(
+        minimum_hp_memory_mib=core_utils.convert_size(minimum_hp_memory, 'MiB', round_up=True))
+
+
 instance_api = APIRouter(prefix='/{cluster_id}')
 
 
