@@ -228,6 +228,37 @@ def jm_repl_tasks_found(node, jm_vuid, caused_by=ec.CAUSED_BY_MONITOR):
         node_id=node.get_id())
 
 
+def jm_wiped_after_corruption(node, failed_at, error, caused_by=ec.CAUSED_BY_MONITOR):
+    """A restart found the node's JM corrupt and replaced it with a wiped one;
+    JC resyncs it from the peer JMs."""
+    ec.log_event_cluster(
+        cluster_id=node.cluster_id,
+        domain=ec.DOMAIN_CLUSTER,
+        event=ec.EVENT_STATUS_CHANGE,
+        db_object=node,
+        caused_by=caused_by,
+        event_level=EventObj.LEVEL_WARN,
+        message=(f"JM of node {node.get_id()} was corrupt ({failed_at} failed: {error}); "
+                 f"it was wiped and re-created, and is resynced from the peer JMs"),
+        node_id=node.get_id())
+
+
+def jm_corrupt_not_wiped(node, failed_at, error, reason, caused_by=ec.CAUSED_BY_MONITOR):
+    """A restart found the node's JM corrupt but wiping it could lose the only
+    copy of journal data: the restart keeps failing until an operator acts."""
+    ec.log_event_cluster(
+        cluster_id=node.cluster_id,
+        domain=ec.DOMAIN_CLUSTER,
+        event=ec.EVENT_STATUS_CHANGE,
+        db_object=node,
+        caused_by=caused_by,
+        event_level=EventObj.LEVEL_CRITICAL,
+        message=(f"JM of node {node.get_id()} is corrupt ({failed_at} failed: {error}) and was "
+                 f"NOT wiped: {reason}. The node cannot restart until the journal is repaired "
+                 f"or its peer JMs are online again"),
+        node_id=node.get_id())
+
+
 def node_ports_changed(node, caused_by=ec.CAUSED_BY_MONITOR):
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(node.cluster_id)
