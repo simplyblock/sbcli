@@ -13,7 +13,7 @@ from simplyblock_core.storage_node_ops import (
     generate_automated_deployment_config,
     upgrade_automated_deployment_config,
 )
-from simplyblock_web import node_utils_k8s
+from simplyblock_web import md_release, node_utils_k8s
 
 logger = logging.getLogger(__name__)
 logger.setLevel(constants.LOG_LEVEL)
@@ -404,6 +404,19 @@ def main() -> None:
                 # with a dedicated journal device are never partitioned.
                 "keep_serials": sorted(utils.previous_lblk_dedicated_journal_serials()),
             }
+
+        # A device the operator drafted may be a member of a software-RAID
+        # array nothing uses. The array holds it until it is stopped, and the
+        # generation refuses a held device, so the arrays go first. Only the
+        # devices this configure names are looked at: a selection by serial or
+        # by exclusion names no device until the generation has run, and an
+        # array is never stopped for a disk nobody named.
+        blk_paths = [x.strip() for x in args.blk_names.split(',') if x.strip()] if args.lblk else []
+        released = md_release.release_idle_arrays(md_release.selected_block_devices(
+            md_release.Host(), pci_addresses=pci_allowed, blk_paths=blk_paths))
+        if released:
+            logger.info(f"Stopped the unused software-RAID arrays {', '.join(released)} "
+                        f"and erased their members' RAID superblocks")
 
         _discard_previous_config()
 
