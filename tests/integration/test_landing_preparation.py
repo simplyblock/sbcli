@@ -498,7 +498,8 @@ def _chain(db, landing, copy, chained_on=()):
 class TestChain:
 
     def test_chains_the_leader_and_its_secondary(self, db, lvstore, spdk):
-        spdk.bdev_get.return_value = None
+        # every member holds the landing volume, not chained yet
+        spdk.bdev_get.return_value = {"driver_specific": {"lvol": {}}}
         spdk.bdev_lvol_add_clone.return_value = True
         copy = _predecessor_copy(db, [TP, TS, TT])
 
@@ -519,18 +520,22 @@ class TestChain:
         assert (answer.state, answer.chained_on) == ("chained", [TP, TS])
         spdk.bdev_lvol_add_clone.assert_not_called()
 
-    def test_an_offline_secondary_declines_before_chaining_anything(self, db, lvstore, spdk):
-        """The lvstore mirrors the transfer to the secondary; an unchained one
-        would read zeros wherever a delta did not write."""
+    def test_a_secondary_offline_in_the_db_but_answering_is_chained(self, db, lvstore, spdk):
+        """Members are judged by whether their SPDK answers, not by their DB
+        status (replica_chain, bed bf23): one that answers is chained like any
+        other. One that cannot be reached declines to a full transfer (unit:
+        simplyblock_core/test/test_replication_partial_transfer.py)."""
         secondary = db.get_storage_node_by_id(TS)
         secondary.status = StorageNode.STATUS_OFFLINE
         secondary.write_to_db(db.kv_store)
+        spdk.bdev_get.return_value = {"driver_specific": {"lvol": {}}}
+        spdk.bdev_lvol_add_clone.return_value = True
         copy = _predecessor_copy(db, [TP, TS, TT])
 
         answer = _chain(db, lvstore, copy)
 
-        assert (answer.state, answer.chained_on) == ("declined", [])
-        spdk.bdev_lvol_add_clone.assert_not_called()
+        assert (answer.state, answer.chained_on) == ("chained", [TP, TS])
+        assert spdk.bdev_lvol_add_clone.call_count == 2
 
     def test_a_failed_secondary_chain_still_reports_the_primary(self, db, lvstore, spdk):
         spdk.bdev_get.return_value = None
@@ -571,7 +576,8 @@ def _finish_request(landing, copy=None, **overrides):
 class TestFinish:
 
     def test_makes_the_landing_volume_the_linked_copy_and_retires_it(self, db, lvstore, spdk):
-        spdk.bdev_get.return_value = None
+        # every member holds the landing volume, neither chained nor converted yet
+        spdk.bdev_get.return_value = {"driver_specific": {"lvol": {}}}
         spdk.bdev_lvol_add_clone.return_value = True
         spdk.bdev_lvol_convert.return_value = True
         copy = _predecessor_copy(db, [TP, TS, TT])
