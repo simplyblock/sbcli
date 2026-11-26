@@ -825,21 +825,56 @@ def reset_nvme_controllers(k8s, node_ip, names):
     return done
 
 
-def wait_nvme_live(k8s, node_ip, names, timeout=180, poll=5):
+def wait_nvme_live(k8s, node_ip, names, timeout=180, poll=2):
     """Block until every named controller is ``live`` again.
 
     Returns ``(ok, seconds, states)``. The seconds are the headline: this is
     how long the client had no path, which is what F-18 measures and what
     NFR-2's 30s bound is about.
+
+    **The loop runs on the host, not here.** One host command, not one per
+    poll. Polling from the runner would be wrong twice over on a cluster
+    without ``oc``: every ``run_on_node`` is a whole ``kubectl debug node/``
+    pod -- an image pull, a schedule, and on k3s a Completed pod left
+    behind -- so a 2s poll over a 240s budget would be a hundred pods and
+    would also measure the harness's pod-startup latency rather than the
+    initiator's reconnect. Inside the host the resolution is a real two
+    seconds.
     """
     start = time.time()
+    checks = " ".join(f"/sys/class/nvme/{n}/state" for n in names)
+    script = (
+        f"end=$(( $(date +%s) + {timeout} )); "
+        f"while :; do all=1; "
+        f"for f in {checks}; do "
+        f"  s=$(cat \"$f\" 2>/dev/null || echo gone); "
+        f"  [ \"$s\" = live ] || all=0; "
+        f"done; "
+        f"if [ $all -eq 1 ]; then echo ALL-LIVE; break; fi; "
+        f"if [ $(date +%s) -ge $end ]; then echo TIMED-OUT; break; fi; "
+        f"sleep {poll}; done; "
+        # The final states, whichever way it went, so the caller can say
+        # which controller did not come back rather than only that one
+        # did not.
+        f"for f in {checks}; do "
+        f"  echo \"state $f=$(cat \"$f\" 2>/dev/null || echo gone)\"; "
+        f"done")
+    out, _err = k8s.run_on_node(
+        node_ip, script, timeout=timeout + 120, check=False)
+    text = out or ""
     states = {}
-    deadline = start + timeout
-    while time.time() < deadline:
-        rows = {r["name"]: r.get("state", "") for r
-                in nvme_client_controllers(k8s, node_ip)}
-        states = {n: rows.get(n, "<gone>") for n in names}
-        if states and all(v == "live" for v in states.values()):
-            return True, round(time.time() - start, 1), states
-        time.sleep(poll)
-    return False, round(time.time() - start, 1), states
+    for line in text.splitlines():
+        m = re.search(r"state /sys/class/nvme/(\S+?)/state=(\S+)", line)
+        if m:
+            states[m.group(1)] = m.group(2)
+    if not states:
+        # The host command itself did not run -- a debug pod that could not
+        # start, a node that is gone. Not the same as the controllers not
+        # coming back, and the caller must not report it as one.
+        raise PnfsProbeError(
+            f"could not read the NVMe controller states on {node_ip} after "
+            f"the reset: the host command returned "
+            f"{text.strip()[:200]!r}. Whether the paths healed is unknown, "
+            f"which is not a product verdict.")
+    ok = "ALL-LIVE" in text
+    return ok, round(time.time() - start, 1), states

@@ -160,6 +160,8 @@ from e2e_tests.pnfs.test_pnfs_mds_standby import (
     PnfsMdsExportGrownBeforeTakeoverK8s,
     PnfsMdsLockAcrossTakeoverK8s,
     PnfsMdsManyExportsTakeoverK8s,
+    PnfsMdsNodeDrainedK8s,
+    PnfsMdsNodeRebootK8s,
     PnfsMdsNoStandbyRecoversK8s,
     PnfsMdsOperatorRestartNoTakeoverK8s,
     PnfsMdsRestartWithClientDownK8s,
@@ -1699,6 +1701,14 @@ def get_pnfs_mds_tests():
         # takes a client node down, so it is the only one whose
         # failure costs the group a worker.
         PnfsMdsRestartWithClientDownK8s,  # F-16  grace with a client gone
+        # The node under the metadata server, not its pod. These are
+        # the only cases that produce the state the fencing design
+        # exists for -- a guest the cluster thinks is gone, on a host
+        # it cannot reach, which then comes back. They take minutes,
+        # not seconds, and they cost the group a worker if the node
+        # does not return, so they run after every pod-level case.
+        PnfsMdsNodeDrainedK8s,                  # planned: the drain path
+        PnfsMdsNodeRebootK8s,                   # unplanned: and it rejoins
         # Last: these change spec.pnfs.mds.standbys. Each restores it, but
         # a case that failed between the patch and the undo leaves the
         # cluster in a shape the cases above would silently pass in.

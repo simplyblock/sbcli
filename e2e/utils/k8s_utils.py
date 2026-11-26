@@ -390,6 +390,43 @@ class K8sUtils:
             )
         return name
 
+    def _reap_node_debuggers(self, node_name: str) -> int:
+        """Delete this node's finished ``kubectl debug node/`` pods.
+
+        Only the Succeeded and Failed ones, and only for this node, so a
+        debug pod another case is using right now is never touched. Never
+        raises: leaking a pod is untidy, failing a host command that
+        already succeeded because the tidying did not is worse.
+        """
+        try:
+            out, _ = self._exec_kubectl(
+                f"kubectl get pods -A -o custom-columns="
+                f"NS:.metadata.namespace,NAME:.metadata.name,"
+                f"NODE:.spec.nodeName,PHASE:.status.phase --no-headers "
+                f"2>/dev/null | awk '$2 ~ /^node-debugger-/ && $3==\""
+                f"{node_name}\" && ($4==\"Succeeded\" || $4==\"Failed\") "
+                f"{{print $1\" \"$2}}' || true", supress_logs=True)
+        except Exception:                             # noqa: BLE001
+            return 0
+        reaped = 0
+        for line in (out or "").splitlines():
+            parts = line.split()
+            if len(parts) != 2:
+                continue
+            try:
+                self._exec_kubectl(
+                    f"kubectl delete pod {parts[1]} -n {parts[0]} "
+                    f"--ignore-not-found --wait=false 2>/dev/null || true",
+                    supress_logs=True, timeout=60)
+                reaped += 1
+            except Exception:                         # noqa: BLE001
+                pass
+        if reaped:
+            self.logger.info(
+                "[K8sUtils] reaped %d finished node-debugger pod(s) on %s",
+                reaped, node_name)
+        return reaped
+
     def node_internal_ip(self, node_name: str) -> str:
         """The node's InternalIP, given its Kubernetes name.
 
@@ -454,12 +491,36 @@ class K8sUtils:
             cmd = (f"oc debug node/{node_name} --quiet=true -- "
                    f"chroot /host bash -c {quoted}")
         else:
-            cmd = (f"kubectl debug node/{node_name} -it --quiet=true "
-                   f"--image=busybox:latest -- chroot /host sh -c {quoted}")
+            # `-i`, never `-it`. _exec_kubectl runs through
+            # subprocess.run(capture_output=True) with no terminal, so `-t`
+            # fails outright with "Unable to use a TTY - input is not a
+            # terminal". And `-i` cannot be dropped either: without a
+            # stdin flag `kubectl debug` defaults to --attach=false, prints
+            # "Creating debugging pod ..." and returns before the command
+            # has run, so the caller gets no output and no error. Either
+            # mistake produces a host action that silently did not happen,
+            # which every injection in this file is built to refuse to
+            # tolerate -- see cut_mds_access.
+            #
+            # The image is pinned and overridable. busybox:latest is an
+            # unpinned Docker Hub pull on every single host command, and an
+            # anonymous rate limit there reads as an ImagePullBackOff that
+            # looks nothing like the cause (see the operator-side note on
+            # node restart). Labs with a mirror set K8S_DEBUG_IMAGE.
+            image = os.getenv("K8S_DEBUG_IMAGE", "busybox:1.37")
+            cmd = (f"kubectl debug node/{node_name} -i --quiet=true "
+                   f"--image={image} -- chroot /host sh -c {quoted}")
 
         try:
-            return self._exec_kubectl(
+            out, err = self._exec_kubectl(
                 cmd, timeout=timeout or self.NODE_CMD_TIMEOUT)
+            if not self.detect_openshift():
+                # `oc debug` deletes its pod when the command returns.
+                # `kubectl debug node/` does not: it leaves a Completed
+                # node-debugger-* pod behind on every call, which on a
+                # polling caller is tens of pods and tens of image pulls.
+                self._reap_node_debuggers(node_name)
+            return out, err
         except Exception as exc:                      # noqa: BLE001
             if check:
                 raise
