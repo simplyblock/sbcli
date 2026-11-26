@@ -52,6 +52,12 @@ def test_a_volume_without_snapshots_has_nothing_in_flight(db):
     assert sc.parent_snapshot_delete_in_flight("lvol-33") == []
 
 
+def test_an_empty_query_iterator_is_no_snapshot(db):
+    # the DB query returns an iterator, truthy even when it yields nothing
+    db.get_snapshots_by_lvol_id.return_value = iter(())
+    assert sc.parent_snapshot_delete_in_flight("lvol-33") == []
+
+
 def test_the_wait_returns_once_the_delete_has_finished(db):
     deleting = [_snap("SNAP_615", 200, SnapShot.STATUS_IN_DELETION)]
     db.get_snapshots_by_lvol_id.side_effect = [deleting, deleting, [_snap("SNAP_477", 100)]]

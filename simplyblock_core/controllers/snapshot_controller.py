@@ -130,7 +130,8 @@ def parent_snapshot_delete_in_flight(lvol_id):
     above it, which a new snapshot of the volume does not touch. Retention and
     chain collapse delete older replication snapshots all the time, so waiting
     on those would only slow replication down."""
-    snaps = db_controller.get_snapshots_by_lvol_id(lvol_id)
+    # list(): the query returns an iterator, which is truthy even when empty
+    snaps = list(db_controller.get_snapshots_by_lvol_id(lvol_id))
     if not snaps:
         return []
     newest = max(int(s.created_at or 0) for s in snaps)
