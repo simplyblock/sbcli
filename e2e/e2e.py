@@ -33,6 +33,7 @@ from __init__ import (
     get_objectstore_tests,
     get_parity_tests,
     get_pnfs_failure_tests,
+    get_pnfs_load_tests,
     get_pnfs_mds_tests,
     get_pnfs_security_tests,
     get_pnfs_tests,
@@ -241,6 +242,11 @@ def main():
         "pnfs-mds": get_pnfs_mds_tests,
         "pnfs-security": get_pnfs_security_tests,
         "pnfs-failure": get_pnfs_failure_tests,
+        # The L- rows. Its own key because L-08 is also the vehicle
+        # for the multi-day L-03 soak, and a group whose runtime is
+        # set by an environment variable does not belong in one
+        # somebody runs to check a fix.
+        "pnfs-load": get_pnfs_load_tests,
         # ObjectStore / S3Bucket. k8s only and gated the same way pnfs is:
         # every bucket is a pNFS volume, so a cluster with no metadata
         # server cannot serve one and the group refuses rather than timing

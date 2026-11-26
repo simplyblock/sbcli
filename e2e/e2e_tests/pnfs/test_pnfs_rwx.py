@@ -305,9 +305,29 @@ class _PnfsBase(TestClusterBase):
         "PNFS_TOOLS_IMAGE",
         "registry.access.redhat.com/ubi9/python-311:latest")
 
-    def _start_shell_pods(self, base, count, claim=None, spread=True):
-        """*count* long-lived pods on the claim, one per node when *spread*."""
+    def _start_shell_pods(self, base, count, claim=None, spread=True,
+                          node=None):
+        """*count* long-lived pods on the claim, one per node when *spread*.
+
+        *node* pins every pod to that one Kubernetes node, which is what
+        the client-fault cases need: F-04 proves a rebooted node restaged
+        by putting a pod back **on that node**, and a pod the scheduler
+        was free to place elsewhere would prove nothing. Pinning and
+        *spread* are mutually exclusive by construction -- a required
+        anti-affinity plus a nodeSelector for a node that already has a
+        pod on the claim is unsatisfiable -- so passing *node* turns the
+        anti-affinity off and says so rather than leaving a pod Pending.
+        """
         claim = claim or self.claim
+        if node and spread:
+            self.logger.info(
+                "[pnfs] %s is pinned to %s, so the one-pod-per-node "
+                "anti-affinity is dropped for it", base, node)
+            spread = False
+        selector = ""
+        if node:
+            selector = ("  nodeSelector:\n"
+                        f"    kubernetes.io/hostname: {node}\n")
         names = []
         for i in range(count):
             name = f"{base}-{i}"
@@ -331,6 +351,7 @@ class _PnfsBase(TestClusterBase):
                 f"    {self.k8s_utils.SHARED_CLAIM_LABEL}: {claim}\n"
                 "spec:\n"
                 f"{affinity}"
+                f"{selector}"
                 "  restartPolicy: Never\n"
                 # The metadata server runs mkfs.xfs as root and exports the
                 # result root-owned, so only root can create at the root of

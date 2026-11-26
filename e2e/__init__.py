@@ -141,10 +141,18 @@ from e2e_tests.objectstore.test_objectstore_resilience import (
     S3RBACFullCycleK8s,
 )
 from e2e_tests.pnfs.test_pnfs_failure import (
+    PnfsClientNodeRebootK8s,
+    PnfsClientPathLossK8s,
     PnfsCsiKilledMidOperationK8s,
     PnfsGuestCrashInPlaceK8s,
+    PnfsMdsPartitionedFromClientK8s,
     PnfsProvisioningChurnK8s,
     PnfsUnalignedDirectIoReportK8s,
+)
+from e2e_tests.pnfs.test_pnfs_load import (
+    PnfsExportCeilingK8s,
+    PnfsManyClientsLoadK8s,
+    PnfsRestartRebootSoakK8s,
 )
 from e2e_tests.pnfs.test_pnfs_mds_standby import (
     PnfsMdsActiveDeletedK8s,
@@ -154,6 +162,7 @@ from e2e_tests.pnfs.test_pnfs_mds_standby import (
     PnfsMdsManyExportsTakeoverK8s,
     PnfsMdsNoStandbyRecoversK8s,
     PnfsMdsOperatorRestartNoTakeoverK8s,
+    PnfsMdsRestartWithClientDownK8s,
     PnfsMdsSecondTakeoverK8s,
     PnfsMdsStandbyMissingK8s,
     PnfsMdsStandbyScaleK8s,
@@ -1686,6 +1695,10 @@ def get_pnfs_mds_tests():
         PnfsMdsManyExportsTakeoverK8s,          # F-10  it scales
         PnfsMdsSecondTakeoverK8s,               # F-09  twice, inside grace
         PnfsMdsOperatorRestartNoTakeoverK8s,    # F-06  and it is not spurious
+        # F-16 last of the takeover cases: it is the only one that
+        # takes a client node down, so it is the only one whose
+        # failure costs the group a worker.
+        PnfsMdsRestartWithClientDownK8s,  # F-16  grace with a client gone
         # Last: these change spec.pnfs.mds.standbys. Each restores it, but
         # a case that failed between the patch and the undo leaves the
         # cluster in a shape the cases above would silently pass in.
@@ -1714,6 +1727,39 @@ def get_pnfs_failure_tests():
         PnfsProvisioningChurnK8s,         # L-05  its own claims
         PnfsCsiKilledMidOperationK8s,     # F-05  restarts the CSI plugins
         PnfsGuestCrashInPlaceK8s,         # F-15  crashes the guest
+        # The client-node faults, last and in this order. Each one
+        # disturbs a shared lab host and restores it by a mechanism that
+        # does not depend on this process surviving (see the module
+        # docstring), but a failure here still costs the lab more than a
+        # pod kill does -- so everything that can be proved without
+        # touching a host is proved first.
+        PnfsClientPathLossK8s,            # F-18  a controller reset, self-healing
+        PnfsMdsPartitionedFromClientK8s,  # F-10  port 2049 only, host-armed undo
+        PnfsClientNodeRebootK8s,          # F-04  a real reboot, ~20min
+    ]
+
+
+def get_pnfs_load_tests():
+    """Track F -- the `L-` load, scale and soak rows.
+
+    Separate from `pnfs-failure` because of what a failure costs and how
+    long it takes: L-01 runs 24 clients for five minutes, L-07 provisions
+    two dozen exports, and L-08 is the vehicle for the multi-day L-03
+    soak. None of it belongs in a group somebody runs to check a fix.
+
+    Ordered by what it leaves behind. L-01 and L-07 touch only their own
+    claims; L-08 destroys the metadata server and reboots client nodes
+    repeatedly, so it runs last.
+
+    `PNFS_L01_CLIENTS`, `PNFS_L07_EXPORTS` and `PNFS_L08_CYCLES` are the
+    knobs. Raising the last one is how this group becomes the soak lane
+    rather than a CI case; the assertions do not change with the
+    duration.
+    """
+    return [
+        PnfsManyClientsLoadK8s,           # L-01  many clients, one claim
+        PnfsExportCeilingK8s,             # L-07  the export boundary
+        PnfsRestartRebootSoakK8s,         # L-08 (and L-03) the soak
     ]
 
 

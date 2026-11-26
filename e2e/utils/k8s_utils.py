@@ -390,6 +390,32 @@ class K8sUtils:
             )
         return name
 
+    def node_internal_ip(self, node_name: str) -> str:
+        """The node's InternalIP, given its Kubernetes name.
+
+        The inverse of :meth:`_get_k8s_node_name`, and needed because
+        everything that acts on a node -- :meth:`run_on_node`,
+        :meth:`reboot_node`, :meth:`cut_mds_access` -- is keyed on an IP,
+        while everything that observes one -- a pod's ``spec.nodeName``, an
+        anti-affinity spread, a drain -- yields a name. A test that has
+        located a client pod and wants to disturb the host under it has a
+        name and needs the IP.
+
+        Raises rather than returning "": an empty string reaches
+        ``_get_k8s_node_name`` as a grep pattern that matches every node,
+        and the caller would then reboot an arbitrary one.
+        """
+        out, _ = self._exec_kubectl(
+            f"kubectl get node {node_name} -o jsonpath="
+            f"'{{.status.addresses[?(@.type==\"InternalIP\")].address}}' "
+            f"2>/dev/null || true", supress_logs=True)
+        ips = (out or "").strip().strip("'").split()
+        if not ips:
+            raise RuntimeError(
+                f"[K8sUtils] node {node_name!r} reports no InternalIP, so "
+                f"there is no address to act on it through.")
+        return ips[0]
+
     # ── host access ───────────────────────────────────────────────────
     #: How long to let a node-level command run before giving up.
     NODE_CMD_TIMEOUT = 180

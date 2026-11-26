@@ -42,11 +42,13 @@ from utils.pnfs_utils import (
     EVENT_MDS_PROMOTED,
     EVENT_MDS_STANDBY_MISSING,
     MDS_TERMINATION_GRACE,
+    NFS_LEASE_DEFAULT,
     PnfsEvidenceError,
     PnfsProbeError,
     mds_pods,
     mds_record,
     mds_statefulset,
+    mountstats,
     nfsexport_status,
     wait_mds_promotion,
 )
@@ -1129,3 +1131,155 @@ class PnfsMdsExportGrownBeforeTakeoverK8s(_MdsBase):
             "[F-19] PASS: %d bytes before, %d after the takeover to %s "
             "(epoch %s -> %s in %ss)",
             grown, after, new_active, epoch, new_epoch, took)
+
+
+class PnfsMdsRestartWithClientDownK8s(_MdsBase):
+    """F-16: a takeover while one client node is down, so grace runs long.
+
+    The boundary the nfsd patches rest on. nfsd lifts its grace period
+    early once every client it knows about has reclaimed; a client that is
+    *gone* can never reclaim, so grace has to run to its full length
+    instead. Two things can go wrong there and only one of them is the
+    product's:
+
+      * the clients that are still up do not recover, because the server
+        spent the whole grace period waiting for one that never would.
+        That is the failure this case exists to catch, and it is asserted
+        hard.
+      * grace ends early anyway. That is *recorded*, not failed. nfsd
+        lifting grace once every **reachable** client has reclaimed is a
+        defensible implementation, and inventing a minimum here would
+        turn an observation into an opinion -- the same reason the S3
+        latency cases carry no threshold. The log line names the lease so
+        a reviewer can see which happened.
+
+    The node is rebooted undrained, so its pod goes down with it and the
+    server genuinely has a client it cannot reach. A drained reboot would
+    unmount cleanly first, the server would have no unreclaimed client,
+    and the case would silently become F-01.
+    """
+
+    CLAIM = "pnfs-mds-f16"
+    #: The surviving clients' budget. Deliberately above a full grace
+    #: period: with an unreachable client in the record, a stall for the
+    #: whole lease is the expected cost, and anything beyond it is the
+    #: server never having come back.
+    MAX_SURVIVOR_GAP = 150
+    REBOOT_TIMEOUT = 1200
+
+    def run(self):
+        self.logger.info("=== F-16 takeover with one client node down ===")
+        self.assert_pnfs_cluster()
+        self.assert_mds_cluster()
+        if self.k8s_utils.detect_talos():
+            raise PnfsProbeError(
+                "[F-16] this needs a client node actually down. Talos has no "
+                "host shell and this runner has no talosctl guarantee; a case "
+                "that skipped the reboot would assert on a takeover with "
+                "every client present, which is F-01.")
+
+        self._make_storage_class()
+        self._make_rwx_claim(self.CLAIM)
+        self.extra_claims.append(self.CLAIM)
+
+        pods = self._start_shell_pods("pnfs-mds-f16", 3)
+        victim, survivor, bystander = pods[0], pods[1], pods[2]
+        node_name = self._pod_node(victim)
+        if not node_name:
+            raise PnfsProbeError(
+                f"[F-16] pod {victim} reports no node, so there is no client "
+                f"host to take down.")
+        node_ip = self.k8s_utils.node_internal_ip(node_name)
+
+        # The lease, from a client rather than assumed, because it is what
+        # the grace period is and the whole case is about its length.
+        lease = NFS_LEASE_DEFAULT
+        try:
+            st = mountstats(self.k8s_utils, survivor, mountpoint=self.MOUNT)
+            lease = int((st or {}).get("lease_time") or NFS_LEASE_DEFAULT)
+        except PnfsProbeError:
+            pass
+        self.logger.info("[F-16] the clients report a %ss lease", lease)
+
+        marker = self.start_writer(survivor)
+        sleep_n_sec(20)
+
+        self.logger.info("[F-16] taking client node %s (%s) down, undrained",
+                         node_name, node_ip)
+        self.undo_stack.append(self.k8s_utils.uncordon_all_workers)
+        if not self.k8s_utils.reboot_node(node_ip, drain=False):
+            raise PnfsProbeError(
+                f"[F-16] no reboot could be issued for {node_name}, so no "
+                f"client went away and the grace period would not be the one "
+                f"this case is about.")
+        if not self.k8s_utils.wait_node_condition(node_ip, ready=False,
+                                                  timeout=300):
+            raise PnfsProbeError(
+                f"[F-16] {node_name} never left Ready, so the server still "
+                f"has every client it started with.")
+        self.logger.info("[F-16] %s is NotReady; one client is unreachable",
+                         node_name)
+
+        # Now the takeover, with that client still gone.
+        active, epoch = self.record()
+        if not active:
+            raise PnfsProbeError(
+                "[F-16] no active guest is recorded, so there is nothing to "
+                "restart.")
+        killed_at = time.time()
+        self.k8s_utils._exec_kubectl(
+            f"kubectl delete pod {active} -n {self.mds_ns} --wait=false")
+        self.logger.info("[F-16] deleted the active guest %s", active)
+
+        new_active, new_epoch, took = wait_mds_promotion(
+            self.k8s_utils, self.sts_name, epoch,
+            timeout=self.TAKEOVER_TIMEOUT, namespace=self.mds_ns)
+        self.wait_exports_ready(
+            1, timeout=self.TAKEOVER_TIMEOUT,
+            what="[F-16] the export after a takeover with a client down")
+        served_after = round(time.time() - killed_at, 1)
+
+        # The observation, not an assertion. Which way it went is the
+        # interesting part of this case and both ways are defensible.
+        if served_after < lease:
+            self.logger.info(
+                "[F-16] grace was lifted EARLY: exports served %ss after the "
+                "guest was deleted, inside the %ss lease, with a client that "
+                "could not possibly have reclaimed. nfsd lifting grace once "
+                "every reachable client has reclaimed is defensible, so this "
+                "is recorded rather than failed -- but it means an "
+                "unreachable client's locks were released before its lease "
+                "expired, and the next case to care is F-12.",
+                served_after, lease)
+        else:
+            self.logger.info(
+                "[F-16] grace ran its full length: %ss to serve, against a "
+                "%ss lease, as the plan expects with an unreclaimed client.",
+                served_after, lease)
+
+        # The assertion: the clients that stayed up recovered anyway.
+        gap = self.assert_client_survived(
+            survivor, marker, "[F-16] the surviving client",
+            self.MAX_SURVIVOR_GAP)
+        self._assert_mount_writable([survivor, bystander])
+
+        # And the node comes back, because the lab is shared.
+        back = self.k8s_utils.wait_node_condition(
+            node_ip, ready=True, timeout=self.REBOOT_TIMEOUT)
+        self.k8s_utils.uncordon_all_workers()
+        if not back:
+            raise PnfsEvidenceError(
+                f"[F-16] {node_name} did not return Ready within "
+                f"{self.REBOOT_TIMEOUT}s. The takeover assertions above "
+                f"passed; the lab is now short a worker.")
+        if victim in self.shell_pods:
+            self.shell_pods.remove(victim)
+        self.k8s_utils.delete_pod(victim, wait=True)
+        rejoined = self._start_shell_pods(
+            "pnfs-mds-f16-rejoin", 1, spread=False, node=node_name)[0]
+        self.logger.info(
+            "[F-16] PASS: epoch %s -> %s (%s) with %s down; exports served "
+            "%ss against a %ss lease; survivor stalled %ss and kept its "
+            "descriptor; %s remounted after the node rejoined",
+            epoch, new_epoch, new_active, node_name, served_after, lease, gap,
+            rejoined)

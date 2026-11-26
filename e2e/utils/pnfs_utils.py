@@ -107,6 +107,7 @@ def parse_mountstats(text, mountpoint=None):
     ``device``      the server export, e.g. ``10.0.0.9:/export/pvc-abc``
     ``fstype``      ``nfs4`` and the option blob the kernel echoes back
     ``layout_type`` the value of ``pnfs=``, or ``None`` on a plain mount
+    ``lease_time``  the server's lease in seconds, or ``None``
     ``ops``         ``{OPNAME: count}`` from the per-op table
 
     *mountpoint* narrows the result to one mount and returns that dict
@@ -127,7 +128,7 @@ def parse_mountstats(text, mountpoint=None):
                 continue
             src, dst, fstype = m.groups()
             cur = {"device": src, "fstype": fstype,
-                   "layout_type": None, "ops": {}}
+                   "layout_type": None, "lease_time": None, "ops": {}}
             entries[dst] = cur
             # The kernel puts pnfs= on the device line for flexfiles.
             lm = re.search(r"\bpnfs=(\w+)", fstype)
@@ -141,6 +142,15 @@ def parse_mountstats(text, mountpoint=None):
             lm = re.search(r"\bpnfs=(\w+)", line)
             if lm:
                 cur["layout_type"] = lm.group(1)
+        # The lease sits on the same `nfsv4:` line as pnfs=. Read rather
+        # than assumed: every case that partitions a client has to outlast
+        # the lease to reach its own premise, and on a lab whose lease is
+        # not the kernel's 90s a hard-coded wait would be either pointless
+        # (too short to expire anything) or wasted minutes.
+        if cur["lease_time"] is None and "lease_time=" in line:
+            tm = re.search(r"\blease_time=(\d+)", line)
+            if tm:
+                cur["lease_time"] = int(tm.group(1))
         # Per-operation table: "WRITE: 1234 1234 0 ..." -- the first number
         # is the operation count, which is the only field we use.
         om = re.match(r"([A-Z_]+):\s+(\d+)", line)
@@ -721,3 +731,115 @@ def resv_registrants(report):
         if rows:
             break
     return rows
+
+
+# ── the client's own NVMe paths ──────────────────────────────────────────
+#
+# The pNFS data path is the client host's kernel NVMe/TCP connection to the
+# storage nodes, which csi-node establishes at stage time. These two
+# functions are what F-18 needs: take that path away, give it back, and see
+# whether the client's I/O went back to being direct on its own.
+
+#: The kernel's default NFSv4 lease, and so the default grace period a
+#: restarted nfsd runs. Mirrored, not imported: it is the kernel's
+#: `nfsd4_lease` and the operator sets nothing else, and the value is read
+#: back per-mount from `lease_time=` in mountstats wherever a case can.
+NFS_LEASE_DEFAULT = 90
+
+
+def nvme_client_controllers(k8s, node_ip, subnqn_match=None):
+    """``[{"name", "traddr", "subnqn", "state"}]`` for a node's NVMe/TCP controllers.
+
+    Reads ``/sys/class/nvme`` rather than ``nvme list-subsys`` so the result
+    carries the sysfs name, which is what a reset has to be written to.
+    *subnqn_match*, when given, keeps only controllers whose subsystem NQN
+    contains it -- the discovery controller and any unrelated subsystem are
+    not paths to anything this suite is testing.
+
+    Needs a host shell, which Talos does not have. The caller gets the
+    RuntimeError ``run_on_node`` raises there and should turn it into a
+    probe failure naming the platform, because a path-loss case that
+    silently disturbed nothing would pass.
+    """
+    out, _err = k8s.run_on_node(
+        node_ip,
+        "for c in /sys/class/nvme/nvme*; do [ -d \"$c\" ] || continue; "
+        "echo \"name=$(basename $c) "
+        # sysfs `address` is itself "traddr=<ip>,trsvcid=<port>", so it is
+        # echoed under `at=` rather than `traddr=` -- labelling it traddr
+        # produces "traddr=traddr=..." and a field regex that captures the
+        # label as part of the value.
+        "at=$(cat $c/address 2>/dev/null | tr -d '\\n') "
+        "subnqn=$(cat $c/subsysnqn 2>/dev/null) "
+        "state=$(cat $c/state 2>/dev/null)\"; done",
+        check=False)
+    rows = []
+    for line in (out or "").splitlines():
+        if "name=" not in line:
+            continue
+        row = {}
+        for field, key in (("name", "name"), ("at", "traddr"),
+                           ("subnqn", "subnqn"), ("state", "state")):
+            m = re.search(rf"\b{field}=(\S*)", line)
+            row[key] = m.group(1) if m else ""
+        if not row.get("name"):
+            continue
+        if subnqn_match and subnqn_match not in row.get("subnqn", ""):
+            continue
+        rows.append(row)
+    return rows
+
+
+def reset_nvme_controllers(k8s, node_ip, names):
+    """Reset each named controller, which drops its paths and reconnects.
+
+    This is the path loss, and it is deliberately not a firewall rule. A
+    rule dropping the storage nodes' data addresses would be applied in the
+    host's network namespace, and on this topology SPDK runs there too --
+    the same rule would cut the storage node's own replication traffic and
+    produce a cluster outage wearing a client-side costume. That is how run
+    20261002-202420 ended, and it is the mistake ``cut_storage_network``'s
+    docstring records.
+
+    A controller reset is scoped to the client's kernel controller alone,
+    heals by itself through the initiator's own reconnect logic, and so
+    needs no armed undo: there is no state left behind to undo. Which is
+    also the point of F-18 -- the heal is the product's, not the test's.
+
+    Returns the number of controllers the write was accepted for.
+    """
+    done = 0
+    for name in names:
+        path = f"/sys/class/nvme/{name}/reset_controller"
+        out, _err = k8s.run_on_node(
+            node_ip,
+            f"[ -w {path} ] && echo 1 > {path} && echo RESET-OK || echo RESET-NO",
+            check=False)
+        if "RESET-OK" in (out or ""):
+            done += 1
+        else:
+            # Not fatal here. The caller asserts on the count, so a
+            # controller that refused is visible as a smaller number rather
+            # than as an exception from the middle of an injection.
+            pass
+    return done
+
+
+def wait_nvme_live(k8s, node_ip, names, timeout=180, poll=5):
+    """Block until every named controller is ``live`` again.
+
+    Returns ``(ok, seconds, states)``. The seconds are the headline: this is
+    how long the client had no path, which is what F-18 measures and what
+    NFR-2's 30s bound is about.
+    """
+    start = time.time()
+    states = {}
+    deadline = start + timeout
+    while time.time() < deadline:
+        rows = {r["name"]: r.get("state", "") for r
+                in nvme_client_controllers(k8s, node_ip)}
+        states = {n: rows.get(n, "<gone>") for n in names}
+        if states and all(v == "live" for v in states.values()):
+            return True, round(time.time() - start, 1), states
+        time.sleep(poll)
+    return False, round(time.time() - start, 1), states
