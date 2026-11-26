@@ -134,6 +134,23 @@ def test_sizes_round_to_8_gib(setup):
         assert vol.identifier == f"id.{vol.id}"
 
 
+@pytest.mark.parametrize("vid", ["3509732900000003", "0123456700000001"])
+def test_a_volume_id_of_digits_alone_is_found_by_name(setup, vid, monkeypatch):
+    """Regression: the fake answered queryIdByKey with the id as bare text, so an
+    id that happened to be all digits (token_hex, about 1 run in 40) decoded as a
+    number, find_volume took it for no answer, and a retried create collided with
+    the volume it had just made ("Volume name already in use"). The gateway
+    answers with a JSON string, which keeps the id, leading zeros included."""
+    ids = iter([vid, "ffffffff00000002"])
+    monkeypatch.setattr(setup.fake, "_new_id", lambda: next(ids))
+    with _client(setup) as c:
+        name = str(uuid.uuid4())
+        first = c.create_volume(name, 8 * GIB)
+        assert first.id == vid
+        assert c.find_volume(name) == first
+        assert c.create_volume(name, 8 * GIB).id == vid
+
+
 def test_not_found_500_is_none_but_other_500_raises(setup):
     with _client(setup) as c:
         assert c.get_volume("deadbeef00000001") is None

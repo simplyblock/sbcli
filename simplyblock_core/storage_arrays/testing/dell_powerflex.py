@@ -215,7 +215,11 @@ class FakePowerFlex(FakeArray):
         name = (req.json() or {}).get("name")
         for v in self.volumes.values():
             if v["name"] == name:
-                return Reply(200, v["id"])
+                # A JSON string, quotes included, as the gateway sends it. A bare
+                # str body would go out as text, and an id of digits alone would
+                # then decode as a number.
+                return Reply(200, json.dumps(v["id"]).encode(),
+                             {"Content-Type": "application/json"})
         raise _err("Could not find the volume", 500, 79)
 
     @route("POST", _VOL + "/action/(?P<action>[A-Za-z]+)")
