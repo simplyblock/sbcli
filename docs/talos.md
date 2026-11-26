@@ -108,7 +108,7 @@ huge pages, 2 MiB pages, through `machine.sysfs` (dotted paths under `/sys`;
 ```yaml
 machine:
   sysfs:
-    devices.system.node.node0.hugepages.hugepages-2048kB.nr_hugepages: "6943"
+    devices.system.node.node0.hugepages.hugepages-2048kB.nr_hugepages: "6144"
   kubelet:
     extraConfig:
       cpuManagerPolicy: static
@@ -118,12 +118,14 @@ machine:
 ```
 
 The page count is what the node sizes for itself: `huge_page_memory` of each
-node config on the worker (`sbctl sn get`), plus 1 GB headroom per node config,
-in 2 MiB pages, per NUMA node. The refusal message prints it, so one way to size
-a fleet is to add the first worker without the patch, read the numbers off the
-failure, and roll them out. A pool set through `machine.sysctls`
-`vm.nr_hugepages` is honoured as well, as long as it covers the SPDK pod's
-request (`spdk_mem` rounded to 2 MiB plus 512 MiB per pod); do not set both.
+node config on the worker (`sbctl sn get`), rounded up to whole 2 MiB pages,
+summed per NUMA node. Each SPDK pod requests exactly its node config's pages
+as `hugepages-2Mi`, so nothing is reserved that the pod cannot use. The refusal
+message prints the count, so one way to size a fleet is to add the first worker
+without the patch, read the numbers off the failure, and roll them out. A pool
+set through `machine.sysctls` `vm.nr_hugepages` is honoured as well, as long as
+it covers the SPDK pod's request (`spdk_mem` rounded up to 2 MiB per pod); do
+not set both.
 
 The refusal message carries this YAML; nothing writes a file for you (the host
 has no shell, and the node agent's filesystem is not yours). A refusal for a
@@ -141,7 +143,7 @@ storageNodes.talosMachineConfig: Managed on the StorageCluster to let the node
 apply it through the Talos API:
 machine:
   sysfs:
-    devices.system.node.node0.hugepages.hugepages-2048kB.nr_hugepages: '3423'
+    devices.system.node.node0.hugepages.hugepages-2048kB.nr_hugepages: '3044'
 ```
 
 The file is the lines from `machine:` to the end, nothing else:
@@ -149,7 +151,7 @@ The file is the lines from `machine:` to the end, nothing else:
 ```yaml title="patch.yaml"
 machine:
   sysfs:
-    devices.system.node.node0.hugepages.hugepages-2048kB.nr_hugepages: '3423'
+    devices.system.node.node0.hugepages.hugepages-2048kB.nr_hugepages: '3044'
 ```
 
 Save it where you run `talosctl` and apply it, then restart the kubelet so it
@@ -168,7 +170,7 @@ of identical workers:
 
 ```
 talosctl -n <node ip> patch mc --mode=no-reboot \
-  -p '{"machine":{"sysfs":{"devices.system.node.node0.hugepages.hugepages-2048kB.nr_hugepages":"3423"}}}'
+  -p '{"machine":{"sysfs":{"devices.system.node.node0.hugepages.hugepages-2048kB.nr_hugepages":"3044"}}}'
 ```
 
 The kubelet refusal has the same shape, with `machine.kubelet.extraConfig` in

@@ -11769,12 +11769,7 @@ def upgrade_automated_deployment_config():
             return False
         utils.store_config_file(updated_config, constants.NODES_CONFIG_FILE, create_read_only_file=True)
         # Set Huge page memory
-        huge_page_memory_dict: dict = {}
-        for node_config in updated_config["nodes"]:
-            numa = node_config["socket"]
-            huge_page_memory_dict[numa] = huge_page_memory_dict.get(numa, 0) + node_config["huge_page_memory"]
-        for numa, huge_page_memory in huge_page_memory_dict.items():
-            num_pages = huge_page_memory // (2048 * 1024)
+        for numa, num_pages in utils.hugepages_per_numa(updated_config["nodes"]).items():
             utils.set_hugepages_if_needed(numa, num_pages)
         logger.info("Config regenerated successfully")
         return True
@@ -11801,9 +11796,8 @@ def generate_automated_deployment_config(max_lvol, max_prov, sockets_to_use, nod
                      f"{constants.MAX_SUBSYSTEMS_PER_NODE} subsystems per storage node")
         return False
     if calculate_hp_only:
-        minimum_hp_memory = utils.calculate_hp_only(max_lvol, number_of_devices, sockets_to_use, nodes_per_socket, vcpu_count)
-        hp_number = math.ceil(minimum_hp_memory / 2)
-        logger.info(f"The required number of huge pages on this host is: {hp_number} ({minimum_hp_memory} MB)")
+        hp_number = utils.calculate_hp_only(max_lvol, number_of_devices, sockets_to_use, nodes_per_socket, vcpu_count)
+        logger.info(f"The required number of huge pages on this host is: {hp_number} ({hp_number * 2} MiB)")
         return True
     else:
         # Minimum 5 vCPUs: the smallest cluster vCPU budget (4) plus one for the

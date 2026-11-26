@@ -159,15 +159,16 @@ class TestSizingHelpers(unittest.TestCase):
 
     def test_pages_per_numa_is_the_apply_config_sizing(self):
         """Two node configs on NUMA 0, one on NUMA 1, max_size overriding
-        where larger: the figures apply_config has always written."""
+        where larger, each rounded up to whole 2 MiB pages on its own: the
+        figures apply_config writes."""
         nodes = [
             {"huge_page_memory": 4_000_000_000, "max_size": 0, "socket": 0},
             {"huge_page_memory": 4_000_000_000, "max_size": 6_000_000_000, "socket": 0},
             {"huge_page_memory": 2_000_000_000, "max_size": 0, "socket": 1},
         ]
         self.assertEqual(k8s_node._hugepages_per_numa(nodes), {
-            0: (4_000_000_000 + 1_000_000_000 + 6_000_000_000 + 1_000_000_000) // 2_000_000,
-            1: (2_000_000_000 + 1_000_000_000) // 2_000_000,
+            0: -(-4_000_000_000 // (2 * MIB)) + -(-6_000_000_000 // (2 * MIB)),
+            1: -(-2_000_000_000 // (2 * MIB)),
         })
 
     def test_sysfs_patch_is_one_dotted_key_per_numa_node(self):
@@ -396,7 +397,7 @@ class TestSpdkProcessStartOnTalos(_TalosHandlerCase):
         self.assertEqual(self._talos_jobs(), ['snode-talos-hugepages-worker-1', 'snode-talos-kubelet-worker-1'])
         [patch_job, kubelet_job] = [j for j in self._jobs_created() if j['metadata']['name'].startswith('snode-talos-')]
         patch_arg = patch_job['spec']['template']['spec']['containers'][0]['args'][-1]
-        self.assertEqual(json.loads(patch_arg), k8s_node._talos_sysfs_patch({0: (12 * GIB + 10**9) // 2_000_000}))
+        self.assertEqual(json.loads(patch_arg), k8s_node._talos_sysfs_patch({0: 12 * GIB // (2 * MIB)}))
         self.assertEqual(kubelet_job['spec']['template']['spec']['containers'][0]['args'][-3:],
                          ['service', 'kubelet', 'restart'])
         self.core.create_namespaced_pod.assert_called()
@@ -408,7 +409,7 @@ class TestSpdkProcessStartOnTalos(_TalosHandlerCase):
         data, error = self._start(host_pool=[2 * GIB], kubelet_capacity=['0'])
         self.assertFalse(data)
         self.assertIn('after applying the machine config patch', error)
-        self.assertIn('NUMA node 0 carries 1024 2 MiB pages, short of 6942', error)
+        self.assertIn('NUMA node 0 carries 1024 2 MiB pages, short of 6144', error)
         self.assertEqual(self._talos_jobs(), ['snode-talos-hugepages-worker-1'])
         self.core.create_namespaced_pod.assert_not_called()
 
@@ -521,45 +522,45 @@ class TestSpdkProcessStartOnTalos(_TalosHandlerCase):
 
     def test_first_sight_adds_simplyblocks_pages_on_top_of_the_hosts(self):
         """A worker never seen before carries 1024 pages of somebody else's:
-        the patch sets 1024 + 6942, not 6942, and the record says whose is
+        the patch sets 1024 + 6144, not 6144, and the record says whose is
         which."""
         self._fresh_host()
-        data, error = self._start(host_pool=[2 * GIB, 7966 * 2 * MIB], kubelet_capacity=['0', '16Gi'])
+        data, error = self._start(host_pool=[2 * GIB, 7168 * 2 * MIB], kubelet_capacity=['0', '16Gi'])
         self.assertIsNone(error, error)
-        self.assertEqual(self._patch_targets(), {0: 1024 + 6942})
-        self.assertEqual(self._state(), (1024, 7966))
+        self.assertEqual(self._patch_targets(), {0: 1024 + 6144})
+        self.assertEqual(self._state(), (1024, 7168))
 
     def test_a_pool_that_already_covers_the_pod_is_not_taken_for_it(self):
         """16 GiB of the user's pages cover the 12 GiB pod, and the old flow
         would have applied nothing; now that pool is the baseline and
         simplyblock's own pages go on top of it."""
         self._fresh_host()
-        data, error = self._start(host_pool=[16 * GIB, (8192 + 6942) * 2 * MIB], kubelet_capacity=['16Gi', '30Gi'])
+        data, error = self._start(host_pool=[16 * GIB, (8192 + 6144) * 2 * MIB], kubelet_capacity=['16Gi', '30Gi'])
         self.assertIsNone(error, error)
         self.assertEqual(self._talos_jobs(), ['snode-talos-hugepages-worker-1', 'snode-talos-kubelet-worker-1'])
-        self.assertEqual(self._patch_targets(), {0: 8192 + 6942})
-        self.assertEqual(self._state(), (8192, 8192 + 6942))
+        self.assertEqual(self._patch_targets(), {0: 8192 + 6144})
+        self.assertEqual(self._state(), (8192, 8192 + 6144))
 
     def test_a_reboot_does_not_stack_a_second_allocation(self):
         """Talos re-applies the machine config on boot, so the host comes
         back with the full total; with the record kept across the reboot
         that is not read as the user's pages."""
-        self._provisioned(user_pages=1024, total_pages=7966)
-        data, error = self._start(host_pool=[7966 * 2 * MIB], kubelet_capacity=['16Gi'])
+        self._provisioned(user_pages=1024, total_pages=7168)
+        data, error = self._start(host_pool=[7168 * 2 * MIB], kubelet_capacity=['16Gi'])
         self.assertIsNone(error, error)
         self.assertEqual(self._talos_jobs(), [])
-        self.assertEqual(self._state(), (1024, 7966))
+        self.assertEqual(self._state(), (1024, 7168))
 
     def test_a_manual_increase_is_absorbed_into_the_users_share(self):
-        self._provisioned(user_pages=1024, total_pages=7966)
-        data, error = self._start(host_pool=[(7966 + 1000) * 2 * MIB], kubelet_capacity=['16Gi'])
+        self._provisioned(user_pages=1024, total_pages=7168)
+        data, error = self._start(host_pool=[(7168 + 1000) * 2 * MIB], kubelet_capacity=['16Gi'])
         self.assertIsNone(error, error)
         self.assertEqual(self._talos_jobs(), [])
-        self.assertEqual(self._state(), (2024, 8966))
+        self.assertEqual(self._state(), (2024, 8168))
 
     def test_the_pool_is_never_shrunk(self):
         """The host holds 8192 pages of simplyblock's from a larger sizing;
-        6942 is what it needs now. No patch, and the surplus is recorded as
+        6144 is what it needs now. No patch, and the surplus is recorded as
         simplyblock's rather than left to read as the user's next time."""
         self._provisioned(user_pages=0, total_pages=8192)
         data, error = self._start(host_pool=[16 * GIB], kubelet_capacity=['16Gi'])

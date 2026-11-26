@@ -796,6 +796,37 @@ def _hp_memory_for_node(small_pool_count, large_pool_count, lvol_count, cpu_coun
     return int(total * constants.HP_OVERHEAD_FACTOR) + constants.HP_RESERVE_BYTES
 
 
+HUGEPAGE_2MI_BYTES = 2 * 1024 * 1024
+
+
+def hugepages_2mi_pages(huge_page_memory) -> int:
+    """The 2 MiB huge pages a storage node needs: its huge-page memory (the
+    figure calculate_minimum_hp_memory and the max_prov floor give), rounded up
+    to whole pages and nothing more. That figure already carries its overhead
+    factor and reserve.
+
+    The host's reservation and the SPDK pod's hugepages-2Mi request are both
+    this number of pages, so they cannot drift apart: the kubelet caps a
+    container's huge pages at its request, and a page reserved beyond it is
+    taken from the node's ordinary memory without ever being used."""
+    return math.ceil(int(huge_page_memory) / HUGEPAGE_2MI_BYTES)
+
+
+def hugepages_per_numa(nodes) -> dict:
+    """2 MiB pages to reserve on each NUMA node for a host's node configs: the
+    sum of hugepages_2mi_pages over the storage nodes on it, each rounded up on
+    its own so that each SPDK pod's request fits. A node config's max_size
+    raises its figure where larger."""
+    pages: dict = {}
+    for node_config in nodes:
+        hg_memory = int(node_config["huge_page_memory"])
+        if int(node_config.get("max_size") or 0) > 0:
+            hg_memory = max(hg_memory, int(node_config["max_size"]))
+        numa = node_config["socket"]
+        pages[numa] = pages.get(numa, 0) + hugepages_2mi_pages(hg_memory)
+    return pages
+
+
 def sys_memory_for_capacity(raw_capacity_bytes) -> int:
     """System (non-hugepage) memory of the SPDK container for a node with this
     much raw device capacity: SYS_MEMORY_BASE_BYTES + SYS_MEMORY_PER_TIB_BYTES
@@ -5509,7 +5540,10 @@ def configure_kms_on_k8s(cluster):
 
 
 def calculate_hp_only(max_lvol, number_of_devices, sockets_to_use, nodes_per_socket, vcpu_count=0):
-    minimum_hp_memory = 0
+    """The 2 MiB huge pages the host needs for the storage nodes it would be
+    configured with: hugepages_2mi_pages per storage node, the same figure
+    apply_config reserves."""
+    hp_pages = 0
     cores_by_numa = get_numa_cores()
     node_cores = generate_core_allocation(cores_by_numa, sockets_to_use, nodes_per_socket, vcpu_count)
     node_index = 0
@@ -5532,11 +5566,11 @@ def calculate_hp_only(max_lvol, number_of_devices, sockets_to_use, nodes_per_soc
                                                                       number_of_poller_cores or len(
                                                                           core_group["isolated"]),
                                                                       max_lvol)
-            minimum_hp_memory += calculate_minimum_hp_memory(small_pool_count, large_pool_count, max_lvol,
-                                                            0, len(core_group["isolated"])) + 1000000000
+            hp_pages += hugepages_2mi_pages(calculate_minimum_hp_memory(
+                small_pool_count, large_pool_count, max_lvol, 0, len(core_group["isolated"])))
 
             node_index += 1
-    return convert_size(minimum_hp_memory, 'MB')
+    return hp_pages
 
 def recalculate_cores_distribution(cores, number_of_alcemls):
     distribution = calculate_core_allocations(cores, number_of_alcemls)
