@@ -24,6 +24,10 @@ EVENT_DISTR_IO_ERROR = "DISTR_IO_ERROR"
 EVENT_FENCE_LOOP = "FENCE_LOOP"
 #: One member of an lvstore keeps failing to register volumes the leader created.
 EVENT_LVS_MEMBER_REGISTER_FAILING = "LVS_MEMBER_REGISTER_FAILING"
+#: The control plane reloaded (or tried to reload) such a member's copy of the lvstore.
+EVENT_LVS_MEMBER_REPAIR = "LVS_MEMBER_REPAIR"
+#: Replication into an lvstore sent full copies because one member could not be chained.
+EVENT_LVS_MEMBER_BLOCKS_DELTA = "LVS_MEMBER_BLOCKS_DELTA"
 #: Multi-attach array LUN mode: a LUN was (or could not be) taken over by
 #: another node after its serving node failed.
 EVENT_LUN_TAKEOVER = "LUN_TAKEOVER"

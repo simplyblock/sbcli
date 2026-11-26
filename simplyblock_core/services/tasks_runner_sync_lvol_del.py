@@ -17,6 +17,7 @@ from simplyblock_core import constants, db_controller, storage_node_ops, utils
 from simplyblock_core.controllers import (
     activation_gate,
     events_controller,
+    lvs_member_repair,
     snapshot_controller,
     storage_events,
     tasks_controller,
@@ -138,6 +139,8 @@ def _alert_repeated_failure(task, node_id, what, msg):
 # (node_id, lvs_name) -> {lvol_id: last failure time}, and when it was last alerted.
 _member_register_failures: dict = {}
 _member_register_alerted: dict = {}
+# (node_id, lvs_name) -> when its copy was last reloaded (lvs_member_repair).
+_member_repaired: dict = {}
 
 
 def _note_member_registration(node, lvs_name, lvol_id, err=None, now=None):
@@ -172,7 +175,36 @@ def _note_member_registration(node, lvs_name, lvol_id, err=None, now=None):
             node, lvs_name, len(seen), window, err)
     except Exception as event_error:                       # noqa: BLE001
         logger.warning(f"Could not log the member registration event: {event_error}")
+    _repair_member(node, lvs_name, now)
     return True
+
+
+def _repair_member(node, lvs_name, now):
+    """Reload the failing member's copy of the lvstore (lvs_member_repair), at
+    most once per constants.LVS_MEMBER_REPAIR_INTERVAL_SEC per (member, lvstore).
+
+    A reload that worked restarts the count: the next alert needs fresh
+    failures. When the failures come back after a reload, the next repair's
+    events say the reload does not help and the node needs a restart."""
+    key = (node.get_id(), lvs_name)
+    last = _member_repaired.get(key)
+    if last is not None and now - last < constants.LVS_MEMBER_REPAIR_INTERVAL_SEC:
+        return None
+    # Failing again soon after a reload: that reload did not help.
+    recent = last if last is not None and now - last < 2 * constants.LVS_MEMBER_REGISTER_FAIL_REALERT_SEC else None
+    try:
+        outcome, detail = lvs_member_repair.repair_member_copy(
+            node, lvs_name, db=db, previous_repair_at=recent)
+    except Exception as e:                                  # noqa: BLE001
+        logger.error("Repair of %s on %s raised: %s", lvs_name, node.get_id(), e)
+        return None
+    if outcome == lvs_member_repair.SKIPPED:
+        return outcome
+    _member_repaired[key] = now
+    if outcome == lvs_member_repair.REPAIRED:
+        _member_register_failures.pop(key, None)
+    logger.warning("Repair of %s on %s: %s (%s)", lvs_name, node.get_id(), outcome, detail)
+    return outcome
 
 
 def _run_sync_op(task):

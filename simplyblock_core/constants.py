@@ -786,6 +786,15 @@ REPL_CUTOVER_ENDGAME_BACKOFF_SEC = 300
 LVS_MEMBER_REGISTER_FAIL_ALERT_LVOLS = 5
 LVS_MEMBER_REGISTER_FAIL_WINDOW_SEC = 1800
 LVS_MEMBER_REGISTER_FAIL_REALERT_SEC = 3600
+# On that alert the control plane reloads the member's copy of the lvstore
+# (controllers/lvs_member_repair: bdev_lvol_update_lvstore on a non-leader while
+# another member leads), at most once per this interval per (member, lvstore).
+LVS_MEMBER_REPAIR_INTERVAL_SEC = 1800
+LVS_MEMBER_REPAIR_RPC_TIMEOUT_SEC = 60
+# Replication into an lvstore with a member that cannot be chained sends full
+# copies (a delta needs the landing volume on every member): reported at most
+# once per this interval per (lvstore, member), with the count since.
+LVS_MEMBER_BLOCKS_DELTA_REPORT_SEC = 3600
 # --- a migration must not fill its source cluster (bed bf29, 2026-11-20) ---
 # Five endgames of one source cluster at once, under sustained overwrite, took
 # a shrink snapshot every 15-30 s each; every one pinned what the client

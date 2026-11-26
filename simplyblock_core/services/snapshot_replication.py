@@ -25,6 +25,7 @@ from simplyblock_core.controllers import (
     replication_recovery_points,
     snapshot_controller,
     snapshot_events,
+    storage_events,
 )
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
@@ -2548,6 +2549,41 @@ def _resolve_chain_target(snapshot, replicate_to_source, remote_snode):
     return {"snap_bdev": _snap_obj.snap_bdev}, _snap_obj, True
 
 
+# (member node id, lvstore) -> [first full copy in the current report period, count, last error]
+_member_blocks_delta: dict = {}
+
+
+def _note_member_blocks_delta(node, lvs_name, err, now=None):
+    """Count a landing volume sent in full because *node* could not chain it,
+    and report it (LVS_MEMBER_BLOCKS_DELTA) at most once per
+    constants.LVS_MEMBER_BLOCKS_DELTA_REPORT_SEC per (member, lvstore).
+
+    The full copy stays: a delta is only correct with the landing volume chained
+    on every member (see _prechain_landing_volume). A member left out could take
+    the leadership -- IO-driven, with no control-plane step that could replay the
+    chain first -- and would then read zeros wherever the delta did not write.
+    bf36 (2026-11-25): one failing tertiary made 379 transfers of one volume
+    full copies, silently."""
+    now = time.time() if now is None else now
+    key = (node.get_id(), lvs_name)
+    rec = _member_blocks_delta.get(key)
+    if rec is None:
+        _member_blocks_delta[key] = [now, 1, err]
+        return False
+    rec[1] += 1
+    rec[2] = err
+    if now - rec[0] < constants.LVS_MEMBER_BLOCKS_DELTA_REPORT_SEC:
+        return False
+    first, count, last_err = rec
+    _member_blocks_delta[key] = [now, 0, err]
+    try:
+        storage_events.snode_lvs_member_blocks_delta(node, lvs_name, count, int(now - first), last_err)
+    except Exception as e:                                  # noqa: BLE001
+        logger.warning("Could not log the full-copy event for %s on %s: %s",
+                       lvs_name, node.get_id(), e)
+    return True
+
+
 def _prechain_landing_volume(task, snapshot, replicate_to_source, remote_lv,
                              remote_lv_node):
     """Chain the landing volume onto the destination's copy of the PREVIOUS
@@ -2648,9 +2684,11 @@ def _prechain_landing_volume(task, snapshot, replicate_to_source, remote_lv,
             node, role, remote_lv.top_bdev, target_prev_snap['snap_bdev'],
             owner=remote_lv_node, record=False, db=db)
         if outcome != replica_chain.DONE:
+            why = err or "not reachable, or without the volume"
             logger.info("Landing volume %s stays a full-transfer target: %s %s "
                         "could not be chained (%s)", remote_lv.top_bdev, role,
-                        node.get_id(), err or "not reachable, or without the volume")
+                        node.get_id(), why)
+            _note_member_blocks_delta(node, remote_lv_node.lvstore, why)
             return False
         prechained.append(node.get_id())
         return True
