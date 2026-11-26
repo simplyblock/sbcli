@@ -366,26 +366,51 @@ spec:
               # (it waits for the MCO reboot to actually land), so correctness no
               # longer depends on this marker being in sync.
               #
-              # A master has no reboot due when it already runs the master pool's
-              # target render: the first master's add rolls every master into the
-              # settings, and a later master's own job has no marker. Its current
-              # config carries the target's content hash and MCO is done with it.
-              # A worker keeps the first-time wait.
-              if [ ! -f "$MARKER" ] && [ -n "$IS_MASTER" ]; then
-                TARGET=$(kubectl get machineconfigpool master -o jsonpath='{.spec.configuration.name}' 2>/dev/null || true)
+              # The marker is a file on the host, so it outlives the cluster that
+              # wrote it. It says the node went through the flow once, not that no
+              # reboot is due now: a redeployment gives the pool a KubeletConfig
+              # under the new cluster's name, and MCO may roll the node again. So
+              # whether MCO is done with the node is read from MCO, as the agent's
+              # gate reads it (_converged_on_pool): the node runs its pool's target
+              # render, by content hash, MCO reports it Done, and it is uncordoned.
+              # The master pool rolls one master at a time and its status names the
+              # old render until the last one has rebooted, so its target is the
+              # spec's render; a storage pool's is its status render.
+              node_converged() {
+                if [ -n "$IS_MASTER" ]; then
+                  TARGET=$(kubectl get machineconfigpool master -o jsonpath='{.spec.configuration.name}' 2>/dev/null || true)
+                else
+                  TARGET=$(kubectl get machineconfigpool "$MCP_NAME" -o jsonpath='{.status.configuration.name}' 2>/dev/null || true)
+                fi
                 CURRENT=$(kubectl get node "$HOSTNAME" \
                   -o jsonpath='{.metadata.annotations.machineconfiguration\.openshift\.io/currentConfig}' 2>/dev/null || true)
                 STATE=$(kubectl get node "$HOSTNAME" \
                   -o jsonpath='{.metadata.annotations.machineconfiguration\.openshift\.io/state}' 2>/dev/null || true)
-                if [ -n "$TARGET" ] && [ -n "$CURRENT" ] && [ "${CURRENT##*-}" = "${TARGET##*-}" ] && [ "$STATE" = "Done" ]; then
-                  echo "[INFO] $HOSTNAME already runs $TARGET; no reboot is due"
-                  touch "$MARKER"
-                fi
+                CORDONED=$(kubectl get node "$HOSTNAME" -o jsonpath='{.spec.unschedulable}' 2>/dev/null || true)
+                [ -n "$TARGET" ] && [ -n "$CURRENT" ] && [ "${CURRENT##*-}" = "${TARGET##*-}" ] \
+                  && [ "$STATE" = "Done" ] && [ "$CORDONED" != "true" ]
+              }
+
+              # A master has no reboot due when it already runs the master pool's
+              # target render: the first master's add rolls every master into the
+              # settings, and a later master's own job has no marker.
+              # A worker keeps the first-time wait.
+              if [ ! -f "$MARKER" ] && [ -n "$IS_MASTER" ] && node_converged; then
+                echo "[INFO] $HOSTNAME already runs $TARGET; no reboot is due"
+                touch "$MARKER"
               fi
               if [ -f "$MARKER" ]; then
                   echo "[INFO] Node already configured. Waiting for numa-align/numa-{{ NSOCKET }} to be allocatable..."
+                  # The 6 minutes for the NUMA plugin count only while MCO is done
+                  # with the node. A node MCO is still rolling, or one that is
+                  # queued behind another master's reboot, loses the plugin's
+                  # resource across its own reboot for longer than that, and a
+                  # missing resource says nothing about the plugin until the node
+                  # has settled. That wait is the first-time path's 15 minutes,
+                  # after which the agent's gate goes on waiting for the rollout.
                   RETRIES=0
-                  while [ $RETRIES -lt 36 ]; do
+                  ROLLOUT=0
+                  while :; do
                     # The kubelet reports the resource only while the NUMA plugin is registered,
                     # so this needs neither the plugin's namespace nor its pod.
                     NUMA_ALLOC=$(kubectl get node "{{ HOSTNAME }}" \
@@ -394,12 +419,24 @@ spec:
                       echo "[INFO] numa-align/numa-{{ NSOCKET }} is available (100)"
                       exit 0
                     fi
-                    RETRIES=$((RETRIES + 1))
-                    echo "[INFO] Waiting for NUMA readiness (allocatable=$NUMA_ALLOC), retry $RETRIES/36 in 10s..."
+                    if node_converged; then
+                      RETRIES=$((RETRIES + 1))
+                      if [ $RETRIES -ge 36 ]; then
+                        echo "[ERROR] NUMA plugin did not become ready after 6 minutes on $HOSTNAME, which runs $TARGET"
+                        exit 1
+                      fi
+                      echo "[INFO] Waiting for NUMA readiness (allocatable=$NUMA_ALLOC), retry $RETRIES/36 in 10s..."
+                    else
+                      ROLLOUT=$((ROLLOUT + 1))
+                      if [ $ROLLOUT -ge 90 ]; then
+                        echo "[WARN] MCO is not done with $HOSTNAME after 15 minutes (current=$CURRENT target=$TARGET state=$STATE cordoned=$CORDONED)"
+                        echo "[WARN] Leaving the rest of the rollout to the agent, which waits for it before it starts SPDK"
+                        exit 0
+                      fi
+                      echo "[INFO] MCO is still rolling $HOSTNAME (current=$CURRENT target=$TARGET state=$STATE cordoned=$CORDONED), waiting $ROLLOUT/90 in 10s..."
+                    fi
                     sleep 10
                   done
-                  echo "[ERROR] NUMA plugin did not become ready after 6 minutes"
-                  exit 1
               fi
 
               echo "[INFO] Marking node as configured."

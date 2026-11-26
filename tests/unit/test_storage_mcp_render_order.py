@@ -163,7 +163,9 @@ if verb == "get":
         pool = s["pools"].get(name)
         if pool is None:
             fail('Error from server (NotFound): machineconfigpools.machineconfiguration.openshift.io "%s" not found' % name)
-        if "spec.configuration.name" in jsonpath:
+        if "spec.configuration.name" in jsonpath or "status.configuration.name" in jsonpath:
+            # A storage pool's status render is its target; the master pool's is
+            # its spec's. The scenarios keep one target per pool.
             print(s["pool_target"].get(name, ""))
         elif "metadata.labels" in jsonpath:
             print(pool.get("labels", {}).get("custom-kubelet", ""))
@@ -228,9 +230,20 @@ if verb == "get":
         print("true")
     elif kind == "node":
         if "currentConfig" in jsonpath:
-            print(s["node_current"].get(name, ""))
+            # MCO still rolls the node for `rolling_polls` reads of its config,
+            # then the node runs `node_current`.
+            if s["rolling_polls"] > 0:
+                s["rolling_polls"] -= 1
+                print(s["node_rolling"].get(name, ""))
+            else:
+                print(s["node_current"].get(name, ""))
         elif jsonpath.endswith("/state}"):
             print("Done")
+        elif "unschedulable" in jsonpath:
+            print("true" if name in s["cordoned"] else "")
+        elif s["numa_unready_polls"] > 0:
+            # The kubelet does not report the resource until the plugin registers.
+            s["numa_unready_polls"] -= 1
         else:
             print("100")
 elif verb in ("create", "apply"):
@@ -306,6 +319,7 @@ def _state(**overrides):
     state = {"pools": {}, "mcs": [], "kcs": {}, "render_after": 2, "generated_suffix": "", "masters": [],
              "kc_label": "storage-cpumanager-ac85c3", "kc_name": "storage-kubelet-ac85c3",
              "master_ours_name": "99-master-generated-kubelet", "master_kcs": [], "race_kc": None, "node_current": {}, "pool_target": {}, "extra_owners": {},
+             "node_rolling": {}, "rolling_polls": 0, "cordoned": [], "numa_unready_polls": 0,
              "reject_kubeletconfig": False, "fail_get_pool": 0, "fail_get_hosts": 0}
     state.update(overrides)
     return state
@@ -640,6 +654,79 @@ def test_a_worker_joining_a_new_render_waits_for_its_reboot(tmp_path):
         node_current={"worker-1": "rendered-worker-ccc333"}))
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "900" in _slept(tmp_path)
+
+
+# ---- A marker that outlived its cluster ---------------------------------------
+# The marker is a file on the host. A redeployment finds it there, replaces the
+# previous cluster's KubeletConfig, and MCO rolls the nodes again while the
+# marker says the node is configured.
+
+def _numa_waits(proc):
+    return proc.stdout.count("Waiting for NUMA readiness")
+
+
+@needs_dash
+def test_a_marked_master_mco_is_still_rolling_is_not_failed_on_the_numa_wait(tmp_path):
+    """The 6 minutes for the NUMA plugin used to start at once on a marked
+    node. A master queued behind the others' reboots has no resource to report
+    for longer than that, and the job failed a node that was only rebooting."""
+    proc, state, calls = _run(tmp_path, _rendered_master(
+        node_current={"master-3": "rendered-master-aaa111"}, node_rolling={"master-3": "rendered-master-old999"},
+        rolling_polls=50, numa_unready_polls=55), hostname="master-3", marker=True)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "MCO is still rolling master-3" in proc.stdout
+    assert "did not become ready" not in proc.stdout
+    assert "numa-align/numa-0 is available (100)" in proc.stdout
+    assert _numa_waits(proc) == 5, "the NUMA wait counts only once MCO is done with the node"
+
+
+@needs_dash
+def test_a_marked_worker_mco_is_still_rolling_is_not_failed_on_the_numa_wait(tmp_path):
+    proc, state, calls = _run(tmp_path, _state(
+        pools={POOL: {"values": ["worker-1"]}}, mcs=[MC], kcs={KC: {}}, render_after=0,
+        pool_target={POOL: "rendered-%s-bbb222" % POOL},
+        node_current={"worker-1": "rendered-%s-bbb222" % POOL}, node_rolling={"worker-1": "rendered-worker-ccc333"},
+        rolling_polls=50, numa_unready_polls=55), marker=True)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "MCO is still rolling worker-1" in proc.stdout
+    assert "did not become ready" not in proc.stdout
+
+
+@needs_dash
+def test_a_cordoned_node_is_not_done_rolling(tmp_path):
+    """MCO uncordons last: a node on the render that is still cordoned has not
+    restarted its pods yet, the NUMA plugin among them."""
+    proc, state, calls = _run(tmp_path, _rendered_master(
+        node_current={"master-3": "rendered-master-aaa111"}, cordoned=["master-3"],
+        numa_unready_polls=40), hostname="master-3", marker=True)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "cordoned=true" in proc.stdout
+    assert _numa_waits(proc) == 0
+
+
+@needs_dash
+def test_a_settled_node_without_the_numa_plugin_still_fails_after_6_minutes(tmp_path):
+    proc, state, calls = _run(tmp_path, _rendered_master(
+        node_current={"master-3": "rendered-master-aaa111"}, numa_unready_polls=10 ** 6),
+        hostname="master-3", marker=True)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "NUMA plugin did not become ready after 6 minutes" in proc.stdout
+    assert "rendered-master-aaa111" in proc.stdout, "the failure names the render the node settled on"
+    assert _numa_waits(proc) == 35
+    assert _slept(tmp_path).count("10") == 35
+
+
+@needs_dash
+def test_a_rollout_longer_than_the_job_waits_is_left_to_the_agent(tmp_path):
+    """The first-time path gives the reboot 15 minutes and then ends, and the
+    agent's gate waits for the rest. A marked node gets the same."""
+    proc, state, calls = _run(tmp_path, _rendered_master(
+        node_current={"master-3": "rendered-master-aaa111"}, node_rolling={"master-3": "rendered-master-old999"},
+        rolling_polls=10 ** 6, numa_unready_polls=10 ** 6), hostname="master-3", marker=True)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "MCO is not done with master-3 after 15 minutes" in proc.stdout
+    assert "did not become ready" not in proc.stdout
+    assert _slept(tmp_path).count("10") == 89
 
 
 def test_the_job_takes_the_object_names_from_the_agent():

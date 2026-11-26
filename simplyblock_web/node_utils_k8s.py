@@ -29,8 +29,10 @@ def wait_for_job_completion(job_name, namespace, timeout=480):
             job = batch_v1.read_namespaced_job(job_name, namespace)
         except ApiException as e:
             if e.status == 404:
-                # Job completed and was garbage-collected — treat as success.
-                return True
+                # No node-preparation Job sets ttlSecondsAfterFinished, so
+                # nothing removes one that finished: a Job that is gone was
+                # deleted while it ran, and what it was to do is not done.
+                raise RuntimeError(f"Job '{job_name}' was deleted before it completed") from e
             raise
         if job.status.succeeded and job.status.succeeded >= 1:
             return True
