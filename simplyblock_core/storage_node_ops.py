@@ -13065,7 +13065,8 @@ def _release_nonleader_examine(rpc, node_id, lvs_name):
         logger.warning("Not releasing the examine of %s on %s: lvstore query failed: %s",
                        lvs_name, node_id[:8], e)
         return False
-    if not lvs:
+    if not isinstance(lvs, dict):
+        # absent, or an answer without the leadership field: not provably non-leader
         return False
     if lvs.get("lvs leadership"):
         logger.warning("Not releasing the examine of %s on %s: it reports leadership",

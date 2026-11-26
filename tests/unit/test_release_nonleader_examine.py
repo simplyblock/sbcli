@@ -48,6 +48,13 @@ def test_no_lvstore_sends_nothing():
     rpc.bdev_lvol_set_leader.assert_not_called()
 
 
+def test_an_answer_without_the_leadership_field_sends_nothing():
+    # e.g. a stub that only says the lvstore exists
+    rpc = _rpc(True)
+    assert ops._release_nonleader_examine(rpc, "6344ccd0-x", "LVS_22") is False
+    rpc.bdev_lvol_set_leader.assert_not_called()
+
+
 def test_a_failed_call_is_not_fatal():
     rpc = _rpc({"name": "LVS_22", "lvs leadership": False}, set_error=RuntimeError("boom"))
     assert ops._release_nonleader_examine(rpc, "6344ccd0-x", "LVS_22") is False
