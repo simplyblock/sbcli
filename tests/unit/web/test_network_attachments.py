@@ -63,7 +63,7 @@ def test_a_pod_without_attachments_is_unchanged():
     assert pod["spec"]["hostNetwork"] is True
     assert pod["spec"]["dnsPolicy"] == "ClusterFirstWithHostNet"
     assert "k8s.v1.cni.cncf.io/networks" not in (pod["metadata"].get("annotations") or {})
-    assert set(_spdk(pod)["resources"]["limits"]) == {"hugepages-2Mi", "cpu"}
+    assert set(_spdk(pod)["resources"]["limits"]) == {"hugepages-2Mi", "cpu", "memory"}
 
 
 def _params(**extra):
@@ -122,7 +122,7 @@ def test_the_spdk_container_requests_the_device_a_plugin_hands_out():
 def test_a_pod_without_device_resources_requests_none():
     pod = _render(NETWORKS=network_attachments.annotation([DATA]), DEVICE_RESOURCES={})
 
-    assert set(_spdk(pod)["resources"]["limits"]) == {"hugepages-2Mi", "cpu"}
+    assert set(_spdk(pod)["resources"]["limits"]) == {"hugepages-2Mi", "cpu", "memory"}
 
 
 @pytest.mark.parametrize("attachment", [

@@ -1165,14 +1165,20 @@ def check_leader_site(cluster, site: str) -> None:
     Raises SyncReplicationUnsupportedError on a cluster without sync
     replication, SyncReplicationSiteError for an empty site or one the
     cluster does not have, SyncLeaderSiteRefusedError for the lost site."""
-    if not cluster.sync_replication:
+    if not cluster.sync_replication and not cluster.stretched_control_plane:
         raise SyncReplicationUnsupportedError(
-            f"cluster {cluster.get_id()} is not a sync-replication cluster; it has no leader site")
+            f"cluster {cluster.get_id()} is not a sync-replication cluster (nor one with a "
+            f"stretched control plane); it has no leader site")
     if not site:
         raise SyncReplicationSiteError("leader_site must not be empty")
     db = DBController()
     sites = {n.site for n in db.get_storage_nodes_by_cluster_id(cluster.get_id())
              if n.site and n.status != StorageNode.STATUS_REMOVED}
+    if cluster.stretched_control_plane:
+        # On a stretched control plane the leader site is also the site whose
+        # control plane leads (docs/stretched-control-plane.md), so a site
+        # qualifies by its management nodes as well as by its storage nodes.
+        sites |= {n.site for n in db.get_mgmt_nodes(cluster.get_id()) if n.site}
     if site not in sites:
         raise SyncReplicationSiteError(
             f"site {site!r} is not a site of cluster {cluster.get_id()} (sites: {sorted(sites)})")
@@ -1832,10 +1838,17 @@ _PROMOTE_REFUSALS = {
 
 
 def _connection_strings(volumes: list[LVol], site: str) -> dict:
+    """The connect entries of each promoted volume on ``site``. A volume whose
+    connect is refused, by the volume itself or by a consistency-group
+    subsystem move holding its subsystem, refuses the promote naming it."""
     from simplyblock_core.controllers import lvol_controller
+    from simplyblock_core.exceptions import SubsystemMoveInProgressError
     out = {}
     for lvol in volumes:
-        entries, err = lvol_controller.connect_lvol(lvol.get_id(), site=site)
+        try:
+            entries, err = lvol_controller.connect_lvol(lvol.get_id(), site=site)
+        except SubsystemMoveInProgressError as e:
+            entries, err = False, str(e)
         if entries is False:
             raise SyncPromoteRefusedError(f"volume {lvol.get_id()}: {err}", [lvol.get_id()])
         out[lvol.get_id()] = entries

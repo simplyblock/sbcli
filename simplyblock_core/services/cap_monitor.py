@@ -2,9 +2,15 @@
 import time
 from datetime import UTC, datetime
 
-from simplyblock_core import cluster_ops, constants, db_controller, utils
+from simplyblock_core import (
+    cluster_ops,
+    constants,
+    db_controller,
+    utils,
+)
 from simplyblock_core.controllers import (
     cluster_events,
+    control_plane_controller,
     fdb_backup_controller,
     mgmt_events,
 )
@@ -63,6 +69,7 @@ def check_api_metrics(cluster):
 def main():
     logger.info("Starting capacity monitoring service...")
     while True:
+        control_plane_controller.wait_until_services_enabled("cap-monitor")
         try:
             db.get_clusters()
         except Exception as e:
@@ -81,25 +88,32 @@ def main():
             size_util = records[0].size_util
             size_prov = records[0].size_prov_util
             logger.debug(f"cluster abs util: {size_util}, prov util: {size_prov}")
-            if cl.cap_crit:
-                if cl.cap_crit <= size_util:
-                    logger.warning(f"Cluster absolute cap critical, util: {size_util}% of cluster util: {cl.cap_crit}, "
-                                   f"putting the cluster in read_only mode")
-                    if cl.id in last_event:
-                        diff = datetime.now(UTC) - datetime.fromtimestamp(last_event[cl.id]["date"]/1000, UTC)
-                        if diff and diff.total_seconds() > 60 * 15:
-                            ev = cluster_events.cluster_cap_crit(cl, size_util)
-                            if ev:
-                                last_event[cl.id] = ev
-                    else:
+            # Capacity thresholds are informational: they raise events, they
+            # never change the cluster's or a device's state. A device is full
+            # when its data plane says so (error_write_cannot_allocate, handled
+            # by the distrib event collector), at 100%, not at a threshold.
+            # Before, crossing cap_crit put the cluster read_only, which marked
+            # every online device cannot_allocate: writes needing new space
+            # failed although the devices still had room (bed bf25,
+            # 2026-11-16: cluster B read_only for 31 s at an 85% reading,
+            # client EIO on 5 of 8 volumes).
+            if cl.status == Cluster.STATUS_READONLY:
+                # Only an earlier version of this monitor set read_only.
+                logger.warning(f"Cluster {cl.get_id()} is read_only from an earlier capacity check: "
+                               f"setting it active")
+                cluster_ops.cluster_set_active(cl.get_id())
+            if cl.cap_crit and cl.cap_crit <= size_util:
+                logger.warning(f"Cluster absolute cap critical, util: {size_util}% of cluster util: {cl.cap_crit}")
+                if cl.id in last_event:
+                    diff = datetime.now(UTC) - datetime.fromtimestamp(last_event[cl.id]["date"]/1000, UTC)
+                    if diff and diff.total_seconds() > 60 * 15:
                         ev = cluster_events.cluster_cap_crit(cl, size_util)
                         if ev:
                             last_event[cl.id] = ev
-                    if cl.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED]:
-                        cluster_ops.cluster_set_read_only(cl.get_id())
                 else:
-                    if cl.status == Cluster.STATUS_READONLY:
-                        cluster_ops.cluster_set_active(cl.get_id())
+                    ev = cluster_events.cluster_cap_crit(cl, size_util)
+                    if ev:
+                        last_event[cl.id] = ev
 
             if cl.cap_warn:
                 if cl.cap_warn < size_util < cl.cap_crit:

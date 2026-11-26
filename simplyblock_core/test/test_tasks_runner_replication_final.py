@@ -94,7 +94,7 @@ def _install(monkeypatch, nodes, rep, cutover_ret):
     calls = []
 
     def _run_cutover(src, tgt, lvol, comp, map_id, snap, operation="replicate",
-                     src_exec=None, tgt_exec=None):
+                     src_exec=None, tgt_exec=None, delta_base=None):
         calls.append((src.get_id(), tgt.get_id(), comp, map_id, snap, operation))
         return cutover_ret
     monkeypatch.setattr(runner.replication_final_step, "run_cutover", _run_cutover)
@@ -616,7 +616,7 @@ def test_the_retry_after_a_failed_final_step_does_not_freeze_again(monkeypatch):
 
     # Past it, with the clone already gone: back to the catch-up gate.
     task.function_params["discard_after"] = 0
-    monkeypatch.setattr(runner, "_delete_cutover_clone", lambda clone_id: True)
+    monkeypatch.setattr(runner, "_delete_cutover_clone", lambda clone_id, *_: True)
     monkeypatch.setattr(runner, "_replication_lag_sec", lambda lvol: 500.0)
     with pytest.raises(TaskDefer, match="catch up"):
         runner.task_runner(task.frozen_view(), [])
@@ -637,7 +637,7 @@ def test_the_failed_clone_is_deleted_before_a_new_one_is_built(monkeypatch):
     monkeypatch.setattr(runner, "db", _FakeDB({}, None))
     state = {"gone": False}
     monkeypatch.setattr(runner, "_delete_cutover_clone",
-                        lambda clone_id: state["gone"])
+                        lambda clone_id, *_: state["gone"])
     task = _discard_task(discard_tgt_lvol_id="CLONE1",
                          discard_after=int(__import__("time").time()) - 1)
 
@@ -654,7 +654,7 @@ def test_a_clone_that_cannot_be_deleted_ends_the_task(monkeypatch):
     from simplyblock_core import constants
     from simplyblock_core.services.task_runner_base import TaskAbort
     monkeypatch.setattr(runner, "db", _FakeDB({}, None))
-    monkeypatch.setattr(runner, "_delete_cutover_clone", lambda clone_id: False)
+    monkeypatch.setattr(runner, "_delete_cutover_clone", lambda clone_id, *_: False)
     task = _discard_task(
         discard_tgt_lvol_id="CLONE1",
         discard_after=1 - constants.REPL_CUTOVER_SHRINK_TIMEOUT_SEC)
@@ -670,7 +670,7 @@ def test_a_spent_budget_releases_the_clone_and_the_relationship(monkeypatch):
     monkeypatch.setattr(runner, "db", _FakeDB({}, rep))
     deleted: list = []
     monkeypatch.setattr(runner, "_delete_cutover_clone",
-                        lambda clone_id: (deleted.__iadd__([clone_id]), False)[1])
+                        lambda clone_id, *_: (deleted.__iadd__([clone_id]), False)[1])
     assert runner.SPEC.on_finish is runner._cleanup_unfinished_cutover
 
     task = _task(tgt_lvol_id="CLONE1")
@@ -686,7 +686,7 @@ def test_a_completed_cutover_keeps_its_clone(monkeypatch):
     monkeypatch.setattr(runner, "db", _FakeDB({}, rep))
     deleted = []
     monkeypatch.setattr(runner, "_delete_cutover_clone",
-                        lambda clone_id: deleted.append(clone_id))
+                        lambda clone_id, *_: deleted.append(clone_id))
     task = _task(tgt_lvol_id="CLONE1", end_time=5)
     task.status = JobSchedule.STATUS_DONE
     task.function_result = "cutover done"
@@ -703,7 +703,7 @@ def test_a_canceled_task_whose_cutover_landed_keeps_its_clone(monkeypatch):
     monkeypatch.setattr(runner, "db", _FakeDB({}, rep))
     deleted = []
     monkeypatch.setattr(runner, "_delete_cutover_clone",
-                        lambda clone_id: deleted.append(clone_id))
+                        lambda clone_id, *_: deleted.append(clone_id))
     task = _task(tgt_lvol_id="CLONE1")
     task.status = JobSchedule.STATUS_DONE
     task.canceled = True

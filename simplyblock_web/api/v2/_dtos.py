@@ -22,6 +22,7 @@ from simplyblock_core.controllers.sync_replication_controller import (
     VolumeSyncStatus,
 )
 from simplyblock_core.db_controller import DBController
+from simplyblock_core.kms import KMSSettings
 from simplyblock_core.models.backup import Backup, BackupPolicy, GroupBackup
 from simplyblock_core.models.backup_config import (
     BackupConfig,
@@ -205,11 +206,16 @@ class ClusterDTO(BaseModel):
     node_affinity: bool
     anti_affinity: bool
     enable_failure_domain: bool
+    lvol_geometry_enabled: bool
     device_mode: str
     inline_checksum: bool
     atomic_4k: bool
+    flex_geometry: bool = False
     page_copy: bool = False
     md_journal: bool = False
+    raid_devices: bool = False
+    multi_attach: bool = False
+    multi_attach_warm_standby: bool = False
     secret: SecretStr
     tls_enabled: bool
     max_fault_tolerance: int
@@ -221,8 +227,12 @@ class ClusterDTO(BaseModel):
     lost_site: str = ""
     lost_site_state: str = ""
     # The site whose operator leads the stretched cluster ("" = unset); a
-    # follower's adoption checks the role it was handed against it.
+    # follower's adoption checks the role it was handed against it. With a
+    # stretched control plane it is also the site whose control plane leads.
     leader_site: str = ""
+    # A control plane on each of two sites over one FoundationDB
+    # (docs/stretched-control-plane.md).
+    stretched_control_plane: bool = False
     capacity: CapacityStatDTO
     snode_api_service: str
     spdk_proxy_service: str
@@ -256,11 +266,16 @@ class ClusterDTO(BaseModel):
             node_affinity=model.enable_node_affinity,
             anti_affinity=model.strict_node_anti_affinity,
             enable_failure_domain=model.enable_failure_domain,
+            lvol_geometry_enabled=model.lvol_geometry_enabled,
             device_mode=model.device_mode,
             inline_checksum=model.inline_checksum,
             atomic_4k=model.atomic_4k,
+            flex_geometry=model.flex_geometry,
             page_copy=model.page_copy,
             md_journal=model.md_journal,
+            raid_devices=model.raid_devices,
+            multi_attach=model.multi_attach,
+            multi_attach_warm_standby=getattr(model, "multi_attach_warm_standby", False) is True,
             secret=model.secret,
             tls_enabled=model.tls,
             max_fault_tolerance=model.max_fault_tolerance,
@@ -269,6 +284,7 @@ class ClusterDTO(BaseModel):
             lost_site=model.lost_site,
             lost_site_state=model.lost_site_state,
             leader_site=model.leader_site,
+            stretched_control_plane=model.stretched_control_plane,
             capacity=CapacityStatDTO.from_model(
                 stat_obj if stat_obj else StatsObject()
             ),
@@ -378,6 +394,8 @@ class ManagementNodeDTO(BaseModel):
     status: str
     hostname: str
     ip: IPv4Address
+    #: The site of a stretched control plane ("" otherwise).
+    site: str = ""
 
     @staticmethod
     def from_model(model: MgmtNode):
@@ -386,6 +404,76 @@ class ManagementNodeDTO(BaseModel):
             status=model.status,
             hostname=model.hostname,
             ip=IPv4Address(model.mgmt_ip),
+            site=model.site,
+        )
+
+
+class ControlPlaneLeaseDTO(BaseModel):
+    holder_site: str
+    holder_host: str
+    epoch: int
+    state: str
+    expires_at: str
+    state_since: str
+    released_by: str
+
+
+class SiteReadinessDTO(BaseModel):
+    site: str
+    role: str
+    holds_lease: bool
+    mgmt_nodes_online: int
+    mgmt_nodes_total: int
+    storage_nodes_online: int
+    storage_nodes_total: int
+    fdb_lag_seconds: float | None
+    fdb_data_state: str
+    #: Every red readiness gate; empty = the site may take the lead.
+    problems: list[str]
+    failback_ready: bool
+
+    @staticmethod
+    def from_readiness(r):
+        return SiteReadinessDTO(
+            site=r.site, role=r.role, holds_lease=r.holds_lease,
+            mgmt_nodes_online=r.mgmt_nodes_online, mgmt_nodes_total=r.mgmt_nodes_total,
+            storage_nodes_online=r.storage_nodes_online, storage_nodes_total=r.storage_nodes_total,
+            fdb_lag_seconds=r.fdb_lag_seconds, fdb_data_state=r.fdb_data_state,
+            problems=list(r.problems), failback_ready=r.ready,
+        )
+
+
+class ControlPlaneStatusDTO(BaseModel):
+    cluster_id: UUID
+    stretched_control_plane: bool
+    #: The site of the control plane that answered.
+    local_site: str
+    #: single | leader | standby | draining | disconnected
+    mode: str
+    mode_reason: str
+    leader_site: str
+    lease: ControlPlaneLeaseDTO | None
+    fdb_region_lag_seconds: float | None
+    fdb_data_state: str
+    sites: list[SiteReadinessDTO]
+
+    @staticmethod
+    def from_status(s):
+        lease = s.lease
+        return ControlPlaneStatusDTO(
+            cluster_id=UUID(s.cluster_id),
+            stretched_control_plane=s.stretched,
+            local_site=s.local_site,
+            mode=s.mode,
+            mode_reason=s.mode_reason,
+            leader_site=s.leader_site,
+            lease=ControlPlaneLeaseDTO(
+                holder_site=lease.holder_site, holder_host=lease.holder_host, epoch=lease.epoch,
+                state=lease.state, expires_at=lease.expires_at, state_since=lease.state_since,
+                released_by=lease.released_by) if lease else None,
+            fdb_region_lag_seconds=s.fdb_lag_seconds,
+            fdb_data_state=s.fdb_data_state,
+            sites=[SiteReadinessDTO.from_readiness(r) for r in s.sites],
         )
 
 
@@ -719,6 +807,13 @@ BackupConfigDTO = BackupConfig
 #: resolves it, so this shape reaches nothing beyond that call.
 UnresolvedBackupConfigDTO = UnresolvedBackupConfig
 
+#: A cluster's external KMS configuration, as the cluster-create request body
+#: takes it and as ``Cluster.set_kms_settings`` resolves it -- a discriminated
+#: union over backends (``provider``), not exposed in any response (write-only,
+#: like ``UnresolvedBackupConfigDTO``'s configuration is -- ``ClusterDTO`` only
+#: ever surfaces a derived boolean, never the raw backup config either).
+KMSSettingsDTO = KMSSettings
+
 #: Where a set of backups lives, without the credentials to reach it. Carried
 #: inside an export rather than named beside one: the manifests describe objects
 #: and not where they are, so the document that collects them says instead.
@@ -987,14 +1082,98 @@ class ConsistencyGroupMemberJoinDTO(BaseModel):
     lvol_id: str
 
 
+class ConsistencyGroupColocationDTO(BaseModel):
+    """The subsystem move a late join would end in, computed against the state
+    the pinned node has once the join's migration landed. Nothing is reserved.
+    ``target_nqn`` is empty for a fresh subsystem (``target_is_new``), and
+    ``refusal`` names why the group could not be brought into one subsystem:
+    ``SubsystemLimitReached: ...`` is final (the join would be refused for
+    it); ``SubsystemBusy: ...`` is a subsystem held by an active migration or
+    move, which ends, so the join is waited, not refused."""
+    target_nqn: str = ""
+    target_is_new: bool = False
+    moving_lvol_ids: list[str] = []
+    refusal: str = ""
+
+
 class ConsistencyGroupJoinPlanDTO(BaseModel):
     """The steps a late join of an existing volume takes (co-location design
     §5): ``migrate`` (live-migrate ``migrate_lvol_ids`` to ``target_node_id``
-    first), ``join``, ``colocate`` (move into ``target_nqn``)."""
+    first), ``join``, ``colocate`` (move into ``target_nqn``). ``colocation``
+    is absent when the group has no other member to share a subsystem with."""
     steps: list[str]
     target_node_id: str = ""
     migrate_lvol_ids: list[str] = []
     target_nqn: str = ""
+    colocation: ConsistencyGroupColocationDTO | None = None
+
+
+class ConsistencyGroupSubsystemMoveCreateDTO(BaseModel):
+    """Request body for a subsystem move. With ``purpose`` ``join`` (the
+    default), ``lvol_id`` is the member that just joined and the group is
+    brought into one subsystem. With ``leave``, ``lvol_id`` is a member about
+    to leave, and its namespace moves out of the subsystem it shares into a
+    fresh one of its own. A retry with the same ``request_id`` answers with
+    the same move."""
+    lvol_id: str
+    request_id: Annotated[str, Field(min_length=1, max_length=128)]
+    purpose: Literal["join", "leave"] = "join"
+
+
+class ConsistencyGroupSubsystemMoveVolumeDTO(BaseModel):
+    """One volume whose namespace changes subsystem: where it is exported
+    from and at which nsid, its wire identity, and its nsid in the target."""
+    lvol_id: str
+    source_nqn: str = ""
+    source_nsid: int = 0
+    ns_uuid: str = ""
+    nguid: str = ""
+    target_nsid: int = 0
+
+
+class ConsistencyGroupSubsystemMoveDTO(BaseModel):
+    """A consistency group's subsystem move. ``id`` is empty, and ``volumes``
+    too, when nothing had to move. ``namespaces_at`` is ``source`` or
+    ``target``; ``deadline`` is the hosts' suspend deadline in Unix seconds
+    the move was started under (0 before it started)."""
+    id: str
+    request_id: str = ""
+    target_nqn: str = ""
+    target_is_new: bool = False
+    namespaces_at: str = "source"
+    deadline: int = 0
+    status: str = ""
+    purpose: str = "join"
+    volumes: list[ConsistencyGroupSubsystemMoveVolumeDTO] = []
+
+    @classmethod
+    def from_record(cls, record: dict) -> "ConsistencyGroupSubsystemMoveDTO":
+        fields = {k: record[k] for k in ("id", "request_id", "target_nqn", "target_is_new",
+                                         "namespaces_at", "deadline", "status", "purpose")
+                  if k in record}
+        volumes = [ConsistencyGroupSubsystemMoveVolumeDTO(
+            **{k: v[k] for k in ConsistencyGroupSubsystemMoveVolumeDTO.model_fields if k in v})
+            for v in record.get("volumes") or []]
+        return cls(**fields, volumes=volumes)
+
+
+class ConsistencyGroupSubsystemMovePrepareDTO(BaseModel):
+    """Request body for preparing a move: ``host_nqn`` asks for the target
+    subsystem's connect entries for that host."""
+    host_nqn: str | None = None
+
+
+class ConsistencyGroupSubsystemMovePreparedDTO(BaseModel):
+    """A prepared move, and the connect entries of its target subsystem for
+    the requested host, shaped like the volume connect route's."""
+    move: ConsistencyGroupSubsystemMoveDTO
+    connect: list[dict] = []
+
+
+class ConsistencyGroupSubsystemMoveStartDTO(BaseModel):
+    """Request body for moving the namespaces: the hosts' suspend deadline in
+    Unix seconds. The move refuses to begin once it has passed."""
+    deadline: util.Unsigned
 
 
 class ConsistencyGroupColocateDTO(BaseModel):

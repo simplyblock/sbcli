@@ -16,6 +16,7 @@ import uuid as uuid_lib
 from typing import Literal
 
 from simplyblock_core import constants, db_controller, utils, xfer_timing
+from simplyblock_core.controllers import replica_chain
 from simplyblock_core.models.hublvol import HubLVol
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.peer.protocol import HubAddress, HubPath
@@ -28,6 +29,10 @@ db = db_controller.DBController()
 # Final-step transfers copy only the small dirty delta; a small cluster batch
 # keeps the IO-freeze window short.
 _FINAL_STEP_BATCH = 2
+# A dirty-page delta is sent in small range requests; SPDK sizes the in-flight
+# window of a partial transfer itself, cluster_batch only bounds how many
+# clusters are scanned ahead.
+_FINAL_STEP_DELTA_BATCH = 2
 
 
 def _get_transfer_nic(node):
@@ -66,16 +71,6 @@ def _lvs_members(primary_node):
         except KeyError:
             continue
     return members
-
-
-def _online_peers(primary_node, lead=None):
-    """Return the online members of *primary_node*'s lvstore other than *lead*
-    (the primary by default). Membership is always read from the PRIMARY: an
-    acting leader's own secondary/tertiary fields describe the lvstore IT is
-    primary of, not this one."""
-    lead_id = (lead or primary_node).get_id()
-    return [m for m in _lvs_members(primary_node)
-            if m.get_id() != lead_id and m.status == StorageNode.STATUS_ONLINE]
 
 
 def _path_entry(node, lvstore):
@@ -348,9 +343,38 @@ class CutoverUnreachable(Exception):
     the same way on every attempt."""
 
 
+def _final_delta_base(lvol, delta_base, src_exec, operation):
+    """The partial_base for the final step, or 0 for whole clusters.
+
+    ``delta_base`` is the SOURCE snapshot whose copy the target clone sits on.
+    SPDK checks what it can see (the live volume's dirty generation started at
+    that snapshot, this leadership epoch, nothing it could not record); this
+    checks the rest, the same way a delta snapshot transfer does
+    (replication_delta): no member but the freezing one executed a write since
+    that snapshot, and none restarted. Called with the source fenced, so the
+    window it brackets is closed. Anything unreadable means whole clusters,
+    which is always correct -- just slow.
+    """
+    from simplyblock_core.controllers import replication_delta
+    if delta_base is None or operation != "replicate":
+        return 0
+    if not getattr(delta_base, "blobid", 0):
+        logger.info("cutover lvol=%s: final step in whole clusters: base snapshot %s "
+                    "has no blob id", lvol.get_id(), delta_base.get_id())
+        return 0
+    with xfer_timing.phase("final_delta_basis", lvol=lvol.get_id()):
+        counts = replication_delta.local_write_counts(
+            lvol, timeout=constants.REPL_FINAL_DELTA_COUNTS_TIMEOUT_SEC, retry=0)
+    ok, why = replication_delta.live_delta_basis(delta_base, counts, src_exec.get_id())
+    if not ok:
+        logger.info("cutover lvol=%s: final step in whole clusters: %s", lvol.get_id(), why)
+        return 0
+    return int(delta_base.blobid)
+
+
 def run_cutover(src_node, tgt_node, lvol, tgt_lvol_composite, tgt_map_id,
                 tgt_snap_composite, operation="replicate", src_exec=None,
-                tgt_exec=None):
+                tgt_exec=None, delta_base=None):
     """Perform the cross-cluster cutover for *lvol*.
 
     Args:
@@ -368,6 +392,10 @@ def run_cutover(src_node, tgt_node, lvol, tgt_lvol_composite, tgt_map_id,
                              defaults to *src_node*
         tgt_exec:            the target member that receives the final delta
                              -- the settled LVS leader; defaults to *tgt_node*
+        delta_base:          the SOURCE snapshot whose copy *tgt_snap_composite*
+                             is; when given (and REPL_FINAL_STEP_DELTA is on),
+                             the final step asks for the dirty-page delta since
+                             it instead of whole clusters (_final_delta_base)
 
     Returns (ok: bool, error: str|None), and raises CutoverUnreachable when the
     target's transfer hub cannot be attached. The IO-freeze window is bounded
@@ -412,16 +440,25 @@ def run_cutover(src_node, tgt_node, lvol, tgt_lvol_composite, tgt_map_id,
         fence_source_paths(src_node, src_node.lvstore, lvol.nqn, lvol.ns_id,
                            executing=src_exec)
 
+    # bf14 (2026-11-06): every whole-cluster final step of a randomly written
+    # volume hit SPDK's 12 s limit -- a few hundred MB of 4K writes touch
+    # nearly every 2 MB cluster. The page delta carries what was written.
+    partial_base = (_final_delta_base(lvol, delta_base, src_exec, operation)
+                    if constants.REPL_FINAL_STEP_DELTA else 0)
+    batch = _FINAL_STEP_DELTA_BATCH if partial_base else _FINAL_STEP_BATCH
+    applied: dict = {}
     logger.info(
         f"[IO-FREEZE] bdev_lvol_transfer_final_step starting: lvol={lvol.uuid} "
         f"src={src_lvol_composite} tgt_snap={tgt_snap_composite} "
-        f"gateway={hub_bdev} op={operation}")
+        f"gateway={hub_bdev} op={operation} partial_base={partial_base:#x}")
     with xfer_timing.phase("final_step_transfer", lvol=lvol.get_id(),
-                           batch=_FINAL_STEP_BATCH):
+                           batch=batch, delta=1 if partial_base else 0):
         try:
             ret = src_rpc.bdev_lvol_transfer_final_step(
                 src_lvol_composite, tgt_map_id, tgt_snap_composite,
-                _FINAL_STEP_BATCH, hub_bdev, operation)
+                batch, hub_bdev, operation,
+                **({"partial_base": partial_base, "cow_landing": True,
+                    "applied": applied} if operation == "replicate" else {}))
         except RPCException as e:
             # A raise used to skip the restore below and leave the source
             # fenced (the volume dark) through every retry (SFAM-2834). SPDK
@@ -460,20 +497,25 @@ def run_cutover(src_node, tgt_node, lvol, tgt_lvol_composite, tgt_map_id,
 
     # Link the final lvol to its predecessor snapshot on the target peers.
     # bdev_lvol_transfer_final_step handles the receiving member internally;
-    # the other online members need an explicit add_clone. Non-fatal — a
-    # missing peer link self-heals on rejoin.
-    for peer in _online_peers(tgt_node, lead=tgt_exec):
-      with xfer_timing.phase("final_peer_add_clone", lvol=lvol.get_id(),
-                             peer=peer.get_id()):
-        try:
-            add_clone_ok = peer.rpc_client().bdev_lvol_add_clone(tgt_lvol_composite, tgt_snap_composite)
-        except RPCException as e:
-            logger.warning(
-                f"add_clone on peer {peer.get_id()[:8]} failed for final lvol (non-fatal): {e}")
+    # every other member that can be reached -- whatever its DB status -- needs
+    # an explicit add_clone to register the link in its in-memory tree
+    # (replica_chain). Non-fatal: IO is about to go live on the target.
+    for peer in _lvs_members(tgt_node):
+        if peer.get_id() == tgt_exec.get_id() or peer.status == StorageNode.STATUS_REMOVED:
             continue
-        if not add_clone_ok:
-            logger.warning(
-                f"add_clone on peer {peer.get_id()[:8]} failed for final lvol (non-fatal)")
+        with xfer_timing.phase("final_peer_add_clone", lvol=lvol.get_id(),
+                               peer=peer.get_id()):
+            try:
+                # non-fatal and never retried: a failure is recorded as owed
+                # like a skip, and replayed (replica_chain.replay_pending)
+                outcome, err = replica_chain.add_clone_on(
+                    peer, "peer", tgt_lvol_composite, tgt_snap_composite,
+                    owner=tgt_node, record_failed=True, db=db)
+            except Exception as e:  # noqa: BLE001 -- non-fatal past the cutover
+                outcome, err = replica_chain.FAILED, str(e)
+        if outcome == replica_chain.FAILED:
+            logger.error(f"add_clone of the final lvol failed on peer {peer.get_id()[:8]} "
+                         f"(non-fatal): {err}")
 
     # Light the target: queued client IO drains here.
     with xfer_timing.phase("enable_target_paths", lvol=lvol.get_id()):

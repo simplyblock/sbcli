@@ -433,8 +433,16 @@ class TestPrimaryEscalation(unittest.TestCase):
         mock_escalate = MagicMock()
         mock_monitor = MagicMock()
         mock_monitor._check_data_plane_and_escalate = mock_escalate
+        # patch.dict restores the real module after the test. A bare
+        # assignment left the MagicMock in sys.modules for the rest of the
+        # run, and every later lazy import of storage_node_monitor got it:
+        # its calls went nowhere while patch() of the module, which resolves
+        # through the package attribute, patched the real one.
         import sys
-        sys.modules["simplyblock_core.services.storage_node_monitor"] = mock_monitor
+        modules = patch.dict(
+            sys.modules, {"simplyblock_core.services.storage_node_monitor": mock_monitor})
+        modules.start()
+        self.addCleanup(modules.stop)
 
         db = mock_db_cls.return_value
 

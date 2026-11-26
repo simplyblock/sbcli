@@ -7,7 +7,7 @@ from simplyblock_core import db_controller
 from simplyblock_core import utils as core_utils
 from simplyblock_core.controllers import lvol_controller, snapshot_controller
 from simplyblock_core.controllers.backup import controller as backup_controller
-from simplyblock_core.exceptions import PreconditionError
+from simplyblock_core.exceptions import PreconditionError, SubsystemMoveInProgressError
 from simplyblock_web import utils
 
 logger = logging.getLogger(__name__)
@@ -280,7 +280,10 @@ def connect_lvol(uuid):
             "use the v2 volume connect", 400)
 
     host_nqn = request.args.get('host_nqn')
-    ret, err = lvol_controller.connect_lvol(uuid, host_nqn=host_nqn)
+    try:
+        ret, err = lvol_controller.connect_lvol(uuid, host_nqn=host_nqn)
+    except SubsystemMoveInProgressError as e:
+        return utils.get_response_error(str(e), 409)
     if err:
         return utils.get_response_error(err, 400)
     return utils.get_response([e.model_dump(by_alias=True) for e in ret])

@@ -1,0 +1,104 @@
+"""The storage array of a multi-attach cluster (array LUN mode, phase 4).
+
+simplyblock creates, presents, grows, fences and deletes the cluster's LUNs
+through the array plugin registered here. Credentials are wrapped by
+the cluster's KMS (or stay in an external Vault KV / KMIP secret the request
+references) and are never returned; everything else is kept on the cluster
+record. See simplyblock_core.controllers.array_controller.
+"""
+
+from typing import Annotated, Any, Literal
+
+from fastapi import APIRouter, HTTPException, Response
+from pydantic import BaseModel, Field, SecretStr
+
+from simplyblock_core.controllers import array_controller
+
+from .. import util
+from .._dependencies import Cluster
+
+api = APIRouter()
+
+
+class ArrayParams(BaseModel):
+    plugin: Annotated[str, Field(min_length=1, description="Plugin name (entry point in simplyblock.array_plugins), e.g. aws-ebs")]
+    endpoint: str = ""
+    options: dict[str, Any] = Field(default_factory=dict)
+    # Wrapped by the cluster's KMS, never stored in the clear; masked in every
+    # representation of this model.
+    credentials: dict[str, SecretStr] = Field(default_factory=dict)
+    credential_ref: Annotated[dict[str, Any], Field(description=(
+        "Instead of credentials: a secret kept outside simplyblock, "
+        '{"kind": "vault-kv", "mount": ..., "path": ..., "version": ...} or '
+        '{"kind": "kmip-secret", "uid": ..., "field": ...}'))] = Field(default_factory=dict)
+    lun_size: Annotated[util.Size, Field(description="Size of the LUN created for each added node; 0 = none")] = 0
+    allow_local_kms_credentials: Annotated[bool | None, Field(description=(
+        "Opt in (true) or out (false) of keeping the credentials in the cluster's local key store, "
+        "effectively unencrypted, when it has no external KMS (test environments); omitted, unchanged"
+    ))] = None
+    journal: Annotated[Literal["local", "lun"], Field(description=(
+        "Where each node's journal is kept: local (a disk or partition of its host) or lun "
+        "(a LUN of its own, created next to its data LUN; needs lun_size)"))] = "local"
+    journal_lun_size: Annotated[util.Size, Field(description=(
+        "journal lun: size of each node's journal LUN; 0 = 3% of lun_size, at least 2 GiB"))] = 0
+    journal_options: Annotated[dict[str, Any], Field(description=(
+        'journal lun: plugin options for the journal LUNs, applied over options, e.g. {"pool": "fast-pool"}'
+    ))] = Field(default_factory=dict)
+
+
+class ArrayDTO(BaseModel):
+    id: str
+    plugin: str
+    endpoint: str
+    options: dict[str, Any]
+    lun_size: int
+    journal: str = "local"
+    journal_lun_size: int = 0
+    journal_options: dict[str, Any] = Field(default_factory=dict)
+    has_credentials: bool
+    credential_ref: dict[str, Any] = Field(default_factory=dict)
+    capabilities: dict[str, Any] | None = None
+
+
+@api.post('/', name='clusters:arrays:create', status_code=201, response_model=ArrayDTO)
+def register(cluster: Cluster, parameters: ArrayParams) -> ArrayDTO:
+    """Register the cluster's storage array (or re-register it, e.g. to
+    rotate its credentials). The plugin is loaded and connected with the
+    credentials and its capabilities read before anything is saved."""
+    try:
+        view = array_controller.register_array(
+            cluster.get_id(), parameters.plugin, parameters.endpoint, parameters.options,
+            parameters.credentials, parameters.lun_size,
+            credential_ref=parameters.credential_ref or None, journal=parameters.journal,
+            journal_lun_size=parameters.journal_lun_size, journal_options=parameters.journal_options or None,
+            allow_local_kms_credentials=parameters.allow_local_kms_credentials)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return ArrayDTO(**view)
+
+
+@api.get('/', name='clusters:arrays:list', response_model=list[ArrayDTO])
+def list_arrays(cluster: Cluster) -> list[ArrayDTO]:
+    return [ArrayDTO(**a) for a in array_controller.get_arrays(cluster.get_id())]
+
+
+@api.get('/{array_id}', name='clusters:arrays:get', response_model=ArrayDTO)
+def get(cluster: Cluster, array_id: str) -> ArrayDTO:
+    for a in array_controller.get_arrays(cluster.get_id()):
+        if a["id"] == array_id:
+            return ArrayDTO(**a)
+    raise HTTPException(404, f"array {array_id} not found")
+
+
+@api.delete('/{array_id}', name='clusters:arrays:delete', status_code=204,
+            responses={204: {"content": None}})
+def delete(cluster: Cluster, array_id: str, force: bool = False) -> Response:
+    """Remove the registration and its credentials. Refused while LUNs
+    created through the array exist, unless ``force``."""
+    try:
+        array_controller.delete_array(cluster.get_id(), array_id, force=force)
+    except KeyError as e:
+        raise HTTPException(404, str(e.args[0] if e.args else e))
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+    return Response(status_code=204)

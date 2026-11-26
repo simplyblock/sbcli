@@ -24,6 +24,10 @@ class _FakeDB:
     def get_lvol_replication_objects(self):
         return self._replications
 
+    def subsystem_move_reservations(self, node_id):
+        # No consistency-group subsystem move holds anything here.
+        return set(), 0
+
 
 def _lvol(uuid, status=LVol.STATUS_ONLINE):
     lv = LVol()

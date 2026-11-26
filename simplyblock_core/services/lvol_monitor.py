@@ -4,6 +4,7 @@ from datetime import datetime
 
 from simplyblock_core import constants, db_controller, utils
 from simplyblock_core.controllers import (
+    control_plane_controller,
     health_controller,
     lvol_controller,
     lvol_events,
@@ -191,6 +192,7 @@ def process_lvol_delete_finish(cluster, lvol, leader_independent=False):
             f"LVol {lvol.get_id()}: empty bdev stack, retiring the record only")
         lvol_events.lvol_delete(lvol)
         lvol.remove(db.kv_store)
+        db.delete_lvol_stats(lvol)
         return
 
     snode = db.get_storage_node_by_id(lvol.node_id)
@@ -477,6 +479,7 @@ def process_lvol_delete_finish(cluster, lvol, leader_independent=False):
 
     lvol_events.lvol_delete(lvol)
     lvol.remove(db.kv_store)
+    db.delete_lvol_stats(lvol)
 
     # check for full devices
     full_devs_ids = []
@@ -1010,6 +1013,7 @@ db = db_controller.DBController()
 def main():
     logger.info("Starting LVol monitor...")
     while True:
+        control_plane_controller.wait_until_services_enabled("lvol-monitor")
         try:
             db.get_clusters()
         except Exception as e:

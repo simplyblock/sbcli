@@ -74,3 +74,25 @@ def write_through_cas(monkeypatch):
 
     monkeypatch.setattr(JobSchedule, "frozen_view", frozen_view)
     monkeypatch.setattr(trb.db, "atomic_update", atomic_update)
+
+
+@pytest.fixture(autouse=True)
+def ns_host_guard_permits(monkeypatch):
+    """The cutover runner asks SPDK which hosts are connected before it removes
+    a namespace (ns_host_guard). The fakes here model no hosts, so every
+    removal is permitted; test_ns_host_guard exercises the guard itself and
+    the runner tests that want a stranded host patch removal_blocked."""
+    from simplyblock_core.controllers import ns_host_guard
+    monkeypatch.setattr(ns_host_guard, "removal_blocked", lambda *a, **kw: None)
+
+
+@pytest.fixture(autouse=True)
+def migration_space_permits(monkeypatch):
+    """Migration snapshots wait for free space and for the volume's pending
+    deletions (simplyblock_core/migration_space.py). The fakes here model no
+    capacity records and no snapshot table, so neither ever holds;
+    test_migration_space_bf29 exercises both with the real functions."""
+    from simplyblock_core import migration_space
+    monkeypatch.setattr(migration_space, "space_hold",
+                        lambda *a, **kw: ("", 0))
+    monkeypatch.setattr(migration_space, "deletions_pending", lambda *a, **kw: [])

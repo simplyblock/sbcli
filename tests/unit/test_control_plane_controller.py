@@ -1,0 +1,411 @@
+"""The stretched control plane's pure logic (docs/stretched-control-plane.md):
+the lease agent's decision, the lease expiry, the FDB status reading, the
+scheme rule, and the API verdict over a mocked mode. No database is touched;
+the lease against real FoundationDB is in
+tests/integration/test_control_plane_lease.py.
+"""
+import datetime
+
+import pytest
+
+from simplyblock_core import constants
+from simplyblock_core.controllers import control_plane_controller as cpc
+from simplyblock_core.models.control_plane_lease import ControlPlaneLease
+
+NOW = datetime.datetime(2026, 11, 9, 12, 0, 0, tzinfo=datetime.UTC)
+DRAIN = constants.CONTROL_PLANE_DRAIN_SEC
+
+
+def _lease(holder="a", state=ControlPlaneLease.STATE_HELD, expires_in=10, since_ago=0, epoch=1):
+    lease = ControlPlaneLease()
+    lease.uuid = lease.cluster_id = "cluster-1"
+    lease.holder_site = holder
+    lease.holder_host = f"{holder}-host"
+    lease.state = state
+    lease.epoch = epoch
+    lease.expires_at = (NOW + datetime.timedelta(seconds=expires_in)).isoformat()
+    lease.state_since = (NOW - datetime.timedelta(seconds=since_ago)).isoformat()
+    return lease
+
+
+def _plan(local, desired, lease):
+    return cpc.plan_step(local=local, desired=desired, lease=lease, now=NOW, drain_sec=DRAIN)
+
+
+class TestPlanStep:
+
+    def test_the_desired_site_acquires_a_missing_lease(self):
+        assert _plan("a", "a", None).action == "acquire"
+
+    def test_the_other_site_waits_for_a_missing_lease(self):
+        assert _plan("b", "a", None).action == "wait"
+
+    def test_a_control_plane_without_a_site_never_acts(self):
+        assert _plan("", "a", None).action == "none"
+        assert _plan("", "a", _lease(expires_in=-5)).action == "none"
+
+    def test_the_holder_renews_while_desired(self):
+        assert _plan("a", "a", _lease()).action == "renew"
+
+    def test_a_reverted_drain_is_renewed_back_to_held(self):
+        assert _plan("a", "a", _lease(state=ControlPlaneLease.STATE_DRAINING)).action == "renew"
+
+    def test_the_holder_drains_when_another_site_is_desired(self):
+        step = _plan("a", "b", _lease())
+        assert step.action == "drain"
+        assert "b" in step.reason
+
+    def test_the_holder_waits_out_the_drain_then_releases(self):
+        early = _lease(state=ControlPlaneLease.STATE_DRAINING, since_ago=DRAIN - 1)
+        assert _plan("a", "b", early).action == "wait"
+        late = _lease(state=ControlPlaneLease.STATE_DRAINING, since_ago=DRAIN)
+        assert _plan("a", "b", late).action == "release"
+
+    def test_the_desired_site_acquires_a_released_lease(self):
+        assert _plan("b", "b", _lease(state=ControlPlaneLease.STATE_RELEASED)).action == "acquire"
+
+    def test_nobody_else_acquires_a_released_lease(self):
+        assert _plan("a", "b", _lease(state=ControlPlaneLease.STATE_RELEASED)).action == "wait"
+
+    def test_the_desired_site_acquires_an_expired_lease(self):
+        assert _plan("b", "b", _lease(holder="a", expires_in=-1)).action == "acquire"
+
+    def test_a_live_lease_of_another_site_is_never_taken(self):
+        """The core safety rule: the desired site waits for the holder's own
+        drain, or for the expiry that only a holder cut off from FDB suffers."""
+        assert _plan("b", "b", _lease(holder="a")).action == "wait"
+        assert _plan("b", "b", _lease(holder="a", state=ControlPlaneLease.STATE_DRAINING)).action == "wait"
+
+
+class TestLeaseExpiry:
+
+    def test_no_lease_is_expired(self):
+        assert cpc.lease_expired(None, NOW)
+
+    def test_an_unparseable_expiry_is_expired(self):
+        lease = _lease()
+        lease.expires_at = "garbage"
+        assert cpc.lease_expired(lease, NOW)
+
+    def test_a_future_expiry_is_live(self):
+        assert not cpc.lease_expired(_lease(expires_in=1), NOW)
+
+    def test_the_boundary_is_expired(self):
+        assert cpc.lease_expired(_lease(expires_in=0), NOW)
+
+
+class TestFdbStatus:
+
+    def test_region_lag_and_data_state_are_read(self):
+        status = {"cluster": {"datacenter_lag": {"seconds": 0.25, "versions": 250000},
+                              "data": {"state": {"name": "healthy", "healthy": True}}}}
+        assert cpc.fdb_region_lag(status) == (0.25, "healthy")
+
+    def test_a_single_region_status_has_no_lag(self):
+        assert cpc.fdb_region_lag({"cluster": {"data": {"state": {"name": "healthy"}}}}) == (None, "healthy")
+
+    def test_no_document_reads_as_unknown(self):
+        assert cpc.fdb_region_lag(None) == (None, "")
+        assert cpc.fdb_region_lag({}) == (None, "")
+
+
+class TestScheme:
+
+    @pytest.mark.parametrize("kwargs,expected", [
+        (dict(sync_replication=True, enable_failure_domain=False, distr_ndcs=4, distr_npcs=2), "sync_replication"),
+        (dict(sync_replication=False, enable_failure_domain=True, distr_ndcs=1, distr_npcs=1), "fd_1p1"),
+        (dict(sync_replication=False, enable_failure_domain=True, distr_ndcs=1, distr_npcs=2), "fd_1p2"),
+        (dict(sync_replication=False, enable_failure_domain=True, distr_ndcs=2, distr_npcs=1), ""),
+        (dict(sync_replication=False, enable_failure_domain=False, distr_ndcs=1, distr_npcs=1), ""),
+    ])
+    def test_the_three_schemes(self, kwargs, expected):
+        assert cpc.stretch_scheme(**kwargs) == expected
+
+    def test_an_unsupported_scheme_is_refused_naming_the_three(self):
+        with pytest.raises(ValueError) as e:
+            cpc.validate_stretched_control_plane(
+                stretched_control_plane=True, sync_replication=False, enable_failure_domain=True,
+                distr_ndcs=2, distr_npcs=1, ha_type="ha", is_single_node=False)
+        for scheme in cpc.STRETCH_SCHEMES.values():
+            assert scheme in str(e.value)
+
+    def test_non_ha_is_refused(self):
+        with pytest.raises(ValueError):
+            cpc.validate_stretched_control_plane(
+                stretched_control_plane=True, sync_replication=True, enable_failure_domain=False,
+                distr_ndcs=1, distr_npcs=1, ha_type="single", is_single_node=False)
+
+    def test_not_stretched_is_not_checked(self):
+        cpc.validate_stretched_control_plane(
+            stretched_control_plane=False, sync_replication=False, enable_failure_domain=False,
+            distr_ndcs=2, distr_npcs=1, ha_type="single", is_single_node=True)
+
+
+class TestApiVerdict:
+
+    @pytest.fixture(autouse=True)
+    def _fresh(self):
+        cpc.reset_identity_cache()
+        yield
+        cpc.reset_identity_cache()
+
+    def test_a_leader_serves_everything(self, monkeypatch):
+        monkeypatch.setattr(cpc, "current_mode", lambda: cpc.ModeVerdict("leader", "holds"))
+        assert cpc.api_verdict("POST", "/api/v2/clusters/x/storage-pools").action == "serve"
+
+    def test_a_standby_serves_reads(self, monkeypatch):
+        monkeypatch.setattr(cpc, "current_mode", lambda: cpc.ModeVerdict(
+            "standby", "no lease", redirects={"c1": "https://a.example:443"}))
+        assert cpc.api_verdict("GET", "/api/v2/clusters/c1/").action == "serve"
+
+    def test_a_standby_redirects_mutations_to_the_leader(self, monkeypatch):
+        monkeypatch.setattr(cpc, "current_mode", lambda: cpc.ModeVerdict(
+            "standby", "no lease", redirects={"c1": "https://a.example:443/"}))
+        verdict = cpc.api_verdict("POST", "/api/v2/clusters/c1/storage-pools", "c1")
+        assert verdict.action == "redirect"
+        assert verdict.location == "https://a.example:443/api/v2/clusters/c1/storage-pools"
+
+    def test_a_standby_without_a_known_leader_endpoint_answers_503(self, monkeypatch):
+        monkeypatch.setattr(cpc, "current_mode", lambda: cpc.ModeVerdict(
+            "standby", "no lease", redirects={"c1": ""}))
+        verdict = cpc.api_verdict("DELETE", "/api/v2/clusters/c1/storage-pools/p", "c1")
+        assert verdict.action == "unavailable"
+        assert "site_api_endpoints" in verdict.message
+
+    def test_control_plane_routes_are_always_served_locally(self, monkeypatch):
+        """A takeover is issued against the standby; it must never bounce."""
+        monkeypatch.setattr(cpc, "current_mode", lambda: cpc.ModeVerdict(
+            "standby", "no lease", redirects={"c1": "https://a.example"}))
+        assert cpc.api_verdict("POST", "/api/v2/clusters/c1/control-plane/takeover", "c1").action == "serve"
+
+    def test_a_site_registers_itself_on_its_own_standby(self, monkeypatch):
+        """The joining site's operator posts its management node to its own
+        control plane, which is standby by then; the write is local."""
+        monkeypatch.setattr(cpc, "current_mode", lambda: cpc.ModeVerdict(
+            "standby", "no lease", redirects={"c1": "https://a.example"}))
+        assert cpc.api_verdict("POST", "/api/v2/management-nodes/", "c1").action == "serve"
+
+    def test_a_disconnected_control_plane_answers_503_but_keeps_health(self, monkeypatch):
+        def boom():
+            raise RuntimeError("fdb timeout")
+        monkeypatch.setattr(cpc, "current_mode", boom)
+        assert cpc.api_verdict("GET", "/api/v2/clusters/").action == "unavailable"
+        assert cpc.api_verdict("GET", "/api/v2/_meta/health").action == "serve"
+        assert cpc.api_verdict("GET", "/_meta/metrics").action == "serve"
+
+    def test_services_are_paused_while_disconnected(self, monkeypatch):
+        def boom():
+            raise RuntimeError("fdb timeout")
+        monkeypatch.setattr(cpc, "current_mode", boom)
+        enabled, reason = cpc.services_enabled()
+        assert not enabled
+        assert reason.startswith("disconnected")
+
+    def test_services_run_on_a_single_control_plane(self, monkeypatch):
+        monkeypatch.setattr(cpc, "current_mode", lambda: cpc.ModeVerdict("single", "no stretched cluster"))
+        assert cpc.services_enabled()[0]
+
+    def test_services_pause_while_draining(self, monkeypatch):
+        monkeypatch.setattr(cpc, "current_mode", lambda: cpc.ModeVerdict(
+            "draining", "handing over", redirects={"c1": ""}))
+        assert not cpc.services_enabled()[0]
+
+
+class TestModeWithoutDatabase:
+
+    def test_no_database_means_single(self):
+        """The unit tier's fdb stub: nothing is stretched as far as the
+        process knows, so every service runs as it always did."""
+        cpc.reset_identity_cache()
+        assert cpc.current_mode().mode == "single"
+
+
+class TestProbeSite:
+    """``takeover`` probes the confirmed-down site. A Kubernetes control plane
+    registers under the placeholder address 0.0.0.0, which answers a local
+    ping; its API endpoint is what is probed instead."""
+
+    def _k8s_site(self, monkeypatch, endpoint_answers):
+        from simplyblock_core.models.cluster import Cluster
+        from simplyblock_core.models.mgmt_node import MgmtNode
+        cluster = Cluster()
+        cluster.uuid = "c1"
+        cluster.site_api_endpoints = {"a": "http://cp-a.example:5000"}
+        m = MgmtNode()
+        m.uuid, m.site, m.mode, m.mgmt_ip = "m1", "a", "kubernetes", "0.0.0.0"
+        monkeypatch.setattr(cpc, "_cluster_sites", lambda db, c: ([m], []))
+        monkeypatch.setattr(cpc, "DBController", lambda: None)
+        pings = []
+        monkeypatch.setattr(cpc.utils, "ping_host", lambda ip: pings.append(ip) or True)
+        monkeypatch.setattr(cpc, "_http_answers", lambda ep, timeout: endpoint_answers)
+        return cluster, pings
+
+    def test_a_kubernetes_control_plane_is_probed_through_its_endpoint(self, monkeypatch):
+        cluster, pings = self._k8s_site(monkeypatch, True)
+        alive = cpc.probe_site(cluster, "a")
+        assert pings == []
+        assert alive and "cp-a.example" in alive[0]
+
+    def test_a_dead_endpoint_means_nothing_answers(self, monkeypatch):
+        cluster, pings = self._k8s_site(monkeypatch, False)
+        assert cpc.probe_site(cluster, "a") == []
+        assert pings == []
+
+    def test_a_docker_control_plane_is_still_pinged(self, monkeypatch):
+        from simplyblock_core.models.cluster import Cluster
+        from simplyblock_core.models.mgmt_node import MgmtNode
+        cluster = Cluster()
+        cluster.uuid = "c1"
+        m = MgmtNode()
+        m.uuid, m.site, m.mode, m.mgmt_ip, m.hostname = "m1", "a", "docker", "10.0.0.5", "h1"
+        monkeypatch.setattr(cpc, "_cluster_sites", lambda db, c: ([m], []))
+        monkeypatch.setattr(cpc, "DBController", lambda: None)
+        monkeypatch.setattr(cpc.utils, "ping_host", lambda ip: ip == "10.0.0.5")
+        assert cpc.probe_site(cluster, "a") == ["management node h1 (10.0.0.5) answers ping"]
+
+
+class TestFdbDatacenters:
+    def test_lists_the_data_centers_with_processes(self):
+        status = {"cluster": {"processes": {
+            "p1": {"locality": {"dcid": "b", "zoneid": "h4"}},
+            "p2": {"locality": {"dcid": "a", "zoneid": "h1"}},
+            "p3": {"locality": {"zoneid": "h2"}},
+            "p4": {"locality": {"dcid": "a", "zoneid": "h3"}},
+        }}}
+        assert cpc.fdb_datacenters(status) == ["a", "b"]
+
+    def test_no_document_means_none(self):
+        assert cpc.fdb_datacenters(None) == []
+        assert cpc.fdb_datacenters({"cluster": {}}) == []
+
+    def test_the_meta_route_serves_them(self, monkeypatch):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        import simplyblock_web.api.v2.meta as meta
+        monkeypatch.setattr(cpc, "current_fdb_datacenters", lambda: ["a", "b"])
+        app = FastAPI()
+        app.include_router(meta.api, prefix="/api/v2/_meta")
+        assert TestClient(app).get("/api/v2/_meta/fdb-datacenters").json() == {"datacenters": ["a", "b"]}
+
+
+class TestKubernetesSiteOnline:
+    """A Kubernetes control plane's management node is unpingable (0.0.0.0);
+    the readiness gate asks its site's API endpoint instead."""
+
+    def _node(self, mode, ip, status):
+        from simplyblock_core.models.mgmt_node import MgmtNode
+        n = MgmtNode()
+        n.uuid, n.site, n.mode, n.mgmt_ip, n.status = "m1", "b", mode, ip, status
+        return n
+
+    def test_kubernetes_node_follows_its_endpoint(self, monkeypatch):
+        from simplyblock_core.models.cluster import Cluster
+        c = Cluster()
+        c.site_api_endpoints = {"b": "https://cp-b.example:5000"}
+        node = self._node("kubernetes", "0.0.0.0", "unreachable")
+        monkeypatch.setattr(cpc, "_http_answers", lambda ep, timeout=3.0: True)
+        assert cpc._mgmt_node_online(c, node)
+        monkeypatch.setattr(cpc, "_http_answers", lambda ep, timeout=3.0: False)
+        assert not cpc._mgmt_node_online(c, node)
+
+    def test_docker_node_keeps_its_status(self, monkeypatch):
+        from simplyblock_core.models.cluster import Cluster
+        monkeypatch.setattr(cpc, "_http_answers", lambda ep, timeout=3.0: True)
+        assert cpc._mgmt_node_online(Cluster(), self._node("docker", "10.0.0.5", "online"))
+        assert not cpc._mgmt_node_online(Cluster(), self._node("docker", "10.0.0.5", "unreachable"))
+
+
+class TestHttpAnswers:
+    """_http_answers: a site's https endpoint answers with a certificate from
+    the cluster's CA, which the default trust store rejects; that still counts."""
+
+    @staticmethod
+    def _raising(exc):
+        def urlopen(url, timeout):
+            raise exc
+        return urlopen
+
+    def test_untrusted_certificate_counts_as_answering(self, monkeypatch):
+        import ssl
+        import urllib.error
+        import urllib.request
+        err = urllib.error.URLError(ssl.SSLCertVerificationError(1, "self-signed certificate in certificate chain"))
+        monkeypatch.setattr(urllib.request, "urlopen", self._raising(err))
+        assert cpc._http_answers("https://site-b.example:5000") is True
+
+    def test_other_tls_failures_and_refusals_do_not(self, monkeypatch):
+        import ssl
+        import urllib.error
+        import urllib.request
+        for err in (urllib.error.URLError(ssl.SSLEOFError(8, "EOF occurred in violation of protocol")),
+                    urllib.error.URLError(ConnectionRefusedError(111, "refused")),
+                    TimeoutError("timed out")):
+            monkeypatch.setattr(urllib.request, "urlopen", self._raising(err))
+            assert cpc._http_answers("https://site-b.example:5000") is False, err
+
+    def test_an_http_status_counts_as_answering(self, monkeypatch):
+        import urllib.error
+        import urllib.request
+        err = urllib.error.HTTPError("https://x/api/v2/_meta/health", 503, "unavailable", {}, None)
+        monkeypatch.setattr(urllib.request, "urlopen", self._raising(err))
+        assert cpc._http_answers("https://site-b.example:5000") is True
+
+
+class TestTakeOverBeforeFence:
+    """A Metro-DR fence of the leading site, asked on the other site's
+    standby, takes over first (Ramen's NetworkFence is the confirmation)."""
+
+    def _setup(self, monkeypatch, *, local="b", leader="a", lease_holder="a", stretched=True):
+        from unittest.mock import MagicMock
+
+        from simplyblock_core.models.cluster import Cluster
+        c = Cluster()
+        c.uuid, c.stretched_control_plane, c.leader_site = "c1", stretched, leader
+        db = MagicMock()
+        db.get_control_plane_lease.return_value = _lease(holder=lease_holder) if lease_holder else None
+        monkeypatch.setattr(cpc, "DBController", lambda: db)
+        monkeypatch.setattr(cpc, "local_site", lambda: local)
+        calls = []
+        monkeypatch.setattr(cpc, "takeover", lambda cid, site, down, operator="": calls.append((cid, site, down)))
+        self.cluster = c
+        return calls
+
+    def test_fencing_the_leading_site_from_the_other_takes_over(self, monkeypatch):
+        calls = self._setup(monkeypatch)
+        assert cpc.take_over_before_fence(self.cluster, "a") is True
+        assert calls == [("c1", "b", "a")]
+
+    def test_fencing_a_site_that_does_not_lead_changes_nothing(self, monkeypatch):
+        calls = self._setup(monkeypatch, local="a", leader="a", lease_holder="a")
+        assert cpc.take_over_before_fence(self.cluster, "b") is False
+        assert calls == []
+
+    def test_a_fence_of_the_own_site_or_off_a_stretched_cluster_changes_nothing(self, monkeypatch):
+        calls = self._setup(monkeypatch, local="a")
+        assert cpc.take_over_before_fence(self.cluster, "a") is False
+        calls = self._setup(monkeypatch, stretched=False)
+        assert cpc.take_over_before_fence(self.cluster, "a") is False
+        assert calls == []
+
+    def test_without_a_live_lease_the_recorded_leader_site_decides(self, monkeypatch):
+        calls = self._setup(monkeypatch, lease_holder=None, leader="a")
+        assert cpc.take_over_before_fence(self.cluster, "a") is True
+        assert calls == [("c1", "b", "a")]
+
+    def test_a_refused_takeover_propagates(self, monkeypatch):
+        self._setup(monkeypatch)
+
+        def refuse(*a, **k):
+            raise cpc.ControlPlaneTakeoverRefusedError("site a still answers", ["mgmt a answers"])
+        monkeypatch.setattr(cpc, "takeover", refuse)
+        with pytest.raises(cpc.ControlPlaneTakeoverRefusedError):
+            cpc.take_over_before_fence(self.cluster, "a")
+
+    def test_the_fence_routes_are_served_where_they_arrive(self, monkeypatch):
+        monkeypatch.setattr(cpc, "current_mode", lambda: cpc.ModeVerdict(
+            "standby", "no lease", redirects={"c1": "https://a.example"}))
+        cid = "236f43b7-8bca-4b02-b909-a9eb1b0eea26"
+        for route in ("fence", "unfence", "status"):
+            assert cpc.api_verdict("POST", f"/api/v2/clusters/{cid}/sites/a/{route}", cid).action == "serve"
+        assert cpc.api_verdict("POST", f"/api/v2/clusters/{cid}/storage-pools", cid).action == "redirect"

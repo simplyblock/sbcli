@@ -21,6 +21,7 @@ from simplyblock_core.models.backup import (
 )
 from simplyblock_core.models.base_model import BaseModel
 from simplyblock_core.models.cluster import Cluster, DeployConfig, PortReservation
+from simplyblock_core.models.control_plane_lease import ControlPlaneLease
 from simplyblock_core.models.events import EventObj
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_migration import LVolMigration
@@ -92,6 +93,11 @@ class Singleton(type):
             if ins is not None and ins.kv_store is not None:
                 cls._instances[cls] = ins
             return ins
+
+
+class SubsystemMoveConflictError(Exception):
+    """A consistency group already has a subsystem move or a migration
+    active, so a second one cannot start."""
 
 
 class SubsystemCapacityError(Exception):
@@ -622,6 +628,13 @@ class DBController(metaclass=Singleton):
             raise KeyError(f'No management node found for hostname {hostname}')
         return node
 
+    def get_control_plane_lease(self, cluster_id: str) -> ControlPlaneLease | None:
+        """The stretched control plane's lease of ``cluster_id``, or None
+        when no site has ever held it (docs/stretched-control-plane.md)."""
+        if not cluster_id:
+            raise KeyError('ControlPlaneLease lookup with a blank cluster id')
+        return single_or_none(ControlPlaneLease().read_from_db(self.kv_store, cluster_id))
+
     def get_lvol_stats(self, lvol, limit=20) -> list[LVolStatObject]:
         if isinstance(lvol, str):
             lvol = self.get_lvol_by_id(lvol)
@@ -638,6 +651,36 @@ class DBController(metaclass=Singleton):
         stats = PoolStatObject().read_from_db(self.kv_store, id="%s/%s" % (pool.get_id(), pool.get_id()), limit=limit,
                                               reverse=True)
         return stats
+
+    @staticmethod
+    def _clear_prefixes_tx(tr, prefixes):
+        for prefix in prefixes:
+            tr.clear_range_startswith(prefix)
+
+    def _clear_prefixes(self, prefixes: list[bytes]) -> None:
+        kv = self.kv_store
+        if kv is not None and hasattr(kv, 'create_transaction'):
+            fdb.transactional(DBController._clear_prefixes_tx)(kv, prefixes)
+        elif kv is not None and hasattr(kv, 'clear_range_startswith'):
+            # Transactionless store (unit-tier fdb stub): same clears, not atomic.
+            DBController._clear_prefixes_tx(kv, prefixes)
+
+    def delete_lvol_stats(self, lvol) -> None:
+        """Clear every stats record of ``lvol``. Call it only once the lvol's
+        record is gone for good: the stats are keyed by its uuid, so an id that
+        lives on (the failback UUID swap) must keep them. The trailing ``/``
+        keeps the prefix from matching another id that merely starts with this
+        one."""
+        self._clear_prefixes([
+            LVolStatObject().get_db_id(f"{lvol.pool_uuid}/{lvol.get_id()}/").encode(),
+            CachedLVolStatObject().get_db_id(f"{lvol.get_id()}/{lvol.get_id()}/").encode(),
+        ])
+
+    def delete_pool_stats(self, pool) -> None:
+        """Clear every stats record of ``pool``; see ``delete_lvol_stats``."""
+        self._clear_prefixes([
+            PoolStatObject().get_db_id(f"{pool.get_id()}/{pool.get_id()}/").encode(),
+        ])
 
     def get_cluster_stats(self, cluster, limit=20) -> list[ClusterStatObject]:
         return self.get_cluster_capacity(cluster, limit)
@@ -887,6 +930,46 @@ class DBController(metaclass=Singleton):
         whether it is ``task``)``."""
         return fdb.transactional(DBController._ensure_sync_resync_task_tx)(
             self, self.kv_store, task, lvs_name, JobSchedule.active_indexes(self.kv_store))
+
+    # repl_snap_task/<cluster_id>/<snapshot_id> -> db key of the snapshot's
+    # replication task. Read and written in the transaction that creates the
+    # task, so two creators of the same snapshot's task conflict and the retry
+    # finds the first one's (bed bf32 2026-11-21).
+    REPL_SNAP_TASK_PREFIX = "repl_snap_task"
+
+    def _repl_snap_task_key(self, cluster_id, snapshot_id):
+        return f"{self.REPL_SNAP_TASK_PREFIX}/{cluster_id}/{snapshot_id}".encode()
+
+    def _ensure_snapshot_replication_task_tx(self, tr, task, index_list):
+        claim_key = self._repl_snap_task_key(
+            task.cluster_id, task.function_params["snapshot_id"])
+        raw = tr.get(claim_key).wait()
+        if raw is not None and raw.present():
+            current = BaseModel._read_record(tr, bytes(raw), JobSchedule)
+            if (current is not None and current.status != JobSchedule.STATUS_DONE
+                    and not current.canceled):
+                return current.uuid, False
+        task.updated_at = str(datetime.datetime.now(datetime.UTC))
+        self._put_tx(tr, task, index_list)
+        tr[claim_key] = task.get_db_id().encode()
+        return task.uuid, True
+
+    def ensure_snapshot_replication_task(self, task: JobSchedule) -> tuple[str, bool]:
+        """Create ``task`` (an FN_SNAPSHOT_REPLICATION task) unless its
+        snapshot already has one that is neither done nor canceled -- checked
+        and written in ONE transaction with the snapshot's claim key, so
+        concurrent callers never create two tasks for one snapshot.
+
+        bed bf32 (2026-11-21): two replication workers enqueued the same chain
+        ancestor 100 ms apart; each saw no task in its scan and each wrote
+        one. The two tasks then ran side by side: one created the landing
+        volume while the other deleted it as "half-created", leaving a stale
+        registration on the secondaries that later crashed SPDK.
+
+        Returns ``(uuid of the snapshot's active task, whether it is task)``.
+        """
+        return self._transact(DBController._ensure_snapshot_replication_task_tx,
+                              task, JobSchedule.active_indexes(self.kv_store))
 
     def _finish_sync_resync_tx(self, tr, task_key, lvs_name, seq_limit, result, duration_sec,
                                task_indexes):
@@ -1570,41 +1653,70 @@ class DBController(metaclass=Singleton):
 
     # ---- Node-add port reservation (Single FDB Transaction) ----
 
-    def _reserve_next_nvmf_port_tx(self, tr, cluster_id, base_port, node_used, owner, now):
+    def _reserve_next_nvmf_port_tx(self, tr, cluster_id, base_port, node_used, owner, now, slot=""):
         used = set(node_used)
+        held = None
         # Read this cluster's reservations transactionally so concurrent
         # reservers conflict-retry instead of picking the same port. Drop
         # stale ones (abandoned by a crashed add) in the same transaction.
         for res in PortReservation().read_from_db(tr, id=cluster_id):
             if res.cluster_id != cluster_id:
                 continue
-            if (now - res.created_at) > constants.PORT_RESERVATION_TTL_SEC:
+            if slot and res.slot == slot:
+                if res.port in used:
+                    # A node record took the port since: the reservation has
+                    # done its work and this slot needs a new one.
+                    del tr[res.get_db_id().encode()]
+                elif held is None:
+                    # An earlier attempt for this slot. The record still being
+                    # here means nobody else was handed the port, however old
+                    # it is, so it is not aged out.
+                    held = res
+                else:
+                    # A second reservation for this slot. One slot holds one
+                    # port, so this one frees its port instead of keeping it
+                    # out of the pool under a name that will never ask for it.
+                    del tr[res.get_db_id().encode()]
+                continue
+            if res.expired(now):
                 del tr[res.get_db_id().encode()]
                 continue
             used.add(res.port)
-        port = base_port
-        while port in used:
-            port += 1
+        if held is not None:
+            port = held.port
+        else:
+            port = base_port
+            while port in used:
+                port += 1
         res = PortReservation()
         res.cluster_id = cluster_id
         res.port = port
         res.owner = owner
         res.created_at = now
+        res.slot = slot
         tr[res.get_db_id().encode()] = json.dumps(res.to_dict()).encode()
         return port
 
-    def reserve_cluster_nvmf_port(self, cluster_id, owner):
+    def reserve_cluster_nvmf_port(self, cluster_id, owner, slot=""):
         """Atomically allocate and reserve the next free NVMe-oF port for a
         node being added. The reservation makes the chosen port visible to
         concurrent allocators until the node record itself is persisted (after
         which the node's own port fields keep it reserved and the reservation
-        ages out by TTL)."""
+        ages out).
+
+        ``slot`` names what the port is for. A reservation for a slot that
+        already holds one returns that port again; see PortReservation.
+
+        The two kinds age out differently: an unnamed reservation after
+        ``PORT_RESERVATION_TTL_SEC``, a slot's after
+        ``PORT_RESERVATION_SLOT_TTL_SEC``, and a slot's never by a reservation
+        for the same slot."""
         from simplyblock_core import utils
         base_port = utils.get_nvmf_base_port(cluster_id)
         node_used = utils.get_node_nvmf_ports(cluster_id)
         now = int(time.time())
         transactional = fdb.transactional(DBController._reserve_next_nvmf_port_tx)
-        return transactional(self, self.kv_store, cluster_id, base_port, node_used, owner, now)
+        return transactional(self, self.kv_store, cluster_id, base_port, node_used, owner, now, slot)
 
     # ---- Namespaced-subsystem slot claim/release (Single FDB Transaction) ----
 
@@ -1625,6 +1737,16 @@ class DBController(metaclass=Singleton):
         alloc_key = f"{self.NS_SLOT_ALLOC_PREFIX}/{host_node.get_id()}".encode()
         raw = tr.get(alloc_key).wait()
         seq = int(bytes(raw).decode()) if raw.present() else 0
+
+        # Subsystems an active consistency-group subsystem move holds (its
+        # sources and its target) take no new namespace, and the fresh
+        # subsystems such moves will create count against the node's cap. A
+        # plain (conflicting) read: a move reserved concurrently aborts this
+        # claim, which then recounts with the reservation present.
+        moving_nqns, moving_fresh = self._flatten_moving(
+            self._read_moving_tx(tr, host_node.get_id()))
+        if moving_nqns:
+            exclude_nqns = sorted(set(exclude_nqns or ()) | moving_nqns)
 
         # Snapshot read: occupancy is recounted on every attempt, but without
         # laying a conflict range over the whole lvol table — any unrelated
@@ -1655,7 +1777,8 @@ class DBController(metaclass=Singleton):
             # leaves the volumes that are already there to pile up. They are
             # still counted, so user creates continue to see true occupancy.
             if (not internal
-                    and lvol_controller.count_lvol_subsystems(host_node, minis) >= node_max):
+                    and lvol_controller.count_lvol_subsystems(host_node, minis) + moving_fresh
+                    >= node_max):
                 raise SubsystemCapacityError(
                     f"Too many subsystems on node: {host_node.get_id()}, "
                     f"max subsystems reached: {node_max}")
@@ -1745,6 +1868,155 @@ class DBController(metaclass=Singleton):
             standalone_namespace, standalone_max_ns, standalone_allowed_hosts,
             exclude_nqns, internal, prefer_nqn)
 
+    # ---- Consistency-group subsystem move reservations ----
+    #
+    # ns_slot_moving/<node_id> -> {move_id: {"nqns": [...], "fresh": 0|1}}:
+    # the subsystems an active move on the node holds, and whether it will
+    # create a fresh one. Written in the transaction that records the move on
+    # its group and bumps the node's slot allocator key, so a claim racing the
+    # reservation conflicts and recounts with it present.
+
+    NS_SLOT_MOVING_PREFIX = "ns_slot_moving"
+
+    def _moving_key(self, node_id):
+        return f"{self.NS_SLOT_MOVING_PREFIX}/{node_id}".encode()
+
+    def _read_moving_tx(self, tr, node_id):
+        raw = tr.get(self._moving_key(node_id)).wait()
+        if not raw.present():
+            return {}
+        return json.loads(bytes(raw).decode())
+
+    @staticmethod
+    def _flatten_moving(moving):
+        nqns: set = set()
+        fresh = 0
+        for entry in moving.values():
+            nqns.update(entry.get("nqns") or [])
+            fresh += int(entry.get("fresh") or 0)
+        return nqns, fresh
+
+    def _transact(self, fn, *args):
+        kv = self.kv_store
+        if kv is not None and hasattr(kv, 'create_transaction'):
+            return fdb.transactional(fn)(self, kv, *args)
+        return fn(self, _NoTxnStore(kv), *args)
+
+    def subsystem_move_reservations(self, node_id):
+        """``(nqns, fresh)``: the subsystems active moves hold on ``node_id``
+        and how many fresh subsystems they will create there."""
+        return self._flatten_moving(self._transact(DBController._read_moving_tx, node_id))
+
+    def _reserve_subsystem_move_tx(self, tr, group, node_id, record, nqns, fresh):
+        from simplyblock_core.models.replication import ConsistencyGroup
+        key = group.get_db_id().encode()
+        outcome: dict = {}
+
+        def mutate(g):
+            current = g.subsystem_move or {}
+            if current:
+                if current.get("request_id") == record["request_id"]:
+                    outcome["existing"] = current
+                    return False
+                raise SubsystemMoveConflictError(
+                    f"consistency group {g.get_id()} already has subsystem move "
+                    f"{current.get('id')} active")
+            if g.migration:
+                raise SubsystemMoveConflictError(
+                    f"consistency group {g.get_id()} has an active migration")
+            g.subsystem_move = record
+            return None
+
+        # Two creates can select one subsystem before either reserves it;
+        # the read of the node's reservations here is what makes the second
+        # one lose, since it conflicts with the first one's write.
+        moving = self._read_moving_tx(tr, node_id)
+        held = {n for m in moving.values() for n in m.get("nqns", ())} & set(nqns)
+        if held:
+            raise SubsystemMoveConflictError(
+                f"subsystems {sorted(held)} are held by another active move on node {node_id}")
+        if fresh:
+            # The selection counted the node's subsystems outside this
+            # transaction; two creates can both see the last free slot. Recount
+            # here the way the namespace-slot claim does, with what other
+            # moves reserved, so the second one loses.
+            from simplyblock_core.controllers import lvol_controller
+            node = StorageNode().read_from_db(tr, id=node_id)[0]
+            node_max = lvol_controller.max_subsystems_for_node(node)
+            minis = LVolMini().read_from_db(tr.snapshot)
+            reserved = sum(int(m.get("fresh", 0)) for m in moving.values())
+            if lvol_controller.count_lvol_subsystems(node, minis) + reserved + fresh > node_max:
+                raise SubsystemCapacityError(
+                    f"Too many subsystems on node: {node_id}, max subsystems reached: {node_max}")
+        fresh_group = self._atomic_update_tx(
+            tr, key, ConsistencyGroup, mutate, ConsistencyGroup.active_indexes(self.kv_store))
+        if fresh_group is None:
+            raise KeyError(f"consistency group {group.get_id()} not found")
+        if "existing" in outcome:
+            return outcome["existing"]
+        moving[record["id"]] = {"nqns": sorted(nqns), "fresh": int(fresh)}
+        tr.set(self._moving_key(node_id), json.dumps(moving).encode())
+        alloc_key = f"{self.NS_SLOT_ALLOC_PREFIX}/{node_id}".encode()
+        raw = tr.get(alloc_key).wait()
+        seq = int(bytes(raw).decode()) if raw.present() else 0
+        tr.set(alloc_key, str(seq + 1).encode())
+        return record
+
+    def reserve_subsystem_move(self, group, node_id, record, nqns, fresh):
+        """Record ``record`` as ``group``'s active subsystem move and hold its
+        subsystems (``nqns``, plus ``fresh`` new ones) against namespace-slot
+        claims on ``node_id``, in ONE transaction.
+
+        Idempotent on ``record["request_id"]``: a retry returns the move
+        already recorded under that id. Raises SubsystemMoveConflictError when
+        another move or a migration is active on the group, or another active
+        move on the node holds one of ``nqns``; SubsystemCapacityError when the
+        ``fresh`` subsystems would take the node past its limit, recounted in
+        the transaction."""
+        return self._transact(DBController._reserve_subsystem_move_tx,
+                              group, node_id, record, nqns, fresh)
+
+    def _release_subsystem_move_tx(self, tr, group, node_id, move_id, outcome, lvol_updates):
+        from simplyblock_core.models.replication import ConsistencyGroup
+        key = group.get_db_id().encode()
+        raw = tr.get(key).wait()
+        if not raw.present():
+            return False
+        current = ConsistencyGroup().from_dict(json.loads(raw)).subsystem_move or {}
+        if current.get("id") != move_id:
+            return False
+        for lvol, fields in lvol_updates:
+            lraw = tr.get(lvol.get_db_id().encode()).wait()
+            if not lraw.present():
+                continue
+            fresh_lvol = type(lvol)().from_dict(json.loads(lraw))
+            for name, value in fields.items():
+                setattr(fresh_lvol, name, value)
+            fresh_lvol.write_to_db(tr)
+
+        def mutate(g):
+            g.subsystem_move = {}
+            g.last_subsystem_move = {"id": move_id, "outcome": outcome}
+
+        self._atomic_update_tx(tr, key, ConsistencyGroup, mutate,
+                               ConsistencyGroup.active_indexes(self.kv_store))
+        moving = self._read_moving_tx(tr, node_id)
+        moving.pop(move_id, None)
+        if moving:
+            tr.set(self._moving_key(node_id), json.dumps(moving).encode())
+        else:
+            tr.clear(self._moving_key(node_id))
+        return True
+
+    def release_subsystem_move(self, group, node_id, move_id, outcome, lvol_updates=()):
+        """End ``group``'s subsystem move ``move_id``: apply ``lvol_updates``
+        ((lvol, {field: value}) pairs, the commit's record switch), clear the
+        move, remember its ``outcome``, and drop its slot reservation -- all in
+        ONE transaction. A move that is no longer active is left alone, which
+        makes a retried commit or rollback a no-op. Returns whether it acted."""
+        return self._transact(DBController._release_subsystem_move_tx,
+                              group, node_id, move_id, outcome, list(lvol_updates))
+
     def _release_lvol_ns_slot_tx(self, tr, lvol):
         lvol.remove(tr)
 
@@ -1758,6 +2030,109 @@ class DBController(metaclass=Singleton):
             transactional = fdb.transactional(DBController._release_lvol_ns_slot_tx)
             return transactional(self, kv, lvol)
         return lvol.remove(kv)
+
+    # ---- Multi-attach controller-ID block claim (Single FDB Transaction) ----
+
+    CNTLID_BLOCK_ALLOC_PREFIX = "cntlid_block_alloc"
+
+    def _claim_cntlid_block_tx(self, tr, node_key, alloc_key, node_id, live_node_ids,
+                               max_blocks, index_list):
+        # The per-cluster allocation map {node_id: block} is the authority:
+        # every claim reads and rewrites it, so two concurrent claims in one
+        # cluster conflict and the loser retries against the winner's entry.
+        raw = tr.get(alloc_key).wait()
+        alloc = json.loads(bytes(raw).decode()) if raw.present() else {}
+        if node_id in alloc:
+            block = int(alloc[node_id])
+        else:
+            # Entries of nodes whose record is gone are reclaimed; a REMOVED
+            # node keeps its block (its record still exists).
+            alloc = {nid: b for nid, b in alloc.items() if nid in live_node_ids}
+            used = {int(b) for b in alloc.values()}
+            free = next((i for i in range(max_blocks) if i not in used), None)
+            if free is None:
+                raise ValueError(
+                    f"no free controller-ID block: a multi-attach cluster supports "
+                    f"at most {max_blocks} storage nodes")
+            block = free
+            alloc[node_id] = block
+            tr.set(alloc_key, json.dumps(alloc, sort_keys=True).encode())
+
+        def _set(node):
+            if node.cntlid_block == block:
+                return False
+            node.cntlid_block = block
+            return True
+
+        self._atomic_update_tx(tr, node_key, StorageNode, _set, index_list)
+        return block
+
+    def claim_cntlid_block(self, node, max_blocks):
+        """Claim the smallest free controller-ID block of ``node``'s cluster
+        for ``node`` (idempotent: a node that holds one gets it back) and
+        persist it on the node record, in ONE FDB transaction. Returns the
+        block index.
+
+        Raises:
+            ValueError: every block of the cluster is taken.
+        """
+        kv = self.kv_store
+        alloc_key = f"{self.CNTLID_BLOCK_ALLOC_PREFIX}/{node.cluster_id}".encode()
+        node_key = node.get_db_id().encode()
+        live_node_ids = {n.get_id() for n in self.get_storage_nodes_by_cluster_id(node.cluster_id)}
+        live_node_ids.add(node.get_id())
+        index_list = StorageNode.active_indexes(kv)
+        if kv is not None and hasattr(kv, 'create_transaction'):
+            transactional = fdb.transactional(DBController._claim_cntlid_block_tx)
+            return transactional(self, kv, node_key, alloc_key, node.get_id(),
+                                 live_node_ids, max_blocks, index_list)
+        return self._claim_cntlid_block_tx(
+            _NoTxnStore(kv), node_key, alloc_key, node.get_id(), live_node_ids,
+            max_blocks, index_list)
+
+    # ---- Multi-attach LUN takeover lease (Single FDB Transaction) ----
+
+    LUN_TAKEOVER_LOCK_PREFIX = "lun_takeover_lock"
+
+    @staticmethod
+    def _acquire_lun_takeover_lock_tx(tr, key, owner, now, ttl):
+        raw = tr.get(key).wait()
+        if raw.present():
+            held = json.loads(bytes(raw).decode())
+            if (held.get("owner") and held.get("owner") != owner
+                    and now - float(held.get("at", 0)) <= ttl):
+                return False, held.get("owner")
+        tr.set(key, json.dumps({"owner": owner, "at": now}).encode())
+        return True, None
+
+    @staticmethod
+    def _release_lun_takeover_lock_tx(tr, key, owner):
+        raw = tr.get(key).wait()
+        if raw.present() and json.loads(bytes(raw).decode()).get("owner") == owner:
+            tr.clear(key)
+
+    def acquire_lun_takeover_lock(self, device_id, owner, ttl):
+        """Take the takeover lease of one multi-attach LUN for ``owner``, so
+        two takeovers of the same LUN never run together, in this process or
+        in another. A lease older than ``ttl`` seconds (its holder died) is
+        taken over. Returns ``(True, None)`` or ``(False, holder)``."""
+        key = f"{self.LUN_TAKEOVER_LOCK_PREFIX}/{device_id}".encode()
+        now = time.time()
+        kv = self.kv_store
+        if kv is not None and hasattr(kv, 'create_transaction'):
+            transactional = fdb.transactional(DBController._acquire_lun_takeover_lock_tx)
+            return transactional(kv, key, owner, now, ttl)
+        return DBController._acquire_lun_takeover_lock_tx(_NoTxnStore(kv), key, owner, now, ttl)
+
+    def release_lun_takeover_lock(self, device_id, owner):
+        """Release the lease only if ``owner`` still holds it."""
+        key = f"{self.LUN_TAKEOVER_LOCK_PREFIX}/{device_id}".encode()
+        kv = self.kv_store
+        if kv is not None and hasattr(kv, 'create_transaction'):
+            transactional = fdb.transactional(DBController._release_lun_takeover_lock_tx)
+            transactional(kv, key, owner)
+            return
+        DBController._release_lun_takeover_lock_tx(_NoTxnStore(kv), key, owner)
 
     # ---- Generic atomic read-modify-write (Single FDB Transaction) ----
 

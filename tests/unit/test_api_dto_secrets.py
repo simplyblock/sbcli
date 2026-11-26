@@ -89,6 +89,7 @@ def _build_cluster_dto():
         node_affinity=False,
         anti_affinity=False,
         enable_failure_domain=False,
+        lvol_geometry_enabled=True,
         device_mode="nvme",
         inline_checksum=False,
         atomic_4k=False,

@@ -157,6 +157,96 @@ class TestPortReservationTx(unittest.TestCase):
         self.assertNotEqual(p1, p2)
         self.assertEqual({p1, p2}, {4420, 4421})
 
+    # A retried add must get the port of the attempt before it. The SPDK pod is
+    # named after its rpc port, so a new port per attempt started a second pod
+    # for the same node, which held the host's huge pages and left the retry
+    # Pending (OpenShift, 2026-11-25: 4420, 4421 and 4422 for one node).
+
+    def test_a_slot_gets_its_port_back(self):
+        db = _new_db()
+        tr = FakeTx()
+        first = db._reserve_next_nvmf_port_tx(tr, "c1", 4420, set(), "attempt-1", now=1000, slot="rpc/w2/0/0xf")
+        second = db._reserve_next_nvmf_port_tx(tr, "c1", 4420, set(), "attempt-2", now=1300, slot="rpc/w2/0/0xf")
+        third = db._reserve_next_nvmf_port_tx(tr, "c1", 4420, set(), "attempt-3", now=1600, slot="rpc/w2/0/0xf")
+        self.assertEqual((first, second, third), (4420, 4420, 4420))
+        # one reservation, owned by the latest attempt and refreshed
+        reservations = [v for k, v in tr.store.items() if v.get("slot") == "rpc/w2/0/0xf"]
+        self.assertEqual(len(reservations), 1)
+        self.assertEqual(reservations[0]["owner"], "attempt-3")
+        self.assertEqual(reservations[0]["created_at"], 1600)
+
+    def test_two_slots_get_distinct_ports(self):
+        """Co-socket siblings and other hosts are other slots."""
+        db = _new_db()
+        tr = FakeTx()
+        a = db._reserve_next_nvmf_port_tx(tr, "c1", 4420, set(), "a", now=1000, slot="rpc/w2/0/0xf")
+        b = db._reserve_next_nvmf_port_tx(tr, "c1", 4420, set(), "b", now=1000, slot="rpc/w2/0/0xf0")
+        c = db._reserve_next_nvmf_port_tx(tr, "c1", 4420, set(), "c", now=1000, slot="rpc/w3/0/0xf")
+        self.assertEqual({a, b, c}, {4420, 4421, 4422})
+        self.assertEqual(
+            db._reserve_next_nvmf_port_tx(tr, "c1", 4420, set(), "b2", now=1100, slot="rpc/w2/0/0xf0"), b)
+
+    def test_a_slot_keeps_its_port_past_the_short_ttl(self):
+        """The gap between two attempts spans a MachineConfig rollout, and
+        another add reserving in between must not reclaim the slot's port."""
+        db = _new_db()
+        tr = FakeTx()
+        mine = db._reserve_next_nvmf_port_tx(tr, "c1", 4420, set(), "attempt-1", now=1000, slot="rpc/w2/0/0xf")
+        later = 1000 + constants.PORT_RESERVATION_TTL_SEC + 1
+        other = db._reserve_next_nvmf_port_tx(tr, "c1", 4420, set(), "x", now=later, slot="rpc/w3/0/0xf")
+        self.assertNotEqual(other, mine)
+        self.assertEqual(
+            db._reserve_next_nvmf_port_tx(tr, "c1", 4420, set(), "attempt-2", now=later + 1, slot="rpc/w2/0/0xf"),
+            mine)
+
+    def test_an_abandoned_slot_is_reclaimed_after_the_slot_ttl(self):
+        db = _new_db()
+        tr = FakeTx()
+        db._reserve_next_nvmf_port_tx(tr, "c1", 4420, set(), "gone", now=1000, slot="rpc/w2/0/0xf")
+        later = 1000 + constants.PORT_RESERVATION_SLOT_TTL_SEC + 1
+        port = db._reserve_next_nvmf_port_tx(tr, "c1", 4420, set(), "x", now=later, slot="rpc/w3/0/0xf")
+        self.assertEqual(port, 4420)
+        self.assertEqual(tr.store[self._res_key("c1", 4420)]["slot"], "rpc/w3/0/0xf")
+
+    def test_a_slot_whose_port_a_node_took_gets_a_new_one(self):
+        db = _new_db()
+        tr = FakeTx()
+        db._reserve_next_nvmf_port_tx(tr, "c1", 4420, set(), "attempt-1", now=1000, slot="rpc/w2/0/0xf")
+        port = db._reserve_next_nvmf_port_tx(tr, "c1", 4420, {4420}, "attempt-2", now=1100, slot="rpc/w2/0/0xf")
+        self.assertEqual(port, 4421)
+        self.assertNotIn(self._res_key("c1", 4420), tr.store)
+
+    def test_a_second_reservation_for_a_slot_frees_its_port(self):
+        """One slot holds one port. A second reservation under the same name
+        is dropped, so its port goes back to the pool."""
+        db = _new_db()
+        store = {}
+        for port in (4420, 4421):
+            res = PortReservation()
+            res.cluster_id = "c1"
+            res.port = port
+            res.owner = "earlier"
+            res.created_at = 1000
+            res.slot = "rpc/w2/0/0xf"
+            store[self._res_key("c1", port)] = res.to_dict()
+        tr = FakeTx(store)
+        mine = db._reserve_next_nvmf_port_tx(tr, "c1", 4420, set(), "attempt-2", now=1100, slot="rpc/w2/0/0xf")
+        self.assertIn(mine, (4420, 4421))
+        left = [v["port"] for v in tr.store.values() if v.get("slot") == "rpc/w2/0/0xf"]
+        self.assertEqual(left, [mine])
+        other = db._reserve_next_nvmf_port_tx(tr, "c1", 4420, set(), "x", now=1100, slot="rpc/w3/0/0xf")
+        self.assertEqual({mine, other}, {4420, 4421})
+
+    def test_a_reservation_without_a_slot_is_never_handed_back(self):
+        """The node's nvmf port is reserved without a slot and must stay
+        distinct from its rpc port and from every other unnamed reservation."""
+        db = _new_db()
+        tr = FakeTx()
+        rpc = db._reserve_next_nvmf_port_tx(tr, "c1", 4420, set(), "n1", now=1000, slot="rpc/w2/0/0xf")
+        nvmf = db._reserve_next_nvmf_port_tx(tr, "c1", 4420, set(), "n1", now=1000)
+        again = db._reserve_next_nvmf_port_tx(tr, "c1", 4420, set(), "n1", now=1000)
+        self.assertEqual(len({rpc, nvmf, again}), 3)
+
 
 # ---------------------------------------------------------------------------
 # 4. set_cluster_status transactional compare-and-set
