@@ -321,6 +321,27 @@ def _validate_new_task_node_add(cluster_id, node_addr):
     return False
 
 
+def _new_job_schedule(function_name, cluster_id, node_id, device_id,
+                      max_retry, function_params) -> JobSchedule:
+    """Build a NEW, not-yet-written ``JobSchedule`` -- the construction
+    ``_add_task`` and ``add_backup_delete_task``/``add_backup_delete_chain_task``
+    share, the latter two writing it through their own atomic admission gate
+    (``DBController.ensure_backup_delete_task``) rather than ``_add_task``'s
+    generic path."""
+    task_obj = JobSchedule()
+    task_obj.uuid = str(uuid.uuid4())
+    task_obj.cluster_id = cluster_id
+    task_obj.node_id = node_id
+    task_obj.device_id = device_id
+    task_obj.date = int(time.time())
+    task_obj.function_name = function_name
+    if function_params and type(function_params) is dict:
+        task_obj.function_params = function_params
+    task_obj.max_retry = max_retry
+    task_obj.status = JobSchedule.STATUS_NEW
+    return task_obj
+
+
 def _add_task(function_name, cluster_id, node_id, device_id,
               max_retry=constants.TASK_EXEC_RETRY_COUNT, function_params=None, send_to_cluster_log=True):
 
@@ -429,17 +450,8 @@ def _add_task(function_name, cluster_id, node_id, device_id,
             logger.info(f"Task found, skip adding new task: {task_id}")
             return False
 
-    task_obj = JobSchedule()
-    task_obj.uuid = str(uuid.uuid4())
-    task_obj.cluster_id = cluster_id
-    task_obj.node_id = node_id
-    task_obj.device_id = device_id
-    task_obj.date = int(time.time())
-    task_obj.function_name = function_name
-    if function_params and type(function_params) is dict:
-        task_obj.function_params = function_params
-    task_obj.max_retry = max_retry
-    task_obj.status = JobSchedule.STATUS_NEW
+    task_obj = _new_job_schedule(function_name, cluster_id, node_id, device_id,
+                                 max_retry, function_params)
     if function_name == JobSchedule.FN_SNAPSHOT_REPLICATION:
         # The scan above is a check-then-write: two replication workers
         # enqueueing the same chain ancestor 100 ms apart both passed it and
@@ -1653,23 +1665,38 @@ def add_backup_restore_task(source_lvol_id, cluster_id, node_id, backup_id, lvol
     return task.uuid
 
 
-def add_backup_delete_task(cluster_id, node_id, lvol_id, backup_id):
-    """Create the task that deletes (or folds into its successor) one backup
-    that has been claimed for removal, unless an open task already covers it.
+def _queue_backup_delete_task(task: JobSchedule, lvol_id: str) -> tuple[bool, str | None]:
+    """Queue ``task`` (an FN_BACKUP_DELETE or FN_BACKUP_DELETE_CHAIN task)
+    through the one atomic admission gate both share, keyed by ``lvol_id``
+    (``DBController.ensure_backup_delete_task``): at most one open task of
+    either type per chain, admitted exclusively rather than deduped
+    scan-then-write (F2/F3 of docs/reviews/backup-deletion-review-round3.md).
 
-    The target is already DELETING or MERGING by the time this is called --
-    ``backup_controller._start_backup_delete``/``trigger_merge`` claim it via
-    ``DBController.claim_backup_chain_op`` first -- so this needs no
-    transactional join of its own: there is no gap between a check and this
-    task existing left to close. One task per ``backup_id`` covers both the
-    direct-delete and fold-into-successor cases: the runner decides which, at
-    execution time, from the backup's current status and chain (see
-    ``tasks_runner_backup._run_backup_delete``).
+    Returns ``(True, None)`` once queued, or ``(False, reason)`` if the chain
+    already has one open -- "busy, try again", the same shape
+    ``backup_controller.delete_backups`` already gave a MERGING sibling before
+    this gate existed.
+    """
+    active_id, created = db.ensure_backup_delete_task(task, lvol_id)
+    if not created:
+        return False, (f"volume {lvol_id}'s backup chain is busy with another "
+                       f"delete/merge task ({active_id}); try again once it finishes")
+    tasks_events.task_create(task)
+    return True, None
 
-    ``lvol_id`` names only the volume this backup belongs to, so an open
-    ``FN_BACKUP_DELETE_CHAIN`` task already covering it can be found without a
-    lookup. Skipped -- not an error, just nothing further to queue -- when one
-    is open: that task retires every backup of the volume, this one included.
+
+def add_backup_delete_task(cluster_id, node_id, lvol_id, backup_id) -> tuple[bool, str | None]:
+    """Queue the task that deletes (or folds into its successor) one backup.
+
+    The target is not claimed (MERGING/DELETING) yet by the time this is
+    called: that now happens as the first thing the task's own execution does
+    (``tasks_runner_backup._run_backup_delete``), re-validating every
+    precondition fresh, rather than here (F2/F3 of
+    docs/reviews/backup-deletion-review-round3.md) -- closing the crash
+    window between a claim committing and its task existing, since neither
+    can happen without the other any more. One task per ``backup_id`` covers
+    both the direct-delete and fold-into-successor cases: the runner decides
+    which, at execution time, from the backup's current status and chain.
 
     max_retry is ``BACKUP_MAX_RETRIES``, the longer ceiling restore and the
     former standalone merge task used -- not ``BACKUP_TASK_MAX_RETRIES`` (the
@@ -1677,73 +1704,45 @@ def add_backup_delete_task(cluster_id, node_id, lvol_id, backup_id):
     mid-merge cannot be cleanly retried from scratch, the same reasoning
     ``BACKUP_TASK_MAX_RETRIES``'s docstring gives for merge. Since this task
     covers that case too now (D5/D8), it keeps that ceiling for both branches.
+
+    Returns ``(True, None)`` once the task is queued, or ``(False, reason)``
+    if ``lvol_id``'s chain already has one open -- see
+    ``_queue_backup_delete_task``.
     """
-    for task in db.get_job_tasks_by_function(cluster_id, JobSchedule.FN_BACKUP_DELETE_CHAIN):
-        if (not task.canceled and task.status != JobSchedule.STATUS_DONE
-                and (task.function_params or {}).get("lvol_id") == lvol_id):
-            logger.info(f"Chain-delete task found for this backup's volume, "
-                        f"skip adding new task: {task.uuid}")
-            return False
-    for task in db.get_job_tasks_by_function(cluster_id, JobSchedule.FN_BACKUP_DELETE):
-        if (not task.canceled and task.status != JobSchedule.STATUS_DONE
-                and (task.function_params or {}).get("backup_id") == backup_id):
-            logger.info(f"Task found, skip adding new task: {task.uuid}")
-            return False
-    return _add_task(
-        JobSchedule.FN_BACKUP_DELETE,
-        cluster_id,
-        node_id,
-        "",
-        max_retry=constants.BACKUP_MAX_RETRIES,
-        function_params={
-            "backup_id": backup_id,
-        },
-    )
+    task = _new_job_schedule(
+        JobSchedule.FN_BACKUP_DELETE, cluster_id, node_id, "",
+        constants.BACKUP_MAX_RETRIES,
+        {"lvol_id": lvol_id, "backup_id": backup_id})
+    return _queue_backup_delete_task(task, lvol_id)
 
 
-def add_backup_delete_chain_task(cluster_id, node_id, lvol_id):
-    """Create the task that deletes every backup of one volume -- a direct S3
+def add_backup_delete_chain_task(cluster_id, node_id, lvol_id) -> tuple[bool, str | None]:
+    """Queue the task that deletes every backup of one volume -- a direct S3
     delete, never a merge: nothing outside the volume's own chain survives to
-    chain against any of its members -- unless an open task already covers it.
+    chain against any of its members.
 
-    Dedup: at most one open task per ``lvol_id``. This task is about to own
-    every backup of the volume, so it also supersedes any open single-backup
-    ``FN_BACKUP_DELETE`` task on one of its members -- cancels it rather than
-    leaving both to independently delete/retire the same backup (closes F3 of
-    docs/reviews/backup-deletion-review-round2.md). ``add_backup_delete_task``
-    already covers the opposite direction: it yields when a covering
-    ``FN_BACKUP_DELETE_CHAIN`` already exists.
+    Shares ``add_backup_delete_task``'s admission gate, keyed by the same
+    ``lvol_id``: a single-backup delete and a whole-chain delete requested for
+    the same volume mutually exclude each other, whichever is admitted first,
+    instead of one superseding the other. This REPLACES the cancel-and-
+    supersede dance this function used to run on an open single-backup
+    ``FN_BACKUP_DELETE`` task of one of the volume's members -- the mechanism
+    that produced F2's two-tasks-on-one-backup window in the first place --
+    rather than hardening it (F2/F3 of
+    docs/reviews/backup-deletion-review-round3.md). The trade-off: an
+    operator who escalates from "delete one backup" to "delete the whole
+    volume" while the narrower delete is still open now gets "busy, retry"
+    instead of immediate takeover.
+
+    Returns ``(True, None)`` once the task is queued, or ``(False, reason)``
+    if ``lvol_id``'s chain already has one open -- see
+    ``_queue_backup_delete_task``.
     """
-    for task in db.get_job_tasks_by_function(cluster_id, JobSchedule.FN_BACKUP_DELETE_CHAIN):
-        if (not task.canceled and task.status != JobSchedule.STATUS_DONE
-                and (task.function_params or {}).get("lvol_id") == lvol_id):
-            logger.info(f"Task found, skip adding new task: {task.uuid}")
-            return False
-
-    def _guard(fresh):
-        if fresh.status == JobSchedule.STATUS_DONE:
-            return False
-        return _flag_canceled(fresh)
-
-    member_ids = {b.uuid for b in db.get_backups_by_lvol_id(lvol_id)}
-    for task in db.get_job_tasks_by_function(cluster_id, JobSchedule.FN_BACKUP_DELETE):
-        if (not task.canceled and task.status != JobSchedule.STATUS_DONE
-                and (task.function_params or {}).get("backup_id") in member_ids
-                and _cancel_atomically(task, _guard) is not None):
-            logger.info(
-                f"Canceled single-backup delete task {task.uuid}, "
-                f"superseded by chain delete of volume {lvol_id}")
-
-    return _add_task(
-        JobSchedule.FN_BACKUP_DELETE_CHAIN,
-        cluster_id,
-        node_id,
-        "",
-        max_retry=constants.BACKUP_TASK_MAX_RETRIES,
-        function_params={
-            "lvol_id": lvol_id,
-        },
-    )
+    task = _new_job_schedule(
+        JobSchedule.FN_BACKUP_DELETE_CHAIN, cluster_id, node_id, "",
+        constants.BACKUP_TASK_MAX_RETRIES,
+        {"lvol_id": lvol_id})
+    return _queue_backup_delete_task(task, lvol_id)
 
 
 def _check_snap_instance_on_node(snapshot_id: str , node_id: str):

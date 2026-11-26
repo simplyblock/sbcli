@@ -1,4 +1,5 @@
 """Creating, restoring, importing, exporting and discovering backups."""
+import itertools
 import logging
 import time
 from collections.abc import Iterable
@@ -11,6 +12,7 @@ from simplyblock_core.controllers.backup import manifest as backup_manifest
 from simplyblock_core.controllers.backup.chain import (
     BackupChain,
     SuccessorIndex,
+    check_no_fork,
     location_of,
 )
 from simplyblock_core.db_controller import DBController
@@ -576,7 +578,7 @@ def create_single_backup(snapshot, lvol, node_id, cluster_id, prev_backup, locat
     return backup
 
 
-def _require_restorable_chain(location: BackupLocation, encrypted: bool,
+def _require_restorable_chain(location: BackupLocation, encrypted: bool, lvol_id: str,
                               backed_snapshots: list[SnapShot], length: int,
                               what: str) -> None:
     """Refuse a chain of ``length`` links, continuing whatever backups already
@@ -591,7 +593,7 @@ def _require_restorable_chain(location: BackupLocation, encrypted: bool,
         PreconditionError: see `BackupChain.require_restorable`.
     """
     BackupChain.assemble(
-        location, encrypted, _existing_chain_backups(backed_snapshots),
+        location, encrypted, lvol_id, _existing_chain_backups(backed_snapshots),
     ).require_restorable(length=length, what=what)
 
 
@@ -613,7 +615,8 @@ def chain_would_be_restorable(lvol, location: BackupLocation, what: str) -> None
     latest_snapshot = db_controller.get_lvol_latest_snapshot(lvol.get_id())
     existing_chain = _get_snapshot_chain(latest_snapshot) if latest_snapshot is not None else []
     _require_restorable_chain(
-        location, bool(lvol.crypto_bdev), existing_chain, len(existing_chain) + 1, what)
+        location, bool(lvol.crypto_bdev), lvol.get_id(),
+        existing_chain, len(existing_chain) + 1, what)
 
 
 def ensure_snapshot_chain_backed_up(snapshot, lvol, node_id, cluster_id,
@@ -654,7 +657,7 @@ def ensure_snapshot_chain_backed_up(snapshot, lvol, node_id, cluster_id,
     # any task is enqueued. A backup either is restorable or was never created.
     snap_chain = _get_snapshot_chain(snapshot)
     _require_restorable_chain(
-        location, bool(lvol.crypto_bdev), snap_chain,
+        location, bool(lvol.crypto_bdev), lvol.get_id(), snap_chain,
         # Every snapshot in the chain gets a backup below, including the ones
         # that have none yet, so the eventual length is the chain's.
         length=len(snap_chain),
@@ -1010,10 +1013,12 @@ def cleanup_backup_kms_keys(backups):
 
 
 def _revert_backup_claim(backup_id: str) -> None:
-    """Undo a claim made by :func:`_start_backup_delete`/``trigger_merge`` that
-    did not get as far as anything irreversible: revert its manifest back to
-    ACTIVE (if the claim got that far before failing) and put the record back
-    to COMPLETED.
+    """Undo a claim made by :func:`_claim_for_delete`, at task execution time
+    (``tasks_runner_backup._run_backup_delete``/``_run_backup_delete_chain``;
+    F2/F3 of docs/reviews/backup-deletion-review-round3.md), that did not get
+    as far as anything irreversible: revert its manifest back to ACTIVE (if
+    the claim got that far before failing) and put the record back to
+    COMPLETED.
 
     A no-op if the backup is gone (improbable here -- nothing between the
     claim and this has removed it) or has moved past DELETING on its own.
@@ -1043,9 +1048,18 @@ def _claim_for_delete(lvol_id: str, backups: list[Backup]) -> tuple[bool, str | 
     """Claim every backup in ``backups`` -- all belonging to ``lvol_id``'s
     chain -- for deletion.
 
+    Called from task execution (``tasks_runner_backup._run_backup_delete``/
+    ``_run_backup_delete_chain``), not from admission any more (F2/F3 of
+    docs/reviews/backup-deletion-review-round3.md): a task is queued first,
+    with nothing yet claimed, and performs this claim itself -- re-validating
+    every precondition fresh -- as the first thing each execution does, so a
+    chain is never committed into DELETING without a task row already
+    durably existing to drive it.
+
     ``backups`` may mix freshly COMPLETED targets with ones already
-    DELETING/BROKEN (a resume of an earlier call that claimed them but did
-    not finish): ``DBController.claim_backup_chain_op`` is idempotent on a
+    DELETING/BROKEN (an earlier execution cycle of this same task claimed
+    them but did not finish retiring them): ``DBController.claim_backup_chain_op``
+    is idempotent on a
     target already in the claimed status and exempts it from its own
     blocking-sibling check, which is what lets a resume and a fresh claim of
     the rest of the chain happen in the one call. Only the COMPLETED ones
@@ -1091,45 +1105,68 @@ def _claim_for_delete(lvol_id: str, backups: list[Backup]) -> tuple[bool, str | 
     return True, None
 
 
-def _start_backup_delete(backup: Backup):
-    """Claim one COMPLETED backup -- nothing chains against it -- for direct
-    deletion, mark its manifest DELETING, and queue the task that removes its
-    S3 objects (D5/D8: ``FN_BACKUP_DELETE``, keyed by this backup's id alone;
-    the runner decides tip-delete vs. fold-into-successor afresh, so this is
-    also what ``trigger_merge`` queues when a successor exists instead).
+def _claim_for_merge(keep_backup: Backup, old_backup: Backup) -> tuple[bool, str | None]:
+    """Claim ``old_backup`` -- completed, and chained against by
+    ``keep_backup``, its completed successor -- for merging into
+    ``keep_backup``.
 
-    Returns ``(True, None)`` once the task is queued (or an equivalent one
-    already was -- ``add_backup_delete_task`` dedupes), or ``(False, reason)``.
-    """
-    ok, reason = _claim_for_delete(backup.lvol_id, [backup])
-    if not ok:
-        return False, reason
+    Called from task execution (``tasks_runner_backup._run_backup_delete``),
+    not from admission (F2/F3 of docs/reviews/backup-deletion-review-round3.md):
+    the actual claim used to run inside :func:`trigger_merge` at admission
+    time; it runs here instead, as the first thing the queued task's
+    execution does, re-validating both preconditions fresh rather than
+    trusting whatever was true when the task was queued.
 
-    tasks_controller.add_backup_delete_task(
-        backup.cluster_id, backup.node_id, backup.lvol_id, backup.uuid)
-    return True, None
-
-
-def _start_backup_delete_chain(lvol_id: str, backups: list[Backup]):
-    """Claim every backup in ``backups`` -- COMPLETED ones freshly, any
-    already DELETING/BROKEN idempotently (a resume) -- for deletion, mark
-    the manifest of each freshly-claimed one DELETING, and queue the single
-    task that removes every one of their S3 objects (``FN_BACKUP_DELETE_CHAIN``,
-    keyed by ``lvol_id`` alone).
-
-    Returns ``(True, None)`` once the task is queued (or an equivalent one
-    already was -- ``add_backup_delete_chain_task`` dedupes), or
+    Returns ``(True, None)`` once ``old_backup`` is MERGING, or
     ``(False, reason)``.
+    """
+    if old_backup.status != Backup.STATUS_COMPLETED:
+        return False, f"backup {old_backup.uuid} is {old_backup.status}, not completed"
+    if keep_backup.status != Backup.STATUS_COMPLETED:
+        return False, f"backup {keep_backup.uuid} is {keep_backup.status}, not completed"
+
+    return db_controller.claim_backup_chain_op(
+        old_backup.lvol_id, [old_backup.uuid], Backup.STATUS_MERGING)
+
+
+def _start_backup_delete(backup: Backup) -> tuple[bool, str | None]:
+    """Queue the task that deletes one COMPLETED backup directly -- nothing
+    chains against it.
+
+    Claims nothing here: the claim (``_claim_for_delete``) now runs as the
+    first thing the queued task's own execution does
+    (``tasks_runner_backup._run_backup_delete``; F2/F3 of
+    docs/reviews/backup-deletion-review-round3.md), re-validating every
+    precondition fresh rather than trusting whatever was true when this was
+    called.
+
+    Returns ``(True, None)`` once the task is queued, or ``(False, reason)``
+    if the chain already has one open (``add_backup_delete_task``'s "chain
+    busy" admission gate).
+    """
+    return tasks_controller.add_backup_delete_task(
+        backup.cluster_id, backup.node_id, backup.lvol_id, backup.uuid)
+
+
+def _start_backup_delete_chain(lvol_id: str, backups: list[Backup]) -> tuple[bool, str | None]:
+    """Queue the single task that deletes every backup of ``lvol_id`` --
+    COMPLETED ones and any already DELETING/BROKEN alike.
+
+    Claims nothing here: every target is claimed together as the first thing
+    the queued task's own execution does
+    (``tasks_runner_backup._run_backup_delete_chain``; F2/F3 of
+    docs/reviews/backup-deletion-review-round3.md). ``backups`` only supplies
+    the task's ``cluster_id``/``node_id``; the task re-derives its actual
+    target set from ``lvol_id`` alone at execution time.
+
+    Returns ``(True, None)`` once the task is queued, or ``(False, reason)``
+    if the chain already has one open (``add_backup_delete_chain_task``'s
+    "chain busy" admission gate).
     """
     if not backups:
         return True, None
-    ok, reason = _claim_for_delete(lvol_id, backups)
-    if not ok:
-        return False, reason
-
-    tasks_controller.add_backup_delete_chain_task(
+    return tasks_controller.add_backup_delete_chain_task(
         backups[0].cluster_id, backups[0].node_id, lvol_id)
-    return True, None
 
 
 def delete_backups(lvol_id):
@@ -1140,11 +1177,13 @@ def delete_backups(lvol_id):
     one into. Refuses outright if any backup of the volume is still being
     created (PENDING/IN_PROGRESS) -- deleting mid-upload would remove the very
     backup a running upload's own ``prev_backup_id`` depends on -- or if any
-    is a live member of a group backup, or already MERGING (someone else's
-    merge of a backup this call would otherwise also claim). A backup already
-    DELETING or BROKEN is tolerated: this call resuming a chain-delete that
-    claimed it but did not finish queuing its task (the process died in
-    between -- see F2 of docs/reviews/backup-deletion-review.md).
+    is a live member of a group backup. A sibling already MERGING/DELETING/
+    BROKEN is not checked here any more: the single task this queues claims
+    the whole chain together, atomically, as the first thing its own
+    execution does, and admission itself refuses outright ("chain busy") if
+    any delete/merge task is already open against this volume -- see F2/F3 of
+    docs/reviews/backup-deletion-review-round3.md,
+    ``tasks_controller.add_backup_delete_chain_task``.
 
     Returns (success, error_message).
     """
@@ -1158,11 +1197,6 @@ def delete_backups(lvol_id):
         return False, (f"backup(s) {', '.join(b.uuid[:8] for b in in_flight)} of volume "
                        f"{lvol_id} are still being created")
 
-    merging = [b for b in backups if b.status == Backup.STATUS_MERGING]
-    if merging:
-        return False, (f"backup(s) {', '.join(b.uuid[:8] for b in merging)} of volume "
-                       f"{lvol_id} are already being merged")
-
     for b in backups:
         if not b.group_backup_id:
             continue
@@ -1175,16 +1209,12 @@ def delete_backups(lvol_id):
                            f"{b.group_backup_id}, which still exists; delete the "
                            "group backup instead")
 
-    # Every backup this call must see DELETING by the time it returns:
-    # freshly COMPLETED ones, plus any already DELETING/BROKEN from an
-    # earlier call that claimed them but did not finish queuing its task
-    # (the process died in between -- see F2 of
-    # docs/reviews/backup-deletion-review.md). Claiming them together in
-    # one call -- rather than skipping the fresh ones whenever a resume is
-    # also present -- is what closes F1 of
-    # docs/reviews/backup-deletion-review-round2.md: claim_backup_chain_op
-    # already tolerates a resumed target sitting in the chain, it was just
-    # never given the rest of the chain to claim alongside it.
+    # Every backup this call wants DELETING, eventually: freshly COMPLETED
+    # ones, plus any already DELETING/BROKEN left by an earlier, still-open
+    # chain-delete task -- the task's own execution-time claim
+    # (tasks_runner_backup._run_backup_delete_chain) re-derives this same set
+    # and is idempotent on them, so passing them along here changes nothing
+    # if that task is still the one driving them.
     targets = [b for b in backups
               if b.status in (Backup.STATUS_COMPLETED, Backup.STATUS_DELETING,
                               Backup.STATUS_BROKEN)]
@@ -1215,12 +1245,13 @@ def delete_backup(backup_id):
 
     Raises:
         KeyError: no backup has this id.
-        PreconditionError: it is the predecessor of a backup that is not yet
-            completed (nothing to merge it into yet); it is a member of a
-            group backup that still exists (delete the group backup
-            instead); it is not completed itself; or the chain it belongs to
-            is already claimed by another merge, delete, or an active
-            restore (``DBController.claim_backup_chain_op``).
+        PreconditionError: it is already MERGED (nothing left to delete); it
+            is the predecessor of a backup that is not yet completed
+            (nothing to merge it into yet); it is a member of a group backup
+            that still exists (delete the group backup instead); it is not
+            completed itself; or the chain it belongs to already has a
+            delete/merge task open (``tasks_controller.add_backup_delete_task``'s
+            "chain busy" admission gate).
     """
     backup = db_controller.get_backup_by_id(backup_id)
 
@@ -1235,14 +1266,15 @@ def delete_backup(backup_id):
                 f"backup {backup.uuid} is a member of group backup "
                 f"{backup.group_backup_id}; delete the group backup instead")
 
-    if backup.status in (Backup.STATUS_DELETING, Backup.STATUS_BROKEN):
-        # Resuming a delete (or a merge whose fold-in broke this backup, see
-        # D4/F5) that claimed this backup but did not finish queuing its
-        # task (the process died in between): re-queue rather than
-        # re-claim, which would see this backup's own status among its
-        # siblings and refuse itself.
-        tasks_controller.add_backup_delete_task(
-            backup.cluster_id, backup.node_id, backup.lvol_id, backup.uuid)
+    if backup.status in (Backup.STATUS_DELETING, Backup.STATUS_MERGING):
+        # Already claimed, and already being driven by an open task
+        # (tasks_runner_backup._run_backup_delete/_run_merge_fold):
+        # finalize_resource guarantees that a task ending before it finishes
+        # always reverts one of these back to COMPLETED, or (MERGING only)
+        # to BROKEN, so neither state is ever left without a task currently
+        # driving it (F2/F3 of docs/reviews/backup-deletion-review-round3.md
+        # moved the claim itself into that task's own execution). A repeat
+        # call here is simply a no-op.
         return
 
     if backup.status == Backup.STATUS_FAILED:
@@ -1254,8 +1286,36 @@ def delete_backup(backup_id):
         backup.remove(db_controller.kv_store)
         return
 
+    if backup.status == Backup.STATUS_MERGED:
+        raise PreconditionError(
+            f"backup {backup.uuid} was already merged into its successor; "
+            "nothing to delete")
+
+    if backup.status == Backup.STATUS_BROKEN:
+        # Unlike DELETING/MERGING, BROKEN has no such guarantee: its S3 data
+        # is already confirmed gone, so finalize_resource deliberately
+        # leaves a task that ends before retiring it exactly as BROKEN,
+        # never reverted (reverting would claim data is there that might not
+        # be). A task that then hits its retry ceiling, times out, or is
+        # canceled leaves this backup genuinely claimed but task-less --
+        # the one case F2/F3 does not close -- so this re-admits it through
+        # the normal gate below rather than no-op'ing: "chain busy" if a
+        # task is still open and actually driving it, a fresh retire task
+        # otherwise.
+        ok, reason = _start_backup_delete(backup)
+        if not ok:
+            raise PreconditionError(f"Cannot delete backup {backup.uuid}: {reason}")
+        return
+
+    if backup.status != Backup.STATUS_COMPLETED:
+        raise PreconditionError(f"backup {backup.uuid} is {backup.status}, not completed")
+
     # A FAILED successor does not count (D7): it was never restorable, so it
-    # protects nothing a direct delete would destroy.
+    # protects nothing a direct delete would destroy. This, and the
+    # completed-ness checks below, are a fast, synchronous rejection only --
+    # re-validated fresh, at task execution time, by whichever of
+    # _claim_for_merge/_claim_for_delete the queued task's own execution
+    # calls (F2/F3 of docs/reviews/backup-deletion-review-round3.md).
     successor = SuccessorIndex.of_lvol(
         db_controller.get_backups_by_lvol_id(backup.lvol_id)).live_successor_of(backup.uuid)
     if successor is not None:
@@ -1267,9 +1327,6 @@ def delete_backup(backup_id):
         if not ok:
             raise PreconditionError(f"Cannot delete backup {backup.uuid}: {reason}")
         return
-
-    if backup.status != Backup.STATUS_COMPLETED:
-        raise PreconditionError(f"backup {backup.uuid} is {backup.status}, not completed")
 
     ok, reason = _start_backup_delete(backup)
     if not ok:
@@ -1447,6 +1504,17 @@ def import_backups(export: backup_manifest.BackupExport, cluster_id=None) -> int
     # typically during the recovery it was meant to serve. A chain may reach back
     # out of the batch into records already stored, so both are given to it.
     stored = db_controller.get_backups()
+
+    # A fork -- two links naming the same prev_backup_id -- is not something
+    # any single BackupChain.importing call can see: each only walks backward
+    # from one head, never sideways at whether a sibling pending manifest or an
+    # existing stored record already claims the same predecessor. Checked once,
+    # batch-wide across the whole population rather than per lvol_id (that
+    # grouping is exactly what BackupChain.assemble's own lvol_id check below
+    # validates, and hasn't run yet at this point) -- before any pending record
+    # is written (F4/F5 of docs/reviews/backup-deletion-review-round3.md).
+    check_no_fork(itertools.chain(stored, pending.values()))
+
     for manifest in pending.values():
         BackupChain.importing(
             manifest, pending, stored,
@@ -1680,19 +1748,22 @@ def _rewrite_manifest_from_record(backup: Backup) -> bool:
 
 
 def trigger_merge(keep_backup, old_backup):
-    """Merge ``old_backup`` into ``keep_backup``, its successor in one volume's
-    chain: claim the chain, mark the old one merging, and queue the task that
-    drives the fold.
+    """Queue the merge of ``old_backup`` into ``keep_backup``, its completed
+    successor in one volume's chain.
 
-    Both must be completed, and the chain must not already be claimed by
-    another merge, delete, or an active restore
-    (``DBController.claim_backup_chain_op``) -- otherwise nothing happens and
-    a later pass retries. Used by the single-volume retention (policy), by
-    the group backup's retirement of a pruned generation's members
-    (group_backup), and by ``delete_backup`` when the backup requested for
-    deletion has a completed successor: deleting it and merging it into that
-    successor are the same operation up to this point, so both go through
-    here rather than duplicating the claim.
+    Both must be completed when this is called, for a fast, synchronous
+    rejection if the pair cannot merge at all -- but the actual claim
+    (``_claim_for_merge`` / ``DBController.claim_backup_chain_op``) no longer
+    happens here: it runs as the first thing the queued task's own execution
+    does, re-validating both this and every other precondition fresh (F2/F3
+    of docs/reviews/backup-deletion-review-round3.md), since time passes
+    between this call and that execution and either side's status can change
+    in between. Used by the single-volume retention (policy), by the group
+    backup's retirement of a pruned generation's members (group_backup), and
+    by ``delete_backup`` when the backup requested for deletion has a
+    completed successor: deleting it and merging it into that successor are
+    the same operation up to this point, so both go through here rather than
+    duplicating the admission.
 
     ``keep_backup`` is not threaded through to the task (D5/D8): the queued
     ``FN_BACKUP_DELETE`` task is keyed only by ``old_backup``'s id, and its
@@ -1702,20 +1773,16 @@ def trigger_merge(keep_backup, old_backup):
     one instead of queuing an independent second merge.
 
     Returns ``(True, None)`` once the task is queued, or ``(False, reason)``
-    if nothing happened. The scheduled callers above treat ``False`` as "try
-    again next cycle" and ignore the reason; ``delete_backup`` surfaces it to
-    its own caller.
+    if nothing happened -- either precondition above failed, or the chain
+    already has an open delete/merge task (``add_backup_delete_task``'s own
+    "chain busy" admission gate). The scheduled callers above treat ``False``
+    as "try again next cycle" and ignore the reason; ``delete_backup``
+    surfaces it to its own caller.
     """
     if old_backup.status != Backup.STATUS_COMPLETED:
         return False, f"backup {old_backup.uuid} is {old_backup.status}, not completed"
     if keep_backup.status != Backup.STATUS_COMPLETED:
         return False, f"backup {keep_backup.uuid} is {keep_backup.status}, not completed"
 
-    ok, reason = db_controller.claim_backup_chain_op(
-        old_backup.lvol_id, [old_backup.uuid], Backup.STATUS_MERGING)
-    if not ok:
-        return False, reason
-
-    tasks_controller.add_backup_delete_task(
+    return tasks_controller.add_backup_delete_task(
         old_backup.cluster_id, old_backup.node_id, old_backup.lvol_id, old_backup.uuid)
-    return True, None

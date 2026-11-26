@@ -40,7 +40,7 @@ ELSEWHERE = BackupLocation(bucket_name="other-bucket", region="eu-central-1")
 
 
 def _record(name, prev=None, s3_id=1, location=LOCATION, encrypted=False,
-            status=Backup.STATUS_COMPLETED) -> Backup:
+            status=Backup.STATUS_COMPLETED, lvol_id=None) -> Backup:
     backup = Backup()
     backup.uuid = str(_id(name))
     backup.s3_id = s3_id
@@ -48,6 +48,11 @@ def _record(name, prev=None, s3_id=1, location=LOCATION, encrypted=False,
     backup.location = location.model_dump(exclude_none=True)
     backup.encrypted = encrypted
     backup.status = status
+    # Matches _manifest's hardcoded ManifestVolume.lvol_id, so a record line
+    # and a manifest line describe the same volume by default -- which is
+    # what BackupChain.assemble's lvol_id coherence check now requires of a
+    # chain that spans both shapes (TestImporting).
+    backup.lvol_id = str(_id("volume")) if lvol_id is None else lvol_id
     return backup
 
 
@@ -185,17 +190,23 @@ class TestCoherence:
             BackupChain.of_manifests(line[-1], line, LOCATION)
 
     def test_an_empty_chain_is_coherent(self):
-        assert BackupChain.assemble(LOCATION, False, []).links == ()
+        assert BackupChain.assemble(LOCATION, False, str(_id("volume")), []).links == ()
 
     def test_assemble_holds_links_to_the_declared_settings(self):
         """The creation path declares what it INTENDS to write, so a cluster
         repointed mid-chain is caught rather than inherited."""
         with pytest.raises(PreconditionError, match="other-bucket"):
-            BackupChain.assemble(LOCATION, False, _line_of_records(2, location=ELSEWHERE))
+            BackupChain.assemble(LOCATION, False, str(_id("volume")),
+                                 _line_of_records(2, location=ELSEWHERE))
 
     def test_assemble_catches_a_volume_that_gained_encryption(self):
         with pytest.raises(PreconditionError, match="encrypted"):
-            BackupChain.assemble(LOCATION, True, _line_of_records(2))
+            BackupChain.assemble(LOCATION, True, str(_id("volume")), _line_of_records(2))
+
+    def test_assemble_catches_a_chain_spanning_volumes(self):
+        with pytest.raises(PreconditionError, match="span volumes"):
+            BackupChain.assemble(LOCATION, False, str(_id("volume")),
+                                 _line_of_records(2, lvol_id=str(_id("other-volume"))))
 
 
 class TestImporting:
@@ -250,7 +261,7 @@ class TestRequireRestorable:
     def test_the_eventual_length_is_what_counts_at_creation(self):
         """At creation the ancestors are snapshots with no backup yet, so the
         chain is shorter than what it is about to become."""
-        chain = BackupChain.assemble(LOCATION, False, [])
+        chain = BackupChain.assemble(LOCATION, False, str(_id("volume")), [])
         chain.require_restorable(length=constants.BACKUP_MAX_CHAIN_LENGTH)
         with pytest.raises(PreconditionError, match="at most"):
             chain.require_restorable(length=constants.BACKUP_MAX_CHAIN_LENGTH + 1)
@@ -260,7 +271,7 @@ class TestRequireRestorable:
         restore path can never address."""
         tiering = BackupLocation(bucket_name="tiering", snapshot_backups=False)
         with pytest.raises(PreconditionError, match="snapshot_backups"):
-            BackupChain.assemble(tiering, False, []).require_restorable()
+            BackupChain.assemble(tiering, False, str(_id("volume")), []).require_restorable()
 
     def test_an_unfinished_link_is_refused_only_when_asked(self):
         line = _line_of_records(2)

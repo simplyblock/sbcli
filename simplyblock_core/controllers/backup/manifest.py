@@ -558,16 +558,19 @@ def mark_deleting(config: BackupConfig, backup_id: UUID) -> None:
 def mark_active(config: BackupConfig, backup_id: UUID) -> None:
     """Revert a backup's manifest to ACTIVE: a delete that did not finish.
 
-    A no-op if the manifest is already active, or already gone (the delete
-    got as far as removing it before being abandoned -- there is nothing left
-    to revert, and the FDB record it was abandoned alongside is reverted
-    separately).
+    A no-op if the manifest is not DELETING -- already active (nothing to
+    revert), already gone (the delete got as far as removing it before being
+    abandoned -- there is nothing left to revert, and the FDB record it was
+    abandoned alongside is reverted separately), or BROKEN (its S3 data is
+    confirmed gone; reverting that to ACTIVE would claim data that is not
+    there any more is still restorable -- F9 of
+    docs/reviews/backup-deletion-review-round3.md).
 
     Raises:
         ManifestError: the manifest could not be read or rewritten.
     """
     manifest = read_if_present(config, backup_id)
-    if manifest is not None and manifest.state != BackupManifestState.ACTIVE:
+    if manifest is not None and manifest.state == BackupManifestState.DELETING:
         write(config, manifest.model_copy(update={"state": BackupManifestState.ACTIVE}))
 
 

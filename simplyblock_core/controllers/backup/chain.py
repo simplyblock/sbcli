@@ -99,6 +99,11 @@ def _encrypted(link: Link) -> bool:
     return link.encrypted if isinstance(link, Backup) else link.encryption is not None
 
 
+def _lvol_id_of(link: Link) -> str:
+    """The lvol a link's backup belongs to, whichever shape it comes in."""
+    return link.lvol_id if isinstance(link, Backup) else str(link.volume.lvol_id)
+
+
 def _index(links: Iterable[L]) -> dict[UUID, L]:
     return {_id_of(link): link for link in links}
 
@@ -160,6 +165,16 @@ def _describe_incoherence(links: Sequence[Link], location: BackupLocation,
         + f", chain={'encrypted' if encrypted else 'plain'}")
 
 
+def _describe_lvol_mismatch(links: Sequence[Link], lvol_id: str) -> str:
+    for link in links:
+        if (elsewhere := _lvol_id_of(link)) != lvol_id:
+            return (
+                f"backup {_id_of(link)} belongs to volume {elsewhere}, but the "
+                f"rest of its chain belongs to volume {lvol_id}. A chain cannot "
+                "span volumes; start a new chain with a full backup")
+    raise AssertionError("no link disagreed with lvol_id")
+
+
 @dataclass(frozen=True)
 class BackupChain:
     """A backup and every backup it is a delta against, oldest first.
@@ -171,27 +186,32 @@ class BackupChain:
 
     location: BackupLocation
     encrypted: bool
+    lvol_id: str
 
     #: Oldest first, ending at the head -- the reverse of the order the data
     #: plane's ``s3_ids`` argument wants; see :meth:`s3_ids_newest_first`.
     links: tuple[Link, ...]
 
     @classmethod
-    def assemble(cls, location: BackupLocation, encrypted: bool,
+    def assemble(cls, location: BackupLocation, encrypted: bool, lvol_id: str,
                  links: Iterable[Link]) -> "BackupChain":
         """The only place a chain is constructed, and so the only place coherence
         is enforced.
 
         Takes the order as given rather than walking ``prev_backup_id``, for the
         caller that already knows it. At creation that caller is the one holding
-        the snapshot chain, and the pair it declares is the *intended* one rather
-        than one read off an existing link -- which is what catches a cluster
-        repointed mid-chain, or a volume that has gained encryption since its
-        last backup, instead of inheriting the old answer.
+        the snapshot chain, and the triple it declares is the *intended* one
+        rather than one read off an existing link -- which is what catches a
+        cluster repointed mid-chain, or a volume that has gained encryption since
+        its last backup, instead of inheriting the old answer.
 
         Raises:
-            PreconditionError: A link lives elsewhere, is encoded differently, or
-                disagrees about whether it is encrypted.
+            PreconditionError: A link lives elsewhere, is encoded differently,
+                disagrees about whether it is encrypted, or belongs to a
+                different volume (F5 of
+                docs/reviews/backup-deletion-review-round3.md: the only route to
+                this is backup import, which never checked a manifest's
+                ``lvol_id`` against the rest of the chain it names).
         """
         links = tuple(links)
 
@@ -201,18 +221,23 @@ class BackupChain:
                 "This chain cannot be restored as a unit: "
                 + _describe_incoherence(links, location, encrypted))
 
-        return cls(location=location, encrypted=encrypted, links=links)
+        if any(_lvol_id_of(link) != lvol_id for link in links):
+            raise PreconditionError(
+                "This chain cannot be restored as a unit: "
+                + _describe_lvol_mismatch(links, lvol_id))
+
+        return cls(location=location, encrypted=encrypted, lvol_id=lvol_id, links=links)
 
     @classmethod
     def of_backups(cls, head_id: UUID, backups: Iterable[Backup]) -> "BackupChain":
         """The chain ending at a stored backup.
 
-        Its location and encryption are the head's, since a stored record carries
-        both; the rest of the chain is held to them.
+        Its location, encryption and lvol are the head's, since a stored record
+        carries all three; the rest of the chain is held to them.
         """
         links = _walk(head_id, _index(backups), absence="not a known backup")
         head = links[-1]
-        return cls.assemble(head.get_location(), head.encrypted, links)
+        return cls.assemble(head.get_location(), head.encrypted, _lvol_id_of(head), links)
 
     @classmethod
     def of_manifests(cls, head: BackupManifest, manifests: Iterable[BackupManifest],
@@ -225,7 +250,7 @@ class BackupChain:
         """
         links = _walk(head.backup_id, _index(manifests))
         return cls.assemble(location_of(head, location),
-                            head.encryption is not None, links)
+                            head.encryption is not None, _lvol_id_of(head), links)
 
     @classmethod
     def importing(cls, head: BackupManifest, pending: Mapping[UUID, BackupManifest],
@@ -241,7 +266,7 @@ class BackupChain:
         links = _walk(head.backup_id, population,
                       absence="neither in this import nor already known")
         return cls.assemble(location_of(head, location),
-                            head.encryption is not None, links)
+                            head.encryption is not None, _lvol_id_of(head), links)
 
     def require_restorable(self, *, length: int | None = None,
                            completed: bool = False,
@@ -326,6 +351,50 @@ class BackupChain:
         return [link.s3_id for link in reversed(self.links)]
 
 
+def _prev_id_str(link: Link) -> str | None:
+    """A link's predecessor id, as the bare string it is stored/declared as --
+    not coerced through :func:`_prev_id_of`'s ``UUID(...)``, since the only
+    thing a fork check needs is equality between two links' predecessor, not
+    a parsed id (and a fixture population need not hold real UUIDs to be
+    checked for a fork)."""
+    if isinstance(link, Backup):
+        return link.prev_backup_id or None
+    return str(link.prev_backup_id) if link.prev_backup_id else None
+
+
+def _id_str(link: Link) -> str:
+    """A link's own id, as the bare string it is stored/declared as. See
+    :func:`_prev_id_str`."""
+    return link.uuid if isinstance(link, Backup) else str(link.backup_id)
+
+
+def check_no_fork(links: Iterable[Link]) -> None:
+    """Raise if two links among *links* name the same predecessor -- a forked
+    chain.
+
+    Generalized over :data:`Link` (F4 of
+    docs/reviews/backup-deletion-review-round3.md) so it can run once, in
+    :func:`controller.import_backups`, over a batch of manifests being
+    imported together with what is already stored -- the only place a fork
+    can actually form, and so the right place to refuse it before any of the
+    batch is written, rather than discovering it reactively through
+    :meth:`SuccessorIndex.of_lvol` at a later delete/retire.
+
+    Raises:
+        PreconditionError: two links name the same predecessor.
+    """
+    seen: dict[str, Link] = {}
+    for link in links:
+        previous = _prev_id_str(link)
+        if previous is None:
+            continue
+        if (existing := seen.get(previous)) is not None:
+            raise PreconditionError(
+                f"backup {previous} has multiple successors: "
+                f"{_id_str(existing)} and {_id_str(link)}")
+        seen[previous] = link
+
+
 @dataclass(frozen=True)
 class SuccessorIndex:
     """Which backup, if any, is a delta against each backup of one lvol.
@@ -336,11 +405,14 @@ class SuccessorIndex:
     with no head and no restorability or coherence requirement, since nothing
     here is being restored.
 
-    A fork -- two backups naming the same ``prev_backup_id`` -- can only reach
-    storage through backup import, which checks each manifest's own ancestry
-    but never checks two manifests, or a manifest against an existing record,
-    against each other. :meth:`of_lvol` is where that defect becomes visible:
-    it refuses to guess which of the two is "the" successor.
+    A fork -- two backups naming the same ``prev_backup_id`` -- can no longer
+    reach storage: :func:`check_no_fork` now also runs batch-wide over an
+    import, before anything is written (F4/F5 of
+    docs/reviews/backup-deletion-review-round3.md), and
+    :class:`BackupChain.assemble`'s ``lvol_id`` check closes the one route that
+    check could not see on its own (a fork that crosses lvols). :meth:`of_lvol`
+    keeps its own check as a defensive backstop: a bug in either of those, or a
+    second import path that bypasses them, is what would make it fire.
     """
 
     _by_prev: Mapping[str, Backup]
@@ -353,19 +425,13 @@ class SuccessorIndex:
 
         Raises:
             PreconditionError: two backups name the same ``prev_backup_id``,
-                i.e. the chain has forked.
+                i.e. the chain has forked. Not expected to ever fire in
+                production any more -- see the class docstring.
         """
-        by_prev: dict[str, Backup] = {}
-        for backup in backups:
-            if not backup.prev_backup_id:
-                continue
-            if (existing := by_prev.get(backup.prev_backup_id)) is not None:
-                raise PreconditionError(
-                    f"backup {backup.prev_backup_id} has multiple successors: "
-                    f"{existing.uuid} and {backup.uuid}")
-            by_prev[backup.prev_backup_id] = backup
-
-        return cls(by_prev)
+        backups = list(backups)
+        check_no_fork(backups)
+        return cls({backup.prev_backup_id: backup
+                    for backup in backups if backup.prev_backup_id})
 
     def successor_of(self, backup_id: str) -> Backup | None:
         """The backup that is a delta against *backup_id*, or ``None`` if

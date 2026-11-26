@@ -1625,6 +1625,15 @@ class DBController(metaclass=Singleton):
         index_list = Backup.active_indexes(tr)
         for target_id in target_ids:
             target = siblings[target_id]
+            if target.status == Backup.STATUS_BROKEN:
+                # Terminal: its data is already confirmed gone, and only the
+                # retire step moves it out of BROKEN. Resetting it back to
+                # new_status (DELETING) here would re-enter the S3-delete
+                # branch for data that is not there any more -- harmless only
+                # because delete_data_objects happens to be idempotent, which
+                # this claim's own contract never relied on (F9 of
+                # docs/reviews/backup-deletion-review-round3.md).
+                continue
             old_keys = BaseModel.index_keys(Backup, index_list, target)
             target.status = new_status
             target.updated_at = str(datetime.datetime.now(datetime.UTC))
@@ -1665,9 +1674,14 @@ class DBController(metaclass=Singleton):
         its own to object to) -- what this guarantees is that no OTHER,
         genuinely different claim can interleave with either, not that only
         one of two identical ones wins. Callers rely on idempotency further
-        downstream (``manifest.mark_deleting`` is a no-op if already marked;
-        ``add_backup_delete_task`` dedupes against an open task) to make a
-        repeat claim of the same ids harmless rather than merely admitted.
+        downstream (``manifest.mark_deleting`` is a no-op if already marked)
+        to make a repeat claim of the same ids harmless rather than merely
+        admitted. Called from task execution, not admission
+        (``tasks_runner_backup._run_backup_delete``/``_run_backup_delete_chain``;
+        F2/F3 of docs/reviews/backup-deletion-review-round3.md) -- a task's own
+        retry/resume cycle is exactly the repeat caller this idempotency is
+        for, since ``ensure_backup_delete_task`` already guarantees only one
+        task is ever open per chain.
 
         Assumes ``Backup``'s ``lvol_id`` index is ready, which it already is in
         any deployment old enough to run this: an index still ``building`` would
@@ -1678,6 +1692,50 @@ class DBController(metaclass=Singleton):
             return False, "No DB connection" if not self.kv_store else "No targets given"
         transactional = fdb.transactional(DBController._claim_backup_chain_op_tx)
         return transactional(self, self.kv_store, lvol_id, list(target_ids), new_status)
+
+    # backup_delete_task/<cluster_id>/<lvol_id> -> db key of the lvol's open
+    # FN_BACKUP_DELETE/FN_BACKUP_DELETE_CHAIN task, whichever was admitted
+    # first. Read and written in the transaction that creates the task, the
+    # same shape _repl_snap_task_key/_ensure_snapshot_replication_task_tx uses
+    # for a snapshot's replication task (bed bf32 2026-11-21) -- what makes
+    # admission exclusive per chain instead of the scan-then-write race
+    # add_backup_delete_task/add_backup_delete_chain_task used to run (F2/F3
+    # of docs/reviews/backup-deletion-review-round3.md).
+    BACKUP_DELETE_TASK_PREFIX = "backup_delete_task"
+
+    def _backup_delete_task_key(self, cluster_id, lvol_id):
+        return f"{self.BACKUP_DELETE_TASK_PREFIX}/{cluster_id}/{lvol_id}".encode()
+
+    def _ensure_backup_delete_task_tx(self, tr, task, lvol_id, index_list):
+        claim_key = self._backup_delete_task_key(task.cluster_id, lvol_id)
+        raw = tr.get(claim_key).wait()
+        if raw is not None and raw.present():
+            current = BaseModel._read_record(tr, bytes(raw), JobSchedule)
+            if (current is not None and current.status != JobSchedule.STATUS_DONE
+                    and not current.canceled):
+                return current.uuid, False
+        task.updated_at = str(datetime.datetime.now(datetime.UTC))
+        self._put_tx(tr, task, index_list)
+        tr[claim_key] = task.get_db_id().encode()
+        return task.uuid, True
+
+    def ensure_backup_delete_task(self, task: JobSchedule, lvol_id: str) -> tuple[str, bool]:
+        """Create ``task`` (an FN_BACKUP_DELETE or FN_BACKUP_DELETE_CHAIN task)
+        unless ``lvol_id``'s chain already has one that is neither done nor
+        canceled -- checked and written in ONE transaction with the chain's
+        claim key, so admission is exclusive per chain: whichever of a
+        single-backup delete and a whole-chain delete is requested first for a
+        given ``lvol_id`` wins, and the other is refused ("chain busy") rather
+        than racing it or preempting it the way
+        ``add_backup_delete_chain_task`` used to (F2/F3 of
+        docs/reviews/backup-deletion-review-round3.md). The two task types
+        share one claim key per ``lvol_id``, not one each, which is what makes
+        them mutually exclusive rather than independently deduped.
+
+        Returns ``(uuid of the chain's active task, whether it is task)``.
+        """
+        return self._transact(DBController._ensure_backup_delete_task_tx,
+                              task, lvol_id, JobSchedule.active_indexes(self.kv_store))
 
     def _create_backup_restore_task_tx(self, tr, source_lvol_id, cluster_id, node_id,
                                        function_params, max_retry, task_uuid, task_date):

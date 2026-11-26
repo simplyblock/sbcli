@@ -272,7 +272,7 @@ class TestRestorePreconditions:
 
 class TestImportPreconditions:
 
-    def _manifest(self, index, prev=None, s3_id=None, with_compression=False):
+    def _manifest(self, index, prev=None, s3_id=None, with_compression=False, lvol_id=None):
         return BackupManifest.model_validate({
             "schema_version": 1,
             "backup_id": _backup_id(index),
@@ -282,7 +282,7 @@ class TestImportPreconditions:
             "size": 4096,
             "prev_backup_id": _backup_id(prev) if prev is not None else None,
             "source": {"cluster_id": CLUSTER_ID, "node_id": NODE_ID},
-            "volume": {"lvol_id": LVOL_ID, "lvol_name": "vol",
+            "volume": {"lvol_id": lvol_id or LVOL_ID, "lvol_name": "vol",
                        "snapshot_id": _snapshot_id(index), "snapshot_name": "s",
                        "size": 4096},
             "dataplane": {"with_compression": with_compression},
@@ -381,6 +381,45 @@ class TestImportPreconditions:
                 cluster_id=CLUSTER_ID)
 
         assert [b.uuid for b in db.get_backups()] == [_backup_id(1)]
+
+    def test_a_fork_within_the_batch_is_refused(self, db, cluster):
+        """Two manifests of the same batch naming the same predecessor is a
+        forked chain -- refused batch-wide, before any of them is written,
+        rather than discovered later by SuccessorIndex.of_lvol at a delete or
+        retire (F4/F5 of docs/reviews/backup-deletion-review-round3.md)."""
+        with pytest.raises(PreconditionError, match="multiple successors"):
+            backup_controller.import_backups(
+                _export([self._manifest(1),
+                         self._manifest(2, prev=1, s3_id=11),
+                         self._manifest(3, prev=1, s3_id=12)], _config().location()),
+                cluster_id=CLUSTER_ID)
+
+        assert db.get_backups() == []
+
+    def test_a_fork_against_an_existing_record_is_refused(self, db, cluster):
+        """The other half of the same batch-wide check: one fork already
+        stored, the manifest being imported the other."""
+        _backup(db, 1)
+        _backup(db, 2, prev=1)
+
+        with pytest.raises(PreconditionError, match="multiple successors"):
+            backup_controller.import_backups(
+                _export([self._manifest(3, prev=1, s3_id=13)], _config().location()),
+                cluster_id=CLUSTER_ID)
+
+    def test_a_chain_spanning_volumes_is_refused(self, db, cluster):
+        """A manifest whose lvol_id disagrees with the rest of its chain -- the
+        only route to this is backup import, which never checked a
+        manifest's lvol_id against the rest of the chain it names (F5)."""
+        other_volume = "20202000-0000-4000-8000-000000000002"
+        with pytest.raises(PreconditionError, match="span volumes"):
+            backup_controller.import_backups(
+                _export([self._manifest(1),
+                         self._manifest(2, prev=1, lvol_id=other_volume)],
+                        _config().location()),
+                cluster_id=CLUSTER_ID)
+
+        assert db.get_backups() == []
 
 
 class TestScheduledBackupPreconditions:

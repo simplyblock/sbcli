@@ -25,6 +25,7 @@ from simplyblock_core.controllers.backup import controller as backup_controller
 from simplyblock_core.controllers.backup import manifest as backup_manifest
 from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.models.backup import Backup, GroupBackup
+from simplyblock_core.models.job_schedule import JobSchedule
 
 logger = utils.get_logger(__name__)
 
@@ -625,18 +626,32 @@ def _config_for_deleting(db, group_backup):
 
 def _members_touched(db, group_backup) -> bool:
     """Whether retiring a member has begun: a member deleted, merging,
-    merged, or claimed for deletion (DELETING -- not yet actually gone, but
-    its own FN_BACKUP_DELETE task may already be destroying its S3 objects,
-    which is exactly the in-flight state a restore back to COMPLETED must
-    not paper over).
+    merged, claimed for deletion (DELETING), or BROKEN -- not yet actually
+    gone, but its own FN_BACKUP_DELETE task may already be destroying its S3
+    objects, which is exactly the in-flight state a restore back to
+    COMPLETED must not paper over.
+
+    A member can also be open-but-unclaimed: ``_retire_members`` queues a
+    member's delete/merge task through ``backup_controller.delete_backup``/
+    ``trigger_merge``, but the claim itself -- the status flip this function
+    used to rely on alone -- now happens only at that task's own execution
+    (F2/F3 of docs/reviews/backup-deletion-review-round3.md), so a member can
+    still read COMPLETED here with its task already open and about to run.
+    Checked by task existence rather than status for that case.
     """
+    open_delete_tasks = {
+        t.function_params.get("backup_id")
+        for t in db.get_job_tasks_by_function(group_backup.cluster_id, JobSchedule.FN_BACKUP_DELETE)
+        if t.status != JobSchedule.STATUS_DONE and not t.canceled}
     for backup_id in group_backup.member_backup_ids:
         try:
             member = db.get_backup_by_id(backup_id)
         except KeyError:
             return True
         if member.status in (Backup.STATUS_MERGING, Backup.STATUS_MERGED,
-                             Backup.STATUS_DELETING):
+                             Backup.STATUS_DELETING, Backup.STATUS_BROKEN):
+            return True
+        if member.uuid in open_delete_tasks:
             return True
     return False
 

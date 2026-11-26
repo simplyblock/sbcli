@@ -417,6 +417,49 @@ def test_merge_in_progress_defers(backup_runner):
     assert old_backup.status == Backup.STATUS_MERGING, "unchanged while still running"
 
 
+def test_merge_claims_a_completed_backup_with_a_completed_successor(backup_runner):
+    """F2/F3: admission no longer decides merge-vs-delete or claims anything;
+    the queued task's own execution does both, fresh, the first time it
+    reaches a COMPLETED backup."""
+    keep_backup, old_backup = _merge_pair(old_status=Backup.STATUS_COMPLETED)
+    keep_backup.status = Backup.STATUS_COMPLETED
+    rpc = _wire_merge(backup_runner, keep_backup, old_backup, "Done")
+    backup_runner.backup_controller._claim_for_merge.return_value = (True, None)
+
+    claimed = {"done": False}
+
+    def _reread(bid):
+        if claimed["done"]:
+            old_backup.status = Backup.STATUS_MERGING
+        return {"keep-1": keep_backup, "old-1": old_backup}[bid]
+    backup_runner.db.get_backup_by_id.side_effect = _reread
+
+    def _claim(successor, backup):
+        claimed["done"] = True
+        return True, None
+    backup_runner.backup_controller._claim_for_merge.side_effect = _claim
+
+    task = _merge_task()
+    assert backup_runner.SPEC.handler(task) is None
+
+    backup_runner.backup_controller._claim_for_merge.assert_called_once_with(
+        keep_backup, old_backup)
+    rpc.bdev_lvol_s3_merge_stat.assert_called_once_with(10, 20)
+    assert old_backup.status == Backup.STATUS_MERGED
+
+
+def test_merge_defers_while_the_successor_is_not_completed_yet(backup_runner):
+    keep_backup, old_backup = _merge_pair(old_status=Backup.STATUS_COMPLETED)
+    keep_backup.status = Backup.STATUS_IN_PROGRESS
+    backup_runner.db.get_backup_by_id.return_value = old_backup
+    backup_runner.db.get_backups_by_lvol_id.return_value = [keep_backup, old_backup]
+
+    with pytest.raises(trb.TaskDefer):
+        backup_runner.SPEC.handler(_merge_task())
+
+    backup_runner.backup_controller._claim_for_merge.assert_not_called()
+
+
 def test_merge_no_process_resets_and_is_a_retry(backup_runner):
     """Mirrors test_backup_no_process_poll_is_a_retry: the re-issue branch must
     consume a retry, otherwise the ceiling never binds here and a merge that
@@ -439,6 +482,49 @@ def test_merge_no_process_resets_and_is_a_retry(backup_runner):
 
 def _delete_task(backup_id="old-1", **params):
     return _backup_task(JobSchedule.FN_BACKUP_DELETE, backup_id=backup_id, **params)
+
+
+def test_direct_delete_claims_a_completed_backup_fresh_at_execution(backup_runner):
+    """F2/F3: admission only queues the task; the claim -- COMPLETED to
+    DELETING -- runs as the first thing this execution does, not before."""
+    backup = Backup()
+    backup.uuid = "old-1"
+    backup.lvol_id = "lvol-1"
+    backup.status = Backup.STATUS_COMPLETED
+    claimed = Backup()
+    claimed.uuid = "old-1"
+    claimed.lvol_id = "lvol-1"
+    claimed.status = Backup.STATUS_DELETING
+    backup_runner.db.get_backup_by_id.side_effect = [backup, claimed]
+    backup_runner.db.get_backups_by_lvol_id.return_value = [backup]  # no successor
+    backup_runner.backup_controller._claim_for_delete.return_value = (True, None)
+
+    task = _delete_task()
+    assert backup_runner.SPEC.handler(task) is None
+
+    backup_runner.backup_controller._claim_for_delete.assert_called_once_with(
+        "lvol-1", [backup])
+    backup_runner.backup_controller._delete_backup_data.assert_called_once_with(claimed)
+    assert claimed.status == Backup.STATUS_BROKEN
+    assert task.function_result == "Backup deleted"
+
+
+def test_direct_delete_defers_when_claiming_a_completed_backup_fails(backup_runner):
+    """A claim refused (e.g. the chain is busy, or a live dependent now
+    exists) defers rather than erroring out -- it is expected to clear on a
+    later cycle."""
+    backup = Backup()
+    backup.uuid = "old-1"
+    backup.lvol_id = "lvol-1"
+    backup.status = Backup.STATUS_COMPLETED
+    backup_runner.db.get_backup_by_id.return_value = backup
+    backup_runner.db.get_backups_by_lvol_id.return_value = [backup]
+    backup_runner.backup_controller._claim_for_delete.return_value = (False, "chain busy")
+
+    with pytest.raises(trb.TaskDefer):
+        backup_runner.SPEC.handler(_delete_task())
+
+    backup_runner.backup_controller._delete_backup_data.assert_not_called()
 
 
 def test_direct_delete_removes_data_then_retires(backup_runner):
@@ -507,6 +593,46 @@ def test_delete_of_an_already_gone_backup_is_a_no_op(backup_runner):
 
 def _delete_chain_task(lvol_id="lvol-1", **params):
     return _backup_task(JobSchedule.FN_BACKUP_DELETE_CHAIN, lvol_id=lvol_id, **params)
+
+
+def test_delete_chain_claims_completed_members_fresh_at_execution(backup_runner):
+    """F2/F3: admission only queues the chain-delete task; the claim --
+    every COMPLETED member of lvol_id to DELETING -- runs as the first thing
+    this execution does."""
+    a = Backup()
+    a.uuid = "a"
+    a.lvol_id = "lvol-1"
+    a.status = Backup.STATUS_COMPLETED
+    claimed_a = Backup()
+    claimed_a.uuid = "a"
+    claimed_a.lvol_id = "lvol-1"
+    claimed_a.status = Backup.STATUS_DELETING
+    # Re-read after the claim (targets), then once more inside
+    # _delete_one_backup's own live-dependent re-check.
+    backup_runner.db.get_backups_by_lvol_id.side_effect = [[a], [claimed_a], [claimed_a]]
+    backup_runner.backup_controller._claim_for_delete.return_value = (True, None)
+
+    task = _delete_chain_task()
+    assert backup_runner.SPEC.handler(task) is None
+
+    backup_runner.backup_controller._claim_for_delete.assert_called_once_with(
+        "lvol-1", [a])
+    backup_runner.backup_controller._delete_backup_data.assert_called_once_with(claimed_a)
+    assert claimed_a.status == Backup.STATUS_BROKEN
+
+
+def test_delete_chain_defers_when_claiming_completed_members_fails(backup_runner):
+    a = Backup()
+    a.uuid = "a"
+    a.lvol_id = "lvol-1"
+    a.status = Backup.STATUS_COMPLETED
+    backup_runner.db.get_backups_by_lvol_id.return_value = [a]
+    backup_runner.backup_controller._claim_for_delete.return_value = (False, "chain busy")
+
+    with pytest.raises(trb.TaskDefer):
+        backup_runner.SPEC.handler(_delete_chain_task())
+
+    backup_runner.backup_controller._delete_backup_data.assert_not_called()
 
 
 def test_delete_chain_removes_every_claimed_member(backup_runner):

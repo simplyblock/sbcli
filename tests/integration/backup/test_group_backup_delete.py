@@ -228,17 +228,25 @@ class TestMarkFirst:
 
 class TestRetireMembers:
 
-    def test_a_leaf_is_deleted_and_a_base_merged_while_the_group_stays(self, db, bucket):
+    def test_a_leaf_and_a_base_each_queue_their_own_delete_task_while_the_group_stays(
+            self, db, bucket):
+        """Admission only queues each member's own delete/merge task now
+        (F2/F3): the claim -- DELETING/MERGING -- runs at that task's own
+        execution, not here."""
         gb, base, leaf, _ = _two_generations(db, bucket)
         group_backup.delete_group_backup(gb.get_id())
 
         state = group_backup.advance_group_backup_delete(gb.get_id())
 
         assert state == group_backup.DeleteState.PENDING
-        # Claimed, not yet actually gone: leaf's own FN_BACKUP_DELETE task
-        # removes it once it confirms the S3 objects are gone.
-        assert _status(db, leaf) == Backup.STATUS_DELETING
-        assert _status(db, base) == Backup.STATUS_MERGING
+        assert _status(db, leaf) == Backup.STATUS_COMPLETED
+        assert _status(db, base) == Backup.STATUS_COMPLETED
+        open_backup_tasks = {
+            t.function_params.get("backup_id")
+            for t in db.get_job_tasks_by_function(CLUSTER, JobSchedule.FN_BACKUP_DELETE)
+            if t.status != JobSchedule.STATUS_DONE and not t.canceled}
+        assert leaf.uuid in open_backup_tasks
+        assert base.uuid in open_backup_tasks
         assert db.get_group_backup_by_id(gb.get_id()).status == GroupBackup.STATUS_DELETING
         assert bucket[GEN_7].state == GroupManifestState.DELETING
 

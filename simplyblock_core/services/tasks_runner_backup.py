@@ -349,7 +349,7 @@ def _retire_backup(backup: Backup) -> None:
     """
     try:
         backup_controller.mark_manifest_broken(backup)
-    except (ManifestError, PreconditionError) as e:
+    except (ManifestError, PreconditionError, KeyError) as e:
         raise TaskRetry(f"Data retired, manifest mark-broken failed: {e}")
 
     try:
@@ -493,19 +493,68 @@ def _set_backup_status(backup: Backup, status: str) -> Backup | None:
     return db.atomic_update(backup, lambda b: setattr(b, "status", status))
 
 
+def _delete_one_backup(backup: Backup) -> Backup | None:
+    """The shared step that drives one already-claimed backup (DELETING or
+    BROKEN) the rest of the way to BROKEN: remove its S3 data if not already
+    gone, then CAS the status.
+
+    Shared by ``_run_backup_delete`` (its one target) and
+    ``_run_backup_delete_chain`` (once per target), so a future hardening of
+    this step cannot land on only one of the two near-duplicate paths (F10 of
+    docs/reviews/backup-deletion-review-round3.md) -- the chain-delete task
+    stays structurally different from "a single-delete given a longer id
+    list" (it re-derives its target set from ``lvol_id`` alone, which is what
+    makes "every backup of the volume" true by construction rather than
+    something re-verified at execution time), but the per-backup delete
+    sequence itself is extracted so it cannot drift between the two.
+
+    Returns the freshly BROKEN record, or ``None`` if a concurrent writer
+    already moved it past DELETING (nothing left for this call to do).
+
+    Raises:
+        TaskDefer: a live dependent now exists -- can only trip on a bug in
+            the claim that marked this backup DELETING, which already refused
+            in that case; deferring rather than destroying data a live
+            successor needs.
+        TaskRetry: the S3 data delete failed.
+    """
+    if backup.status != Backup.STATUS_DELETING:
+        return backup   # already BROKEN: nothing left to delete here
+
+    # Re-assert: a live dependent must still be absent at execution time, not
+    # just at claim time (claim_backup_chain_op's own in-transaction check
+    # already refuses a claim where one exists, so this can only trip on a
+    # bug there).
+    successor = SuccessorIndex.of_lvol(
+        db.get_backups_by_lvol_id(backup.lvol_id)).live_successor_of(backup.uuid)
+    if successor is not None:
+        raise TaskDefer(
+            f"backup {backup.uuid} now has a live dependent "
+            f"{successor.uuid}; deferring")
+
+    try:
+        backup_controller._delete_backup_data(backup)
+    except (ManifestError, PreconditionError) as e:
+        raise TaskRetry(f"S3 data delete failed: {e}")
+
+    return _set_backup_status(backup, Backup.STATUS_BROKEN)
+
+
 def _run_backup_delete(task):
     """Delete, or fold into its successor, the backup named by
-    ``function_params["backup_id"]`` -- whichever the claim that queued this
-    task settled on: MERGING means a live successor to fold into
-    (``_run_merge_fold``); DELETING/BROKEN means a direct S3 delete, nothing
-    chains against it.
+    ``function_params["backup_id"]``.
 
-    DELETING: remove its S3 objects, mark it BROKEN (data confirmed gone),
-    then retire it (manifest + record) -- the reverse of the order
-    ``backup_controller._start_backup_delete`` claimed it in (record marked
-    DELETING, then manifest marked DELETING, then this task). BROKEN: resume
-    at the retire step -- a prior cycle already removed the S3 objects (D3/F1:
-    no automated reconciler; this is what re-drives it).
+    A COMPLETED backup has not been claimed yet: this is the first execution
+    of this task to reach it, so the merge-vs-delete decision and the claim
+    itself (``_claim_for_merge``/``_claim_for_delete``) both happen right
+    here, fresh, rather than trusting whatever was true when
+    ``backup_controller`` queued this task (F2/F3 of
+    docs/reviews/backup-deletion-review-round3.md): a live, completed
+    successor means a fold-in (``_run_merge_fold``); otherwise a direct S3
+    delete, nothing chains against it. Once claimed, later executions (and a
+    resumed BROKEN one) skip straight to driving whichever path the claim
+    settled on: MERGING to ``_run_merge_fold``; DELETING/BROKEN to
+    ``_delete_one_backup`` and then retirement.
 
     No data-plane RPC for the direct-delete path: there is no
     ``bdev_lvol_s3_delete`` and none is planned, so the control plane removes
@@ -525,6 +574,22 @@ def _run_backup_delete(task):
         set_result(task, "Nothing left to delete")
         return
 
+    if backup.status == Backup.STATUS_COMPLETED:
+        successor = SuccessorIndex.of_lvol(
+            db.get_backups_by_lvol_id(backup.lvol_id)).live_successor_of(backup.uuid)
+        if successor is not None and successor.status != Backup.STATUS_COMPLETED:
+            raise TaskDefer(
+                f"backup {backup.uuid}'s successor {successor.uuid} is not "
+                "completed yet; deferring")
+
+        if successor is not None:
+            ok, reason = backup_controller._claim_for_merge(successor, backup)
+        else:
+            ok, reason = backup_controller._claim_for_delete(backup.lvol_id, [backup])
+        if not ok:
+            raise TaskDefer(f"cannot claim backup {backup.uuid} yet: {reason}")
+        backup = db.get_backup_by_id(backup_id)
+
     if backup.status == Backup.STATUS_MERGING:
         _run_merge_fold(task, backup)
         return
@@ -533,40 +598,30 @@ def _run_backup_delete(task):
         set_result(task, "Nothing left to delete")
         return
 
-    if backup.status == Backup.STATUS_DELETING:
-        # Re-assert: a live dependent must still be absent at execution time,
-        # not just at claim time (claim_backup_chain_op's own in-transaction
-        # check already refuses a claim where one exists, so this can only
-        # trip on a bug there -- defer rather than destroy data a live
-        # successor needs).
-        successor = SuccessorIndex.of_lvol(
-            db.get_backups_by_lvol_id(backup.lvol_id)).live_successor_of(backup.uuid)
-        if successor is not None:
-            raise TaskDefer(
-                f"backup {backup.uuid} now has a live dependent "
-                f"{successor.uuid}; deferring")
+    fresh = _delete_one_backup(backup)
+    if fresh is None:
+        set_result(task, "Nothing left to delete")
+        return
 
-        try:
-            backup_controller._delete_backup_data(backup)
-        except (ManifestError, PreconditionError) as e:
-            raise TaskRetry(f"S3 data delete failed: {e}")
-
-        fresh = _set_backup_status(backup, Backup.STATUS_BROKEN)
-        if fresh is None:
-            set_result(task, "Nothing left to delete")
-            return
-        backup = fresh
-
-    _retire_backup(backup)
+    _retire_backup(fresh)
     set_result(task, "Backup deleted")
     logger.info(f"Deleted backup: {backup_id}")
 
 
 def _run_backup_delete_chain(task):
-    """Delete every backup of ``function_params["lvol_id"]`` that this chain's
-    claim marked DELETING/BROKEN: always a direct S3 delete, never a merge --
-    ``backup_controller.delete_backups``' own invariant is that nothing
-    outside the call survives to chain against any of its targets.
+    """Delete every backup of ``function_params["lvol_id"]``: always a direct
+    S3 delete, never a merge -- ``backup_controller.delete_backups``' own
+    invariant is that nothing outside the call survives to chain against any
+    of its targets.
+
+    Nothing has been claimed yet the first time this reaches a COMPLETED
+    backup of the volume: claims the whole chain now, fresh -- re-validating
+    every precondition in the same transaction, rather than trusting
+    whatever was true when ``delete_backups`` queued this task (F2/F3 of
+    docs/reviews/backup-deletion-review-round3.md). Already-claimed siblings
+    (an earlier cycle of this same task) ride along unchanged:
+    ``claim_backup_chain_op`` is idempotent on a target already in the
+    claimed status.
 
     Re-reads the volume's backups at execution time rather than carrying an
     explicit id list, so a retry always acts on the current claimed set.
@@ -575,25 +630,27 @@ def _run_backup_delete_chain(task):
     if not lvol_id:
         raise TaskAbort("Missing lvol_id")
 
-    targets = [b for b in db.get_backups_by_lvol_id(lvol_id)
+    backups = db.get_backups_by_lvol_id(lvol_id)
+    claimable = [b for b in backups
+                if b.status in (Backup.STATUS_COMPLETED, Backup.STATUS_DELETING,
+                                Backup.STATUS_BROKEN)]
+    if not claimable:
+        set_result(task, "Nothing left to delete")
+        return
+
+    if any(b.status == Backup.STATUS_COMPLETED for b in claimable):
+        ok, reason = backup_controller._claim_for_delete(lvol_id, claimable)
+        if not ok:
+            raise TaskDefer(f"cannot claim backups of volume {lvol_id} yet: {reason}")
+        backups = db.get_backups_by_lvol_id(lvol_id)
+
+    targets = [b for b in backups
               if b.status in (Backup.STATUS_DELETING, Backup.STATUS_BROKEN)]
     if not targets:
         set_result(task, "Nothing left to delete")
         return
 
-    broken = []
-    for backup in targets:
-        if backup.status != Backup.STATUS_DELETING:
-            broken.append(backup)
-            continue
-        try:
-            backup_controller._delete_backup_data(backup)
-        except (ManifestError, PreconditionError) as e:
-            raise TaskRetry(f"S3 data delete failed: {e}")
-        fresh = _set_backup_status(backup, Backup.STATUS_BROKEN)
-        if fresh is not None:
-            broken.append(fresh)
-
+    broken = [b for b in (_delete_one_backup(backup) for backup in targets) if b is not None]
     for backup in broken:
         _retire_backup(backup)
 
