@@ -2720,6 +2720,21 @@ jobs:
           [ "$sec" = "s3" ] && want=1
           case "$name" in *s3*|*objectstore*) want=1;; esac
           echo "S3_WANTED=$want" >> "$GITHUB_ENV"
+          # pNFS is the prerequisite UNDER S3, not the same thing as it.
+          # Every S3 bucket is a pNFS volume, so an S3 run needs it; but a
+          # pNFS run needs only this half and must not be failed by
+          # OpenBao or the gateway, which it never touches.
+          #
+          # Without this a pnfs testname set neither, so the driver was
+          # never patched, no metadata server ever ran, and every case in
+          # the group raised "this cluster runs no metadata server" --
+          # eighteen of them, against a cluster that was never asked to
+          # serve pNFS. A suite that reports nothing is worse than one
+          # that fails.
+          pnfs=$want
+          case "$name" in *pnfs*) pnfs=1;; esac
+          echo "PNFS_WANTED=$pnfs" >> "$GITHUB_ENV"
+          echo "cluster_security=$sec testname=$name -> PNFS_WANTED=$pnfs"
           echo "cluster_security=$sec testname=$name -> S3_WANTED=$want"
 
       # ── cluster_security: s3 ───────────────────────────────────────────────
@@ -2733,8 +2748,8 @@ jobs:
       # patching StorageCluster.spec.backup afterwards never reaches the
       # control plane. Every step here is post-Online by construction -- the
       # MDS DaemonSet does not schedule until the cluster is serving.
-      - name: Enable the S3 prerequisites (pNFS + gateway IAM)
-        if: ${{ env.S3_WANTED == '1' }}
+      - name: Enable the pNFS prerequisite, and the S3 gateway when wanted
+        if: ${{ env.PNFS_WANTED == '1' }}
         timeout-minutes: 20
         shell: bash
         run: |
@@ -2767,6 +2782,17 @@ jobs:
             exit 1
           fi
           echo "kvm-capable: $KVM"
+
+          # A pNFS run stops here. Everything below is the S3 gateway, and
+          # a pNFS case must not be failed by OpenBao sealing or an
+          # ObjectStore it never looks at. Exiting beats wrapping the rest
+          # in a conditional: the block below is long, and reindenting it
+          # is the kind of edit that breaks a workflow nobody can test
+          # without burning a lab reservation.
+          if [ "${S3_WANTED:-0}" != "1" ]; then
+            echo "pNFS prerequisite done; this run wants no S3 gateway."
+            exit 0
+          fi
 
           echo "=== the gateway's IAM AppRole ==="
           # versitygw's IAM is OpenBao's KV-v2 behind AppRole auth
