@@ -6,7 +6,8 @@ snapshots in between -- and when it cannot reach the base through snapshots
 open on the sending node, ``bdev_lvol_transfer`` / ``bdev_lvol_transfer_final_step``
 answer ``{"code": -32602, "message": "No such file or directory"}`` before
 anything is sent (a final step's freeze is undone). Retrying the same delta is
-refused every time: the control plane must send without a base.
+refused every time: the control plane must send without a base -- the last
+resort, so every such full send raises REPLICATION_FULL_SEND.
 """
 import errno
 import os
@@ -14,11 +15,21 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from simplyblock_core.controllers import lvol_events
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.rpc_client import RPCRemoteError, transfer_base_unreachable
 from simplyblock_core.services import replication_final_step as rfs
 from simplyblock_core.services import snapshot_replication
 from simplyblock_core.services import tasks_runner_replication_final as final
+
+# the real one, for the event's own test (the fixture below stubs it)
+_REAL_FULL_SEND = lvol_events.replication_full_send
+
+
+@pytest.fixture(autouse=True)
+def full_send_event():
+    with patch.object(snapshot_replication.lvol_events, "replication_full_send") as ev:
+        yield ev
 
 
 def _refused():
@@ -54,18 +65,20 @@ def _repl_task(**params):
     return t
 
 
+_SNAP = MagicMock()
 _KW = dict(name="LVS_1/SNAP_2", offset=0, batch_size=256, bdev_name="hub",
            operation="replicate", lvol_id=7, priority_class=7)
 
 
-def test_periodic_refused_delta_is_sent_in_full():
+def test_periodic_refused_delta_is_sent_in_full(full_send_event):
     rpc = MagicMock()
     rpc.bdev_lvol_transfer.side_effect = [_refused(), True]
     task = _repl_task(allow_partial=True, partial_base=0x42, allow_partial_landing="REP_LV")
     applied: dict = {}
 
-    snapshot_replication._submit_transfer(task, rpc, allow_partial=True, partial_base=0x42,
-                                          cow_landing=True, applied=applied, **_KW)
+    snapshot_replication._submit_transfer(task, rpc, _SNAP, allow_partial=True,
+                                          partial_base=0x42, cow_landing=True,
+                                          applied=applied, **_KW)
 
     first, second = (c.kwargs for c in rpc.bdev_lvol_transfer.call_args_list)
     assert first["allow_partial"] is True and first["partial_base"] == 0x42
@@ -77,17 +90,33 @@ def test_periodic_refused_delta_is_sent_in_full():
     assert task.function_params["partial_base"] == 0
     assert task.function_params["allow_partial_landing"] == "REP_LV"
     task.write_to_db.assert_called()
+    full_send_event.assert_called_once()
+    lvol, what, base, err = full_send_event.call_args.args
+    assert lvol is _SNAP.lvol and "SNAP_2" in what and base == 0x42
+    assert transfer_base_unreachable(err)
 
 
-def test_periodic_other_errors_still_raise():
+def test_periodic_a_failing_event_does_not_stop_the_full_send(full_send_event):
+    full_send_event.side_effect = RuntimeError("fdb down")
+    rpc = MagicMock()
+    rpc.bdev_lvol_transfer.side_effect = [_refused(), True]
+    snapshot_replication._submit_transfer(_repl_task(), rpc, _SNAP, allow_partial=True,
+                                          partial_base=0x42, cow_landing=False,
+                                          applied={}, **_KW)
+    assert rpc.bdev_lvol_transfer.call_count == 2
+
+
+def test_periodic_other_errors_still_raise(full_send_event):
     rpc = MagicMock()
     rpc.bdev_lvol_transfer.side_effect = RPCRemoteError(os.strerror(errno.EEXIST), -32602)
     task = _repl_task(allow_partial=True, partial_base=0x42)
     with pytest.raises(RPCRemoteError):
-        snapshot_replication._submit_transfer(task, rpc, allow_partial=True, partial_base=0x42,
-                                              cow_landing=False, applied={}, **_KW)
+        snapshot_replication._submit_transfer(task, rpc, _SNAP, allow_partial=True,
+                                              partial_base=0x42, cow_landing=False,
+                                              applied={}, **_KW)
     assert rpc.bdev_lvol_transfer.call_count == 1
     assert task.function_params["partial_base"] == 0x42
+    full_send_event.assert_not_called()
 
 
 def test_periodic_full_send_is_not_retried():
@@ -95,7 +124,7 @@ def test_periodic_full_send_is_not_retried():
     rpc = MagicMock()
     rpc.bdev_lvol_transfer.side_effect = _refused()
     with pytest.raises(RPCRemoteError):
-        snapshot_replication._submit_transfer(_repl_task(), rpc, allow_partial=False,
+        snapshot_replication._submit_transfer(_repl_task(), rpc, _SNAP, allow_partial=False,
                                               partial_base=0, cow_landing=False,
                                               applied={}, **_KW)
     assert rpc.bdev_lvol_transfer.call_count == 1
@@ -155,7 +184,7 @@ def _run_cutover(rpc):
     return ok, err, fence, restore, enable
 
 
-def test_final_step_refused_delta_goes_again_in_whole_clusters():
+def test_final_step_refused_delta_goes_again_in_whole_clusters(full_send_event):
     rpc = _FinalRPC([_refused(), {"transfer_state": "Done"}])
     ok, err, fence, restore, enable = _run_cutover(rpc)
     assert ok is True and err is None
@@ -167,6 +196,9 @@ def test_final_step_refused_delta_goes_again_in_whole_clusters():
     fence.assert_called_once()
     restore.assert_not_called()
     enable.assert_called_once()
+    full_send_event.assert_called_once()
+    assert "final step" in full_send_event.call_args.args[1]
+    assert full_send_event.call_args.args[2] == 0x31
 
 
 def test_final_step_failing_full_send_restores_the_source():
@@ -178,13 +210,14 @@ def test_final_step_failing_full_send_restores_the_source():
     enable.assert_not_called()
 
 
-def test_final_step_other_errors_are_not_retried_in_full():
+def test_final_step_other_errors_are_not_retried_in_full(full_send_event):
     rpc = _FinalRPC([RPCRemoteError(os.strerror(errno.EEXIST), -32602)])
     ok, _err, _fence, restore, enable = _run_cutover(rpc)
     assert ok is False
     assert len(rpc.calls) == 1
     restore.assert_called_once()
     enable.assert_not_called()
+    full_send_event.assert_not_called()
 
 
 # ---- cutover direct rounds ---------------------------------------------------------
@@ -234,7 +267,7 @@ def _submit_round(rpc):
         return final._submit_direct_round(_final_task(), _lvol())
 
 
-def test_direct_round_refused_delta_is_sent_in_whole_clusters():
+def test_direct_round_refused_delta_is_sent_in_whole_clusters(full_send_event):
     rpc = MagicMock()
     rpc.bdev_lvol_transfer.side_effect = [_refused(), True]
     err, task = _submit_round(rpc)
@@ -244,11 +277,33 @@ def test_direct_round_refused_delta_is_sent_in_whole_clusters():
     assert second["allow_partial"] is False and second["partial_base"] == 0
     assert second["dest_clone"] is True and second["lvol_id"] == 7
     assert task.function_params["direct_submits"] == 1
+    full_send_event.assert_called_once()
+    assert "round" in full_send_event.call_args.args[1]
+    assert full_send_event.call_args.args[2] == 0x55
 
 
-def test_direct_round_other_errors_are_reported():
+def test_direct_round_other_errors_are_reported(full_send_event):
     rpc = MagicMock()
     rpc.bdev_lvol_transfer.side_effect = RPCRemoteError(os.strerror(errno.EEXIST), -32602)
     err, _task = _submit_round(rpc)
     assert "did not start" in err
     assert rpc.bdev_lvol_transfer.call_count == 1
+    full_send_event.assert_not_called()
+
+
+# ---- the event ---------------------------------------------------------------------
+
+def test_the_full_send_event_is_a_warning_naming_base_and_cause():
+    from simplyblock_core.controllers import events_controller as ec
+    from simplyblock_core.models.events import EventObj
+    lv = _lvol()
+    lv.pool_uuid = "P1"
+    dbc = MagicMock()
+    dbc.return_value.get_pool_by_id.return_value.cluster_id = "CL"
+    with patch.object(lvol_events, "DBController", dbc),             patch.object(lvol_events.ec, "log_event_cluster") as log:
+        _REAL_FULL_SEND(lv, "snapshot LVS_1/SNAP_2", 0x42, _refused())
+    kw = log.call_args.kwargs
+    assert kw["event"] == ec.EVENT_REPLICATION_FULL_SEND
+    assert kw["event_level"] == EventObj.LEVEL_WARN
+    assert kw["cluster_id"] == "CL"
+    assert "0x42" in kw["message"] and "in full" in kw["message"]

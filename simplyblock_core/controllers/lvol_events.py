@@ -201,6 +201,36 @@ def replication_target_leaderless(lvol, lvs_name, waited_s, why, caused_by=ec.CA
         event_level=EventObj.LEVEL_ERROR)
 
 
+def replication_full_send(lvol, what, partial_base, err, caused_by=ec.CAUSED_BY_MONITOR):
+    """SPDK refused a delta of *lvol*'s replication (*what*: the transfer, the
+    cutover round, the final step) against *partial_base*, and the control
+    plane sends it in full instead.
+
+    Warning level: the data is correct, but the volume crosses the wire whole.
+    SPDK refuses only when it cannot reach the base from the source through
+    snapshots open on the sending node (simplyblock/spdk#108): the base was
+    deleted, a snapshot in between is not open there, or more than
+    XFER_BRIDGE_MAX_HOPS snapshots lie in between. Each of these is a fault of
+    its own; the event makes it visible instead of a silent full copy."""
+    from simplyblock_core.models.events import EventObj
+    try:
+        cluster_id = DBController().get_pool_by_id(lvol.pool_uuid).cluster_id
+    except Exception as e:
+        logger.error(f"No cluster could be resolved for lvol {lvol.get_id()}; event not logged: {e}")
+        return
+    ec.log_event_cluster(
+        cluster_id=cluster_id,
+        domain=ec.DOMAIN_CLUSTER,
+        event=ec.EVENT_REPLICATION_FULL_SEND,
+        db_object=lvol,
+        caused_by=caused_by,
+        message=(f"Replication of LVol {lvol.get_id()}: SPDK refused the delta of {what} "
+                 f"against base {int(partial_base):#x} (the base is not reachable from the "
+                 f"source through open snapshots: {err}); sent in full instead"),
+        node_id=lvol.get_id(),
+        event_level=EventObj.LEVEL_WARN)
+
+
 def migration_space_low(lvol, reason, caused_by=ec.CAUSED_BY_MONITOR):
     """A migration snapshot of *lvol* waits for free space on its source
     cluster (simplyblock_core/migration_space.py). Warning level: client IO

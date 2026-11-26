@@ -457,6 +457,9 @@ def run_cutover(src_node, tgt_node, lvol, tgt_lvol_composite, tgt_map_id,
                     f"cutover lvol={lvol.uuid}: SPDK refused the final step's delta "
                     f"against base {partial_base:#x} (not reachable from the volume "
                     f"through open snapshots: {e}); sending it in whole clusters")
+                from simplyblock_core.services import snapshot_replication
+                snapshot_replication._full_send_event(lvol, "the cutover final step",
+                                                      partial_base, e)
                 partial_base, batch = 0, _FINAL_STEP_BATCH
                 applied.clear()
                 ret = src_rpc.bdev_lvol_transfer_final_step(

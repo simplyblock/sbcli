@@ -1362,7 +1362,7 @@ def process_snap_replicate_start(task, snapshot):
         task.write_to_db()
         applied: dict = {}
         _submit_transfer(
-            task, snode.rpc_client(),
+            task, snode.rpc_client(), snapshot,
             name=snapshot.snap_bdev,
             offset=offset,
             # SPDK sends every replication request in pieces of at most 64 KiB
@@ -1411,7 +1411,7 @@ def process_snap_replicate_start(task, snapshot):
     _await_transfer_completion(task, snapshot, snode)
 
 
-def _submit_transfer(task, rpc, *, allow_partial, partial_base, cow_landing, applied, **kw):
+def _submit_transfer(task, rpc, snapshot, *, allow_partial, partial_base, cow_landing, applied, **kw):
     """Start the snapshot's transfer; a delta SPDK refuses goes again as a full send.
 
     SPDK refuses a delta whose base it cannot reach from the snapshot through
@@ -1421,7 +1421,9 @@ def _submit_transfer(task, rpc, *, allow_partial, partial_base, cow_landing, app
     ever, so the transfer goes without a base: whole clusters, as for any
     transfer this runner declines a delta for. The verdict is recorded on the
     task (allow_partial / partial_base, still keyed to this landing volume),
-    so a resumed attempt stays full and the finish does not merge.
+    so a resumed attempt stays full and the finish does not merge. Every such
+    full send raises REPLICATION_FULL_SEND (lvol_events.replication_full_send):
+    it is the last resort, and its cause is a fault of its own.
     """
     try:
         return rpc.bdev_lvol_transfer(allow_partial=allow_partial, partial_base=partial_base,
@@ -1433,12 +1435,22 @@ def _submit_transfer(task, rpc, *, allow_partial, partial_base, cow_landing, app
                        "%#x (the base is not reachable from the snapshot through open "
                        "snapshots: %s); sending it in full instead",
                        task.uuid, kw.get("name"), int(partial_base), e)
+        _full_send_event(snapshot.lvol, f"snapshot {kw.get('name')}", partial_base, e)
     task.function_params["allow_partial"] = False
     task.function_params["partial_base"] = 0
     task.write_to_db()
     applied.clear()
     return rpc.bdev_lvol_transfer(allow_partial=False, partial_base=0, cow_landing=False,
                                   applied=applied, **kw)
+
+
+def _full_send_event(lvol, what, partial_base, err):
+    """REPLICATION_FULL_SEND; never lets the event fail the transfer."""
+    try:
+        lvol_events.replication_full_send(lvol, what, partial_base, err)
+    except Exception as ev_err:                                # noqa: BLE001
+        logger.error("Could not log the full-send event of lvol %s: %s",
+                     getattr(lvol, "uuid", "?"), ev_err)
 
 
 def _counterpart_on_destination(snapshot, remote_node):

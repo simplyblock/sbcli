@@ -1831,6 +1831,7 @@ def _submit_direct_round(task, lvol):
                            "base %#x (not reachable through open snapshots: %s); "
                            "sending it in whole clusters", lvol.get_id(), rnd,
                            partial_base, e)
+            snapshot_replication._full_send_event(lvol, f"cutover round {rnd}", partial_base, e)
             partial_base = 0
             src_rpc.bdev_lvol_transfer(allow_partial=False, partial_base=0, **xfer)
     except RPCRemoteError as e:
