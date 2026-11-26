@@ -3,6 +3,7 @@ import contextlib
 import copy
 import datetime
 import enum
+import errno
 import json
 import logging
 import math
@@ -94,6 +95,7 @@ from simplyblock_core.rpc_client import (
     JC_REMOVE_JM_NOT_USED,
     JC_REMOVE_JM_STILL_IN_USE,
     RPC_UNSUPPORTED,
+    RPCConnectionError,
     RPCErrorCode,
     RPCException,
     RPCRemoteError,
@@ -918,6 +920,31 @@ _restart_worker_sem = threading.BoundedSemaphore(constants.RESTART_WORKER_MAX_CO
 #: coordinators wait only on leaves, leaves wait on nothing.
 _restart_coordinator_sem = threading.BoundedSemaphore(
     constants.RESTART_COORDINATOR_MAX_CONCURRENCY)
+
+
+def _wait_spdk_rpc_ready(snode, timeout=None, poll=2.0):
+    """Wait until *snode*'s SPDK answers RPC at all; ``(True, None)`` once it
+    does, ``(False, last_error)`` after *timeout* seconds
+    (constants.SPDK_RPC_READY_WAIT_SEC).
+
+    Only "could not reach it" keeps waiting -- including a name that does not
+    resolve yet, which a just-started SPDK pod's spdk-proxy DNS name does until
+    the operator publishes it. Any answer, an error reply included, means the
+    endpoint is there."""
+    timeout = constants.SPDK_RPC_READY_WAIT_SEC if timeout is None else timeout
+    deadline = time.time() + timeout
+    client = snode.rpc_client(timeout=5, retry=1)
+    while True:
+        try:
+            client.get_version()
+            return True, None
+        except RPCConnectionError as e:
+            last = e
+        except RPCException:
+            return True, None
+        if time.time() >= deadline:
+            return False, last
+        time.sleep(poll)
 
 
 def _evict_node_rpc_sessions(snode):
@@ -1750,7 +1777,189 @@ def _jc_compression_status_with_retry(leader: StorageNode, jm_vuid, timeout_s=No
                            "(journal re-level in progress?)", leader.get_id(), e)
 
 
-def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode: StorageNode, after_restart):
+# --- JM journal corruption on restart: wipe once, let JC resync it ----------
+#
+# A node restart re-opens its JM stack in load mode (alceml pba_init_mode=1,
+# then bdev_jm_create on top). When the on-disk JM metadata or journal is
+# corrupt, one of those two RPCs fails the same way on every attempt, so the
+# restart failed forever and the node stayed stuck in RESTARTING.
+#
+# How the data plane reports it (ultra, DISTR_v2/src_code_app_spdk):
+#   * bdev_alceml_create: every page-map load failure -- storage signature
+#     missing (-10), page size / storage uid / checksum-mode mismatch,
+#     duplicate or inconsistent page headers (-21..-24) -- ends in
+#     bdev_alloc_emulation/bdev_alceml_impl.cpp, state bcsFinishing:
+#     ``return_final(-EFAULT)``. The RPC answers code -14, message
+#     "Bad address" (spdk_jsonrpc_send_error_response(rc, strerror(|rc|))).
+#   * bdev_jm_create: a journal history that does not preload, or fails the
+#     cross-history consistency check, ends in bdev_jm/bdev_jm_impl.cpp,
+#     state bcsFinishBdevInit, with ``errc = -EFAULT`` -> code -14 as well.
+#     A storage that cannot be opened is -ENODEV there, a bad parameter
+#     -EINVAL, an allocation failure -ENOMEM: none of those is corruption.
+# EFAULT is not exclusive to corruption: the alceml also answers it when its
+# backing bdev cannot be opened or a metadata read fails. The wipe path
+# therefore checks the backing bdev before formatting, and a bdev that cannot
+# be opened fails the formatting create the same way, so nothing is wiped.
+#
+# Recovery: a wiped JM comes back empty. JC treats it exactly like a JM that
+# returns after an outage with an old journal: the leveling pass of every
+# journal it carries finds it below the latest cross-JM sync point and makes
+# it a full-replication target (bdev_distrib/parts/alg_journal.cpp, "jm_id %d
+# is out of the sync, will add to replication targets"). The restart's
+# existing wait_for_jm_rep_tasks_to_finish / jc_disable_replication steps
+# already wait that replication out, so no extra RPC is needed.
+
+def is_jm_corruption_error(err: BaseException) -> bool:
+    """True when an alceml / JM create failed because the on-disk JM metadata
+    or journal could not be loaded (EFAULT, see above). Transport errors,
+    timeouts, ENODEV, EEXIST, EBUSY, ENOMEM, EINVAL are never corruption."""
+    return isinstance(err, RPCRemoteError) and err.posix_errno == errno.EFAULT
+
+
+def _used_jm_ids(node: StorageNode) -> list[str]:
+    """The remote JM ids ``node``'s own journal is written to: the selection
+    get_node_jm_names makes (all of them on a sync-replication cluster, else
+    the first ``ha_jm_count - 1``)."""
+    ids = [j for j in (node.jm_ids or []) if j]
+    if node.site:
+        return ids
+    return ids[:max(0, int(node.ha_jm_count or 0) - 1)]
+
+
+def jm_wipe_safety(snode: StorageNode) -> tuple[bool, str]:
+    """Whether the local JM of ``snode`` may be wiped, and why not.
+
+    SAFETY RULE: a JM may only be wiped when every journal it carries has
+    another copy on a JM that is ONLINE right now, on an ONLINE node. So HA JM
+    must be on (enable_ha_jm, ha_jm_count >= 2), and
+      * for this node's own journal: one of its remote JMs is online;
+      * for every other node's journal this JM is a replica of: that node's
+        own JM, or another of its remote JMs, is online.
+    Otherwise the corrupt JM may hold the only copy of journal records not yet
+    flushed to the distribs, and formatting it would lose them: the restart
+    keeps failing as before and the operator is told by an event instead.
+    """
+    if not snode.enable_ha_jm or int(snode.ha_jm_count or 0) < 2:
+        return False, "HA JM is not enabled on this node (single journal copy)"
+    jm_dev = snode.jm_device
+    if not jm_dev or not jm_dev.get_id():
+        return False, "the node has no JM device record"
+    my_jm = jm_dev.get_id()
+
+    db = DBController()
+    peers = [n for n in db.get_storage_nodes_by_cluster_id(snode.cluster_id)
+             if n.get_id() != snode.get_id() and n.status != StorageNode.STATUS_REMOVED]
+    online_jms = {n.jm_device.get_id() for n in peers
+                  if n.status == StorageNode.STATUS_ONLINE and n.jm_device
+                  and n.jm_device.get_id() and n.jm_device.status == JMDevice.STATUS_ONLINE}
+
+    own_remote = _used_jm_ids(snode)
+    if not any(j in online_jms for j in own_remote):
+        return False, f"no remote JM of this node's journal is online (remote JMs: {own_remote})"
+
+    for peer in peers:
+        if not peer.enable_ha_jm:
+            continue
+        used = _used_jm_ids(peer)
+        if my_jm not in used:
+            continue
+        others = [j for j in used if j != my_jm]
+        if peer.jm_device and peer.jm_device.get_id():
+            others.append(peer.jm_device.get_id())
+        if not any(j in online_jms for j in others):
+            return False, (f"this JM is a replica of node {peer.get_id()}'s journal and none "
+                           f"of that journal's other JMs is online")
+    return True, ""
+
+
+def _wait_bdev_gone(rpc_client, name, timeout_s=10.0, interval_s=0.5) -> bool:
+    deadline = time.monotonic() + timeout_s
+    while True:
+        if not rpc_client.bdev_get(name):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(interval_s)
+
+
+def _create_jm_alceml_and_bdev(rpc_client, snode: StorageNode, cluster, alceml_name, nvme_bdev,
+                               alceml_id, jm_bdev, load, wipe_on_corruption=False) -> bool:
+    """Create the JM alceml on ``nvme_bdev`` and the JM bdev on top of it.
+
+    ``load`` opens the existing alceml metadata and journal (restart), else
+    the alceml is formatted. With ``wipe_on_corruption`` (restart path only)
+    a corrupt alceml or journal (is_jm_corruption_error) is replaced ONCE by a
+    formatted alceml and a fresh JM, if jm_wipe_safety allows it; JC then
+    resyncs the empty JM from its peers. Returns True, or False when an RPC
+    answered falsy; RPC errors raise, as they always did.
+    """
+    stage = ["alceml"]
+
+    def _create(pba_init_mode):
+        stage[0] = "alceml"
+        ret = snode.create_alceml(
+            alceml_name, nvme_bdev, alceml_id,
+            pba_init_mode=pba_init_mode,
+            pba_page_size=cluster.page_size_in_blocks,
+            full_page_unmap=cluster.full_page_unmap
+        )
+        if not ret:
+            logger.error(f"Failed to create alceml bdev: {alceml_name}")
+            return False
+        stage[0] = "jm"
+        ret = rpc_client.bdev_jm_create(jm_bdev, alceml_name, jm_cpu_mask=snode.jm_cpu_mask,
+                                        shared_placement=cluster.shared_placement,
+                                        compression_thread=False,
+                                        compression_cpu_mask=snode.compression_cpu_mask)
+        if not ret:
+            logger.error(f"Failed to create {jm_bdev}")
+            return False
+        return True
+
+    try:
+        return _create(1 if load else 3)
+    except RPCRemoteError as e:
+        if not (load and wipe_on_corruption and is_jm_corruption_error(e)):
+            raise
+        corruption = e
+    failed_at = "alceml load" if stage[0] == "alceml" else "JM journal load"
+
+    node_id = snode.get_id()
+    logger.error("JM of node %s is corrupt: %s of %s failed: %s", node_id, failed_at,
+                 alceml_name if stage[0] == "alceml" else jm_bdev, corruption)
+    safe, reason = jm_wipe_safety(snode)
+    if not safe:
+        logger.error("Not wiping the corrupt JM of node %s: %s. The restart keeps failing until "
+                     "the journal is repaired or its peer JMs are back", node_id, reason)
+        storage_events.jm_corrupt_not_wiped(snode, failed_at, str(corruption), reason)
+        raise corruption
+
+    # Clean up what the failed load left behind: a failed alceml create frees
+    # itself, a failed JM create leaves the alceml (and maybe a JM) up.
+    for name, delete in ((jm_bdev, rpc_client.bdev_jm_delete),
+                         (alceml_name, rpc_client.bdev_alceml_delete)):
+        if rpc_client.bdev_get(name):
+            delete(name)
+            if not _wait_bdev_gone(rpc_client, name):
+                logger.error("%s did not go away after delete; not wiping the JM", name)
+                raise corruption
+    # EFAULT also means "backing bdev could not be opened": never format
+    # unless the backing bdev is really there.
+    if not rpc_client.bdev_get(nvme_bdev):
+        logger.error("JM backing bdev %s is missing; not wiping the JM", nvme_bdev)
+        raise corruption
+
+    logger.warning("Wiping the JM of node %s: re-creating %s on %s formatted (pba_init_mode=3) and "
+                   "%s fresh; JC resyncs it from the peer JMs", node_id, alceml_name, nvme_bdev, jm_bdev)
+    # One attempt only: if this fails, the restart fails exactly as before.
+    ret = _create(3)
+    if ret:
+        storage_events.jm_wiped_after_corruption(snode, failed_at, str(corruption))
+    return ret
+
+
+def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode: StorageNode, after_restart,
+                             wipe_on_corruption=False):
     # RAID 0+1 journal layout (see simplyblock_core/jm_raid.py):
     #   1 device   -> no raid (bare device)
     #   2 devices  -> raid1 over two single-device legs  (a 2-way mirror)
@@ -1842,24 +2051,10 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode: StorageNode, afte
     alceml_name = f"alceml_jm_{snode.get_id()}"
     nvme_bdev = raid_bdev
 
-    ret = snode.create_alceml(
-        alceml_name, nvme_bdev, alceml_id,
-        pba_init_mode=1 if after_restart else 3,
-        pba_page_size=cluster.page_size_in_blocks,
-        full_page_unmap=cluster.full_page_unmap
-    )
-
-    if not ret:
-        logger.error(f"Failed to create alceml bdev: {alceml_name}")
-        return False
-
     jm_bdev = f"jm_{snode.get_id()}"
-    ret = rpc_client.bdev_jm_create(jm_bdev, alceml_name, jm_cpu_mask=snode.jm_cpu_mask,
-                                    shared_placement=cluster.shared_placement,
-                                    compression_thread=False,
-                                    compression_cpu_mask=snode.compression_cpu_mask)
-    if not ret:
-        logger.error(f"Failed to create {jm_bdev}")
+    if not _create_jm_alceml_and_bdev(rpc_client, snode, cluster, alceml_name, nvme_bdev, alceml_id,
+                                      jm_bdev, load=after_restart,
+                                      wipe_on_corruption=wipe_on_corruption):
         return False
 
     pt_name = ""
@@ -2384,7 +2579,8 @@ def _prepare_cluster_devices_on_restart(snode: StorageNode, clear_data=False):
                 logger.error(f"BDev not found: {jm_device.jm_nvme_bdev_list[0]}")
                 jm_device.status = JMDevice.STATUS_REMOVED
                 return True
-            ret = _create_jm_stack_on_raid(rpc_client, jm_device.jm_nvme_bdev_list, snode, after_restart=not clear_data)
+            ret = _create_jm_stack_on_raid(rpc_client, jm_device.jm_nvme_bdev_list, snode, after_restart=not clear_data,
+                                           wipe_on_corruption=True)
             if not ret:
                 logger.error("Failed to create JM device")
                 return False
@@ -2402,7 +2598,8 @@ def _prepare_cluster_devices_on_restart(snode: StorageNode, clear_data=False):
                 logger.error(f"JM bdev not found: {bdev_name}")
 
         if len(jm_bdevs_found) > 1:
-            ret = _create_jm_stack_on_raid(rpc_client, jm_bdevs_found, snode, after_restart=not clear_data)
+            ret = _create_jm_stack_on_raid(rpc_client, jm_bdevs_found, snode, after_restart=not clear_data,
+                                           wipe_on_corruption=True)
             if not ret:
                 logger.error("Failed to create JM device")
                 return False
@@ -2423,24 +2620,10 @@ def _prepare_cluster_devices_on_restart(snode: StorageNode, clear_data=False):
             nvme_bdev = jm_device.testing_bdev
 
         cluster = db_controller.get_cluster_by_id(snode.cluster_id)
-        ret = snode.create_alceml(
-            jm_device.alceml_bdev, nvme_bdev, jm_device.get_id(),
-            pba_init_mode=3 if clear_data else 1,
-            pba_page_size=cluster.page_size_in_blocks,
-            full_page_unmap=cluster.full_page_unmap
-        )
-
-        if not ret:
-            logger.error(f"Failed to create alceml bdev: {jm_device.alceml_bdev}")
-            return False
-
         jm_bdev = f"jm_{snode.get_id()}"
-        ret = rpc_client.bdev_jm_create(jm_bdev, jm_device.alceml_bdev, jm_cpu_mask=snode.jm_cpu_mask,
-                                        shared_placement=cluster.shared_placement,
-                                        compression_thread=False,
-                                        compression_cpu_mask=snode.compression_cpu_mask)
-        if not ret:
-            logger.error(f"Failed to create {jm_bdev}")
+        if not _create_jm_alceml_and_bdev(rpc_client, snode, cluster, jm_device.alceml_bdev, nvme_bdev,
+                                          jm_device.get_id(), jm_bdev, load=not clear_data,
+                                          wipe_on_corruption=True):
             return False
 
         if snode.enable_ha_jm:
@@ -3931,6 +4114,22 @@ def reserve_cluster_hugepages(snode_api, nodes, cluster):
     return True
 
 
+def _rpc_port_slot(node_addr, socket, cpu_mask) -> str:
+    """The name the rpc port of one storage node is reserved under. A storage
+    node's identity on a host is (api_endpoint, socket, cpu_mask), the same
+    triple add_node matches an earlier attempt's record on."""
+    return f"rpc/{node_addr}/{socket}/{cpu_mask or ''}"
+
+
+def _slot_record(db_controller, cluster_id, node_addr, socket, cpu_mask):
+    """The storage node recorded for one slot of a host, or None. The slot is
+    the triple ``_rpc_port_slot`` names."""
+    for n in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
+        if n.api_endpoint == node_addr and n.socket == socket and (n.spdk_cpu_mask or "") == (cpu_mask or ""):
+            return n
+    return None
+
+
 class _SpdkPodStillPresent(Exception):
     """The SPDK pod has not disappeared from the API server yet."""
 
@@ -4064,12 +4263,21 @@ def _abort_started_spdk(snode_api, rpc_port, cluster_id, reason, cluster_mode=No
     fallback, and the only path in docker mode, where the control plane has
     no way to reach the container itself.
 
-    The rpc_port reservation is deliberately NOT released: it has no release
-    API and ages out by TTL (see reserve_cluster_nvmf_port), and dropping it
-    here would hand the port to a concurrent add while this pod is still
-    shutting down.
+    The rpc_port reservation is deliberately NOT released. It is held for the
+    slot (see ``_rpc_port_slot`` and PortReservation), so the retry of this add
+    gets the same port back, and dropping it here would hand the port to a
+    concurrent add while this pod is still shutting down. A slot nobody
+    retries ages out after ``PORT_RESERVATION_SLOT_TTL_SEC``.
     """
     logger.error(f"add_node aborting after SPDK start: {reason}")
+
+    if constants.SPDK_START_SUPERSEDED in str(reason):
+        # The agent started nothing for this request: a later request for the
+        # same pod arrived while this one was preparing the host. The pod on
+        # this port is that request's, and tearing it down here would take a
+        # running add's SPDK away from under it.
+        logger.warning(f"Leaving the SPDK pod on port {rpc_port} to the later add that superseded this one")
+        return
 
     if cluster_mode == "kubernetes":
         # A pod-network add created a Service before the pod, and nothing names
@@ -4670,11 +4878,8 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         # Generate the node uuid up front so it can own the port reservations
         # made before the node record itself is persisted (the new node isn't
         # written to the DB until after SPDK boots, so two concurrent adds would
-        # otherwise read the same "next free" port). reserve_cluster_nvmf_port
-        # allocates and reserves the port atomically against other concurrent
-        # node adds.
+        # otherwise read the same "next free" port).
         node_uuid = str(uuid.uuid4())
-        rpc_port = db_controller.reserve_cluster_nvmf_port(cluster_id, node_uuid)
         logger.info(f"mgmt interface is {mgmt_iface}")
 
         spdk_image = cluster.prefixed_image(spdk_image or constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
@@ -4708,7 +4913,10 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         # record is persisted only after spdk_cpu_mask is set (below), so a
         # persisted IN_CREATION orphan always carries its mask and a
         # deterministic config re-gen reproduces the same value on retry.
-        incoming_cpu_mask = node_config.get("cpu_mask")
+        # Normalised the way the record stores it (spdk_cpu_mask or ""), so a
+        # configuration without a mask matches the record an earlier attempt
+        # wrote for it, here and in the name its rpc port is reserved under.
+        incoming_cpu_mask = node_config.get("cpu_mask") or ""
         existing_healthy = None
         for n in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
             if not (n.api_endpoint == node_addr and n.socket == node_socket
@@ -4762,6 +4970,36 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                 f"socket {node_socket} (status {existing_healthy.status}); skipping duplicate add "
                 f"for this slot and checking the rest")
             continue
+
+        # The rpc port is reserved for the slot, not for this attempt, so a
+        # retry gets the port of the attempt before it. The SPDK pod is named
+        # after the port and the agent removes a pod of that name before it
+        # starts one, so the retry replaces whatever the earlier attempt left
+        # running. An attempt can die between starting its pod and writing the
+        # node record (the tasks runner is rescheduled, the agent's caller
+        # times out while the host waits on a MachineConfig rollout); with a
+        # new port each time the retry started a second pod beside the first,
+        # which no record named and which held the host's huge pages, so the
+        # retry stayed Pending on "Insufficient hugepages-2Mi" (OpenShift,
+        # 2026-11-25: pods on 4420, 4421 and 4422 for one node). Reserved here,
+        # after the cleanup above, so that a port freed by a removed
+        # IN_CREATION record is the one handed back.
+        rpc_port = db_controller.reserve_cluster_nvmf_port(
+            cluster_id, node_uuid, slot=_rpc_port_slot(node_addr, node_socket, incoming_cpu_mask))
+
+        # The cleanup above saw no record for this slot, or removed the one it
+        # saw. One that is here now was written since, by another attempt at
+        # this same slot that is still running. The reservation just made saw
+        # that record's port as taken and moved the slot to a new one, so
+        # going on would start a second pod beside the other attempt's. This
+        # attempt gives way; a retry finds the record and cleans it up or
+        # skips the slot, as the cleanup above decides.
+        overlapping = _slot_record(db_controller, cluster_id, node_addr, node_socket, incoming_cpu_mask)
+        if overlapping is not None:
+            logger.error(
+                f"Another add of {node_addr} socket {node_socket} wrote node {overlapping.get_id()} "
+                f"(status {overlapping.status}) while this one was starting; failing this add for retry")
+            return False
 
         total_mem = minimum_hp_memory
         for n in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
@@ -9931,6 +10169,14 @@ def _restart_storage_node_impl(
     # eaten the FIN that would let urllib3 notice (SFAM-2834).
     _evict_node_rpc_sessions(snode)
     time.sleep(5)
+    # The first RPC below must not be the one that finds out whether the new
+    # SPDK can be reached: on Kubernetes its DNS name appears only once the
+    # operator publishes the new pod (SPDK_RPC_READY_WAIT_SEC).
+    reachable, rpc_err = _wait_spdk_rpc_ready(snode)
+    if not reachable:
+        logger.error(f"SPDK of {snode.get_id()} did not answer RPC within "
+                     f"{constants.SPDK_RPC_READY_WAIT_SEC}s after its start: {rpc_err}")
+        return False
 
     if small_bufsize:
         snode.iobuf_small_bufsize = small_bufsize
@@ -11680,12 +11926,7 @@ def upgrade_automated_deployment_config():
             return False
         utils.store_config_file(updated_config, constants.NODES_CONFIG_FILE, create_read_only_file=True)
         # Set Huge page memory
-        huge_page_memory_dict: dict = {}
-        for node_config in updated_config["nodes"]:
-            numa = node_config["socket"]
-            huge_page_memory_dict[numa] = huge_page_memory_dict.get(numa, 0) + node_config["huge_page_memory"]
-        for numa, huge_page_memory in huge_page_memory_dict.items():
-            num_pages = huge_page_memory // (2048 * 1024)
+        for numa, num_pages in utils.hugepages_per_numa(updated_config["nodes"]).items():
             utils.set_hugepages_if_needed(numa, num_pages)
         logger.info("Config regenerated successfully")
         return True
@@ -11712,9 +11953,8 @@ def generate_automated_deployment_config(max_lvol, max_prov, sockets_to_use, nod
                      f"{constants.MAX_SUBSYSTEMS_PER_NODE} subsystems per storage node")
         return False
     if calculate_hp_only:
-        minimum_hp_memory = utils.calculate_hp_only(max_lvol, number_of_devices, sockets_to_use, nodes_per_socket, vcpu_count)
-        hp_number = math.ceil(minimum_hp_memory / 2)
-        logger.info(f"The required number of huge pages on this host is: {hp_number} ({minimum_hp_memory} MB)")
+        hp_number = utils.calculate_hp_only(max_lvol, number_of_devices, sockets_to_use, nodes_per_socket, vcpu_count)
+        logger.info(f"The required number of huge pages on this host is: {hp_number} ({hp_number * 2} MiB)")
         return True
     else:
         # Minimum 5 vCPUs: the smallest cluster vCPU budget (4) plus one for the

@@ -2109,12 +2109,12 @@ class RPCClient:
 
     def supports_two_node_arbitration(self):
         """True when the node exposes every RPC the arbiter drives
-        (constants.TWO_NODE_ARBITRATION_RPCS). Any error means no."""
-        try:
-            methods = set(self.rpc_get_methods() or [])
-        except Exception:                           # noqa: BLE001 - probe only
-            return False
-        return all(m in methods for m in constants.TWO_NODE_ARBITRATION_RPCS)
+        (constants.TWO_NODE_ARBITRATION_RPCS).
+
+        Raises:
+            RPCException: the node's method list could not be read.
+        """
+        return set(constants.TWO_NODE_ARBITRATION_RPCS) <= set(self.rpc_get_methods())
 
     def bdev_lvol_snapshot_group(self, lvs_name, snapshots):
         """One crash-consistent snapshot per consistency-group member.

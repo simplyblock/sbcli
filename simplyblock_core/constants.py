@@ -400,6 +400,19 @@ CLUSTER_ADD_LOCK_WAIT_TIMEOUT_SEC = 1800
 # loses its reserved port.
 PORT_RESERVATION_TTL_SEC = 600
 
+# A reservation made for a named slot (the rpc port of one storage node on one
+# host) is kept this long instead. It is what hands a retried add the port of
+# the attempt before it, so that the retry replaces that attempt's SPDK pod
+# rather than starting a second one next to it. It has to outlive the gap
+# between two attempts, which on OpenShift spans a whole MachineConfig rollout.
+PORT_RESERVATION_SLOT_TTL_SEC = 24 * 3600
+
+# How the node agent's spdk_process_start begins its error when it declined to
+# create the pod because a later request for the same pod had arrived. The
+# request that gets this answer started nothing, so its caller must not tear
+# the pod down on the way out: the pod on that port is the later request's.
+SPDK_START_SUPERSEDED = "spdk_process_start superseded"
+
 # add_node_add_task's dedup check (by node_addr) is itself a plain
 # read-then-write: two concurrent posts for one host can both pass it before
 # either commits, queuing two FN_NODE_ADD tasks for the same host (the
@@ -764,6 +777,15 @@ REPL_CUTOVER_FREEZE_MAX_ROUND_SEC = (REPL_CUTOVER_FINAL_STEP_LIMIT_SEC
 # released, the volume replicates on its ordinary cadence, and the endgame is
 # retried after this long (the abandon burns one attempt of the task's budget).
 REPL_CUTOVER_ENDGAME_BACKOFF_SEC = 300
+# One lvstore member failing to register volumes the leader created: alert once
+# this many DIFFERENT volumes failed on the same (member, lvstore) within the
+# window, and again at most every REALERT seconds while it persists. A per-task
+# alert never fires for this: replication landing volumes are deleted long
+# before their own sync-op task reaches TASK_FAILURE_ALERT_THRESHOLD (bf36,
+# 2026-11-25: 411 failures on one tertiary over 10 h, no alert).
+LVS_MEMBER_REGISTER_FAIL_ALERT_LVOLS = 5
+LVS_MEMBER_REGISTER_FAIL_WINDOW_SEC = 1800
+LVS_MEMBER_REGISTER_FAIL_REALERT_SEC = 3600
 # --- a migration must not fill its source cluster (bed bf29, 2026-11-20) ---
 # Five endgames of one source cluster at once, under sustained overwrite, took
 # a shrink snapshot every 15-30 s each; every one pinned what the client
@@ -774,6 +796,13 @@ REPL_CUTOVER_ENDGAME_BACKOFF_SEC = 300
 # Cutover endgames (shrink-round phase) running at once per SOURCE cluster.
 # The others replicate on their ordinary cadence while they wait for a slot.
 REPL_CUTOVER_MAX_ENDGAMES_PER_CLUSTER = 1
+# A volume refused an endgame slot records when it started waiting; a free slot
+# goes to the volume that has waited longest, among those whose wait was renewed
+# within this many seconds (a waiting task re-checks every few seconds, so an
+# older mark means it stopped waiting: it fell behind, or its task ended).
+# bf36 (2026-11-26): one volume that could not converge re-took the slot after
+# every 5-minute back-off, five times in R8a, while another waited 1496 passes.
+REPL_ENDGAME_QUEUE_FRESH_SEC = 180
 # An endgame takes its next round snapshot only once none of the volume's
 # snapshots is still in deletion -- for at most this long per wait: a deletion
 # that is stuck (no leader, a clone in deletion) must not stall the endgame
@@ -1064,6 +1093,13 @@ REPL_CUTOVER_EARLY_PREPARE = False
 
 SPDK_PROXY_MULTI_THREADING_ENABLED=True
 SPDK_PROXY_TIMEOUT=60*5
+# How long a restart waits, after starting SPDK, for its RPC endpoint to answer.
+# On Kubernetes under TLS the endpoint is <worker>.<spdk-proxy service>, a name
+# the operator publishes only once the new SPDK pod serves an address (and DNS
+# may cache the miss for up to 30 s): a fixed 5 s pause was not enough, and the
+# failed lookup aborted the restart and deleted the pod again (bf36 R3b,
+# 2026-11-26: 10 attempts in 75 min, the node never came back).
+SPDK_RPC_READY_WAIT_SEC = 180
 LVOL_NVME_CONNECT_RECONNECT_DELAY=2
 LVOL_NVME_CONNECT_CTRL_LOSS_TMO=60*60
 LVOL_NVME_CONNECT_FAST_IO_FAIL_TO=8

@@ -703,15 +703,30 @@ class PortReservation(BaseModel):
     redundant after that and is reclaimed by ``created_at`` TTL
     (``PORT_RESERVATION_TTL_SEC``) — no explicit release is required, and a
     crashed add self-heals when the reservation goes stale.
+
+    ``slot`` names what the port is for, when that is something an add can be
+    retried for: the rpc port of one storage node on one host. A second
+    reservation for the same slot gets the same port back instead of the next
+    free one. The SPDK pod is named after its rpc port, so a retry that kept
+    the port replaces the pod of the attempt before it; a retry that took a new
+    port started a second pod beside it, which nothing owned and which held the
+    host's huge pages. A slot reservation therefore lives much longer
+    (``PORT_RESERVATION_SLOT_TTL_SEC``).
     """
 
     cluster_id: str = ""
     port: int = 0
     owner: str = ""
     created_at: int = 0
+    slot: str = ""
 
     def get_id(self):
         return "%s/%s" % (self.cluster_id, self.port)
+
+    def expired(self, now: int) -> bool:
+        """Whether the reservation is old enough to be treated as abandoned."""
+        ttl = constants.PORT_RESERVATION_SLOT_TTL_SEC if self.slot else constants.PORT_RESERVATION_TTL_SEC
+        return (now - self.created_at) > ttl
 
 
 class DeployConfig(BaseModel):

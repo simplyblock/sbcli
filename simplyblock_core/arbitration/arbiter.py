@@ -39,7 +39,7 @@ from simplyblock_core.models.arbitration import (
     ClusterArbitration,
 )
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.rpc_client import RPCHTTPError, RPCRemoteError
+from simplyblock_core.rpc_client import RPCException, RPCHTTPError, RPCRemoteError
 
 logger = logging.getLogger(__name__)
 
@@ -327,10 +327,19 @@ class Arbiter:
     # ---- node configuration and leases ---------------------------------------
 
     def probe(self, node: StorageNode) -> bool:
+        """Whether the node exposes the arbitration RPCs. Only the node's
+        answer is kept: an error is intermittent (a node still starting, a
+        transient outage), so the node stays undecided and is probed again on
+        the next renewal."""
         nid = node.get_id()
         if nid not in self.capable:
-            self.capable[nid] = node.rpc_client(timeout=3, retry=0).supports_two_node_arbitration()
-            if not self.capable[nid]:
+            try:
+                capable = node.rpc_client(timeout=3, retry=0).supports_two_node_arbitration()
+            except RPCException as e:
+                logger.debug("Capability probe of %s failed, probing again: %s", nid, e)
+                return False
+            self.capable[nid] = capable
+            if not capable:
                 logger.warning("Node %s lacks the two-node arbitration RPCs; not arbitrated", nid)
         return self.capable[nid]
 

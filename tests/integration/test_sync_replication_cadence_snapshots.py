@@ -425,7 +425,7 @@ class TestGuards:
             _tick(cluster)
 
         # today's path: straight into the snapshot, which does its own lookup
-        add.assert_called_once_with(lvol.get_id(), ANY, snap_type=SnapShot.TYPE_INTERNAL)
+        add.assert_called_once_with(lvol.get_id(), ANY, snap_type=SnapShot.TYPE_INTERNAL, delete_wait=0)
         assert add.call_args.args[1].startswith(f"repl_internal_{lvol.get_id()[:8]}_")
         assert rpcs == {}                                 # the timer asked no node anything
         assert _deferrals(caplog) == []
