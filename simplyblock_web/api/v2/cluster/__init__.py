@@ -423,6 +423,22 @@ def update_cluster( cluster: Cluster, parameters: _UpdateParams) -> Response:
     return Response(status_code=204)
 
 
+@instance_api.post('/switch-write-protection', name='clusters:switch-write-protection', status_code=204, responses={
+    204: {"content": None},
+    409: {"description": "The switch did not complete: no node is online, or a node rejected it. "
+                         "The cluster stays on v1 write protection; call again once the nodes are online"},
+})
+def switch_write_protection(cluster: Cluster) -> Response:
+    """Move the cluster's distribs from v1 to v2 write protection.
+
+    The runtime switch reaches every online node, and an offline node picks v2
+    up from its stored parameters when it next restarts. A cluster already on v2
+    succeeds without acting."""
+    if not cluster_ops.switch_write_protection(cluster.get_id()):
+        raise HTTPException(409, 'The write-protection switch did not complete; the cluster stays on v1')
+    return Response(status_code=204)
+
+
 @instance_api.post('/rebalance', name='clusters:rebalance', status_code=204, responses={204: {"content": None}})
 def rebalance_cluster( cluster: Cluster) -> Response:
     cluster_ops.rebalance(cluster.get_id())

@@ -4,6 +4,7 @@ import json
 
 import pytest
 
+from simplyblock_core import constants
 from simplyblock_core.models.cluster import Cluster
 from tests.unit.web.api.v2._factories import CLUSTER_ID, EVENT_ID, make_event
 
@@ -540,3 +541,45 @@ class TestWatchClusters:
         assert 'event: snapshot' in response.text
         assert CLUSTER_ID in response.text
         cluster_ops.watch_cluster.assert_called_once_with(CLUSTER_ID)
+
+
+class TestImagesAndWriteProtection:
+    """What a Kubernetes rollout needs from the cluster record: the images the
+    control plane starts a node with when nobody names one, and whether the
+    cluster's distribs have been moved to v2 write protection. The operator
+    resolves a node's desired SPDK image to the default when neither the node
+    nor its cluster states one, and drives the write-protection switch as an
+    operation of its own (operator design-release-upgrade.md, P0-3 and P0-4)."""
+
+    def test_reports_the_default_spdk_images_behind_the_image_prefix(self, client, db, cluster):
+        cluster.container_image_prefix = 'mirror.example.com'
+
+        body = client.get(f'/api/v2/clusters/{CLUSTER_ID}/').json()
+
+        assert body['default_spdk_image'] == cluster.prefixed_image(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
+        assert body['default_spdk_proxy_image'] == cluster.prefixed_image(constants.SIMPLY_BLOCK_DOCKER_IMAGE)
+        assert body['default_spdk_image'].startswith('mirror.example.com/')
+
+    @pytest.mark.parametrize('v2', [True, False])
+    def test_reports_the_write_protection_generation(self, client, db, cluster, v2):
+        cluster.write_protection_v2 = v2
+
+        assert client.get(f'/api/v2/clusters/{CLUSTER_ID}/').json()['write_protection_v2'] is v2
+
+    def test_switch_write_protection_runs_the_switch(self, client, db, cluster, cluster_ops):
+        cluster_ops.switch_write_protection.return_value = True
+
+        response = client.post(f'/api/v2/clusters/{CLUSTER_ID}/switch-write-protection')
+
+        assert response.status_code == 204
+        cluster_ops.switch_write_protection.assert_called_once_with(CLUSTER_ID)
+
+    def test_a_switch_that_did_not_complete_is_a_conflict(self, client, db, cluster, cluster_ops):
+        """switch_write_protection returns False when no node is online or a
+        node rejected the RPC, and leaves the cluster on v1. The caller retries
+        once the nodes are back, so it is told the switch did not happen."""
+        cluster_ops.switch_write_protection.return_value = False
+
+        response = client.post(f'/api/v2/clusters/{CLUSTER_ID}/switch-write-protection')
+
+        assert response.status_code == 409
