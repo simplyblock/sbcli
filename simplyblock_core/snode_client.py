@@ -7,7 +7,7 @@ from requests.adapters import HTTPAdapter
 from urllib3 import Retry
 
 from simplyblock_core.settings import Settings
-from simplyblock_core.utils import peer_address
+from simplyblock_core.utils import lblk_identity, peer_address
 from simplyblock_core.utils.secrets import unwrap_secrets_for_send
 
 logger = logging.getLogger()
@@ -30,6 +30,9 @@ class SNodeClient:
         scheme = "https" if settings.tls_connect != "disabled" else "http"
         self.url = f'{scheme}://{host}/snode/'
         self.timeout = timeout
+        # The lblk_devices of the node this client talks to, set by
+        # StorageNode.client(); empty for a host that is no node yet.
+        self.recorded_lblk_devices: list = []
         self.session = requests.session()
         if settings.tls_connect != "disabled":
             self.session.verify = str(settings.tls_certificate_authority)
@@ -254,8 +257,14 @@ class SNodeClient:
         return self._request("POST", "bind_device_to_spdk", params)
 
     def get_blockdevices(self):
-        """Whole-disk inventory for the lblk cluster mode."""
-        return self._request("GET", "blockdevices")
+        """Inventory of the host's disks and partitions for the lblk cluster
+        mode. A partition that the node of this client recorded under a
+        made-up id is reported under that id (lblk_identity): callers compare
+        the serials of the inventory with the ones the node recorded."""
+        inventory, error = self._request("GET", "blockdevices", {"partition_serials": "partuuid"})
+        if isinstance(inventory, list):
+            inventory = lblk_identity.under_recorded_serials(self.recorded_lblk_devices, inventory)
+        return inventory, error
 
     def wipe_block_device(self, device_name):
         """--force-format for lblk add-node: wipe partition/FS signatures

@@ -86,6 +86,7 @@ class TestInventoryPartitions(unittest.TestCase):
     def _inventory(self):
         with patch.object(node_utils.shell_utils, "run_command",
                           return_value=(json.dumps(self.LSBLK), "", 0)), \
+                patch.object(node_utils, "_probe_partuuid", return_value=""), \
                 patch.object(node_utils, "_root_disk_names", return_value=[]), \
                 patch.object(node_utils, "_disk_holders", return_value=[]), \
                 patch.object(node_utils, "_partition_holders", return_value=[]), \

@@ -2667,6 +2667,8 @@ def detect_lblk_devices(include_names=None, exclude_names=None,
             entry["type"] = "part"
             entry["partuuid"] = dev.get("partuuid", "")
             entry["parent_serial"] = dev.get("parent_serial", "")
+            if dev.get("legacy_serial"):
+                entry["legacy_serial"] = dev["legacy_serial"]
         result[dev["name"]] = entry
     if len(result) < min_units:
         raise ValueError(
@@ -2702,6 +2704,8 @@ def _lblk_entry_from_inventory(dev) -> dict:
         entry["type"] = "part"
         entry["partuuid"] = dev.get("partuuid", "")
         entry["parent_serial"] = dev.get("parent_serial", "")
+        if dev.get("legacy_serial"):
+            entry["legacy_serial"] = dev["legacy_serial"]
     return entry
 
 
@@ -3024,8 +3028,25 @@ def lblk_device_serials(lblk_devices) -> set[str]:
 
     Takes the list itself, so it serves both a node-config entry's
     ``lblk_devices`` and a StorageNode record's.
+
+    A partition counts under every id it is known by (utils/lblk_identity.py),
+    because the two sides of a comparison may hold different ones: a node that
+    recorded a partition under a made-up id sends that id, while the node
+    config the agent rewrote carries the PARTUUID-based serial. So an entry
+    also counts under the made-up id it had (``legacy_serial``), and under
+    the PARTUUID-based serial that its recorded disk serial and PARTUUID give
+    -- the only id left in common once a reboot renamed the partition and
+    changed the made-up id the agent computes.
     """
-    return {e["serial"] for e in (lblk_devices or []) if e.get("serial")}
+    serials = set()
+    for entry in lblk_devices or []:
+        if entry.get("serial"):
+            serials.add(entry["serial"])
+        if entry.get("legacy_serial"):
+            serials.add(entry["legacy_serial"])
+        if entry.get("type") == "part" and entry.get("parent_serial") and entry.get("partuuid"):
+            serials.add(f"{entry['parent_serial']}-part-{entry['partuuid'].lower()}")
+    return serials
 
 
 def node_config_min_sys_memory(node, extra_capacity=0) -> int:
