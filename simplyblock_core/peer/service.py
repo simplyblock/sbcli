@@ -648,14 +648,14 @@ def ensure_hub(cluster_id: str, request: EnsureHubRequest) -> EnsureHubResponse:
 
 
 def _pair_online(db, leader):
-    """Whether *leader* has no secondary (a single-node cluster: no member to
-    leave holes on) or its secondary is online."""
-    if not leader.secondary_node_id:
-        return True
-    try:
-        return db.get_storage_node_by_id(leader.secondary_node_id).status == StorageNode.STATUS_ONLINE
-    except KeyError:
-        return False
+    """Whether every other member of *leader*'s lvstore (secondary, tertiary)
+    can be reached -- none at all on a single-node cluster. A member is judged
+    by whether its SPDK answers, not by its DB status (replica_chain): a delta
+    must be able to land on every member, or it leaves holes there."""
+    from simplyblock_core.controllers import replica_chain
+
+    return all(replica_chain.reachable(member, role)
+               for role, member in replica_chain.lvstore_replicas(leader, db=db))
 
 
 def chain(cluster_id: str, request: ChainRequest) -> ChainResponse:
@@ -672,7 +672,8 @@ def chain(cluster_id: str, request: ChainRequest) -> ChainResponse:
 
 def chain_landing(db, request: ChainRequest) -> ChainResponse:
     """Chain the landing volume onto the copy of the snapshot before it, on the
-    leader and its secondary, BEFORE the transfer, so it can ship only the delta.
+    leader and every other member of its lvstore, BEFORE the transfer, so it
+    can ship only the delta.
 
     ``bdev_lvol_transfer`` sends a blob's own cluster map and nothing else, so a
     partial transfer ships only the ranges written since the previous snapshot;
@@ -683,12 +684,16 @@ def chain_landing(db, request: ChainRequest) -> ChainResponse:
     parent before applying the incoming range.
 
     The bar for "chained" is high: the copy must be in the leader's lvstore,
-    and the secondary must be online and accept the chain too. The transfer
-    lands on the leader and the lvstore mirrors it to the secondary; an
-    unchained secondary would read zeros wherever the delta did not write. A
-    member already in ``request.chained_on`` is not chained again: the same
-    clone entry twice is not idempotent in SPDK. Anything short of the bar
-    declines, and a full transfer -- always correct -- is sent.
+    and every other member (secondary, tertiary) must answer and take the
+    chain too (replica_chain: members are judged by whether they answer, not
+    by their DB status). The transfer lands on the leader and the lvstore
+    mirrors it to the others; an unchained member would read zeros wherever
+    the delta did not write, and a member that missed the link keeps a stale
+    tree it acts on once it leads (bed bf23 2026-11-12, LVS_16: a tertiary
+    deleted a snapshot's data). A member already in ``request.chained_on`` is
+    not chained again: the same clone entry twice is not idempotent in SPDK.
+    Anything short of the bar declines, and a full transfer -- always
+    correct -- is sent.
 
     Raises:
         KeyError: the landing volume or the leader is unknown.
@@ -709,15 +714,10 @@ def chain_landing(db, request: ChainRequest) -> ChainResponse:
                              reason=f"the predecessor's copy {request.predecessor_id} lives on "
                                     f"{copy.lvol.node_id}, not in the lvstore of "
                                     f"{request.leader_node_id}; cannot chain across lvstores")
+    from simplyblock_core.controllers import replica_chain
+
     leader = db.get_storage_node_by_id(request.leader_node_id)
-    secondary = None
-    if leader.secondary_node_id:
-        with contextlib.suppress(KeyError):
-            secondary = db.get_storage_node_by_id(leader.secondary_node_id)
-        if secondary is None or secondary.status != StorageNode.STATUS_ONLINE:
-            return ChainResponse(state="declined", chained_on=chained,
-                                 reason=f"the secondary of {leader.get_id()} is not online, "
-                                        f"and a delta would leave holes on it")
+    replicas = replica_chain.lvstore_replicas(leader, db=db)
 
     def chain_on(node, role):
         if node.get_id() in chained:
@@ -747,9 +747,18 @@ def chain_landing(db, request: ChainRequest) -> ChainResponse:
     if not chain_on(leader, "primary"):
         return ChainResponse(state="declined", chained_on=chained,
                              reason=f"the chain on {leader.get_id()} failed")
-    if secondary is not None and not chain_on(secondary, "secondary"):
-        return ChainResponse(state="declined", chained_on=chained,
-                             reason=f"the chain on the secondary {secondary.get_id()} failed")
+    for role, member in replicas:
+        if member.get_id() in chained:
+            continue
+        # Idempotent (an existing link reads as done); not recorded as owed:
+        # a decline sends a full transfer, which needs no link.
+        outcome, err = replica_chain.add_clone_on(
+            member, role, lvol.top_bdev, copy.snap_bdev, owner=leader, record=False, db=db)
+        if outcome != replica_chain.DONE:
+            return ChainResponse(state="declined", chained_on=chained,
+                                 reason=f"the {role} {member.get_id()} could not be chained "
+                                        f"({err or 'not reachable, or without the volume'})")
+        chained.append(member.get_id())
     return ChainResponse(state="chained", chained_on=chained)
 
 

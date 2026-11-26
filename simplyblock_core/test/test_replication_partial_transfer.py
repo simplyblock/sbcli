@@ -246,8 +246,6 @@ def test_unreachable_secondary_forces_a_full_transfer(monkeypatch):
 
     assert sr._prechain_landing_volume(
         task, cur, False, _LandingLV(), "N_TGT") is False
-    # nothing was chained at all -- we bail before touching either node
-    assert leader.add_clone_calls == []
     assert sec.add_clone_calls == []
     # what did land is remembered, so the finish does not add it twice
     assert task.function_params["prechained_node_ids"] == ["N_TGT"]
@@ -260,7 +258,7 @@ def test_secondary_offline_in_the_db_but_answering_is_chained(monkeypatch):
     task = _Task()
 
     assert sr._prechain_landing_volume(
-        task, cur, False, _LandingLV(), leader) is True
+        task, cur, False, _LandingLV(), "N_TGT") is True
     assert sec.add_clone_calls == [("LVS/REP_SNAP_2", "LVS/T_SNAP_1")]
 
 
@@ -270,7 +268,7 @@ def test_tertiary_is_pre_chained_too(monkeypatch):
     task = _Task()
 
     assert sr._prechain_landing_volume(
-        task, cur, False, _LandingLV(), leader) is True
+        task, cur, False, _LandingLV(), "N_TGT") is True
     ter = sr.db.get_storage_node_by_id("N_TGT_TER")
     assert ter.add_clone_calls == [("LVS/REP_SNAP_2", "LVS/T_SNAP_1")]  # type: ignore[attr-defined]
     assert task.function_params["prechained_node_ids"] == ["N_TGT", "N_TGT_SEC", "N_TGT_TER"]
@@ -281,8 +279,19 @@ def test_unreachable_tertiary_forces_a_full_transfer(monkeypatch):
     task = _Task()
 
     assert sr._prechain_landing_volume(
-        task, cur, False, _LandingLV(), leader) is False
+        task, cur, False, _LandingLV(), "N_TGT") is False
     assert task.function_params["prechained_node_ids"] == ["N_TGT", "N_TGT_SEC"]
+
+
+def _hub(leader):
+    """The destination's ensure_hub answer for *leader*: pair_online is the
+    target's own judgement (peer.service._pair_online: every other member
+    answers)."""
+    from simplyblock_core.peer import service as peer_service
+    from simplyblock_core.peer.protocol import EnsureHubResponse
+
+    return EnsureHubResponse(state="ready", leader_node_id=leader.get_id(),
+                             pair_online=peer_service._pair_online(sr.db, leader))
 
 
 def test_deferred_delta_judges_members_by_reachability(monkeypatch):
@@ -293,9 +302,9 @@ def test_deferred_delta_judges_members_by_reachability(monkeypatch):
     pred = sr.db.get_snapshot_by_id("SNAP_1")
     pred.blobid = 0x51
     monkeypatch.setattr(sr.replication_delta, "delta_basis", lambda *a: (True, ""))
-    assert sr._deferred_partial_decision(_Task(), cur, pred, leader, "N_SRC") == (True, 0x51)
+    assert sr._deferred_partial_decision(_Task(), cur, pred, _hub(leader), "N_SRC") == (True, 0x51)
     sec.reachable = False
-    assert sr._deferred_partial_decision(_Task(), cur, pred, leader, "N_SRC") == (False, 0)
+    assert sr._deferred_partial_decision(_Task(), cur, pred, _hub(leader), "N_SRC") == (False, 0)
 
 
 def test_failed_primary_chain_forces_a_full_transfer(monkeypatch):

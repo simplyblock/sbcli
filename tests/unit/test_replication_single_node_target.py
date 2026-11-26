@@ -40,6 +40,7 @@ class TestFinishOnASingleNodeTarget(unittest.TestCase):
         primary = MagicMock()
         primary.get_id.return_value = "n-p"
         primary.secondary_node_id = ""
+        primary.tertiary_node_id = ""   # the chain covers every replica now
         primary.rpc_client.return_value.bdev_lvol_convert.return_value = True
         landing = SimpleNamespace(top_bdev="LVS_1/LVOL_92", lvs_name="LVS_1", node_id="n-p",
                                   nodes=["n-p"], status="online", lvol_priority_class=0,
@@ -72,6 +73,7 @@ class TestDeltaIntoASingleNodeTarget(unittest.TestCase):
         node = MagicMock()
         node.get_id.return_value = "n-p"
         node.secondary_node_id = ""
+        node.tertiary_node_id = ""   # the chain covers every replica now
         rpc = node.rpc_client.return_value
         rpc.bdev_lvol_add_clone.return_value = True
         rpc.bdev_get.return_value = None            # not a clone yet

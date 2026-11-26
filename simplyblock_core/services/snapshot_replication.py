@@ -2123,7 +2123,7 @@ def _deferred_partial_decision(task, snapshot, pred, hub, source_node_id):
     logger.info("Transfer of %s runs while %s's copy is merged; its landing volume is "
                 "chained onto that copy after the transfer", snapshot.get_id(), pred.get_id())
     if not hub.pair_online:
-        logger.info("Transfer of %s stays FULL: the secondary of %s is not online",
+        logger.info("Transfer of %s stays FULL: a member of %s's lvstore cannot be reached",
                     snapshot.get_id(), hub.leader_node_id)
         return False, 0
     ok, why = replication_delta.delta_basis(pred, snapshot, source_node_id)

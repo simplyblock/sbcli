@@ -188,8 +188,8 @@ class EnsureHubResponse(BaseModel):
     leader_node_id: str = ""
     map_id: int | None = None
     hub: HubAddress | None = None
-    #: The leader has no secondary, or its secondary is online: a delta can
-    #: land on every member of the pair.
+    #: Every other member of the leader's lvstore (secondary, tertiary) can be
+    #: reached, or there is none: a delta can land on every member.
     pair_online: bool = False
     converted_on: list[str] = Field(default_factory=list)
     #: With ``unsettled``: "<id8> <status>" of every member of the lvstore, in
