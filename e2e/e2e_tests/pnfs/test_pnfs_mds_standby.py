@@ -1288,123 +1288,239 @@ class PnfsMdsRestartWithClientDownK8s(_MdsBase):
 
 
 class _MdsNodeOutageBase(_MdsBase):
-    """Outages of the node the active metadata server is running on.
+    """Outages of the node the metadata server is running on.
 
-    Every F- case above this takes the metadata server away by deleting
+    Every other case in this file removes the metadata server by deleting
     its pod, which is a graceful stop: the runner gets SIGTERM, drains
-    nfsd, powers the guest down over QMP and the operator promotes a
-    standby with the cluster's full cooperation. None of that happens
-    when the *node* goes.
+    nfsd, powers the guest down over QMP, and the replacement starts with
+    the cluster's full cooperation. None of that happens when the *node*
+    goes, and that difference is the point of these two cases.
 
-    That difference is the whole point of these two cases. A node outage
-    produces the one state the fencing design exists for -- a guest that
-    the cluster believes is gone, running on a host the cluster cannot
-    talk to, which may come back still believing it is active. If the
-    promotion does not fence the state volume against it, two guests
-    serve one filesystem and the clients cannot tell.
+    **These two do not require a warm standby, and the rest of this file
+    does.** On operator `main` there is none to require:
 
-    Needs a host shell or a reboot verb, so Talos is a probe failure
-    rather than a skip.
+        operator/internal/controllers/driver/mds.go:370
+            // One, and never more: two guests mounting one filesystem
+            // lose data, and a StatefulSet does not start a second pod
+            // while the first is terminating.
+            Replicas: ptr.To(int32(1)),
+
+    There is no `standbys` field on `DriverPNFSMDS`, and `standbys`,
+    `mds-epoch`, `mds-active` and `MDSPromoted` do not appear anywhere in
+    the operator repository. The warm standby is a design document and a
+    test plan, not shipped code -- which is why every `F-` case above
+    correctly refuses to run through `assert_mds_cluster()`.
+
+    So recovery here is the single-MDS path, which is the one that
+    actually runs on every cluster we have and is where every pNFS defect
+    we have filed lives: the StatefulSet's one pod has to come back --
+    rescheduled onto another kvm-capable node if there is one, otherwise
+    on the same node once it returns -- reattach the state volume and
+    every export's namespace, and serve again.
+
+    The epoch assertions are kept and applied *conditionally*. When the
+    standby feature lands, `mds_record` starts returning an epoch and
+    these cases tighten themselves to assert a promotion and the absence
+    of a split brain, without a second pair of classes to write. The log
+    says which mode each run took, so a green run can never be mistaken
+    for the stronger one.
     """
 
-    #: A node outage is not a pod delete. The promotion has to wait for
-    #: the cluster to notice the node is gone -- node-monitor-grace-period
-    #: plus the pod eviction timeout -- before it can even start, and that
-    #: is minutes on a default cluster, not the 45s grace.
+    #: A node outage is not a pod delete. Nothing tells the cluster the
+    #: node is gone: it waits out node-monitor-grace-period and then the
+    #: pod eviction timeout before the StatefulSet may even start a
+    #: replacement, and with one replica it will not start one while the
+    #: old pod is Terminating. Minutes, not the 45s shutdown grace.
     TAKEOVER_TIMEOUT = 900
     REBOOT_TIMEOUT = 1200
-    #: What a client may lose across it. Above the 93s a single-MDS
-    #: replacement already cost us, because this outage is strictly worse
-    #: than that one and a budget below it would fail on arithmetic rather
+    #: What a client may lose. Above the 93s a single-MDS replacement has
+    #: already been measured at, because this outage is strictly worse
+    #: than that one -- a budget below it would fail on arithmetic rather
     #: than on a regression.
     MAX_CLIENT_GAP = 300
 
     def gate(self, tag):
         self.assert_pnfs_cluster()
-        sts = self.assert_mds_cluster()
+        # want_standbys=False, for the reason in the class docstring. The
+        # node outage is worth driving against a single MDS; it is the
+        # topology every cluster we have actually runs.
+        sts = self.assert_mds_cluster(want_standbys=False)
         if self.k8s_utils.detect_talos():
             raise PnfsProbeError(
                 f"{tag} this lab is Talos: a node outage needs talosctl on "
                 f"the runner for a reboot and a host shell for a drain, and "
                 f"neither is guaranteed. A case that skipped the outage "
-                f"would assert on a pod delete, which is F-01.")
+                f"would be asserting on a pod delete, which is F-01.")
+        replicas = ((sts.get("spec") or {}).get("replicas")) or 0
+        _active, epoch = mds_record(sts)
+        self.standby_mode = replicas >= 2 and epoch is not None
+        self.logger.info(
+            "%s StatefulSet %s runs %s replica(s), record epoch=%r -> %s "
+            "mode. %s", tag, self.sts_name, replicas, epoch,
+            "standby" if self.standby_mode else "single-MDS",
+            "The promotion and split-brain assertions apply."
+            if self.standby_mode else
+            "No warm standby exists on this cluster (operator main hard-codes "
+            "one replica and publishes no epoch), so recovery is asserted as "
+            "the one pod coming back and serving, not as a promotion.")
+        self.kvm_nodes = self.kvm_capable()
+        self.logger.info("%s kvm-capable node(s): %s", tag,
+                         self.kvm_nodes or "(none labelled)")
         return sts
 
-    def active_node(self, tag):
-        """``(pod, node, epoch)`` for the active guest and its host."""
-        active, epoch = self.record()
-        if not active:
-            raise PnfsProbeError(
-                f"{tag} no active guest is recorded, so there is no node to "
-                f"take an outage on.")
-        node = None
-        for name, host, _phase, _ready in mds_pods(
-                self.k8s_utils, self.sts_name, self.mds_ns):
-            if name == active:
-                node = host
-        if not node or node == "<none>":
-            raise PnfsProbeError(
-                f"{tag} the active guest {active} reports no node.")
-        return active, node, epoch
+    def kvm_capable(self):
+        """The nodes that can host the guest at all.
 
-    def assert_one_active(self, tag, want_epoch):
-        """Exactly one active guest, at the epoch the promotion reached.
+        Decides what recovery is even possible: with a second kvm-capable
+        node the pod can be rescheduled while the first is down; with
+        one, recovery cannot begin until that node returns, and a case
+        that expected otherwise would report a product failure for a
+        labelling decision.
+        """
+        out, _ = self.k8s_utils._exec_kubectl(
+            "kubectl get nodes -l storage.simplyblock.io/kvm-capable=true "
+            "-o custom-columns=NAME:.metadata.name --no-headers "
+            "2>/dev/null || true", supress_logs=True)
+        return sorted(n.strip() for n in (out or "").splitlines() if n.strip())
 
-        The split-brain assertion. Read after the lost node is back,
-        because that is when the old guest could reappear still believing
-        it serves: the record is the only thing that arbitrates, every
-        guest answers on the same StatefulSet hostname, and a standby's
-        readiness probe reports SERVING too -- so a client cannot tell
-        two actives apart and neither can a pod listing.
+    def mds_host(self, tag):
+        """``(pod, node, epoch)`` for the serving guest and its host.
+
+        Falls back to the StatefulSet's only Ready pod when no record is
+        published, which on operator main is always.
         """
         active, epoch = self.record()
-        if epoch != want_epoch:
+        pods = mds_pods(self.k8s_utils, self.sts_name, self.mds_ns)
+        if not active:
+            ready = [(n, h) for n, h, _p, r in pods if r]
+            if not ready:
+                raise PnfsProbeError(
+                    f"{tag} no metadata server pod is Ready, so there is "
+                    f"nothing serving and no outage to judge. Pods: {pods}")
+            if len(ready) > 1:
+                raise PnfsEvidenceError(
+                    f"{tag} {len(ready)} metadata server pods are Ready "
+                    f"before any outage: {ready}. The StatefulSet is "
+                    f"declared one replica and never more, because two "
+                    f"guests mounting one filesystem lose data.")
+            active, node = ready[0]
+        else:
+            node = next((h for n, h, _p, _r in pods if n == active), None)
+        if not node or node == "<none>":
+            raise PnfsProbeError(
+                f"{tag} the serving guest {active} reports no node.")
+        return active, node, epoch
+
+    def wait_mds_serving(self, tag, was_pod, was_epoch, timeout=None):
+        """Wait until a metadata server is serving again. Returns seconds.
+
+        In standby mode this is the promotion. In single-MDS mode it is
+        the StatefulSet's pod being Ready again -- which is the honest
+        assertion, because there is nothing else that could have taken
+        over, and a case that waited for an epoch that no cluster
+        publishes would simply time out and call the product broken.
+        """
+        timeout = timeout or self.TAKEOVER_TIMEOUT
+        start = time.time()
+        if self.standby_mode:
+            new_active, new_epoch, took = wait_mds_promotion(
+                self.k8s_utils, self.sts_name, was_epoch, timeout=timeout,
+                namespace=self.mds_ns)
+            self.logger.info("%s promoted to %s at epoch %s after %ss",
+                             tag, new_active, new_epoch, took)
+            return new_active, new_epoch, took
+        deadline = start + timeout
+        seen = []
+        while time.time() < deadline:
+            seen = mds_pods(self.k8s_utils, self.sts_name, self.mds_ns)
+            ready = [(n, h) for n, h, _p, r in seen if r]
+            if len(ready) == 1:
+                name, host = ready[0]
+                took = round(time.time() - start, 1)
+                self.logger.info(
+                    "%s a metadata server is serving again: %s on %s after "
+                    "%ss (was %s)", tag, name, host, took, was_pod)
+                return name, None, took
+            if len(ready) > 1:
+                raise PnfsEvidenceError(
+                    f"{tag} {len(ready)} metadata server pods are Ready at "
+                    f"once: {ready}. With one replica and no standby this "
+                    f"is two guests on one filesystem, which the design "
+                    f"forbids outright.")
+            sleep_n_sec(10)
+        raise PnfsEvidenceError(
+            f"{tag} no metadata server pod became Ready within {timeout}s "
+            f"after the outage. Pods: {seen}. With a single MDS and no "
+            f"standby, every pNFS volume in the cluster is unserved for as "
+            f"long as this lasts"
+            + (f"; the only kvm-capable node(s) are {self.kvm_nodes}, so the "
+               f"pod had nowhere else to go." if len(self.kvm_nodes) < 2
+               else "."))
+
+    def assert_no_split_brain(self, tag, want_epoch):
+        """One guest serving, and nothing contended for the role.
+
+        Read after the lost node rejoins, because that is when the old
+        guest can reappear still believing it serves. Checking before it
+        returns would pass on a cluster with no fencing at all -- which,
+        on operator main, is the cluster we have.
+        """
+        pods = mds_pods(self.k8s_utils, self.sts_name, self.mds_ns)
+        ready = [(n, h) for n, h, _p, r in pods if r]
+        if len(ready) > 1:
             raise PnfsEvidenceError(
-                f"{tag} the record moved to epoch {epoch} after the lost "
-                f"node rejoined; the promotion had reached {want_epoch}. "
-                f"Either something promoted again for no reason, or the "
-                f"returning guest asserted itself over the one that took "
-                f"over from it.")
+                f"{tag} {len(ready)} metadata server pods are Ready after "
+                f"the lost node rejoined: {ready}. The returning guest came "
+                f"back alongside the one that replaced it, so two guests "
+                f"have the same filesystem mounted.")
         reasons = self.event_reasons()
-        if EVENT_MDS_PROMOTION_CONFLICT in reasons:
-            raise PnfsEvidenceError(
-                f"{tag} the operator published "
-                f"{EVENT_MDS_PROMOTION_CONFLICT} across this outage. Two "
-                f"guests contended for the active role, which is the state "
-                f"the epoch-keyed reservation is supposed to make "
-                f"impossible.")
-        if EVENT_MDS_FENCE_FAILED in reasons:
-            raise PnfsEvidenceError(
-                f"{tag} {EVENT_MDS_FENCE_FAILED} was published. The promoted "
-                f"guest could not fence the state volume against its "
-                f"predecessor, so nothing is stopping the old guest writing "
-                f"to it when its node comes back.")
-        self.logger.info("%s one active (%s) at epoch %s, no conflict and no "
-                         "fence failure", tag, active, epoch)
-        return active, epoch
+        why = {
+            EVENT_MDS_PROMOTION_CONFLICT: (
+                "two guests contended for the active role, which the "
+                "epoch-keyed reservation exists to make impossible"),
+            EVENT_MDS_FENCE_FAILED: (
+                "the serving guest could not fence the state volume against "
+                "its predecessor, so nothing stops the old guest writing "
+                "to it"),
+        }
+        for bad in (EVENT_MDS_PROMOTION_CONFLICT, EVENT_MDS_FENCE_FAILED):
+            if bad in reasons:
+                raise PnfsEvidenceError(
+                    f"{tag} {bad} was published: {why[bad]}.")
+        if self.standby_mode:
+            _active, epoch = self.record()
+            if epoch != want_epoch:
+                raise PnfsEvidenceError(
+                    f"{tag} the record moved to epoch {epoch} after the lost "
+                    f"node rejoined; recovery had reached {want_epoch}. "
+                    f"Either something promoted again for no reason, or the "
+                    f"returning guest asserted itself over its replacement.")
+        self.logger.info("%s one guest serving, no conflict and no fence "
+                         "failure after the node rejoined", tag)
+        return ready[0] if ready else (None, None)
 
 
 class PnfsMdsNodeRebootK8s(_MdsNodeOutageBase):
-    """The active metadata server's node reboots, undrained.
+    """The metadata server's node reboots, undrained — the unplanned outage.
 
-    The unplanned outage. The guest is destroyed with its host and gets
-    no chance to drain nfsd or release anything, which is the case the
-    graceful pod delete can never produce:
+    The guest is destroyed with its host and gets no chance to drain
+    nfsd, release its reservations or power down, which is the case a pod
+    delete can never produce. Three things follow that F-01 does not
+    exercise:
 
-      * the cluster has to *notice*. Nothing tells it the node is gone;
-        it waits out node-monitor-grace-period and then the pod eviction
-        timeout, which is why this case allows 900s for a takeover that
-        F-01 does in 300.
-      * the predecessor is not dead, it is unreachable. For the whole
-        window between the reboot and the kubelet reporting in again,
-        the old guest's state is unknown to the cluster -- and it is
-        exactly then that a standby is promoted onto the same state
-        volume and the same exports.
-      * and then it comes back. A guest that rejoins still holding its
-        old epoch's reservation, or still believing it is active, is a
-        second writer on one filesystem. ``assert_one_active`` is read
-        *after* the node is Ready again for that reason; checking before
-        it rejoins would pass on a cluster with no fencing at all.
+      * the cluster has to *notice*. Nothing announces the node;
+        node-monitor-grace-period and the pod eviction timeout have to
+        expire, and with one replica the StatefulSet will not start a
+        replacement while the old pod is Terminating. That is why this
+        allows 900s where F-01 allows 300, and the elapsed time is the
+        headline of the run: it is every pNFS volume in the cluster
+        unserved.
+      * the predecessor is not dead, it is unreachable. Its state is
+        unknown to the cluster for the whole window in which a
+        replacement attaches the same state volume and the same export
+        namespaces.
+      * and then it comes back. ``assert_no_split_brain`` is read *after*
+        the node is Ready again, for that reason.
     """
 
     CLAIM = "pnfs-mds-nodereboot"
@@ -1419,15 +1535,23 @@ class PnfsMdsNodeRebootK8s(_MdsNodeOutageBase):
         marker = self.start_writer(pods[0])
         sleep_n_sec(20)
 
-        active, node, epoch = self.active_node("[mds-node-reboot]")
+        was_pod, node, epoch = self.mds_host("[mds-node-reboot]")
         node_ip = self.k8s_utils.node_internal_ip(node)
-        self.logger.info(
-            "[mds-node-reboot] the active guest %s runs on %s (%s) at epoch "
-            "%s; rebooting that node undrained", active, node, node_ip, epoch)
+        if len(self.kvm_nodes) < 2:
+            self.logger.warning(
+                "[mds-node-reboot] %s is the only kvm-capable node, so the "
+                "guest has nowhere to be rescheduled and cannot recover "
+                "until this node is back. The outage this measures is "
+                "therefore the node's whole reboot, which is the honest "
+                "cost of a single-MDS cluster on a single KVM host.", node)
 
-        # Before the reboot: a cordon outlives the run that set it, and
-        # the operator then refuses the worker outright on the next
-        # bring-up, complaining about stripe width.
+        self.logger.info(
+            "[mds-node-reboot] the metadata server %s runs on %s (%s); "
+            "rebooting that node undrained", was_pod, node, node_ip)
+        # Registered before the reboot: reboot_node cordons on the way in
+        # and only uncordons on its own recovery path, so a failure in
+        # between leaves the worker unschedulable and the NEXT run's
+        # bring-up fails talking about stripe width.
         self.undo_stack.append(self.k8s_utils.uncordon_all_workers)
 
         killed_at = time.time()
@@ -1438,92 +1562,99 @@ class PnfsMdsNodeRebootK8s(_MdsNodeOutageBase):
         if not self.k8s_utils.wait_node_condition(node_ip, ready=False,
                                                   timeout=300):
             raise PnfsProbeError(
-                f"[mds-node-reboot] {node} never left Ready, so the active "
-                f"guest is still running and there is no takeover to judge.")
+                f"[mds-node-reboot] {node} never left Ready, so the guest is "
+                f"still running and there is no recovery to judge.")
         self.logger.info("[mds-node-reboot] %s is NotReady after %.1fs",
                          node, time.time() - killed_at)
 
-        new_active, new_epoch, took = wait_mds_promotion(
-            self.k8s_utils, self.sts_name, epoch,
-            timeout=self.TAKEOVER_TIMEOUT, namespace=self.mds_ns)
-        self.logger.info(
-            "[mds-node-reboot] promoted to %s at epoch %s, %ss after the "
-            "record was read (%.1fs after the reboot was issued)",
-            new_active, new_epoch, took, time.time() - killed_at)
-        if new_active == active:
-            raise PnfsEvidenceError(
-                f"[mds-node-reboot] the epoch advanced to {new_epoch} but "
-                f"the active guest is still {active}, which is on the node "
-                f"that was rebooted. A promotion back onto the host that "
-                f"just died is not a failover.")
+        # With one kvm-capable node the pod cannot start until the host
+        # is back, so the node's return is part of the recovery rather
+        # than a step after it.
+        if len(self.kvm_nodes) < 2:
+            back = self.k8s_utils.wait_node_condition(
+                node_ip, ready=True, timeout=self.REBOOT_TIMEOUT)
+            self.k8s_utils.uncordon_all_workers()
+            if not back:
+                raise PnfsEvidenceError(
+                    f"[mds-node-reboot] {node} did not return Ready within "
+                    f"{self.REBOOT_TIMEOUT}s, and it is the only node that "
+                    f"can host the guest. The lab is short a worker.")
 
+        new_pod, new_epoch, took = self.wait_mds_serving(
+            "[mds-node-reboot]", was_pod, epoch)
         self.wait_exports_ready(
             1, timeout=self.TAKEOVER_TIMEOUT,
             what="[mds-node-reboot] the export after the node outage")
-        reasons = self.event_reasons()
-        if EVENT_MDS_PROMOTED not in reasons:
+        unserved = round(time.time() - killed_at, 1)
+
+        if self.standby_mode and new_pod == was_pod:
             raise PnfsEvidenceError(
-                f"[mds-node-reboot] a takeover happened ({epoch} -> "
-                f"{new_epoch}) and no {EVENT_MDS_PROMOTED} event says so. "
-                f"Reasons present: {sorted(set(reasons)) or '(none)'}.")
+                f"[mds-node-reboot] the epoch advanced to {new_epoch} but "
+                f"the serving guest is still {was_pod}, on the node that was "
+                f"rebooted. A promotion back onto the host that just died is "
+                f"not a failover.")
+        if self.standby_mode and EVENT_MDS_PROMOTED not in self.event_reasons():
+            raise PnfsEvidenceError(
+                f"[mds-node-reboot] a promotion happened ({epoch} -> "
+                f"{new_epoch}) and no {EVENT_MDS_PROMOTED} event says so.")
 
         gap = self.assert_client_survived(
             pods[0], marker, "[mds-node-reboot]", self.MAX_CLIENT_GAP)
         self._assert_mount_writable([pods[1]])
 
-        # Now the hard part: the predecessor returns.
-        back = self.k8s_utils.wait_node_condition(
-            node_ip, ready=True, timeout=self.REBOOT_TIMEOUT)
-        self.k8s_utils.uncordon_all_workers()
-        if not back:
-            raise PnfsEvidenceError(
-                f"[mds-node-reboot] {node} did not return Ready within "
-                f"{self.REBOOT_TIMEOUT}s. The takeover assertions passed, "
-                f"but the fencing half of this case cannot be judged and "
-                f"the lab is short a worker.")
+        # The predecessor returns. Already waited for above when it was
+        # the only KVM host.
+        if len(self.kvm_nodes) >= 2:
+            back = self.k8s_utils.wait_node_condition(
+                node_ip, ready=True, timeout=self.REBOOT_TIMEOUT)
+            self.k8s_utils.uncordon_all_workers()
+            if not back:
+                raise PnfsEvidenceError(
+                    f"[mds-node-reboot] {node} did not return Ready within "
+                    f"{self.REBOOT_TIMEOUT}s. Recovery passed, but the "
+                    f"split-brain half cannot be judged and the lab is short "
+                    f"a worker.")
         self.logger.info("[mds-node-reboot] %s is Ready again; the old guest "
                          "can now reappear", node)
-        # Long enough for the returning guest to be scheduled, started and
-        # to have tried whatever it is going to try.
         sleep_n_sec(self.QUIET_SECONDS)
-        self.assert_one_active("[mds-node-reboot]", new_epoch)
+        self.assert_no_split_brain("[mds-node-reboot]", new_epoch)
         self.wait_exports_ready(
             1, timeout=300,
             what="[mds-node-reboot] the export after the node rejoined")
         self._assert_mount_writable(pods)
 
         self.logger.info(
-            "[mds-node-reboot] PASS: %s died with its node, %s took over at "
-            "epoch %s in %ss, clients stalled %ss, and the returning guest "
-            "did not take the role back", active, new_active, new_epoch,
-            took, gap)
+            "[mds-node-reboot] PASS (%s mode): %s died with %s, %s was "
+            "serving %ss later, every pNFS volume was unserved for %ss, "
+            "clients stalled %ss and kept their descriptors, and the "
+            "returning guest did not come back alongside its replacement",
+            "standby" if self.standby_mode else "single-MDS", was_pod, node,
+            new_pod, took, unserved, gap)
 
 
 class PnfsMdsNodeDrainedK8s(_MdsNodeOutageBase):
-    """The active metadata server's node is drained — planned maintenance.
+    """The metadata server's node is drained — planned maintenance.
 
-    The same loss by the opposite route, and the interesting one because
-    it is the route an administrator actually takes. A drain is supposed
-    to be the *safe* way to move work off a node, so two things are worth
+    The same loss by the route an administrator actually takes, and the
+    more interesting of the two because a drain is supposed to be the
+    *safe* way to take a node out of service. Two things are worth
     asserting that the reboot case cannot:
 
-      * **the drain completes.** A drain that hangs is the known shape
-        here: replacing the metadata server has already been measured at
-        93s of cluster-wide stall, 23s of it a guest power-down that can
-        never succeed, and the drain reaches the guest at all only
-        because it is not among the operator's eviction targets. A drain
-        that never returns blocks the node's maintenance window and the
-        administrator has no way to tell whether waiting longer would
-        help.
-      * **the client cost of the planned path is not worse than the
-        unplanned one.** If a graceful drain stalls clients longer than
-        pulling the power does, the graceful path is the one to stop
-        recommending.
+      * **the drain completes.** This is the known sore spot: replacing
+        the metadata server has already been measured at 93s of
+        cluster-wide stall, 23s of it a guest power-down that cannot
+        succeed, and a drain reaches the guest at all only because the
+        operator's eviction targets omit it. A drain that never returns
+        blocks the maintenance window with no way for the administrator
+        to tell whether waiting longer would help, so it is gated as the
+        defect even when the recovery itself worked.
+      * **the planned path is not worse than the unplanned one.** If a
+        graceful drain stalls clients longer than pulling the power
+        does, the graceful path is the one to stop recommending. Both
+        numbers are recorded for comparison against the reboot case.
 
-    Both are recorded with their timings whichever way they go; only the
-    takeover itself and the clients keeping their descriptors are gated.
-    `drain_node` is deliberately never fatal in the harness, so its
-    return value is a finding here rather than an exception.
+    `drain_node` is never fatal in the harness by design, so its return
+    value is a finding here rather than an exception.
     """
 
     CLAIM = "pnfs-mds-nodedrain"
@@ -1539,12 +1670,23 @@ class PnfsMdsNodeDrainedK8s(_MdsNodeOutageBase):
         marker = self.start_writer(pods[0])
         sleep_n_sec(20)
 
-        active, node, epoch = self.active_node("[mds-node-drain]")
+        was_pod, node, epoch = self.mds_host("[mds-node-drain]")
         node_ip = self.k8s_utils.node_internal_ip(node)
-        self.logger.info(
-            "[mds-node-drain] draining %s (%s), which hosts the active guest "
-            "%s at epoch %s", node, node_ip, active, epoch)
+        if len(self.kvm_nodes) < 2:
+            # A cordon on the only KVM host means the guest cannot be
+            # rescheduled anywhere for as long as the cordon stands. That
+            # is a real finding about the topology, not a reason to skip:
+            # it is what an administrator would hit.
+            self.logger.warning(
+                "[mds-node-drain] %s is the only kvm-capable node. Draining "
+                "it cordons the only host the guest can run on, so the "
+                "metadata server cannot come back until the node is "
+                "uncordoned. The drain's own behaviour is still what this "
+                "case is about.", node)
 
+        self.logger.info(
+            "[mds-node-drain] draining %s (%s), which hosts the metadata "
+            "server %s", node, node_ip, was_pod)
         self.undo_stack.append(self.k8s_utils.uncordon_all_workers)
         self.k8s_utils.cordon_node(node_ip, cordon=True)
 
@@ -1555,30 +1697,38 @@ class PnfsMdsNodeDrainedK8s(_MdsNodeOutageBase):
         self.logger.info("[mds-node-drain] drain returned %s after %ss",
                          "cleanly" if clean else "NOT cleanly", drain_s)
 
-        new_active, new_epoch, took = wait_mds_promotion(
-            self.k8s_utils, self.sts_name, epoch,
-            timeout=self.TAKEOVER_TIMEOUT, namespace=self.mds_ns)
+        # The guest must not still be sitting on the drained node. It is
+        # not among the operator's eviction targets, so a drain can report
+        # success and leave it running -- and the administrator's
+        # maintenance then takes down a live metadata server.
+        left = [p for p, host, _ph, _r in mds_pods(
+            self.k8s_utils, self.sts_name, self.mds_ns) if host == node]
+        if left:
+            self.logger.warning(
+                "[mds-node-drain] MDS pod(s) %s are still on the drained "
+                "node %s. The guest is not an eviction target, so a drain "
+                "that reports success can leave it in place.", left, node)
+
+        # Uncordon before waiting for recovery when this is the only host
+        # that can run the guest: otherwise the wait is a wait on the
+        # cordon, which the test placed.
+        if len(self.kvm_nodes) < 2:
+            self.k8s_utils.uncordon_all_workers()
+            self.logger.info(
+                "[mds-node-drain] %s uncordoned before the recovery wait: it "
+                "is the only kvm-capable node, so leaving the cordon on "
+                "would be timing the test's own cordon", node)
+
+        new_pod, new_epoch, took = self.wait_mds_serving(
+            "[mds-node-drain]", was_pod, epoch)
         self.wait_exports_ready(
             1, timeout=self.TAKEOVER_TIMEOUT,
             what="[mds-node-drain] the export after the drain")
-        served_s = round(time.time() - started, 1)
+        unserved = round(time.time() - started, 1)
 
         gap = self.assert_client_survived(
             pods[0], marker, "[mds-node-drain]", self.MAX_CLIENT_GAP)
         self._assert_mount_writable([pods[1]])
-
-        # The guest must not have been left on the drained node. A drain
-        # that reported success while the pod it could not evict is still
-        # there has drained nothing that matters.
-        still = [p for p, host, _ph, _r in mds_pods(
-            self.k8s_utils, self.sts_name, self.mds_ns) if host == node]
-        if still:
-            self.logger.warning(
-                "[mds-node-drain] MDS pod(s) %s are still on the drained "
-                "node %s. The guest is not among the operator's eviction "
-                "targets, so a drain that reports success can leave it in "
-                "place -- and the administrator's maintenance window then "
-                "takes down a running metadata server.", still, node)
 
         self.k8s_utils.uncordon_all_workers()
         self.logger.info("[mds-node-drain] %s uncordoned", node)
@@ -1588,16 +1738,17 @@ class PnfsMdsNodeDrainedK8s(_MdsNodeOutageBase):
         if not clean:
             raise PnfsEvidenceError(
                 f"[mds-node-drain] the drain of {node} did not complete "
-                f"cleanly in {self.DRAIN_MINUTES}m ({drain_s}s elapsed). "
-                f"Draining a node is the documented way to take it out of "
-                f"service; a drain that hangs on the metadata server gives "
-                f"an administrator no way to tell whether waiting longer "
-                f"would help, and the takeover itself worked -- epoch "
-                f"{epoch} -> {new_epoch} on {new_active}, clients stalled "
-                f"{gap}s. The drain is the defect, not the failover.")
+                f"cleanly within {self.DRAIN_MINUTES}m ({drain_s}s elapsed). "
+                f"Draining is the documented way to take a node out of "
+                f"service, and a drain that hangs on the metadata server "
+                f"leaves an administrator no way to tell whether waiting "
+                f"longer would help. The recovery itself worked -- {new_pod} "
+                f"was serving {took}s later, clients stalled {gap}s -- so "
+                f"the drain is the defect, not the failover.")
 
         self.logger.info(
-            "[mds-node-drain] PASS: drain of %s completed in %ss, %s took "
-            "over at epoch %s (%ss to serve from the start of the drain), "
-            "clients stalled %ss and kept their descriptors",
-            node, drain_s, new_active, new_epoch, served_s, gap)
+            "[mds-node-drain] PASS (%s mode): drain of %s completed in %ss, "
+            "%s was serving %ss later, pNFS unserved for %ss from the start "
+            "of the drain, clients stalled %ss and kept their descriptors",
+            "standby" if self.standby_mode else "single-MDS", node, drain_s,
+            new_pod, took, unserved, gap)
