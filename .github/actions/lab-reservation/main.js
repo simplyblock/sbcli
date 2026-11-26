@@ -88,20 +88,34 @@ async function main() {
                  `https://labreservation.simplyblock.ai/api/v1/reservations/${stale.id}`)
           }
         }
-        // And then wait for the cluster to actually come free. The DELETE
-        // above is accepted, not done: the teardown playbook runs in the
-        // background and the service holds the cluster for the whole of it,
-        // so booking straight afterwards books against ourselves. Both k3s
-        // attempts on 2026-11-18 died here, reporting the lab as "held by
-        // raunak@simplyblock.io until ..." with the expiry of the booking
-        // this action had released a quarter of a second earlier.
-        await waitCleared(one, Number(input('ready-timeout') || '900'))
+        // The DELETE above is accepted, not done: the teardown playbook runs
+        // in the background and the service holds the cluster for the whole
+        // of it, so booking straight afterwards books against ourselves. Both
+        // k3s attempts on 2026-11-18 died that way, reporting the lab as
+        // "held by raunak@simplyblock.io until ..." with the expiry of the
+        // booking this action had released a quarter of a second earlier. The
+        // wait for that is on the booking path below, which is reached whether
+        // or not we were the ones who released.
         res = null
       }
       if (res) {
         log(`${res.cluster} is already reserved to this account as ${res.id} ` +
             `(expires ${res.expires_at}); using it rather than booking again`)
       } else {
+        // Before booking, not only after releasing. `existing()` answers "can
+        // we reuse what we hold" and so excludes `ending` on purpose, which
+        // means a booking still tearing down is invisible here -- and that is
+        // exactly the booking that holds the cluster. Gating this wait on
+        // `existing()` returning a row skipped it in the one case it was added
+        // for: run 45795612219 released its own stuck booking at 10:05:10 and
+        // the rerun five minutes later reported `baremetal is held by
+        // raunak@simplyblock.io until 2026-11-27T09:50:09Z` -- the expiry of
+        // the booking it had just released. `liveAll()` sees `ending`, and a
+        // cluster with nothing live returns immediately, so this is a no-op on
+        // the normal path and a no-op when a colleague holds the lab (GET
+        // /reservations is ours only, so that case still falls through to the
+        // 409 it should).
+        await waitCleared(one, Number(input('ready-timeout') || '900'))
         res = await reserve({
           cluster: one,
           kind,
@@ -139,6 +153,13 @@ async function main() {
     }
     if (created.length) {
       log(`released ${created.length} booking(s) this job had already taken`)
+      // And forget them, so the post step does not go looking for an id this
+      // block has already released. It cannot tell a 404 from a booking
+      // someone else took away, so it reported run 45795612219's own cleanup
+      // as `Expired, or released by a concurrent run?` -- which reads like the
+      // lab was stolen mid-run and sent triage after a second run that did not
+      // exist.
+      saveState('reservation', '')
     }
     throw err
   }
