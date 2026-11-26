@@ -140,6 +140,12 @@ from e2e_tests.objectstore.test_objectstore_resilience import (
     S3OperatorRestartK8s,
     S3RBACFullCycleK8s,
 )
+from e2e_tests.pnfs.test_pnfs_failure import (
+    PnfsCsiKilledMidOperationK8s,
+    PnfsGuestCrashInPlaceK8s,
+    PnfsProvisioningChurnK8s,
+    PnfsUnalignedDirectIoReportK8s,
+)
 from e2e_tests.pnfs.test_pnfs_mds_standby import (
     PnfsMdsActiveDeletedK8s,
     PnfsMdsDefaultTopologyK8s,
@@ -1686,6 +1692,28 @@ def get_pnfs_mds_tests():
         PnfsMdsStandbyScaleK8s,                 # E-04  1 -> 0 -> 1
         PnfsMdsNoStandbyRecoversK8s,            # E-03  standbys=0
         PnfsMdsStandbyMissingK8s,               # E-02  nowhere to put one
+    ]
+
+
+def get_pnfs_failure_tests():
+    """Track E -- failure injection and churn, the `F-`/`L-` rows of
+    test-plan-pnfs-rwx that this lab can reach.
+
+    Pod-level and client-level faults only. The rows that need a client
+    node actually down, a network partition, a pre-6.11 kernel or RHCOS
+    5.14 clients are listed in the module docstring with the reason, not
+    written as cases that would fail for the lab rather than the product.
+
+    Ordered cheapest-blast-radius first: the churn and the reporting
+    cases touch only their own claims, F-05 restarts the CSI plugins, and
+    F-15 crashes the metadata server guest, so a failure part-way leaves
+    progressively less behind in that order reversed.
+    """
+    return [
+        PnfsUnalignedDirectIoReportK8s,   # F-22  client-side only
+        PnfsProvisioningChurnK8s,         # L-05  its own claims
+        PnfsCsiKilledMidOperationK8s,     # F-05  restarts the CSI plugins
+        PnfsGuestCrashInPlaceK8s,         # F-15  crashes the guest
     ]
 
 

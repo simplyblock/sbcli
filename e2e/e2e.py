@@ -32,6 +32,7 @@ from __init__ import (
     get_migration_tests,
     get_objectstore_tests,
     get_parity_tests,
+    get_pnfs_failure_tests,
     get_pnfs_mds_tests,
     get_pnfs_security_tests,
     get_pnfs_tests,
@@ -239,6 +240,7 @@ def main():
         # feature and the disturbance.
         "pnfs-mds": get_pnfs_mds_tests,
         "pnfs-security": get_pnfs_security_tests,
+        "pnfs-failure": get_pnfs_failure_tests,
         # ObjectStore / S3Bucket. k8s only and gated the same way pnfs is:
         # every bucket is a pNFS volume, so a cluster with no metadata
         # server cannot serve one and the group refuses rather than timing
