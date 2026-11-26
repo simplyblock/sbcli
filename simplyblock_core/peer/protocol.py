@@ -304,6 +304,10 @@ class FinishRequest(BaseModel):
     chained_on: list[str] = Field(default_factory=list)
     converted_on: list[str] = Field(default_factory=list)
     merged: bool = False
+    #: The delta landed merge-free (SPDK ``cow_landing``: partly covered
+    #: clusters were copied from the base on their first write); there is
+    #: nothing to merge, and no merge record a target restart could lose.
+    cow_landing: bool = False
     #: Which field of the copy names the source snapshot: ``source`` for a
     #: forward copy, ``target`` for a fail-back, ``none`` for an instance copy
     #: (no links, no chain back-link).
@@ -323,6 +327,10 @@ class FinishResponse(BaseModel):
     chained_on: list[str] = Field(default_factory=list)
     converted_on: list[str] = Field(default_factory=list)
     merged: bool = False
+    #: With ``retry``: the merge job with the base failed (``merge_rc``); the
+    #: source backs off before the next finish instead of relaunching it at once.
+    merge_failed: bool = False
+    merge_rc: int | None = None
     copy_id: str = ""
     record: dict = Field(default_factory=dict)
 

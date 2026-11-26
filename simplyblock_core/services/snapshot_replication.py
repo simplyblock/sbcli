@@ -2304,9 +2304,23 @@ def _merge_backoff(fails):
                constants.REPL_MERGE_RETRY_MAX_SEC)
 
 
-def _merge_failed(task, remote_lv, remote_snode, st):
-    """Record a failed landing merge: back off before the relaunch, and raise a
-    REPLICATION_STALLED event once it keeps failing (rate-limited)."""
+def _merge_backing_off(task, now=None):
+    """True while the finish waits out the back-off after a failed merge of the
+    landing volume with its base (_merge_failed): no relaunch before then."""
+    return (time.time() if now is None else now) < (task.function_params.get("merge_retry_at") or 0)
+
+
+def _merge_done(task, landing_id):
+    """Record the landing volume as merged with its base, and end any back-off."""
+    task.function_params["merged_landing"] = landing_id
+    for key in ("merge_fails", "merge_retry_at", "merge_alerted_at"):
+        task.function_params.pop(key, None)
+
+
+def _merge_failed(task, remote_lv, node_id, st):
+    """Record a failed landing merge on the destination member *node_id*: back
+    off before the next finish relaunches it, and raise a REPLICATION_STALLED
+    event once it keeps failing (rate-limited)."""
     params = task.function_params
     now = time.time()
     fails = int(params.get("merge_fails") or 0) + 1
@@ -2314,7 +2328,7 @@ def _merge_failed(task, remote_lv, remote_snode, st):
     params["merge_fails"] = fails
     params["merge_retry_at"] = now + wait
     logger.error("Replication task %s: merge of %s with its base failed on %s (%d in a row, "
-                 "retry in %.0fs): %s", task.uuid, remote_lv.top_bdev, remote_snode.get_id(),
+                 "retry in %.0fs): %s", task.uuid, remote_lv.top_bdev, node_id,
                  fails, wait, st)
     xfer_timing.stamp("landing_merge_failed", lvol=remote_lv.get_id(), rc=st.get("rc"),
                       fails=fails, retry_in=round(wait))
@@ -2326,7 +2340,7 @@ def _merge_failed(task, remote_lv, remote_snode, st):
         except Exception:                                 # noqa: BLE001
             src = remote_lv
         try:
-            lvol_events.replication_merge_failing(src, remote_snode.get_id(), st.get("rc"), fails, wait)
+            lvol_events.replication_merge_failing(src, node_id, st.get("rc"), fails, wait)
         except Exception as e:                            # noqa: BLE001
             logger.error("Replication task %s: could not log the stalled-merge event: %s",
                          task.uuid, e)
@@ -2363,6 +2377,14 @@ def process_snap_replicate_finish(task, snapshot):
     # predecessor by volume and age (snap_ref_id is never populated on internal
     # snapshots: chain_attempts=0 in every run of labs 2026-08-10..14); the
     # destination refuses to finish when that copy cannot be used.
+    # Backing off after a failed merge of the landing volume with its base
+    # (_merge_failed): no relaunch before merge_retry_at.
+    if _merge_backing_off(task):
+        _close_hub(task, snapshot, sent_to)
+        task.function_params["pending_why"] = ("backing off after a failed merge of the "
+                                               "landing volume with its base")
+        return FINISH_PENDING
+
     predecessor_id = _predecessor_copy_id(snapshot, replicate_to_source)
     chained = _prechained_nodes_for(task, landing_id)
     answer = _task_peer(task, snapshot).finish(FinishRequest(
@@ -2378,6 +2400,7 @@ def process_snap_replicate_finish(task, snapshot):
         chained_on=chained,
         converted_on=list(task.function_params.get("converted_nodes") or []),
         merged=task.function_params.get("merged_landing") == landing_id,
+        cow_landing=task.function_params.get("cow_landing") == landing_id,
         link="none" if as_instance else ("target" if replicate_to_source else "source")))
 
     # What the destination did, so a later pass skips it (add_clone and
@@ -2385,7 +2408,10 @@ def process_snap_replicate_finish(task, snapshot):
     task.function_params["converted_nodes"] = answer.converted_on
     task.function_params["prechained_node_ids"] = answer.chained_on
     if answer.merged:
-        task.function_params["merged_landing"] = landing_id
+        _merge_done(task, landing_id)
+    elif answer.merge_failed:
+        _merge_failed(task, _landing_of(task), answer.leader_node_id,
+                      {"state": "failed", "rc": answer.merge_rc})
     task.write_to_db()
 
     if answer.state == "pending" and answer.waiting_for_leader:

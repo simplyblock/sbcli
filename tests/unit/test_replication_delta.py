@@ -363,27 +363,6 @@ class TestLandingMerge(unittest.TestCase):
                                 side_effect=RPCRemoteError("No such device", -19))
         self.assertEqual(res, "retry")
 
-    def test_a_failed_merge_backs_off_before_the_relaunch(self):
-        # bf18 2026-11-09: a merge failing with -12 within 5 ms was relaunched
-        # every pass, 1883 times in 37 min, without any event.
-        res, rpc, task = self._merge({"partial_base": 7}, start={"state": "failed", "rc": -12},
-                                     stats=[self.NONE])
-        self.assertEqual(res, "retry")
-        p = task.function_params
-        self.assertEqual(p["merge_fails"], 1)
-        self.assertGreater(p["merge_retry_at"], time.time())
-        # within the back-off the failed job is not relaunched
-        res, rpc, _ = self._merge(p, stats=[{"state": "failed", "rc": -12}])
-        self.assertEqual(res, "pending")
-        rpc.bdev_lvol_merge_base.assert_not_called()
-        # after it, it is
-        p["merge_retry_at"] = time.time() - 1
-        res, rpc, _ = self._merge(p, start={"state": "failed", "rc": -12},
-                                  stats=[{"state": "failed", "rc": -12}])
-        self.assertEqual(res, "retry")
-        rpc.bdev_lvol_merge_base.assert_called_once()
-        self.assertEqual(p["merge_fails"], 2)
-
     def test_the_backoff_doubles_up_to_its_cap(self):
         b = snapshot_replication._merge_backoff
         c = snapshot_replication.constants
@@ -391,28 +370,68 @@ class TestLandingMerge(unittest.TestCase):
         self.assertEqual(b(2), 2 * c.REPL_MERGE_RETRY_MIN_SEC)
         self.assertEqual(b(30), c.REPL_MERGE_RETRY_MAX_SEC)
 
+
+
+class TestMergeBackOff(unittest.TestCase):
+    """A failed merge job on the destination is answered as such (merge_failed);
+    the source backs off before the next finish relaunches it, and raises one
+    REPLICATION_STALLED event once it keeps failing. bf18 2026-11-09: a merge
+    failing with -12 within 5 ms was relaunched every pass, 1883 times in
+    37 min, without any event."""
+
+    LANDING = SimpleNamespace(get_id=lambda: "landing", top_bdev="LVS/LAND")
+
+    def _task(self, **params):
+        return SimpleNamespace(uuid="t1", write_to_db=MagicMock(),
+                               function_params={"snapshot_id": "s1", **params})
+
+    def test_a_failed_merge_backs_off_before_the_relaunch(self):
+        task = self._task()
+        sr = snapshot_replication
+        sr._merge_failed(task, self.LANDING, "n1", {"state": "failed", "rc": -12})
+        p = task.function_params
+        self.assertEqual(p["merge_fails"], 1)
+        self.assertGreater(p["merge_retry_at"], time.time())
+        # within the back-off the finish is not asked again
+        self.assertTrue(sr._merge_backing_off(task))
+        # after it, it is
+        p["merge_retry_at"] = time.time() - 1
+        self.assertFalse(sr._merge_backing_off(task))
+        sr._merge_failed(task, self.LANDING, "n1", {"state": "failed", "rc": -12})
+        self.assertEqual(p["merge_fails"], 2)
+
+    def test_the_destination_reports_a_failed_merge_job(self):
+        node = MagicMock()
+        node.get_id.return_value = "n1"
+        rpc = node.rpc_client.return_value
+        rpc.bdev_lvol_merge_base_stat.side_effect = [{"state": "none", "rc": 0}]
+        rpc.bdev_lvol_merge_base.return_value = {"state": "failed", "rc": -12}
+        status: dict = {}
+        with patch.object(peer_service, "_replication_class_on", return_value=False):
+            self.assertEqual(peer_service._merge_landing(self.LANDING, node, status), "retry")
+        self.assertEqual(status, {"state": "failed", "rc": -12})
+
     def test_a_merge_that_keeps_failing_raises_one_event(self):
-        p = {"partial_base": 7, "snapshot_id": "s1",
-             "merge_fails": snapshot_replication.constants.REPL_MERGE_FAIL_ALERT - 1}
-        with patch.object(snapshot_replication, "lvol_events") as ev,                 patch.object(snapshot_replication, "db") as db:
-            res, _, task = self._merge(p, start={"state": "failed", "rc": -12}, stats=[self.NONE])
-            self.assertEqual(res, "retry")
+        task = self._task(merge_fails=snapshot_replication.constants.REPL_MERGE_FAIL_ALERT - 1)
+        with patch.object(snapshot_replication, "lvol_events") as ev, \
+                patch.object(snapshot_replication, "db") as db:
+            snapshot_replication._merge_failed(task, self.LANDING, "n1",
+                                               {"state": "failed", "rc": -12})
             ev.replication_merge_failing.assert_called_once()
             self.assertIs(ev.replication_merge_failing.call_args.args[0],
                           db.get_snapshot_by_id.return_value.lvol)
             # rate-limited: the next failure inside the window raises none
             task.function_params["merge_retry_at"] = 0
-            self._merge(task.function_params, start={"state": "failed", "rc": -12},
-                        stats=[{"state": "failed", "rc": -12}])
+            snapshot_replication._merge_failed(task, self.LANDING, "n1",
+                                               {"state": "failed", "rc": -12})
             ev.replication_merge_failing.assert_called_once()
 
     def test_a_done_merge_clears_the_backoff(self):
-        p = {"partial_base": 7, "merge_fails": 4, "merge_retry_at": 0, "merge_alerted_at": 1}
-        res, _, task = self._merge(p, stats=[{"state": "done", "rc": 0}])
-        self.assertEqual(res, "ok")
+        task = self._task(merge_fails=4, merge_retry_at=0, merge_alerted_at=1)
+        snapshot_replication._merge_done(task, "landing")
+        self.assertEqual(task.function_params["merged_landing"], "landing")
         for k in ("merge_fails", "merge_retry_at", "merge_alerted_at"):
             self.assertNotIn(k, task.function_params)
-
 
 
 class TestMergeHandOff(unittest.TestCase):

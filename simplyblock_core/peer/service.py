@@ -878,28 +878,34 @@ def finish_landing(db, request: FinishRequest) -> FinishResponse:
         return answer
     # A delta landed only its own blocks in pre-allocated clusters: fill the
     # rest from the base before the convert makes the volume a snapshot.
-    if leader.get_id() not in answer.converted_on and not answer.merged and request.partial_base:
-        merge = _merge_landing(landing, leader)
+    # Not after a merge-free landing (cow_landing): nothing to merge then.
+    if (leader.get_id() not in answer.converted_on and not answer.merged
+            and request.partial_base and not request.cow_landing):
+        st: dict = {}
+        merge = _merge_landing(landing, leader, st)
         if merge in ("pending", "retry", "restart"):
             answer.state = merge
             answer.reason = {"pending": "landing volume merging with its base",
                              "retry": "the merge with the base failed",
                              "restart": f"landing volume {landing.top_bdev} lost the record of "
                                         f"its delta; it has to be transferred again"}[merge]
+            if merge == "retry" and st.get("state") == "failed":
+                answer.merge_failed, answer.merge_rc = True, st.get("rc")
             return answer
         answer.merged = True
     if not _convert_on(answer, landing, leader, "primary", required=True):
         return answer
 
-    # The secondary; a single-node cluster's node has none.
-    secondary = (db.get_storage_node_by_id(leader.secondary_node_id)
-                 if leader.secondary_node_id else None)
-    if secondary is not None and secondary.status == StorageNode.STATUS_ONLINE:
-        if not _finish_on(answer, landing, secondary, predecessor, request, "secondary",
-                          required=False):
-            return answer
-        if not _convert_on(answer, landing, secondary, "secondary", required=False):
-            return answer
+    # The other members: the secondary AND the tertiary, whenever they can be
+    # reached, whatever their DB status (replica_chain). Each keeps its own
+    # in-memory snapshot tree and learns of the change only from these calls;
+    # one that misses them acts on a stale tree once it leads (bf23
+    # 2026-11-12, LVS_16: a tertiary that never saw a clone link deleted the
+    # parent's data). An unreachable member, or one without the base, is
+    # skipped and owes the change, replayed once it answers with the bdev; a
+    # member that answers with an error fails the finish (it retries).
+    if not _finish_on_replicas(db, answer, landing, leader, predecessor, request):
+        return answer
 
     # The landing volume is a snapshot now and will back fail-over and
     # test-failover clones: drop the replication class from it.
@@ -952,6 +958,55 @@ def _finish_on(answer, landing, node, predecessor, request, role, required):
     return False
 
 
+def _finish_on_replicas(db, answer, landing, leader, predecessor, request):
+    """Chain and convert the landing volume on every other member of the
+    leader's lvstore (see finish_landing). False fails the finish."""
+    from simplyblock_core.controllers import replica_chain
+    from simplyblock_core.models.replica_chain_pending import ReplicaChainPending
+
+    for role, member in replica_chain.lvstore_replicas(leader, db=db):
+        if member.get_id() in answer.converted_on:
+            logger.info("Landing volume %s is already converted on %s; skipping its chain "
+                        "and convert", landing.top_bdev, member.get_id())
+            continue
+        if predecessor is not None and member.get_id() not in answer.chained_on:
+            if _reads_through(member, landing.top_bdev, predecessor.snap_bdev):
+                answer.chained_on.append(member.get_id())
+            elif _lacks_bdev(member, predecessor.snap_bdev):
+                logger.warning("%s %s does not hold %s; the chain is owed there", role,
+                               member.get_id(), predecessor.snap_bdev)
+                replica_chain.record_pending(
+                    member, role, ReplicaChainPending.OP_ADD_CLONE, landing.top_bdev,
+                    predecessor.snap_bdev, reason=ReplicaChainPending.REASON_ABSENT,
+                    owner=leader, db=db)
+            else:
+                logger.info("Chaining replicated lvol %s to snap %s on %s (%s)",
+                            landing.top_bdev, predecessor.snap_bdev, member.get_id(), role)
+                with xfer_timing.phase("chain_add_clone", snap=request.snapshot.snapshot_id,
+                                       lvol=landing.get_id(), node=role):
+                    outcome, err = replica_chain.add_clone_on(
+                        member, role, landing.top_bdev, predecessor.snap_bdev,
+                        owner=leader, db=db)
+                if outcome == replica_chain.FAILED:
+                    answer.reason = (f"failed to chain the replicated snapshot on the {role} "
+                                     f"{member.get_id()}: {err}")
+                    logger.error(answer.reason)
+                    return False
+                if outcome == replica_chain.DONE:
+                    answer.chained_on.append(member.get_id())
+        with xfer_timing.phase("chain_convert", lvol=landing.get_id(), node=role):
+            outcome, err = replica_chain.convert_on(member, role, landing.top_bdev,
+                                                    owner=leader, db=db)
+        if outcome == replica_chain.FAILED:
+            answer.reason = f"failed to convert to snapshot on the {role} {member.get_id()}: {err}"
+            logger.error(answer.reason)
+            return False
+        if outcome == replica_chain.DONE:
+            # a skipped member (unreachable) is tried again by a later pass
+            answer.converted_on.append(member.get_id())
+    return True
+
+
 def _convert_on(answer, landing, node, role, required):
     """Convert the landing volume into a snapshot on *node*, unless an earlier
     pass did. False fails the finish."""
@@ -975,7 +1030,7 @@ def _convert_on(answer, landing, node, role, required):
     return True
 
 
-def _merge_landing(landing, leader):
+def _merge_landing(landing, leader, status=None):
     """Fill the landing volume from its base after a delta transfer.
 
     The destination pre-allocates every cluster the delta touches and receives
@@ -984,7 +1039,10 @@ def _merge_landing(landing, leader):
     a job on the target (minutes for a large delta): started idempotently,
     waited for briefly, then on later passes. Returns "ok", "pending", "retry"
     (a failed job is started again) or "restart" (the target lost the record
-    of what arrived: transfer again into a fresh landing volume).
+    of what arrived: transfer again into a fresh landing volume). *status*,
+    when given, receives the merge job's last status (its ``state`` is
+    ``failed`` when the job itself failed: the source then backs off before
+    the next attempt).
     """
     rpc = leader.rpc_client()
     try:
@@ -1008,6 +1066,8 @@ def _merge_landing(landing, leader):
         logger.error("Merge of %s with its base on %s: %s", landing.top_bdev, leader.get_id(), e)
         return "retry"
     st = st or {}
+    if status is not None:
+        status.update(st)
     if st.get("state") == "running":
         return "pending"
     if st.get("state") == "done":
@@ -1103,6 +1163,7 @@ def _retire_landing(db, landing):
                          "anyway (its bdev lives on as the converted snapshot)",
                          landing.get_id(), node_id[:8], e)
     landing.remove(db.kv_store)
+    db.delete_lvol_stats(landing)
 
 
 def _reset_service_class(db, node_ids, bdev):
