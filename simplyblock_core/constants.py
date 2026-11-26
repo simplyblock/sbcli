@@ -1093,6 +1093,13 @@ REPL_CUTOVER_EARLY_PREPARE = False
 
 SPDK_PROXY_MULTI_THREADING_ENABLED=True
 SPDK_PROXY_TIMEOUT=60*5
+# How long a restart waits, after starting SPDK, for its RPC endpoint to answer.
+# On Kubernetes under TLS the endpoint is <worker>.<spdk-proxy service>, a name
+# the operator publishes only once the new SPDK pod serves an address (and DNS
+# may cache the miss for up to 30 s): a fixed 5 s pause was not enough, and the
+# failed lookup aborted the restart and deleted the pod again (bf36 R3b,
+# 2026-11-26: 10 attempts in 75 min, the node never came back).
+SPDK_RPC_READY_WAIT_SEC = 180
 LVOL_NVME_CONNECT_RECONNECT_DELAY=2
 LVOL_NVME_CONNECT_CTRL_LOSS_TMO=60*60
 LVOL_NVME_CONNECT_FAST_IO_FAIL_TO=8

@@ -94,6 +94,7 @@ from simplyblock_core.rpc_client import (
     JC_REMOVE_JM_NOT_USED,
     JC_REMOVE_JM_STILL_IN_USE,
     RPC_UNSUPPORTED,
+    RPCConnectionError,
     RPCErrorCode,
     RPCException,
     RPCRemoteError,
@@ -918,6 +919,31 @@ _restart_worker_sem = threading.BoundedSemaphore(constants.RESTART_WORKER_MAX_CO
 #: coordinators wait only on leaves, leaves wait on nothing.
 _restart_coordinator_sem = threading.BoundedSemaphore(
     constants.RESTART_COORDINATOR_MAX_CONCURRENCY)
+
+
+def _wait_spdk_rpc_ready(snode, timeout=None, poll=2.0):
+    """Wait until *snode*'s SPDK answers RPC at all; ``(True, None)`` once it
+    does, ``(False, last_error)`` after *timeout* seconds
+    (constants.SPDK_RPC_READY_WAIT_SEC).
+
+    Only "could not reach it" keeps waiting -- including a name that does not
+    resolve yet, which a just-started SPDK pod's spdk-proxy DNS name does until
+    the operator publishes it. Any answer, an error reply included, means the
+    endpoint is there."""
+    timeout = constants.SPDK_RPC_READY_WAIT_SEC if timeout is None else timeout
+    deadline = time.time() + timeout
+    client = snode.rpc_client(timeout=5, retry=1)
+    while True:
+        try:
+            client.get_version()
+            return True, None
+        except RPCConnectionError as e:
+            last = e
+        except RPCException:
+            return True, None
+        if time.time() >= deadline:
+            return False, last
+        time.sleep(poll)
 
 
 def _evict_node_rpc_sessions(snode):
@@ -9986,6 +10012,14 @@ def _restart_storage_node_impl(
     # eaten the FIN that would let urllib3 notice (SFAM-2834).
     _evict_node_rpc_sessions(snode)
     time.sleep(5)
+    # The first RPC below must not be the one that finds out whether the new
+    # SPDK can be reached: on Kubernetes its DNS name appears only once the
+    # operator publishes the new pod (SPDK_RPC_READY_WAIT_SEC).
+    reachable, rpc_err = _wait_spdk_rpc_ready(snode)
+    if not reachable:
+        logger.error(f"SPDK of {snode.get_id()} did not answer RPC within "
+                     f"{constants.SPDK_RPC_READY_WAIT_SEC}s after its start: {rpc_err}")
+        return False
 
     if small_bufsize:
         snode.iobuf_small_bufsize = small_bufsize
