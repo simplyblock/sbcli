@@ -140,6 +140,18 @@ from e2e_tests.objectstore.test_objectstore_resilience import (
     S3OperatorRestartK8s,
     S3RBACFullCycleK8s,
 )
+from e2e_tests.pnfs.test_pnfs_mds_standby import (
+    PnfsMdsActiveDeletedK8s,
+    PnfsMdsDefaultTopologyK8s,
+    PnfsMdsExportGrownBeforeTakeoverK8s,
+    PnfsMdsLockAcrossTakeoverK8s,
+    PnfsMdsManyExportsTakeoverK8s,
+    PnfsMdsNoStandbyRecoversK8s,
+    PnfsMdsOperatorRestartNoTakeoverK8s,
+    PnfsMdsSecondTakeoverK8s,
+    PnfsMdsStandbyMissingK8s,
+    PnfsMdsStandbyScaleK8s,
+)
 from e2e_tests.pnfs.test_pnfs_rwx import (
     PnfsByteRangeLockK8s,
     PnfsClaimCeilingK8s,
@@ -157,6 +169,14 @@ from e2e_tests.pnfs.test_pnfs_rwx import (
     PnfsSharedWriteVerifyK8s,
     PnfsSnapshotRestoreK8s,
     PnfsTwoNamespacesK8s,
+)
+from e2e_tests.pnfs.test_pnfs_security import (
+    PnfsExportAllowListK8s,
+    PnfsGuestFencingPreemptsOldEpochK8s,
+    PnfsGuestHoldsNoCredentialsK8s,
+    PnfsPodCidrDirectMountK8s,
+    PnfsRootSquashK8s,
+    PnfsUnauthorizedNqnRefusedK8s,
 )
 from e2e_tests.reboot_on_another_node_fio_run import TestRestartNodeOnAnotherHost
 from e2e_tests.replication.test_replication_consistency import (
@@ -1633,6 +1653,60 @@ def get_pnfs_tests():
         # Last, and alone: it takes the metadata server away from the
         # whole cluster for the length of the case.
         PnfsNoMetadataServerK8s,     # B-16  negative
+    ]
+
+
+def get_pnfs_mds_tests():
+    """Track C -- the warm-standby metadata server, test-plan-pnfs-mds-standby.
+
+    Its own group, not folded into ``pnfs``. Every case here deliberately
+    destroys the active metadata server, and several change
+    ``spec.pnfs.mds.standbys`` on the driver. Running them inside the Track B
+    group would mean every ``--testname pnfs`` run paid for a dozen
+    takeovers, and a Track B failure after one of these would be ambiguous
+    between the feature and the disturbance.
+
+    Ordered as a gate. E-01 proves the topology is an active plus a standby
+    on separate nodes; if it is not, every F- case below it is measuring
+    something else, so it runs first and the rest read as consequences.
+    The two that change the standby count run last, after the cases that
+    need the default shape, and each restores it from teardown.
+    """
+    return [
+        PnfsMdsDefaultTopologyK8s,              # E-01  the gate
+        PnfsMdsActiveDeletedK8s,                # F-01  the headline takeover
+        PnfsMdsLockAcrossTakeoverK8s,           # F-12  locks survive it
+        PnfsMdsExportGrownBeforeTakeoverK8s,    # F-19  resize races it
+        PnfsMdsManyExportsTakeoverK8s,          # F-10  it scales
+        PnfsMdsSecondTakeoverK8s,               # F-09  twice, inside grace
+        PnfsMdsOperatorRestartNoTakeoverK8s,    # F-06  and it is not spurious
+        # Last: these change spec.pnfs.mds.standbys. Each restores it, but
+        # a case that failed between the patch and the undo leaves the
+        # cluster in a shape the cases above would silently pass in.
+        PnfsMdsStandbyScaleK8s,                 # E-04  1 -> 0 -> 1
+        PnfsMdsNoStandbyRecoversK8s,            # E-03  standbys=0
+        PnfsMdsStandbyMissingK8s,               # E-02  nowhere to put one
+    ]
+
+
+def get_pnfs_security_tests():
+    """Track D -- pNFS security, the ``SEC-`` rows of test-plan-pnfs-rwx.
+
+    The plan's §7 says "No security suite exists for pNFS"; this is it.
+    Separate from ``pnfs`` because these assert mechanism rather than
+    behaviour -- registrant lists, uids, refusals -- and because SEC-01
+    drives a takeover, which Track B assumes does not happen under it.
+
+    Read-only cases first, so a cluster that fails them fails before
+    anything has been disturbed.
+    """
+    return [
+        PnfsGuestHoldsNoCredentialsK8s,     # SEC-08  read-only
+        PnfsRootSquashK8s,                  # SEC-03  tenancy
+        PnfsExportAllowListK8s,             # SEC-05  gated on design §15
+        PnfsPodCidrDirectMountK8s,          # SEC-07  the known exposure
+        PnfsUnauthorizedNqnRefusedK8s,      # SEC-04  the layer underneath
+        PnfsGuestFencingPreemptsOldEpochK8s,  # SEC-01  drives a takeover
     ]
 
 

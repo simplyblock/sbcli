@@ -32,6 +32,8 @@ from __init__ import (
     get_migration_tests,
     get_objectstore_tests,
     get_parity_tests,
+    get_pnfs_mds_tests,
+    get_pnfs_security_tests,
     get_pnfs_tests,
     get_replication_load_tests,
     get_replication_stress_tests,
@@ -229,6 +231,14 @@ def main():
         # plain NFS. Runs on the existing k8s-native-e2e lane with
         # testname=pnfs; no new workflow.
         "pnfs": get_pnfs_tests,
+        # Track C and Track D. Their own keys, not folded into
+        # "pnfs": the MDS group destroys the active metadata server
+        # a dozen times and patches spec.pnfs.mds.standbys, and the
+        # security group drives a takeover of its own, so a Track B
+        # failure underneath either would be ambiguous between the
+        # feature and the disturbance.
+        "pnfs-mds": get_pnfs_mds_tests,
+        "pnfs-security": get_pnfs_security_tests,
         # ObjectStore / S3Bucket. k8s only and gated the same way pnfs is:
         # every bucket is a pNFS volume, so a cluster with no metadata
         # server cannot serve one and the group refuses rather than timing

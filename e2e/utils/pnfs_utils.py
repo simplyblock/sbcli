@@ -530,3 +530,194 @@ def nvme_resv_report(k8s, node_ip, device):
             except ValueError:
                 continue
     return {}
+
+
+# ── the warm-standby metadata server ────────────────────────────────────
+#
+# Mirrored from the operator rather than imported, as e2e/AGENTS.md
+# requires: the harness and the cluster run independently selected
+# versions, and an import would bind an assertion to the runner's copy.
+#
+#   annotations    atlas-lib/kube/names.go, AnnoMDS* (287-296)
+#   event reasons  operator/internal/controllers/pnfs, Reason* and the
+#                  Events.Driver/Events.Exports calls
+#
+# These must move together with their definitions there. A reviewer
+# renaming one can grep for the counterpart.
+ANNO_MDS_ACTIVE = "storage.simplyblock.io/mds-active"
+ANNO_MDS_ACTIVE_INSTANCE = "storage.simplyblock.io/mds-active-instance"
+ANNO_MDS_EPOCH = "storage.simplyblock.io/mds-epoch"
+ANNO_MDS_STATE_VOLUME = "storage.simplyblock.io/mds-state-volume"
+ANNO_MDS_HOST_ORDINALS = "storage.simplyblock.io/mds-host-ordinals"
+
+EVENT_MDS_PROMOTED = "MDSPromoted"
+EVENT_MDS_FENCE_FAILED = "MDSFenceFailed"
+EVENT_MDS_STANDBY_MISSING = "MDSStandbyMissing"
+EVENT_MDS_HOST_NOT_ALLOWED = "MDSHostNotAllowed"
+EVENT_MDS_SCALE_HELD = "MDSScaleHeld"
+EVENT_MDS_PROMOTION_CONFLICT = "MDSPromotionConflict"
+
+#: design-pnfs-mds-standby.md §5: the pods' terminationGracePeriodSeconds is
+#: 45, covering the runner's drain and the guest's power down. A takeover
+#: that is waited on for less than this is being timed against the grace
+#: period rather than against the product.
+MDS_TERMINATION_GRACE = 45
+
+
+def mds_statefulset(k8s, namespace=None):
+    """The MDS StatefulSet, or ``{}``.
+
+    There is one per storage cluster and no CR of its own: the design puts
+    the active record on the StatefulSet precisely because no such kind
+    exists (§5.2). It is found by name rather than by label because the
+    label set is the generic workload one the mds-proxy DaemonSet also
+    carries, and matching that returns both.
+    """
+    ns = namespace or k8s.namespace
+    out, _err = k8s._exec_kubectl(
+        f"kubectl get statefulset -n {ns} "
+        f"-o custom-columns=NAME:.metadata.name --no-headers "
+        f"2>/dev/null || true", supress_logs=True)
+    names = [ln.strip() for ln in (out or "").splitlines()
+             if ln.strip() and "pnfs-mds" in ln]
+    if not names:
+        return {}
+    return k8s.get_resource_json("statefulset", min(names), ns)
+
+
+def mds_record(sts):
+    """``(active_instance, epoch)`` from the StatefulSet's annotations.
+
+    ``epoch`` is an int, or 0 when never promoted: the design says the
+    first promotion writes 1, so 0 is "no guest has ever been active",
+    which is a different thing from a missing annotation and is what a
+    freshly created StatefulSet reads as.
+    """
+    anno = ((sts.get("metadata") or {}).get("annotations") or {})
+    active = (anno.get(ANNO_MDS_ACTIVE_INSTANCE)
+              or anno.get(ANNO_MDS_ACTIVE) or "")
+    try:
+        epoch = int(anno.get(ANNO_MDS_EPOCH) or 0)
+    except ValueError:
+        epoch = 0
+    return active, epoch
+
+
+def mds_pods(k8s, sts_name=None, namespace=None):
+    """``[(name, node, phase, ready)]`` for the MDS guests, ordinal order.
+
+    Ready is the agent's health probe, which design-pnfs-mds-standby.md
+    §5.5 defines as SERVING for a booted standby and, once active, the
+    state volume mounted and nfsd threads running as well. So a Ready pod
+    is not necessarily the active one -- which is the whole reason the
+    active is read from the record instead.
+    """
+    ns = namespace or k8s.namespace
+    out, _err = k8s._exec_kubectl(
+        f"kubectl get pods -n {ns} "
+        f"-o custom-columns=NAME:.metadata.name,NODE:.spec.nodeName,"
+        f"PHASE:.status.phase,READY:.status.containerStatuses[0].ready "
+        f"--no-headers 2>/dev/null || true", supress_logs=True)
+    rows = []
+    for line in (out or "").splitlines():
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+        if "pnfs-mds" not in parts[0]:
+            continue
+        if sts_name and not parts[0].startswith(sts_name):
+            continue
+        rows.append((parts[0], parts[1], parts[2], parts[3] == "true"))
+    return sorted(rows)
+
+
+def wait_mds_promotion(k8s, sts_name, from_epoch, timeout=300,
+                       namespace=None, poll=5):
+    """Wait for the epoch to advance past *from_epoch*.
+
+    The epoch, not the active instance: a takeover back onto the pod that
+    was active before -- which a delete-and-reschedule can produce -- keeps
+    the instance the same and still is a promotion. Returns
+    ``(active, epoch, seconds)``, and raises on timeout rather than
+    returning a sentinel, because every caller treats "no promotion" as
+    the finding.
+    """
+    import time as _time
+    started = _time.time()
+    deadline = started + timeout
+    last = (None, from_epoch)
+    while _time.time() < deadline:
+        sts = mds_statefulset(k8s, namespace)
+        active, epoch = mds_record(sts)
+        last = (active, epoch)
+        if epoch > from_epoch:
+            return active, epoch, round(_time.time() - started, 1)
+        _time.sleep(poll)
+    raise PnfsEvidenceError(
+        f"the metadata server did not promote within {timeout}s: the "
+        f"record still reads active={last[0]!r} epoch={last[1]}, which is "
+        f"the epoch it carried before. Exports stay unserved until a "
+        f"standby takes over, so every client is stalled for this whole "
+        f"window.")
+
+
+#: design-pnfs-mds-standby.md §6.2:
+#:
+#:     key(epoch) = 0x01 << 56 | (sha256(<StatefulSet UID>)[0:3] << 32) | epoch
+#:
+#: so an MDS key is identified by its top byte, the next 24 bits separate
+#: StatefulSets, and the low 32 bits are the epoch. Mirrored, not imported.
+#: If the derivation changes there, this must change with it.
+MDS_KEY_PREFIX = 0x01
+MDS_KEY_EPOCH_MASK = 0xFFFFFFFF
+MDS_KEY_TAG_SHIFT = 32
+MDS_KEY_TAG_MASK = 0xFFFFFF
+
+
+def mds_key_parts(key):
+    """``(is_mds, tag, epoch)`` for a reservation key.
+
+    A client's key is not in the MDS range and must never be touched by a
+    promotion, so ``is_mds`` is what separates "a guest we fenced" from "a
+    client we must not have".
+    """
+    try:
+        k = int(key, 16) if isinstance(key, str) else int(key)
+    except (TypeError, ValueError):
+        return False, 0, 0
+    if (k >> 56) != MDS_KEY_PREFIX:
+        return False, 0, 0
+    return (True,
+            (k >> MDS_KEY_TAG_SHIFT) & MDS_KEY_TAG_MASK,
+            k & MDS_KEY_EPOCH_MASK)
+
+
+def resv_registrants(report):
+    """``[{"key": int, "hostid": str}]`` from an ``nvme resv-report`` body.
+
+    nvme-cli names the registrant list ``regctlext`` when the extended
+    data structure was requested and ``regctl`` otherwise, and the key
+    field is ``rkey`` in both. Both shapes are accepted because the
+    extended report is a storage-build requirement (design P0-3) that a
+    lab may predate -- and a parser that silently returns nothing on the
+    older shape would report every namespace as unfenced.
+    """
+    rows = []
+    if not isinstance(report, dict):
+        return rows
+    for field in ("regctlext", "regctl"):
+        for entry in (report.get(field) or []):
+            if not isinstance(entry, dict):
+                continue
+            key = entry.get("rkey", entry.get("rkey_", 0))
+            try:
+                key = int(key, 16) if isinstance(key, str) else int(key)
+            except (TypeError, ValueError):
+                continue
+            rows.append({
+                "key": key,
+                "hostid": str(entry.get("hostid", entry.get("hostid_", ""))),
+            })
+        if rows:
+            break
+    return rows
