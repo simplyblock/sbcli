@@ -14,6 +14,7 @@ import simplyblock_core.services.task_runner_base as trb
 from simplyblock_core.models.backup import Backup
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
+from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.release_upgrades import jc_compression_upgrade
 from simplyblock_core.rpc_client import RPCException
@@ -600,7 +601,8 @@ def test_migration_error_all_online_fault_tolerant_is_not_retried(mig_all_online
     """All online and every unplaced page fault tolerant: an imperfect balance
     only, the migration is done and the cluster may be ACTIVE."""
     mig, cluster = mig_all_online
-    task = _task(distr_name="distr-1", migration={"name": "distr-1"}, migration_started=_STARTED)
+    task = _task(distr_name="distr-1", migration={"name": "distr-1"}, migration_started=_STARTED,
+                 migration_error_confirmed=9)
     assert mig.report_migration_status(task, _ft_status(9, 0)) is None
     assert "not retried" in task.function_result
     assert cluster.migration_ft_impact == {}
@@ -611,7 +613,8 @@ def test_migration_error_all_online_ft_impacted_degrades(mig_all_online, ft_page
     """All online, pages left without full fault tolerance (or a data plane
     that does not tell): no retry, the cluster is held DEGRADED with the reason."""
     mig, cluster = mig_all_online
-    task = _task(distr_name="distr-1", migration={"name": "distr-1"}, migration_started=_STARTED)
+    task = _task(distr_name="distr-1", migration={"name": "distr-1"}, migration_started=_STARTED,
+                 migration_error_confirmed=10)
     assert mig.report_migration_status(task, _ft_status(10, ft_pages)) is None
     entry = cluster.migration_ft_impact["node-1/distr-1"]
     assert entry["error"] == 10
@@ -631,6 +634,77 @@ def test_migration_error_retries_when_a_node_came_back_during_it(mig_all_online,
     with pytest.raises(trb.TaskRetry):
         mig.report_migration_status(task, _ft_status(10, 608))
     assert cluster.migration_ft_impact == {}
+
+
+def test_migration_error_all_online_is_retried_once_to_confirm(mig_all_online):
+    """2026-11-16 bed: a data-port partition changed no status; the first
+    errored migration is run once more before its errors count as final."""
+    mig, cluster = mig_all_online
+    task = _task(distr_name="distr-1", migration={"name": "distr-1"}, migration_started=_STARTED)
+    with pytest.raises(trb.TaskRetry, match="confirm"):
+        mig.report_migration_status(task, _ft_status(520, 3750))
+    assert task.function_params["migration_error_confirmed"] == 520
+    assert "migration" not in task.function_params
+    assert cluster.migration_ft_impact == {}
+
+
+def _health_node(node_id, health=True, dev_health=True):
+    n = _online_node("2026-10-29T17:00:00+00:00")
+    n.status = "online"
+    n.health_check = health
+    n.get_id.return_value = node_id
+    d = MagicMock()
+    d.status = NVMeDevice.STATUS_ONLINE
+    d.health_check = dev_health
+    d.get_id.return_value = f"{node_id}-dev"
+    n.nvme_devices = [d]
+    return n
+
+
+def test_cluster_unhealthy_state_lists_failing_health_of_online_members(mig_all_online):
+    mig, _ = mig_all_online
+    offline = _health_node("n3", health=False)
+    offline.status = "offline"
+    mig.db.get_storage_nodes_by_cluster_id.return_value = [
+        _health_node("n1", health=False), _health_node("n2", dev_health=False), offline]
+    assert mig.cluster_unhealthy_state("cl-1") == ["dev:n2-dev", "node:n1"]
+
+
+def test_migration_error_retries_when_health_recovered_during_it(mig_all_online):
+    """Health failing at the start, passing at the end: the partition ended
+    while the migration ran, so its errors are not final (even if confirmed)."""
+    mig, cluster = mig_all_online
+    mig.db.get_storage_nodes_by_cluster_id.return_value = [_health_node("n1")]
+    task = _task(distr_name="distr-1", migration={"name": "distr-1"}, migration_started=_STARTED,
+                 migration_unhealthy=["dev:n1-dev", "node:n1"], migration_error_confirmed=520)
+    with pytest.raises(trb.TaskRetry, match="recovered"):
+        mig.report_migration_status(task, _ft_status(520, 3750))
+    assert cluster.migration_ft_impact == {}
+
+
+def test_start_migration_records_unhealthy_members(mig):
+    mig.db.get_storage_nodes_by_cluster_id.return_value = [_health_node("n1", dev_health=False)]
+    task = _task(distr_name="distr-1")
+    mig.start_migration(task, lambda: True)
+    assert task.function_params["migration_unhealthy"] == ["dev:n1-dev"]
+
+
+def test_start_gate_defers_while_health_fails_then_gives_up(mig, monkeypatch):
+    from datetime import UTC, datetime, timedelta
+    mig.db.get_storage_nodes_by_cluster_id.return_value = [_health_node("n1", health=False)]
+    task = _task(distr_name="distr-1")
+    with pytest.raises(trb.TaskDefer, match="health"):
+        mig.defer_while_unhealthy(task)
+    assert "wait_unhealthy_since" in task.function_params
+    with pytest.raises(trb.TaskDefer):
+        mig.defer_while_unhealthy(task)
+    task.function_params["wait_unhealthy_since"] = (
+        datetime.now(UTC) - timedelta(seconds=mig.UNHEALTHY_START_WAIT_SEC + 1)).isoformat()
+    assert mig.defer_while_unhealthy(task) is None   # bounded: proceeds
+
+    mig.db.get_storage_nodes_by_cluster_id.return_value = [_health_node("n1")]
+    mig.defer_while_unhealthy(task)
+    assert "wait_unhealthy_since" not in task.function_params
 
 
 def test_start_migration_records_its_start(mig):

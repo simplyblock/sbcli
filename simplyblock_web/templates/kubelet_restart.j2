@@ -1,0 +1,66 @@
+{#
+  The shell script that restarts the kubelet of the host it runs on, for the
+  Jobs that change what the kubelet reads when it starts: the init Job (huge
+  pages) and the CPU-topology Job (kubelet configuration).
+
+  The unit the kubelet runs under depends on how the distribution packages it:
+  a systemd unit, the snap of the Canonical EKS image, or the k3s or RKE2
+  process that embeds it. The first one the host has is restarted. The server
+  units come last, because restarting one also restarts the API server it
+  embeds.
+
+  The script runs in the host's namespaces under the host's /bin/sh, which is
+  dash on Ubuntu, and is passed in single quotes: it is POSIX sh and contains
+  no single quote.
+
+  required=false: a host with no known unit, or a restart that fails, is
+    reported and the script goes on. The init Job's caller cannot tell a host
+    that needed the restart from one that did not.
+  required=true: either one fails the script, and so does a kubelet that is
+    not active again afterward. The CPU-topology Job has changed the kubelet's
+    configuration, and must not report a node configured that is not.
+#}
+{% macro restart_kubelet(required=false) %}
+if command -v systemctl >/dev/null 2>&1; then
+  KUBELET_UNITS="kubelet.service snap.kubelet-eks.daemon.service k3s-agent.service rke2-agent.service k3s.service rke2-server.service"
+  KUBELET_UNIT=""
+  for unit in $KUBELET_UNITS; do
+    if systemctl cat "$unit" >/dev/null 2>&1; then
+      KUBELET_UNIT="$unit"
+      break
+    fi
+  done
+  if [ -n "$KUBELET_UNIT" ]; then
+{% if required %}
+    systemctl daemon-reload
+    if ! systemctl restart "$KUBELET_UNIT"; then
+      echo "[ERROR] $KUBELET_UNIT restart failed"
+      exit 1
+    fi
+    echo "$KUBELET_UNIT restarted"
+    # A kubelet that refuses its configuration exits and is started again by
+    # systemd, so one look can find it between two attempts.
+    for wait in 10 5 5; do
+      sleep "$wait"
+      if ! systemctl is-active --quiet "$KUBELET_UNIT"; then
+        echo "[ERROR] $KUBELET_UNIT is not active after the restart"
+        exit 1
+      fi
+    done
+    echo "$KUBELET_UNIT is active"
+{% else %}
+    systemctl restart "$KUBELET_UNIT" && echo "$KUBELET_UNIT restarted" || echo "$KUBELET_UNIT restart failed"
+{% endif %}
+  else
+    echo "[WARN] None of $KUBELET_UNITS found: the kubelet is not restarted, and keeps what it read when it started"
+{% if required %}
+    exit 1
+{% endif %}
+  fi
+{% if required %}
+else
+  echo "[ERROR] systemctl not found: the kubelet cannot be restarted"
+  exit 1
+{% endif %}
+fi
+{% endmacro %}

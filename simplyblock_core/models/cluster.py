@@ -2,14 +2,49 @@ import os.path
 from collections.abc import Mapping
 from typing import Any, ClassVar
 
-from pydantic import SecretStr
+from pydantic import SecretStr, TypeAdapter
 
 from simplyblock_core import constants
+from simplyblock_core.kms import KMSSettings
 from simplyblock_core.models.backup_config import BackupConfig
 from simplyblock_core.models.base_model import BaseModel, default_factory
 
+_KMS_SETTINGS_ADAPTER: TypeAdapter[Any] = TypeAdapter(KMSSettings)
+
+
+def normalize_image_prefix(prefix: str | None) -> str:
+    """The registry/proxy ``prefix`` in the one form it is stored and compared in.
+
+    No surrounding whitespace and no trailing ``/``; ``""`` for none. Everything
+    that takes a prefix from outside (the CLI, the API, a cluster record) goes
+    through here, so the shell and compose side never sees another spelling.
+    """
+    return (prefix or "").strip().rstrip("/")
+
+
+def prefix_image(prefix: str | None, image: str) -> str:
+    """``image`` behind the registry/proxy ``prefix``.
+
+    The prefix is a path such as ``registry-1.docker.io``, joined
+    with exactly one ``/`` whether or not it carries a trailing slash. An empty
+    prefix leaves the image as named. Idempotent: an image already carrying the
+    prefix -- e.g. one read back from a storage node record written by an
+    earlier call -- is returned unchanged, so callers can apply it to any image
+    without tracking where it came from.
+    """
+    prefix = normalize_image_prefix(prefix)
+    if not prefix or not image or image.startswith(f"{prefix}/"):
+        return image
+    return f"{prefix}/{image}"
+
 
 class HashicorpVaultSettings(BaseModel):
+    """Superseded by ``Cluster.kms_settings`` (a validated ``KMSSettings``
+    union, see ``simplyblock_core.kms``). Kept only so a record written before
+    that change still loads: ``Cluster.get_kms_settings`` falls back to this
+    field until ``kms_settings_migration`` (``release_upgrades/``) rewrites the
+    record on that cluster's next ``cluster upgrade-complete``. Nothing writes
+    to this field any more."""
     base_url: str = ""
     transit_mount: str = "simplyblock/transit"
     kv_mount: str = "simplyblock/kv"
@@ -93,7 +128,7 @@ class Cluster(BaseModel):
 
     auth_hosts_only: bool = False
     blk_size: int = 0
-    cap_crit: int = 90
+    cap_crit: int = 98
     # ISO-8601 UTC timestamp of when the cluster last entered IN_ACTIVATION.
     # Stamped/cleared by cluster_ops.set_cluster_status and consumed by the
     # storage_node_monitor watchdog to detect and revert a wedged activation
@@ -181,6 +216,66 @@ class Cluster(BaseModel):
     node_label_suffix: str = ""
     disable_monitoring: bool = False
     strict_node_anti_affinity: bool = False
+    # Cluster-create-time, immutable declaration that every data device is
+    # protected below simplyblock (hardware RAID LUN, md or dm RAID). Lowers
+    # the data-device floor from n+2k to n+k (simplyblock_core.floors) and
+    # lets the data plane place several chunks of a stripe on one device when
+    # no other device is writable (allow_device_colocation on the distribs,
+    # affinity_floor "relaxed" on migrations).
+    raid_devices: bool = False
+    # Cluster-create-time, immutable: multi-attach array LUN mode. Every data
+    # device is an array LUN presented to several storage nodes; the cluster
+    # runs 1+0 and tolerates max_fault_tolerance node failures by reopening
+    # an owner's LUN on another node and adding it as an extra NVMe-oF path.
+    # Requires raid_devices. Gates every multi-attach path (device NQN,
+    # controller-ID ranges, hold timeouts, owner loopback).
+    multi_attach: bool = False
+    # Multi-attach clusters, opt-in: keep a warm standby alceml (standby=true,
+    # page map kept warm in hugepages) of every LUN on each attached
+    # non-serving node, so a takeover activates it on the first I/O instead of
+    # loading the whole page map cold (lun_takeover.ensure_warm_standbys).
+    # Costs the page-map memory of every such LUN on each standby node.
+    multi_attach_warm_standby: bool = False
+    # Multi-attach clusters: the storage array the LUNs live on. A LUN is
+    # taken over by another node only after its serving node is fenced at the
+    # array, through the plugin named here (entry point in the group
+    # simplyblock.array_plugins, see simplyblock_core.array). Empty = no
+    # plugin: a takeover is refused (never reopen a LUN unfenced). The array
+    # is registered through controllers/array_controller (POST
+    # /clusters/{id}/arrays). Its credentials are never kept here, only a
+    # reference to them (array_credential_ref).
+    array_plugin: str = ""
+    array_endpoint: str = ""
+    array_options: dict = default_factory(dict)
+    # Id of the registered array ("" = none, or configured before arrays were
+    # registered) and whether credentials were stored for it in the KMS.
+    array_id: str = ""
+    array_has_credentials: bool = False
+    # Where the array's credentials are (simplyblock_core.credentials): a
+    # "managed" reference (wrapped by the cluster's credentials key in its
+    # KMS, bound to array id + endpoint), or an external "vault-kv" /
+    # "kmip-secret" secret. {} with array_has_credentials = an array
+    # registered before references existed: its secret is in the KMS at
+    # cluster/<id>/array/<array_id>.
+    array_credential_ref: dict = default_factory(dict)
+    # Size in bytes of the LUN created for each node added to the cluster
+    # while an array is registered; 0 = node adds create no LUN (the LUNs are
+    # presented by the operator, as in phase 2/3).
+    array_lun_size: int = 0
+    # Where each node's journal is kept when the array plugin creates the
+    # nodes' LUNs (array_lun_size > 0):
+    # - "local": a disk or partition of the node's host, named at sn configure
+    #   (--lblk-journal-only); never shared.
+    # - "lun": a LUN of its own the plugin creates at node add, next to the
+    #   data LUN, presented to that node only (never multi-attached). It is
+    #   created with array_options updated by array_journal_options (e.g.
+    #   {"pool": "fast-pool"}: a pool of higher performance or priority) and
+    #   array_journal_lun_size bytes (0 = 3% of array_lun_size, at least
+    #   2 GiB). The node's host then needs no local device
+    #   (sn configure --lblk-array-only).
+    array_journal: str = "local"
+    array_journal_lun_size: int = 0
+    array_journal_options: dict = default_factory(dict)
     tls: bool = False
     tls_config: dict = default_factory(dict)
     is_re_balancing: bool = False
@@ -311,6 +406,11 @@ class Cluster(BaseModel):
     # Deploy-time only — set at cluster create/add, never toggled at runtime;
     # an existing cluster must be redeployed to gain the feature.
     enable_failure_domain: bool = False
+    # LVol geometry: new lvols inherit distr_ndcs/distr_npcs (or the values
+    # passed at create). When False every new lvol is created with
+    # ndcs=npcs=0, i.e. the distrib's own layout. Toggled at runtime with
+    # `cluster set-lvol-geometry`; existing lvols keep their geometry.
+    lvol_geometry_enabled: bool = True
     # Site-level synchronous replication (two sites, one cluster). Deploy-time
     # only, like enable_failure_domain: set at cluster create, never toggled.
     # Every storage node then carries a `site`, and every LVS is replicated to
@@ -345,6 +445,24 @@ class Cluster(BaseModel):
     site_activation_site: str = ""
     site_activation_since: str = ""
     site_activation_heartbeat: str = ""
+    # Stretched control plane (docs/stretched-control-plane.md): a control
+    # plane on each of the cluster's two sites over one FoundationDB, one of
+    # them leading (ControlPlaneLease). Deploy-time only, like
+    # sync_replication. Allowed with sync_replication (any n+k, two sites),
+    # or with enable_failure_domain and 1+1 (two sites) / 1+2 (three
+    # storage sites) where the failure domain of a node is its site
+    # (site_failure_domains). leader_site is then the site that should lead
+    # the control plane as well: the lease follows it, moved by an operator.
+    stretched_control_plane: bool = False
+    # site -> failure-domain id, assigned at the first add-node of a site on
+    # a stretched cluster without sync replication; never reassigned.
+    site_failure_domains: dict = default_factory(dict)
+    # site -> the API endpoint of that site's control plane
+    # ("https://host:port"), where a standby control plane sends the
+    # mutating calls it receives. Set at create / control-plane add.
+    site_api_endpoints: dict = default_factory(dict)
+    # Lease timing of the stretched control plane; 0 = the constants.
+    control_plane_lease_ttl_sec: int = 0
     # Storage-device mode for the whole cluster. "nvme" (default): NVMe PCIe
     # controllers auto-detected and attached through the SPDK nvme bdev.
     # "lblk": arbitrary Linux block devices wrapped in SPDK AIO bdevs (one
@@ -365,6 +483,9 @@ class Cluster(BaseModel):
     # sends force_4k_atomic so the data plane skips its >=4K block-size gate for
     # fallback-mode inline checksum. Frozen at cluster create time.
     atomic_4k: bool = False
+    # Flex geometry: the lvstore cluster size (and the raid0 strip under it) is
+    # a fixed 8 MiB instead of ndcs pages. Frozen at cluster create time.
+    flex_geometry: bool = False
     # Journal blobstore metadata pages so a write torn by a power loss cannot
     # leave a half-written page behind. Needed when a device is not 4K-write
     # atomic. The lvstore records it in its super block at creation, so it is
@@ -383,18 +504,25 @@ class Cluster(BaseModel):
     rpc_base_port: int = 8080
     snode_api_port: int = 50001
     container_image_prefix: str = ""
+    # Validated via get_kms_settings()/set_kms_settings() into a KMSSettings
+    # union (simplyblock_core.kms) -- stays an untyped dict on the record for
+    # the same reason backup_config does: BaseModel cannot nest a pydantic
+    # union, so validating on read/write gives the typing without an FDB
+    # migration for every create/update. Empty dict = no external KMS (LocalKMS).
+    kms_settings: dict = default_factory(dict)
     hashicorp_vault_settings: HashicorpVaultSettings | None = None
+    # Explicit opt-in to keep credentials for external systems (storage
+    # arrays, ...) with no external KMS configured. LocalKMS only encodes, so
+    # such credentials would sit effectively in plaintext in FoundationDB;
+    # without this flag simplyblock_core.credentials refuses to store or read
+    # them unless a Vault or KMIP backend is configured.
+    allow_local_kms_credentials: bool = False
 
     # Single-node-expansion resumability cursor. Empty dict means no expansion
     # is in flight. Populated/advanced/cleared via the helpers in
     # ``simplyblock_core.controllers.cluster_expansion.planner``. See the feature plan
     # ``single_node_expansion_plan.md`` for the schema.
     expand_state: dict = default_factory(dict)
-    # Set while new device weights (placement sizes after an uneven growth of
-    # lblk devices) are written but not yet pushed to every node and handed to
-    # a rebalance. A re-run of `cluster grow-devices` finishes the job. See
-    # device_controller.rebalance_after_growth.
-    reweight_pending: bool = False
     # State owned by release-specific upgrade plug-ins (see
     # simplyblock_core/release_upgrades/). Keys are plugin STATE_KEYs; a key
     # is set by the plugin's pre_update step (first thing `cluster update`
@@ -415,6 +543,12 @@ class Cluster(BaseModel):
     # and it is used for gelf address in the storage nodes' containers.
     # If not defined, then gelf address will be the first mgmt node's address
     cluster_vip: str = ""
+
+    def lvs_cluster_size(self) -> int:
+        """The lvstore cluster size this cluster creates its lvstores with
+        (utils.lvstore_cluster_size); also their raid0 strip."""
+        from simplyblock_core.utils import lvstore_cluster_size
+        return lvstore_cluster_size(self.flex_geometry, self.distr_ndcs, self.page_size_in_blocks)
 
     def get_status_code(self):
         if self.status in self.STATUS_CODE_MAP:
@@ -467,6 +601,10 @@ class Cluster(BaseModel):
 
         return self._resolve_backup_config(self.backup_config)
 
+    def prefixed_image(self, image: str) -> str:
+        """``image`` as this cluster pulls it, behind ``container_image_prefix``."""
+        return prefix_image(self.container_image_prefix, image)
+
     def set_backup_config(self, config: Mapping[str, Any]) -> None:
         """Validate a raw backup configuration and store it on this record.
 
@@ -485,6 +623,63 @@ class Cluster(BaseModel):
         """
         self._resolve_backup_config(config)
         self.backup_config = dict(config)
+
+    def _resolve_kms_settings(self, config: Mapping[str, Any]):
+        if "provider" not in config and "base_url" in config:
+            # The flat shape HashicorpVaultSettings used before kms_settings
+            # existed, with no discriminator -- legacy cluster records (and
+            # anything still posting the old hashicorp_vault_settings shape)
+            # carry this.
+            config = {"provider": "vault", **config}
+        return _KMS_SETTINGS_ADAPTER.validate_python(config)
+
+    def get_kms_settings(self):
+        """Validate and return this cluster's KMS configuration, or ``None``
+        for the default (``LocalKMS``, keys held in FoundationDB).
+
+        ``kms_settings`` stays an untyped dict on the record for the same
+        reason ``backup_config`` does (see ``get_backup_config``); validating
+        on read gives the typing without an FDB migration for every write.
+        A cluster written before this field existed has no ``kms_settings``
+        but may have the legacy ``hashicorp_vault_settings`` field populated
+        -- read from there until ``kms_settings_migration``
+        (``release_upgrades/``) rewrites the record on this cluster's next
+        ``cluster upgrade-complete``.
+
+        Raises:
+            ValueError: The stored configuration is not valid. ``ValidationError``
+                is a ``ValueError``, so one except clause covers both.
+        """
+        if self.kms_settings:
+            return self._resolve_kms_settings(self.kms_settings)
+        if self.hashicorp_vault_settings is not None:
+            legacy = self.hashicorp_vault_settings
+            # Not legacy.to_dict(): HashicorpVaultSettings is a BaseModel
+            # subclass, so that also carries id/uuid/name/status/... from the
+            # base class, which KMSSettings' extra="forbid" would then reject.
+            return self._resolve_kms_settings({
+                "base_url": legacy.base_url,
+                "transit_mount": legacy.transit_mount,
+                "kv_mount": legacy.kv_mount,
+                "cert_role": legacy.cert_role,
+            })
+        return None
+
+    def set_kms_settings(self, config: Mapping[str, Any] | None) -> None:
+        """Validate a raw KMS configuration and store it on this record.
+
+        The only way to put a KMS configuration on a cluster going forward --
+        nothing writes to the legacy ``hashicorp_vault_settings`` field any
+        more. ``config=None`` clears it back to the default (``LocalKMS``).
+
+        Raises:
+            ValueError: The configuration does not match any known KMS provider.
+        """
+        if not config:
+            self.kms_settings = {}
+            return
+        self._resolve_kms_settings(config)
+        self.kms_settings = dict(config)
 
     def get_backup_path(self, path=""):
         if self.backup_s3_bucket and self.backup_s3_cred:
@@ -508,15 +703,30 @@ class PortReservation(BaseModel):
     redundant after that and is reclaimed by ``created_at`` TTL
     (``PORT_RESERVATION_TTL_SEC``) — no explicit release is required, and a
     crashed add self-heals when the reservation goes stale.
+
+    ``slot`` names what the port is for, when that is something an add can be
+    retried for: the rpc port of one storage node on one host. A second
+    reservation for the same slot gets the same port back instead of the next
+    free one. The SPDK pod is named after its rpc port, so a retry that kept
+    the port replaces the pod of the attempt before it; a retry that took a new
+    port started a second pod beside it, which nothing owned and which held the
+    host's huge pages. A slot reservation therefore lives much longer
+    (``PORT_RESERVATION_SLOT_TTL_SEC``).
     """
 
     cluster_id: str = ""
     port: int = 0
     owner: str = ""
     created_at: int = 0
+    slot: str = ""
 
     def get_id(self):
         return "%s/%s" % (self.cluster_id, self.port)
+
+    def expired(self, now: int) -> bool:
+        """Whether the reservation is old enough to be treated as abandoned."""
+        ttl = constants.PORT_RESERVATION_SLOT_TTL_SEC if self.slot else constants.PORT_RESERVATION_TTL_SEC
+        return (now - self.created_at) > ttl
 
 
 class DeployConfig(BaseModel):

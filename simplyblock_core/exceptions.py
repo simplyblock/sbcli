@@ -11,6 +11,12 @@ class MigrationConflictError(Exception):
     """Raised when a conflicting active migration already exists."""
 
 
+class SubsystemMoveInProgressError(Exception):
+    """Raised when a host asks to connect a volume whose subsystem a
+    consistency-group subsystem move holds. Transient: the move's suspend
+    window is bounded, so the caller retries after it."""
+
+
 class SyncReplicationUnsupportedError(PreconditionError):
     """The operation is not supported on a sync-replication cluster (a
     limitation of its first version: it would publish paths without the
@@ -130,7 +136,50 @@ class ReachabilityAddressError(PreconditionError):
     more addresses than one request may name."""
 
 
+class PromoteIncompleteError(Exception):
+    """The promote that finishes a node's relocation left devices as they
+    were: a device of the new host still ``new`` (not activated) or a device
+    of the old host still ``removed`` (its data not migrated off it). The
+    node's own addresses were re-pointed regardless, since the node is on the
+    new host either way; the promote is idempotent and the caller calls it
+    again once what blocked it is gone. ``still_new`` and ``still_removed``
+    list the device ids."""
+
+    def __init__(self, message: str, still_new=(), still_removed=()):
+        self.still_new = list(still_new)
+        self.still_removed = list(still_removed)
+        super().__init__(message)
+
+
 class NodeTransitionInProgress(Exception):
     """Raised when a node is mid-transition (e.g. its shutdown has not
     finished) and the request can only be served once it lands. Retryable:
     the v2 API answers 503."""
+
+
+class ControlPlaneError(PreconditionError):
+    """A stretched-control-plane operation is refused: the cluster is not
+    stretched, names no such site, or the request is malformed."""
+
+
+class ControlPlaneNotReadyError(ControlPlaneError):
+    """A planned leadership move is refused because the target site is not
+    ready for it; ``problems`` names every failed gate."""
+
+    def __init__(self, message: str, problems: list[str]):
+        super().__init__(message)
+        self.problems = problems
+
+
+class ControlPlaneTakeoverRefusedError(ControlPlaneError):
+    """A takeover is refused because the site declared down still answers;
+    ``alive`` names what answered."""
+
+    def __init__(self, message: str, alive: list[str]):
+        super().__init__(message)
+        self.alive = alive
+
+
+class MonitoringConfigError(Exception):
+    """A monitoring component (Grafana, Prometheus) refused a configuration
+    change or could not be reached to apply it."""

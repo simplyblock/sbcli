@@ -58,6 +58,7 @@ def task_runner(task):
     if not mig.migration_started(task):
         if not _all_devices_online_or_written_off(task.cluster_id):
             raise TaskRetry("Some devs are offline, retrying")
+        mig.defer_while_unhealthy(task)
 
         try:
             db.get_storage_device_by_id(task.device_id)
@@ -67,7 +68,8 @@ def task_runner(task):
         started = mig.start_migration(task, lambda: rpc_client.distr_migration_expansion_start(
             task.function_params["distr_name"], mig.qos_high_priority(snode.cluster_id),
             job_size=constants.MIG_JOB_SIZE, jobs=constants.MIG_PARALLEL_JOBS,
-            relaxed_mode=mig.migration_relaxed(snode.cluster_id)))
+            relaxed_mode=mig.migration_relaxed(snode.cluster_id),
+            affinity_floor=mig.migration_affinity_floor(snode.cluster_id)))
         if started is None:
             raise TaskAbort("canceled while starting migration")
         task = started

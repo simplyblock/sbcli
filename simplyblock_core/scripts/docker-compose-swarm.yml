@@ -11,112 +11,6 @@ x-service-base: &service-base
 
 services:
 
-  fdb-server:
-    <<: *service-base
-    image: foundationdb/foundationdb:7.3.63
-    networks:
-      - hostnet
-    environment:
-      SIMPLYBLOCK_LOG_LEVEL: '$LOG_LEVEL'
-      FDB_CLUSTER_FILE_CONTENTS: '$FDB_CLUSTER_FILE_CONTENTS'
-      FDB_NETWORKING_MODE: 'container'
-      FDB_CLUSTER_FILE: '/etc/foundationdb/fdb.cluster'
-    volumes:
-      - "/etc/foundationdb:/etc/foundationdb"
-      - "/etc/foundationdb/data:/var/fdb/data"
-      - "/etc/foundationdb/logs:/var/fdb/logs"
-
-    deploy:
-      mode: global
-      placement:
-        constraints: [ node.role == manager ]
-      resources:
-        reservations:
-          memory: 4g
-
-  fdb-server1:
-    <<: *service-base
-    image: foundationdb/foundationdb:7.3.63
-    networks:
-      - hostnet
-    environment:
-      FDB_CLUSTER_FILE_CONTENTS: '$FDB_CLUSTER_FILE_CONTENTS'
-      FDB_NETWORKING_MODE: 'container'
-      FDB_PORT: 4501
-    volumes:
-      - "fdb_server_1_data:/var/fdb/data"
-      - "fdb_server_1_logs:/var/fdb/logs"
-    deploy:
-      mode: global
-      placement:
-        constraints: [ node.role == manager ]
-
-  fdb-server2:
-    <<: *service-base
-    image: foundationdb/foundationdb:7.3.63
-    networks:
-      - hostnet
-    environment:
-      FDB_CLUSTER_FILE_CONTENTS: '$FDB_CLUSTER_FILE_CONTENTS'
-      FDB_NETWORKING_MODE: 'container'
-      FDB_PORT: 4502
-    volumes:
-      - "fdb_server_2_data:/var/fdb/data"
-      - "fdb_server_2_logs:/var/fdb/logs"
-    deploy:
-      mode: global
-      placement:
-        constraints: [ node.role == manager ]
-
-  fdb-server3:
-    <<: *service-base
-    image: foundationdb/foundationdb:7.3.63
-    networks:
-      - hostnet
-    environment:
-      FDB_CLUSTER_FILE_CONTENTS: '$FDB_CLUSTER_FILE_CONTENTS'
-      FDB_NETWORKING_MODE: 'container'
-      FDB_PORT: 4503
-    volumes:
-      - "fdb_server_3_data:/var/fdb/data"
-      - "fdb_server_3_logs:/var/fdb/logs"
-    deploy:
-      mode: global
-      placement:
-        constraints: [ node.role == manager ]
-
-  fdb-server4:
-    <<: *service-base
-    image: foundationdb/foundationdb:7.3.63
-    networks:
-      - hostnet
-    environment:
-      FDB_CLUSTER_FILE_CONTENTS: '$FDB_CLUSTER_FILE_CONTENTS'
-      FDB_NETWORKING_MODE: 'container'
-      FDB_PORT: 4504
-    volumes:
-      - "fdb_server_4_data:/var/fdb/data"
-      - "fdb_server_4_logs:/var/fdb/logs"
-    deploy:
-      mode: global
-      placement:
-        constraints: [ node.role == manager ]
-
-
-  fdb-backup-agent:
-    <<: *service-base
-    image: foundationdb/foundationdb:7.3.63
-    entrypoint: "/usr/bin/backup_agent -C  /etc/foundationdb/fdb.cluster"
-    networks:
-      - hostnet
-    environment:
-      FDB_CLUSTER_FILE: '/etc/foundationdb/fdb.cluster'
-    volumes:
-      - "/etc/foundationdb:/etc/foundationdb"
-    deploy:
-      placement:
-        constraints: [ node.role == manager ]
-
   WebAppAPI:
     <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE
@@ -132,6 +26,7 @@ services:
       - "/etc/foundationdb:/etc/foundationdb"
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
       FLASK_DEBUG: "False"
       FLASK_ENV: "production"
       FLASK_PORT: 5000
@@ -158,6 +53,7 @@ services:
       - hostnet
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
 
   MgmtNodeMonitor:
     <<: *service-base
@@ -172,6 +68,7 @@ services:
       - hostnet
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
 
   LVolStatsCollector:
     <<: *service-base
@@ -186,6 +83,7 @@ services:
       - hostnet
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
 
   MainDistrEventCollector:
     <<: *service-base
@@ -200,6 +98,7 @@ services:
       - "/etc/foundationdb:/etc/foundationdb"
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
 
   TwoNodeArbiter:
     <<: *service-base
@@ -214,11 +113,12 @@ services:
       - "/etc/foundationdb:/etc/foundationdb"
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
 
   TwoNodeEventCollector:
     <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "/usr/local/bin/sb-event-collector"
+    command: "python3 simplyblock_core/services/two_node_event_collector.py"
     networks:
       - hostnet
     deploy:
@@ -228,25 +128,7 @@ services:
       - "/etc/foundationdb:/etc/foundationdb"
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
-
-  HAProxy:
-    image: haproxytech/haproxy-debian:latest
-    deploy:
-      mode: global
-      placement:
-        constraints: [node.role == manager]
-    ports:
-      - 80:80
-      - 12202:12202
-      - 9200:9200
-      - 9090:9090
-    networks:
-      - localnet
-      - monitoring-net
-    volumes:
-      - "$DIR/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg"
-    environment:
-      SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
 
   CapacityAndStatsCollector:
     <<: *service-base
@@ -261,6 +143,7 @@ services:
       - hostnet
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
 
   CapacityMonitor:
     <<: *service-base
@@ -275,6 +158,7 @@ services:
       - hostnet
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
 
   HealthCheck:
     <<: *service-base
@@ -289,6 +173,7 @@ services:
       - hostnet
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
 
   DeviceMonitor:
     <<: *service-base
@@ -303,6 +188,7 @@ services:
       - hostnet
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
 
   LVolMonitor:
     <<: *service-base
@@ -317,6 +203,7 @@ services:
       - hostnet
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
 
   SnapshotMonitor:
     <<: *service-base
@@ -331,12 +218,14 @@ services:
       - hostnet
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
 
   CleanupFDB:
     <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
       LOG_DELETION_INTERVAL: "${LOG_DELETION_INTERVAL}"
     command: "python3 simplyblock_core/workers/cleanup_foundationdb.py"
     deploy:
@@ -360,6 +249,7 @@ services:
       - hostnet
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
 
   TasksRunnerMigration:
     <<: *service-base
@@ -374,6 +264,7 @@ services:
       - hostnet
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
 
   TasksRunnerLVolMigration:
     <<: *service-base
@@ -388,6 +279,7 @@ services:
       - hostnet
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
 
   TasksRunnerBatchMigration:
     <<: *service-base
@@ -402,6 +294,7 @@ services:
       - hostnet
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
 
   TasksRunnerFailedMigration:
     <<: *service-base
@@ -416,6 +309,7 @@ services:
       - hostnet
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
 
   TasksRunnerClusterStatus:
     <<: *service-base
@@ -430,6 +324,7 @@ services:
       - hostnet
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
 
   TasksRunnerNewDeviceMigration:
     <<: *service-base
@@ -444,6 +339,7 @@ services:
       - hostnet
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
 
   TasksNodeAddRunner:
     <<: *service-base
@@ -458,6 +354,7 @@ services:
       - hostnet
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
 
   TasksNodeRemovalRunner:
     <<: *service-base
@@ -472,6 +369,7 @@ services:
       - hostnet
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
 
   TasksRunnerClusterExpand:
     <<: *service-base
@@ -486,6 +384,7 @@ services:
       - hostnet
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
 
   TasksRunnerPortAllow:
     <<: *service-base
@@ -500,6 +399,7 @@ services:
       - hostnet
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
 
   TasksRunnerJCCompResume:
     <<: *service-base
@@ -514,6 +414,7 @@ services:
       - hostnet
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
 
   TasksRunnerSyncResync:
     <<: *service-base
@@ -528,6 +429,7 @@ services:
       - hostnet
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
 
   TasksRunnerSyncPromote:
     <<: *service-base
@@ -542,6 +444,7 @@ services:
       - hostnet
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
 
   TasksRunnerLVolSyncDelete:
     <<: *service-base
@@ -556,6 +459,7 @@ services:
       - hostnet
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
 
   TasksRunnerBackup:
     <<: *service-base
@@ -570,6 +474,7 @@ services:
       - hostnet
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
 
   BackupMergeService:
     <<: *service-base
@@ -584,6 +489,7 @@ services:
       - hostnet
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
 
   SnapshotReplication:
     <<: *service-base
@@ -598,6 +504,7 @@ services:
       - hostnet
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
 
   TasksRunnerReplicationFinal:
     <<: *service-base
@@ -612,6 +519,7 @@ services:
       - hostnet
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
 
   BackupService:
     <<: *service-base
@@ -626,10 +534,11 @@ services:
       - hostnet
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      NODE_HOSTNAME: "{{.Node.Hostname}}"
 
   FDBExporter:
     <<: *service-base
-    image: aikoven/foundationdb-exporter:3.1.0
+    image: "${IMAGE_PREFIX}aikoven/foundationdb-exporter:3.1.0"
     environment:
       FDB_CLUSTER_FILE: /etc/foundationdb/fdb.cluster
     deploy:
@@ -656,14 +565,3 @@ networks:
     ipam:
       config:
         - subnet: 192.168.1.0/24
-
-
-volumes:
-  fdb_server_1_data:
-  fdb_server_1_logs:
-  fdb_server_2_data:
-  fdb_server_2_logs:
-  fdb_server_3_data:
-  fdb_server_3_logs:
-  fdb_server_4_data:
-  fdb_server_4_logs:

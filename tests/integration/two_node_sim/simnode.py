@@ -108,6 +108,10 @@ class Lvstore:
     leader_since: float = 0.0        # F23: when this node last became the LVS's leader
     ana_restore_pending: bool = False
     ana_saved: dict = field(default_factory=dict)
+    # JC stopped on error (JCERR) while holding or fenced: with two-node
+    # arbitration ultra keeps the node alive and the vuid in error mode until
+    # jc_grant_solo / jc_unfence (alg_journal.cpp, B7); jc_compression answers -6
+    jcerr: bool = False
 
 
 @dataclass
@@ -202,12 +206,17 @@ class SimNode:
             lvs.leader = False
             lvs.takeover_blocked = False
             lvs.fenced = lvs.held = lvs.fence_port_owned = False
+            lvs.jcerr = False
             lvs.ana_saved = {}
             lvs.ana_restore_pending = False
             lvs.redirect_stopped = False
         for d in self.devices:
             self.devices[d] = True
         self.blocked = {}
+        if "jm_reconnect_ineffective" in self.world.conditions:
+            # the c1/c2 manual remedy: a restart brings the remote JMs back both ways
+            self.world.jm_reconnected[self.uuid] = True
+            self.world.jm_reconnected[self.peer().uuid] = True
         # the restart flow recreates every subsystem as the volume defines it
         # (any host, listing the hosts the volumes authorize)
         stale = self.world.stale_host_lists
@@ -369,6 +378,10 @@ class SimNode:
         lvs.fenced, lvs.held = True, False
         lvs.leader = False
         lvs.takeover_blocked = True
+        if "jc_error_while_fenced" in self.world.conditions:
+            # the held client IO fails with -ENOTCONN at the fence; the JC goes
+            # into error mode and stays there (expected while fenced, no abort)
+            lvs.jcerr = True
         self.world.on_fence(self, lvs)
 
     def _unfence(self, vuid: int):
@@ -377,6 +390,7 @@ class SimNode:
         if lvs is None or not lvs.fenced:
             return
         lvs.fenced = False
+        lvs.jcerr = False                   # the resume path: back to active
         port = lvs.client_port
         still = any(o is not lvs and o.fenced and o.client_port == port for o in self.lvstores.values())
         if lvs.fence_port_owned and not still and "unfence_keeps_ports" not in self.bugs:
@@ -466,6 +480,9 @@ class SimNode:
         self.lease_expiry_ms = now + int(ttl_ms or self.lease_ttl_ms)
         for v in lvs:
             lv = self.ha[int(v)]
+            store = self.lvs_by_vuid(int(v))
+            if store is not None:
+                store.jcerr = False         # the resume path: back to active
             if lv.state == SOLO:
                 continue
             was_holding = lv.state == HOLDING
@@ -523,6 +540,10 @@ class SimNode:
         return {"res": 1}
 
     def rpc_jc_compression(self, jm_vuid=None, get_status=False, **_):
+        # ultra _s_jc_compression: a vuid in JCERR answers -6 before anything else
+        lvs = self.lvs_by_vuid(int(jm_vuid or 0))
+        if lvs is not None and lvs.jcerr:
+            self._err(6, "Compression request failed")
         # The leader re-levels a returning journal on its own (B1 auto-resync);
         # while it does, jc_compression answers "Compression request failed".
         if self.world.vt.time() < self.relevel_until:

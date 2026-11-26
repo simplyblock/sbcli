@@ -17,6 +17,15 @@ from simplyblock_core.services import storage_node_monitor
 from simplyblock_core.services import tasks_runner_sync_promote as runner
 from simplyblock_core.snode_client import SNodeClientException
 
+
+@pytest.fixture(autouse=True)
+def _floors_out_of_the_site_tests():
+    """The site verdicts are judged on the veto / majority rules alone; the
+    resource floors (simplyblock_core.floors, DEGRADED while a site's online
+    nodes are below n+2k) are tested in test_cluster_floors."""
+    with patch.object(storage_node_monitor.floors, "evaluate", return_value=[]):
+        yield
+
 API_UP = "the node API reports the SPDK process up"
 RPC_ANSWERS = "its RPC answers"
 

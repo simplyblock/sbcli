@@ -252,7 +252,7 @@ class Arbiter:
             legacy = item.instance == ev.LEGACY_INSTANCE
             if legacy and self.capable.get(item.node_id):
                 # JC pushes a remote-JM event into both queues; on a node with
-                # jc_wait_events the Go collector already delivered it.
+                # jc_wait_events the event collector already delivered it.
                 item.remove(self.db.kv_store)
                 continue
             sig = self.signals.setdefault(item.node_id, ev.NodeSignals())

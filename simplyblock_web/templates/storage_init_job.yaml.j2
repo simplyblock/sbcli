@@ -1,3 +1,4 @@
+{% from 'kubelet_restart.j2' import restart_kubelet %}
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -73,6 +74,19 @@ spec:
 
               echo "--- Checking OS ---"
               OS_ID="$(cat /proc/version | awk '{print $3}' | awk -F'-' '{print $NF}')"
+              # The node manages the host's huge pages (writes nr_hugepages,
+              # restarts the kubelet) unless the host is immutable. Talos is
+              # stated by the operator (TALOS_CLUSTER on the node agent, as
+              # OPENSHIFT_CLUSTER is); the kernel-version sniff stays as a
+              # fallback for a deployment that did not state it.
+              MANAGE_HUGEPAGES=true
+              if [ "{{ 'true' if TALOS_CLUSTER else 'false' }}" = "true" ]; then
+                echo "[INFO] TALOS_CLUSTER is set - huge pages are pre-provisioned by the machine config"
+                MANAGE_HUGEPAGES=false
+              elif [ "$OS_ID" = "talos" ]; then
+                echo "[INFO] Talos detected from the kernel version - huge pages are pre-provisioned by the machine config"
+                MANAGE_HUGEPAGES=false
+              fi
 
               echo "--- Capturing hugepage baseline per NUMA node ---"
               for numa_dir in /sys/devices/system/node/node*/; do
@@ -92,7 +106,7 @@ spec:
               done
 
               echo "--- Sending config to $NODE_IP ---"
-              if [ "$OS_ID" != "talos" ]; then
+              if [ "$MANAGE_HUGEPAGES" = "true" ]; then
                 {% if TLS_CONNECT == "disabled" %}
                 {% set SCHEME = "http" %}
                 {% set CURL_TLS_FLAGS = "" %}
@@ -111,7 +125,7 @@ spec:
                 fi
               fi
 
-              if [ "$OS_ID" != "talos" ]; then
+              if [ "$MANAGE_HUGEPAGES" = "true" ]; then
                 HUGEPAGES_AFTER=$(grep HugePages_Total /proc/meminfo | awk '{print $2}')
                 HUGEPAGES_AFTER_KB=$((HUGEPAGES_AFTER * 2048))
                 echo "[INFO] Hugepages after (kB): $HUGEPAGES_AFTER_KB"
@@ -137,23 +151,14 @@ spec:
                 if [ "$HUGEPAGES_AFTER_KB" -ne "$K8S_NODE_HUGEPAGES_KB" ]; then
                   echo "[INFO] Hugepages changed from Kubernetes-known value ($HUGEPAGES_AFTER_KB kB != $K8S_NODE_HUGEPAGES_KB kB), restarting kubelet..."
                   nsenter --target 1 --mount --uts --ipc --net --pid -- /bin/sh -c '
-                    if command -v systemctl >/dev/null 2>&1; then
-                      if systemctl cat kubelet.service >/dev/null 2>&1; then
-                        systemctl restart kubelet && echo "Kubelet restarted" || echo "Kubelet restart failed"
-                      elif systemctl cat k3s-agent.service >/dev/null 2>&1; then
-                        echo "kubelet service not found, restarting k3s-agent..."
-                        systemctl restart k3s-agent && echo "k3s-agent restarted" || echo "k3s-agent restart failed"
-                      else
-                        echo "Neither kubelet nor k3s-agent service found, skipping restart"
-                      fi
-                    fi
+                    {{ restart_kubelet() | trim | indent(20) }}
                   '
                 else
                   echo "[INFO] Hugepages not greater than what Kubernetes reports, skipping kubelet restart."
                 fi
               else
-                echo "Talos detected - skipping nsenter and kubelet restart."
-                echo "Use '\''talosctl service kubelet restart -n $NODE_IP'\'' to restart the node kubelet"
+                echo "[INFO] Huge pages not managed by the node - skipping nr_hugepages write and kubelet restart."
+                echo "[INFO] Host huge pages (kB): $(grep HugePages_Total /proc/meminfo | awk '{print $2 * 2048}')"
               fi
 
               echo "--- Init setup complete ---"

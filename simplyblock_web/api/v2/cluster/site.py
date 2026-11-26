@@ -12,7 +12,10 @@ from fastapi import APIRouter, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 
-from simplyblock_core.controllers import sync_replication_controller
+from simplyblock_core.controllers import (
+    control_plane_controller,
+    sync_replication_controller,
+)
 
 from .. import util
 from .._dependencies import Cluster
@@ -53,7 +56,18 @@ def fence(request: Request, cluster: Cluster, site: str) -> JSONResponse:
     refused - a node of the site may still run, another site is lost, the
     monitor drains the site, a site activation runs, no other site serves,
     or the last fence task failed its proof (reported once, with its
-    ``task_id``; the next call queues a new attempt)."""
+    ``task_id``; the next call queues a new attempt).
+
+    On a stretched control plane, a fence of the leading site asked on the
+    other site takes over first (control_plane_controller.
+    take_over_before_fence): 409 with ``alive`` while anything of the site
+    still answers."""
+    try:
+        control_plane_controller.take_over_before_fence(cluster, site)
+    except control_plane_controller.ControlPlaneTakeoverRefusedError as e:
+        raise util.sync_error(409, str(e), alive=e.alive) from e
+    except control_plane_controller.ControlPlaneError as e:
+        raise util.sync_error(409, str(e)) from e
     with util.sync_http_errors():
         result = sync_replication_controller.fence_site(cluster.get_id(), site)
         record = sync_replication_controller.site_record(cluster.get_id(), site) if result.done else None

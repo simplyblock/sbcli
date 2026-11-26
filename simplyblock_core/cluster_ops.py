@@ -3,6 +3,7 @@ import builtins
 import contextlib
 import copy
 import json
+import logging
 import os
 import re
 import shlex
@@ -21,11 +22,19 @@ import requests
 import yaml
 from docker.errors import DockerException
 from kubernetes import client as k8s_client
-from pydantic import SecretStr
+from pydantic import SecretStr, TypeAdapter
+from tenacity import (
+    Retrying,
+    before_sleep_log,
+    retry_if_exception_type,
+    stop_after_delay,
+    wait_fixed,
+)
 
 import docker
 from simplyblock_core import (
     constants,
+    floors,
     index_ops,
     jm_raid,
     mgmt_node_ops,
@@ -36,6 +45,7 @@ from simplyblock_core import (
 )
 from simplyblock_core.controllers import (
     activation_gate,
+    array_controller,
     cluster_events,
     device_controller,
     pool_controller,
@@ -48,17 +58,22 @@ from simplyblock_core.controllers.backup import device as backup_device
 from simplyblock_core.controllers.cluster_expansion.planner import (
     RemoteTripletPlacementError,
 )
+from simplyblock_core.controllers.cluster_expansion.planner import (
+    fd_activation_min_domains as fd_planner_min_domains,
+)
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.exceptions import (
+    MonitoringConfigError,
     SyncReplicationSiteError,
     reject_on_sync_replication,
 )
+from simplyblock_core.kms import KMSSettings
 from simplyblock_core.models import indices
 from simplyblock_core.models.backup_config import UnresolvedBackupConfig
 from simplyblock_core.models.cluster import (
     Cluster,
     DeployConfig,
-    HashicorpVaultSettings,
+    normalize_image_prefix,
 )
 from simplyblock_core.models.events import EventObj
 from simplyblock_core.models.job_schedule import JobSchedule
@@ -119,51 +134,96 @@ async def watch_events(cluster_id):
         yield batch
 
 
-def _create_update_user(cluster_id, grafana_url, grafana_secret: SecretStr, user_secret: SecretStr, update_secret=False):
-    session = requests.session()
+#: Per-request bound on a Grafana API call.
+GRAFANA_REQUEST_TIMEOUT_SEC = 10
+#: How long Grafana may stay unreachable (still starting, or the proxy in
+#: front of it) before a user sync gives up.
+GRAFANA_READY_TIMEOUT_SEC = 60
+
+
+class _GrafanaUnavailable(Exception):
+    """Grafana could not answer: a connection failure, a timeout or a 5xx.
+    Transient, unlike a 4xx, which no retry changes."""
+
+
+def _grafana_request(session: requests.Session, method: str, url: str, **kwargs) -> requests.Response:
+    try:
+        response = session.request(method, url, timeout=GRAFANA_REQUEST_TIMEOUT_SEC, **kwargs)
+    except (requests.ConnectionError, requests.Timeout) as e:
+        raise _GrafanaUnavailable(f"{method} {url}: {e}") from e
+    if response.status_code >= 500:
+        raise _GrafanaUnavailable(f"{method} {url}: HTTP {response.status_code}")
+    return response
+
+
+def _sync_grafana_user(cluster_id, grafana_url, grafana_secret: SecretStr, user_secret: SecretStr) -> None:
+    """Make Grafana's user for the cluster exist, with ``user_secret`` as its password.
+
+    Idempotent: the user is created when the lookup does not find it and has
+    its password reset otherwise, so a run that failed half-way, or a cluster
+    whose user was never created, converges on a re-run. Raises
+    MonitoringConfigError when Grafana refuses the change or stays
+    unreachable for GRAFANA_READY_TIMEOUT_SEC.
+    """
+    session = requests.Session()
     session.auth = ("admin", grafana_secret.get_secret_value())
-    headers = {
-        'X-Requested-By': '',
-        'Content-Type': 'application/json',
-    }
-    retries = 5
-    if update_secret:
-        url = f"{grafana_url}/api/users/lookup?loginOrEmail={cluster_id}"
-        response = session.request("GET", url, headers=headers)
-        userid = response.json().get("id")
+    session.headers.update({'X-Requested-By': ''})
 
-        payload = json.dumps({
-            "password": user_secret.get_secret_value()
-        })
+    def sync() -> None:
+        lookup = _grafana_request(session, "GET", f"{grafana_url}/api/users/lookup",
+                                  params={"loginOrEmail": cluster_id})
+        if lookup.status_code == 404:
+            action = "create"
+            response = _grafana_request(session, "POST", f"{grafana_url}/api/admin/users", json={
+                "name": cluster_id,
+                "login": cluster_id,
+                "password": user_secret.get_secret_value(),
+            })
+        elif lookup.ok:
+            action = "update the password of"
+            response = _grafana_request(
+                session, "PUT", f"{grafana_url}/api/admin/users/{lookup.json()['id']}/password",
+                json={"password": user_secret.get_secret_value()})
+        else:
+            action, response = "look up", lookup
+        if not response.ok:
+            raise MonitoringConfigError(
+                f"Grafana at {grafana_url} refused to {action} user {cluster_id}: "
+                f"HTTP {response.status_code} {response.text[:200]}")
 
-        url = f"{grafana_url}/api/admin/users/{userid}/password"
+    try:
+        Retrying(
+            stop=stop_after_delay(GRAFANA_READY_TIMEOUT_SEC),
+            wait=wait_fixed(3),
+            retry=retry_if_exception_type(_GrafanaUnavailable),
+            before_sleep=before_sleep_log(logger, logging.WARNING),
+            reraise=True,
+        )(sync)
+    except _GrafanaUnavailable as e:
+        raise MonitoringConfigError(f"Grafana at {grafana_url} is unreachable: {e}") from e
+    logger.debug(f"Grafana user {cluster_id} in sync")
 
-        while retries > 0:
-            response = session.request("PUT", url, headers=headers, data=payload)
-            if response.status_code == 200:
-                logger.debug(f"user create/update {cluster_id} succeeded")
-                return response.status_code == 200
-            logger.debug(response.status_code)
-            logger.debug("waiting for grafana api to come up")
-            retries -= 1
-            time.sleep(3)
 
-    else:
-        payload = json.dumps({
-            "name": cluster_id,
-            "login": cluster_id,
-            "password": user_secret.get_secret_value()
-        })
-        url = f"{grafana_url}/api/admin/users"
-        while retries > 0:
-            response = session.request("POST", url, headers=headers, data=payload)
-            if response.status_code == 200:
-                logger.debug(f"user create/update {cluster_id} succeeded")
-                return response.status_code == 200
-            logger.debug(response.status_code)
-            logger.debug("waiting for grafana api to come up")
-            retries -= 1
-            time.sleep(3)
+def _add_grafana_user_or_disable_monitoring(cluster: Cluster, grafana_secret: SecretStr) -> None:
+    """Create Grafana's user for a cluster being created; on failure, create it without monitoring.
+
+    A cluster is usable without its dashboards, so an unreachable or refusing
+    Grafana does not fail the create. The cluster is marked
+    ``disable_monitoring`` instead, so nothing later (``update-secret``)
+    expects a Grafana user that does not exist. Must run before the cluster
+    record is first written.
+    """
+    try:
+        _sync_grafana_user(cluster.uuid, cluster.grafana_endpoint, grafana_secret, cluster.secret)
+    except MonitoringConfigError as e:
+        logger.warning(
+            f"Could not create the Grafana user for cluster {cluster.uuid}: {e}. "
+            f"Continuing with monitoring disabled for this cluster")
+        cluster.disable_monitoring = True
+
+
+#: Graylog extractor condition: the message starts with a JSON object.
+JSON_MESSAGE_CONDITION = r"^\s*\{"
 
 
 def _add_graylog_input(cluster_ip, password: SecretStr):
@@ -238,6 +298,12 @@ def _add_graylog_input(cluster_ip, password: SecretStr):
         return False
 
     extractor_url = f"{input_url}/{input_id}/extractors"
+    # Only a message that IS a JSON document is parsed. Without the condition
+    # Graylog ran the JSON extractor on every line, and every plain line (all
+    # of SPDK's and spdk-proxy's) threw a NullPointerException inside it: on
+    # the EKS bed bf34 (2026-11-24, ten storage nodes) that per-line exception
+    # was a large part of why Graylog fell 13 minutes behind and never caught
+    # up. fluent-bit already sends the kubernetes fields structured.
     extractor_payload = {
         "title": "Extract Kubernetes JSON",
         "extractor_type": "json",
@@ -247,8 +313,8 @@ def _add_graylog_input(cluster_ip, password: SecretStr):
         "source_field": "message",
         "target_field": "",
         "extractor_config": {},
-        "condition_type": "none",
-        "condition_value": ""
+        "condition_type": "regex",
+        "condition_value": JSON_MESSAGE_CONDITION,
     }
 
     extractor_response = session.post(extractor_url, headers=headers, data=json.dumps(extractor_payload))
@@ -362,23 +428,101 @@ def _validate_sync_replication(sync_replication, ha_type, is_single_node) -> Non
         raise ValueError("sync replication cannot be used on a single-node cluster")
 
 
-def _validate_leader_site(sync_replication, leader_site) -> None:
+def _validate_leader_site(sync_replication, leader_site, stretched_control_plane=False) -> None:
     """The leader site of a stretched cluster (Cluster.leader_site) exists
-    only on a sync-replication cluster. No node exists at create, so the site
-    is not checked against node sites here (sync_replication_controller.
-    check_leader_site does that when it is moved).
+    only on a sync-replication cluster or one with a stretched control
+    plane. No node exists at create, so the site is not checked against node
+    sites here (sync_replication_controller.check_leader_site does that when
+    it is moved).
 
     Raises:
-        SyncReplicationSiteError: a leader site was given without sync replication.
+        SyncReplicationSiteError: a leader site was given without sync
+            replication or a stretched control plane.
     """
-    if leader_site and not sync_replication:
+    if leader_site and not sync_replication and not stretched_control_plane:
         raise SyncReplicationSiteError(
-            "leader_site is only allowed together with sync_replication")
+            "leader_site is only allowed together with sync_replication or stretched_control_plane")
+
+
+#: Erasure-coding scheme a multi-attach (array LUN) cluster runs: the array
+#: already protects every LUN, so simplyblock adds no parity.
+MULTI_ATTACH_SCHEME = (1, 0)
+
+
+def _resolve_multi_attach(multi_attach, ftt, raid_devices, ha_type, is_single_node,
+                          distr_ndcs, distr_npcs, max_fault_tolerance):
+    """Validate the multi-attach array LUN options and return the effective
+    ``(distr_ndcs, distr_npcs, max_fault_tolerance)``.
+
+    Without ``multi_attach`` the inputs are returned unchanged (``ftt`` must
+    then be unset). With it the cluster runs 1+0 (the array protects the
+    LUNs) and tolerates ``ftt`` node failures by reopening an owner's LUN on
+    another node, so it needs ``raid_devices``, an HA cluster (the LUN is
+    attached to the LVS secondary/tertiary) and more than one node.
+
+    Raises:
+        ValueError: an inconsistent combination of options.
+    """
+    if not multi_attach:
+        if ftt is not None:
+            raise ValueError("ftt is only valid together with multi_attach")
+        return distr_ndcs, distr_npcs, max_fault_tolerance
+    if not raid_devices:
+        raise ValueError("multi_attach requires raid_devices: the array must protect every LUN")
+    if ftt not in (1, 2):
+        raise ValueError("multi_attach requires ftt 1 or 2")
+    if ha_type != "ha":
+        raise ValueError("multi_attach requires ha_type='ha'")
+    if is_single_node:
+        raise ValueError("multi_attach cannot be used on a single-node cluster")
+    if (distr_ndcs, distr_npcs) != MULTI_ATTACH_SCHEME:
+        logger.info("multi_attach: erasure coding %s+%s overridden by %s+%s",
+                    distr_ndcs, distr_npcs, *MULTI_ATTACH_SCHEME)
+    return MULTI_ATTACH_SCHEME[0], MULTI_ATTACH_SCHEME[1], int(ftt)
+
+
+def _validate_warm_standby(multi_attach, warm_standby):
+    """Warm standbys (Cluster.multi_attach_warm_standby) are a multi-attach
+    option only."""
+    if warm_standby and not multi_attach:
+        raise ValueError("multi_attach_warm_standby requires multi_attach")
+
+
+def _validate_stretched_control_plane_params(stretched_control_plane, sync_replication, enable_failure_domain,
+                                             distr_ndcs, distr_npcs, ha_type, is_single_node, leader_site, site):
+    """The deploy-time rules of a stretched control plane
+    (docs/stretched-control-plane.md): one of the three supported data-plane
+    schemes, and the creating control plane's site named.
+
+    Raises:
+        ValueError: the scheme is unsupported, or ``site`` is missing.
+        SyncReplicationSiteError: a leader site without a stretched cluster.
+    """
+    from simplyblock_core.controllers import control_plane_controller
+    control_plane_controller.validate_stretched_control_plane(
+        stretched_control_plane=stretched_control_plane, sync_replication=sync_replication,
+        enable_failure_domain=enable_failure_domain, distr_ndcs=distr_ndcs, distr_npcs=distr_npcs,
+        ha_type=ha_type, is_single_node=is_single_node)
+    _validate_leader_site(sync_replication, leader_site, stretched_control_plane)
+    if stretched_control_plane and not site:
+        raise ValueError("a stretched control plane needs the site of this control plane (--site)")
+    if site and not stretched_control_plane:
+        raise ValueError("--site on cluster create is only allowed with --stretched-control-plane")
+
+
 def _validate_integrity_flags(inline_checksum, atomic_4k):
     """atomic_4k only lifts the data plane's 4K gate on fallback-mode
     checksums, so without inline_checksum it is a setting that does nothing."""
     if atomic_4k and not inline_checksum:
         raise ValueError("atomic_4k requires inline_checksum")
+
+
+def _validate_flex_geometry(flex_geometry, page_size_in_blocks):
+    """A flex-geometry lvstore cluster must be a whole number of pages."""
+    size = constants.FLEX_GEOMETRY_LVS_CLUSTER_SIZE
+    if flex_geometry and (not page_size_in_blocks or size % int(page_size_in_blocks)):
+        raise ValueError(f"flex_geometry needs a page size that divides {size >> 20} MiB "
+                         f"(got {page_size_in_blocks})")
 
 
 def create_cluster(blk_size, page_size_in_blocks, cli_pass,
@@ -388,33 +532,59 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    tls_secret, ingress_host_source, dns_name, fabric, is_single_node, client_data_nic,
                    nvmeof_tls_config=None, max_fault_tolerance=1, backup_config=None,
                    nvmf_base_port=4420, rpc_base_port=8080, snode_api_port=50001, container_image_prefix=None,
-                   hashicorp_vault_settings : HashicorpVaultSettings | None = None,
+                   kms_settings : t.Mapping[str, t.Any] | None = None,
                    enable_failure_domain=False,
+                   lvol_geometry_enabled=True,
                    device_mode=constants.DEVICE_MODE_NVME,
                    enable_hang_device=False,
                    max_subsys=0, hugepages_mem=0, spdk_vcpu_count=0,
                    alert_config: dict[str, t.Any] | None = None,
                    inline_checksum=False,
                    atomic_4k=False,
+                   flex_geometry=False,
                    cluster_vip=None,
                    sync_replication=False,
                    page_copy=False,
                    md_journal=True,
+                   raid_devices=False,
+                   multi_attach=False,
+                   ftt=None,
+                   multi_attach_warm_standby=False,
+                   stretched_control_plane=False,
+                   leader_site="",
+                   site="",
+                   site_api_endpoint="",
 ) -> str:
+    distr_ndcs, distr_npcs, max_fault_tolerance = _resolve_multi_attach(
+        multi_attach, ftt, raid_devices, ha_type, is_single_node,
+        distr_ndcs, distr_npcs, max_fault_tolerance)
+    _validate_warm_standby(multi_attach, multi_attach_warm_standby)
     if (distr_ndcs, distr_npcs) not in SUPPORTED_ERASURE_CODING_SCHEMES:
         raise ValueError("Unsupported erasure coding scheme")
     _validate_integrity_flags(inline_checksum, atomic_4k)
+    _validate_flex_geometry(flex_geometry, page_size_in_blocks)
 
     _validate_sync_replication(sync_replication, ha_type, is_single_node)
+    if stretched_control_plane and not leader_site:
+        leader_site = site  # the creating control plane leads until an operator moves it
+    _validate_stretched_control_plane_params(
+        stretched_control_plane, sync_replication, enable_failure_domain, distr_ndcs, distr_npcs,
+        ha_type, is_single_node, leader_site, site)
 
     if max_fault_tolerance > 1:
         if ha_type != "ha":
             raise ValueError("max_fault_tolerance > 1 requires ha_type='ha'")
-        if distr_npcs < 2:
+        # Multi-attach runs 1+0: its FTT comes from the array LUN being
+        # reopened on another node, not from parity.
+        if distr_npcs < 2 and not multi_attach:
             raise ValueError("max_fault_tolerance > 1 requires distr_npcs >= 2")
 
-    if (hashicorp_vault_settings is not None) and (Settings().tls_connect != "authenticated"):
-        raise ValueError("External KMS requires mTLS authentication to be used")
+    if kms_settings is not None:
+        # Reject a configuration no backend could act on before installing
+        # anything, rather than at the set_kms_settings below.
+        TypeAdapter(KMSSettings).validate_python(kms_settings)
+        if Settings().tls_connect != "authenticated":
+            raise ValueError("External KMS requires mTLS authentication to be used")
 
     if ingress_host_source == "dns" or ingress_host_source == "loadbalancer":
         if not dns_name:
@@ -550,7 +720,12 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.inflight_io_threshold = inflight_io_threshold
     cluster.strict_node_anti_affinity = strict_node_anti_affinity
     cluster.enable_failure_domain = enable_failure_domain
+    cluster.lvol_geometry_enabled = lvol_geometry_enabled
     cluster.sync_replication = bool(sync_replication)
+    cluster.stretched_control_plane = bool(stretched_control_plane)
+    cluster.leader_site = leader_site or ""
+    if site and site_api_endpoint:
+        cluster.site_api_endpoints[site] = site_api_endpoint
     validate_spdk_sizing(max_subsys, hugepages_mem, spdk_vcpu_count)
     cluster.max_subsys = max_subsys or 0
     cluster.hugepages_mem = hugepages_mem or 0
@@ -562,15 +737,19 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.full_page_unmap = False
     cluster.inline_checksum = bool(inline_checksum)
     cluster.atomic_4k = bool(atomic_4k)
+    cluster.flex_geometry = bool(flex_geometry)
     cluster.page_copy = bool(page_copy)
     cluster.md_journal = bool(md_journal)
+    cluster.raid_devices = bool(raid_devices)
+    cluster.multi_attach = bool(multi_attach)
+    cluster.multi_attach_warm_standby = bool(multi_attach and multi_attach_warm_standby)
     cluster.client_data_nic = client_data_nic or ""
     cluster.max_fault_tolerance = max_fault_tolerance
     cluster.nvmf_base_port = nvmf_base_port
     cluster.rpc_base_port = rpc_base_port
     cluster.snode_api_port = snode_api_port
-    cluster.container_image_prefix = container_image_prefix or ""
-    cluster.hashicorp_vault_settings = hashicorp_vault_settings
+    cluster.container_image_prefix = normalize_image_prefix(container_image_prefix)
+    cluster.set_kms_settings(kms_settings)
     cluster.backup_local_path = os.path.join(constants.KVD_DB_BACKUP_PATH, cluster.uuid)
     cluster.cluster_vip = cluster_vip or ""
     if nvmeof_tls_config:
@@ -583,15 +762,33 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     if not disable_monitoring:
         utils.render_and_deploy_alerting_configs(alert_config, contact_point, cluster.grafana_endpoint, cluster.uuid, cluster.secret.get_secret_value())
 
-    logger.info("Deploying swarm stack ...")
     log_level = "DEBUG" if constants.LOG_WEB_DEBUG else "INFO"
-    scripts.deploy_stack(cli_pass.get_secret_value(), dev_ip, constants.SIMPLY_BLOCK_DOCKER_IMAGE, cluster.secret.get_secret_value(), cluster.uuid,
-                            log_del_interval, metrics_retention_period, log_level, cluster.grafana_endpoint, str(disable_monitoring))
-    logger.info("Deploying swarm stack > Done")
+
+    def deploy_stack_phase(phase):
+        scripts.deploy_stack(cli_pass.get_secret_value(), dev_ip,
+                             cluster.prefixed_image(constants.SIMPLY_BLOCK_DOCKER_IMAGE),
+                             cluster.secret.get_secret_value(), cluster.uuid, log_del_interval,
+                             metrics_retention_period, log_level, cluster.grafana_endpoint, str(disable_monitoring),
+                             phase=phase, image_prefix=cluster.container_image_prefix)
+
+    # Order matters: every simplyblock service exits on an unconfigured
+    # database, so the database must be configured after FDB is up and before
+    # those services are deployed (SFAM-2847).
+    logger.info("Deploying monitoring stack ...")
+    deploy_stack_phase("monitoring")
+    logger.info("Deploying monitoring stack > Done")
+
+    logger.info("Deploying FDB services ...")
+    deploy_stack_phase("fdb")
+    logger.info("Deploying FDB services > Done")
 
     logger.info("Configuring DB...")
     scripts.set_db_config_single()
     logger.info("Configuring DB > Done")
+
+    logger.info("Deploying simplyblock services ...")
+    deploy_stack_phase("app")
+    logger.info("Deploying simplyblock services > Done")
     monitoring_secret = cluster.secret
 
 
@@ -616,7 +813,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     if not disable_monitoring:
         _set_max_result_window(os_endpoint)
         _add_graylog_input(graylog_endpoint, monitoring_secret)
-        _create_update_user(cluster.uuid, cluster.grafana_endpoint, monitoring_secret, cluster.secret)
+        _add_grafana_user_or_disable_monitoring(cluster, monitoring_secret)
 
     cluster.db_connection = db_connection  # type: ignore[assignment]
     cluster.status = Cluster.STATUS_UNREADY
@@ -634,7 +831,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     for line in index_ops.build_indices(log=logger.info):
         logger.info(line)
 
-    mgmt_node_ops.add_mgmt_node(dev_ip, mode, cluster.uuid)
+    mgmt_node_ops.add_mgmt_node(dev_ip, mode, cluster.uuid, site=site)
 
     logger.info("New Cluster has been created")
     logger.info(cluster.uuid)
@@ -665,6 +862,24 @@ def _cleanup_nvme(mount_point, nqn_value) -> None:
     logger.info(f"Removed mount point: {mount_point}")
 
 
+def _image_prefix_for_added_cluster(container_image_prefix: str | None, clusters) -> str:
+    """The registry prefix a cluster added to this control plane is stored with.
+
+    ``None`` -- the caller did not say -- inherits the prefix of a cluster
+    already here: they are served by the same management hosts, and a registry
+    those cannot reach is not reachable for the new cluster's images either. A
+    given value is taken as is, ``""`` included, which is how a caller opts the
+    new cluster out.
+    """
+    if container_image_prefix is not None:
+        return normalize_image_prefix(container_image_prefix)
+    for existing in clusters or []:
+        inherited = normalize_image_prefix(existing.container_image_prefix)
+        if inherited:
+            return inherited
+    return ""
+
+
 def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
                 distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity, qpair_count,
                 max_queue_size, inflight_io_threshold, strict_node_anti_affinity, is_single_node, name, cr_name=None,
@@ -672,19 +887,29 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
                 max_subsys=0, hugepages_mem=0, spdk_vcpu_count=0,
                 client_data_nic="", max_fault_tolerance=1, backup_config=None,
                 nvmf_base_port=4420, rpc_base_port=8080, snode_api_port=50001,
-                hashicorp_vault_settings : HashicorpVaultSettings | None = None,
+                kms_settings : t.Mapping[str, t.Any] | None = None,
                 enable_failure_domain=False,
+                lvol_geometry_enabled=True,
                 device_mode=constants.DEVICE_MODE_NVME,
                 inline_checksum=False,
                 atomic_4k=False,
+                flex_geometry=False,
                 sync_replication=False,
                 leader_site="",
                 page_copy=False,
                 md_journal=True,
+                raid_devices=False,
+                multi_attach=False,
+                ftt=None,
+                multi_attach_warm_standby=False,
                 snode_api_service=constants.K8S_SNODE_API_SERVICE,
                 spdk_proxy_service=constants.K8S_SPDK_PROXY_SERVICE,
                 spdk_proxy_tls_secret=constants.K8S_SPDK_PROXY_TLS_SECRET,
                 node_label_suffix="",
+                stretched_control_plane=False,
+                site="",
+                site_api_endpoint="",
+                container_image_prefix: str | None = None,
 ) -> str:
     """Thin wrapper around _add_cluster_impl() that serializes create calls
     for the same name behind a DbLock.
@@ -710,18 +935,28 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
         cr_name=cr_name, cr_namespace=cr_namespace, cr_plural=cr_plural, fabric=fabric,
         client_data_nic=client_data_nic, max_fault_tolerance=max_fault_tolerance, backup_config=backup_config,
         nvmf_base_port=nvmf_base_port, rpc_base_port=rpc_base_port, snode_api_port=snode_api_port,
-        hashicorp_vault_settings=hashicorp_vault_settings, enable_failure_domain=enable_failure_domain,
+        kms_settings=kms_settings, enable_failure_domain=enable_failure_domain,
+        lvol_geometry_enabled=lvol_geometry_enabled,
         device_mode=device_mode,
         inline_checksum=inline_checksum,
         atomic_4k=atomic_4k,
+        flex_geometry=flex_geometry,
         sync_replication=sync_replication,
         leader_site=leader_site,
         page_copy=page_copy,
         md_journal=md_journal,
+        raid_devices=raid_devices,
+        multi_attach=multi_attach,
+        ftt=ftt,
+        multi_attach_warm_standby=multi_attach_warm_standby,
         snode_api_service=snode_api_service,
         spdk_proxy_service=spdk_proxy_service,
         spdk_proxy_tls_secret=spdk_proxy_tls_secret,
         node_label_suffix=node_label_suffix,
+        stretched_control_plane=stretched_control_plane,
+        site=site,
+        site_api_endpoint=site_api_endpoint,
+        container_image_prefix=container_image_prefix,
     )
     if not name:
         return _add_cluster_impl(**kwargs)
@@ -746,21 +981,32 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
                 max_subsys=0, hugepages_mem=0, spdk_vcpu_count=0,
                 client_data_nic="", max_fault_tolerance=1, backup_config=None,
                 nvmf_base_port=4420, rpc_base_port=8080, snode_api_port=50001,
-                hashicorp_vault_settings : HashicorpVaultSettings | None = None,
+                kms_settings : t.Mapping[str, t.Any] | None = None,
                 enable_failure_domain=False,
+                lvol_geometry_enabled=True,
                 device_mode=constants.DEVICE_MODE_NVME,
                 inline_checksum=False,
                 atomic_4k=False,
+                flex_geometry=False,
                 sync_replication=False,
                 leader_site="",
                 page_copy=False,
                 md_journal=True,
+                raid_devices=False,
+                multi_attach=False,
+                ftt=None,
+                multi_attach_warm_standby=False,
                 snode_api_service=constants.K8S_SNODE_API_SERVICE,
                 spdk_proxy_service=constants.K8S_SPDK_PROXY_SERVICE,
                 spdk_proxy_tls_secret=constants.K8S_SPDK_PROXY_TLS_SECRET,
                 node_label_suffix="",
+                stretched_control_plane=False,
+                site="",
+                site_api_endpoint="",
+                container_image_prefix: str | None = None,
 ) -> str:
     _validate_integrity_flags(inline_checksum, atomic_4k)
+    _validate_flex_geometry(flex_geometry, page_size_in_blocks)
 
     clusters = db_controller.get_clusters()
     if name and clusters:
@@ -768,20 +1014,34 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
             if existing.cluster_name and existing.cluster_name == name:
                 raise ValueError(f"A cluster with the name '{name}' already exists")
 
+    distr_ndcs, distr_npcs, max_fault_tolerance = _resolve_multi_attach(
+        multi_attach, ftt, raid_devices, ha_type, is_single_node,
+        distr_ndcs, distr_npcs, max_fault_tolerance)
+    _validate_warm_standby(multi_attach, multi_attach_warm_standby)
     if (distr_ndcs, distr_npcs) not in SUPPORTED_ERASURE_CODING_SCHEMES:
         raise ValueError("Unsupported erasure coding scheme")
 
     _validate_sync_replication(sync_replication, ha_type, is_single_node)
-    _validate_leader_site(sync_replication, leader_site)
+    if stretched_control_plane and not leader_site:
+        leader_site = site  # the creating control plane leads until an operator moves it
+    _validate_stretched_control_plane_params(
+        stretched_control_plane, sync_replication, enable_failure_domain, distr_ndcs, distr_npcs,
+        ha_type, is_single_node, leader_site, site)
 
     if max_fault_tolerance > 1:
         if ha_type != "ha":
             raise ValueError("max_fault_tolerance > 1 requires ha_type='ha'")
-        if distr_npcs < 2:
+        # Multi-attach runs 1+0: its FTT comes from the array LUN being
+        # reopened on another node, not from parity.
+        if distr_npcs < 2 and not multi_attach:
             raise ValueError("max_fault_tolerance > 1 requires distr_npcs >= 2")
 
-    if (hashicorp_vault_settings is not None) and (Settings().tls_connect != "authenticated"):
-        raise ValueError("External KMS requires mTLS authentication to be used")
+    if kms_settings is not None:
+        # Reject a configuration no backend could act on before installing
+        # anything, rather than at the set_kms_settings below.
+        TypeAdapter(KMSSettings).validate_python(kms_settings)
+        if Settings().tls_connect != "authenticated":
+            raise ValueError("External KMS requires mTLS authentication to be used")
 
     logger.info("Adding new cluster")
     cluster = Cluster()
@@ -809,8 +1069,12 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
     cluster.secret = SecretStr(utils.generate_string(20))
     cluster.strict_node_anti_affinity = strict_node_anti_affinity
     cluster.enable_failure_domain = enable_failure_domain
+    cluster.lvol_geometry_enabled = lvol_geometry_enabled
     cluster.sync_replication = bool(sync_replication)
     cluster.leader_site = leader_site or ""
+    cluster.stretched_control_plane = bool(stretched_control_plane)
+    if site and site_api_endpoint:
+        cluster.site_api_endpoints[site] = site_api_endpoint
     cluster.device_mode = _validated_device_mode(device_mode)
 
     if clusters:
@@ -842,7 +1106,7 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
             raise ValueError("monitoring_secret is required")
         cluster.grafana_endpoint = constants.GRAFANA_K8S_ENDPOINT
 
-        mgmt_node_ops.add_mgmt_node("0.0.0.0", "kubernetes", cluster.uuid)
+        mgmt_node_ops.add_mgmt_node("0.0.0.0", "kubernetes", cluster.uuid, site=site)
 
         if not cluster.disable_monitoring:
             _set_max_result_window(constants.OS_K8S_ENDPOINT)
@@ -857,7 +1121,7 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
         cfg.write_to_db()
 
     if not cluster.disable_monitoring:
-        _create_update_user(cluster.uuid, cluster.grafana_endpoint, cluster.grafana_secret, cluster.secret)
+        _add_grafana_user_or_disable_monitoring(cluster, cluster.grafana_secret)
 
     if cluster.mode == "kubernetes":
         utils.patch_prometheus_configmap(cluster.uuid, cluster.secret.get_secret_value())
@@ -897,14 +1161,19 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
     cluster.full_page_unmap = False
     cluster.inline_checksum = bool(inline_checksum)
     cluster.atomic_4k = bool(atomic_4k)
+    cluster.flex_geometry = bool(flex_geometry)
     cluster.page_copy = bool(page_copy)
     cluster.md_journal = bool(md_journal)
+    cluster.raid_devices = bool(raid_devices)
+    cluster.multi_attach = bool(multi_attach)
+    cluster.multi_attach_warm_standby = bool(multi_attach and multi_attach_warm_standby)
     cluster.client_data_nic = client_data_nic or ""
     cluster.max_fault_tolerance = max_fault_tolerance
     cluster.nvmf_base_port = nvmf_base_port
     cluster.rpc_base_port = rpc_base_port
     cluster.snode_api_port = snode_api_port
-    cluster.hashicorp_vault_settings = hashicorp_vault_settings
+    cluster.container_image_prefix = _image_prefix_for_added_cluster(container_image_prefix, clusters)
+    cluster.set_kms_settings(kms_settings)
     if backup_config:
         cluster.set_backup_config(backup_config)
 
@@ -955,6 +1224,25 @@ def set_two_node_arbitration(cl_id, enabled: bool) -> None:
         fresh.two_node_arbitration = enabled
 
     db_controller.atomic_update(cluster, mutate)
+
+
+def set_array_plugin(cl_id, plugin: str, endpoint: str = "", options: dict | None = None,
+                     credentials: dict | None = None, lun_size: int = 0) -> None:
+    """Configure the storage-array plugin of a multi-attach cluster (see
+    controllers/array_controller.register_array: the plugin is connected
+    before anything is saved, credentials go to the KMS). An empty
+    ``plugin`` removes the registration, after which takeovers are refused.
+
+    Raises:
+        ValueError: not a multi-attach cluster, the plugin cannot be loaded
+            or connected, or (removal) LUNs created through it exist.
+    """
+    cluster = db_controller.get_cluster_by_id(cl_id)
+    if not plugin:
+        if cluster.array_plugin:
+            array_controller.delete_array(cl_id, cluster.array_id)
+        return
+    array_controller.register_array(cl_id, plugin, endpoint, options, credentials, lun_size)
 
 
 def _wait_for_full_device_connectivity(cl_id, timeout_sec=300, poll_sec=10, checkpoint=None):
@@ -1392,10 +1680,21 @@ def _record_activation_topology(cluster, single_node, fresh) -> None:
 
 
 def activation_minimum_devices(cluster, single_node_cluster) -> int:
-    """ndcs+npcs devices are needed for placement; the +1 spare is rebuild
-    headroom that a single-node cluster (no data redundancy to rebuild onto
-    a spare) does not require."""
+    """The RE-activation device gate (recovery of an existing layout): ndcs+npcs
+    devices are needed for placement; the +1 spare is rebuild headroom that a
+    single-node cluster (no data redundancy to rebuild onto a spare) does not
+    require. A FRESH activation is judged by the full floors instead
+    (``activation_floor_violations``); a re-activation deliberately keeps
+    this weaker gate so a drifted cluster can still be recovered."""
     return cluster.distr_ndcs + cluster.distr_npcs + (0 if single_node_cluster else 1)
+
+
+def activation_floor_violations(cluster, snodes, online_nodes) -> builtins.list[str]:
+    """The floors (simplyblock_core.floors) a fresh activation would violate
+    with ``online_nodes`` online: node count, one data device per node, the
+    cluster-wide data-device count and, with failure domains, the domain
+    count. Journal devices never count (they sit in ``jm_device``)."""
+    return floors.evaluate(cluster, snodes, online_nodes=online_nodes)
 
 
 #: Sites of a sync-replication cluster: one simplyblock cluster spans exactly two.
@@ -1630,10 +1929,23 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False, site_activ
         logger.warning("Single-node cluster: activating as non-HA "
                        "(no secondary nodes, single journal) regardless of ha_type")
 
-    minimum_devices = activation_minimum_devices(cluster, single_node_cluster)
-    if dev_count < minimum_devices:
-        _revert()
-        raise ValueError(f"Failed to activate cluster, No enough online device.. Minimum is {minimum_devices}")
+    if is_fresh_activation:
+        # Fresh activation refuses below any floor (simplyblock_core.floors).
+        # A node without a data device is refused here too: downstream,
+        # _prepare_cluster_devices_jm_on_dev accepts an empty device list.
+        floor_violations = activation_floor_violations(cluster, snodes, online_nodes)
+        if floor_violations:
+            _revert()
+            raise ValueError("Failed to activate cluster, below the resource floors for "
+                             f"the {cluster.distr_ndcs}+{cluster.distr_npcs} scheme: "
+                             + "; ".join(floor_violations))
+    else:
+        # Re-activation (recovery): the weaker device gate of before, so a
+        # drifted or partially-online cluster can still be brought back.
+        minimum_devices = activation_minimum_devices(cluster, single_node_cluster)
+        if dev_count < minimum_devices:
+            _revert()
+            raise ValueError(f"Failed to activate cluster, No enough online device.. Minimum is {minimum_devices}")
 
     # Sync replication: the configured two-site layout is enforced on every
     # activation (force included) -- a third site or an unsited node is never
@@ -1679,7 +1991,7 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False, site_activ
     fd_desired_layout: dict[str, tuple[str, str]] = {}
     if cluster.enable_failure_domain:
         distinct_domains = {node.failure_domain for node in online_nodes if node.failure_domain >= 0}
-        min_domains = cluster.distr_npcs + 2
+        min_domains = fd_planner_min_domains(cluster.distr_npcs, cluster.distr_ndcs)
         if len(distinct_domains) < min_domains:
             logger.warning(
                 "Failure-domain feature is enabled but only %d distinct failure "
@@ -1736,7 +2048,8 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False, site_activ
                 # stranding another node's secondary/tertiary with none at all.
                 # This also subsumes the plain "at least two domains" floor.
                 domain_count_violation = fd_planner.fd_activation_domain_count_violation(
-                    cluster.distr_npcs, len(fd_host_counts))
+                    cluster.distr_npcs, len(fd_host_counts), ndcs=cluster.distr_ndcs,
+                    site_bound=bool(cluster.stretched_control_plane and not cluster.sync_replication))
                 if domain_count_violation:
                     _fd_fail(_on_site(domain_count_violation))
                 if len(set(fd_host_counts.values())) != 1:
@@ -1879,6 +2192,10 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False, site_activ
                     raise ValueError("Failed to activate cluster, not enough nodes for dual fault tolerance")
                 snode = db_controller.get_storage_node_by_id(snode.get_id())
                 used_nodes_as_tertiary.append(snode.tertiary_node_id)
+
+        # Multi-attach cluster with an array: present every owner's LUN to
+        # its new secondary / tertiary (a no-op on every other cluster).
+        array_controller.reconcile_after_role_change(cl_id)
 
         # Sync replication: every LVS also gets its remote triplet on the other
         # site. Refs a re-activation finds are kept; missing ones are picked.
@@ -2666,6 +2983,10 @@ def cluster_expand(cl_id) -> None:
             sec_node_2.lvstore_stack_tertiary = snode.get_id()
             sec_node_2.write_to_db()
 
+        if cluster.ha_type == "ha":
+            # Multi-attach cluster with an array: the new roles' LUN paths.
+            array_controller.reconcile_after_role_change(cl_id)
+
         if cluster.ha_type == "ha" and cluster.sync_replication:
             try:
                 storage_node_ops.assign_remote_triplets(cluster, [snode.get_id()])
@@ -2755,24 +3076,6 @@ def set_cluster_status(cl_id, status) -> None:
     if updated is None or 'old' not in captured:
         return
     cluster_events.cluster_status_change(updated, updated.status, captured['old'])
-
-
-def cluster_set_read_only(cl_id) -> None:
-    cluster = db_controller.get_cluster_by_id(cl_id)
-
-    if cluster.status == Cluster.STATUS_READONLY:
-        return
-
-    set_cluster_status(cl_id, Cluster.STATUS_READONLY)
-    st = db_controller.get_storage_nodes_by_cluster_id(cl_id)
-    for node in st:
-        if node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
-            continue
-        for dev in node.nvme_devices:
-            if dev.status == NVMeDevice.STATUS_ONLINE:
-                # dev_stat = db_controller.get_device_stats(dev, 1)
-                # if dev_stat and dev_stat[0].size_util >= cluster.cap_crit:
-                device_controller.device_set_state(dev.get_id(), NVMeDevice.STATUS_CANNOT_ALLOCATE)
 
 
 def cluster_set_active(cl_id) -> None:
@@ -3391,16 +3694,41 @@ def get_secret(cluster_id) -> str:
 
 
 def set_secret(cluster_id, secret: SecretStr) -> None:
+    """Rotate the cluster secret.
+
+    The copies outside FDB -- Grafana's user for the cluster, and the
+    Prometheus scrape config and event log alert data source that authenticate
+    with the secret -- are updated first and the record last. A failure part-way
+    leaves the old secret in force for the API, and a re-run converges: the
+    Grafana sync is idempotent and the config rotation is keyed on the stored
+    secret, so a copy already rotated is left alone.
+    """
     cluster = db_controller.get_cluster_by_id(cluster_id)
     plain = secret.get_secret_value().strip()
     if len(plain) < 20:
         raise ValueError("Secret must be at least 20 char")
+    # The API splits "<cluster-id> <secret>" on whitespace, and the monitoring
+    # configs carry the secret as a quoted YAML scalar.
+    if any(c.isspace() or c in "'\"" for c in plain):
+        raise ValueError("Secret must not contain whitespace or quotes")
+    old = cluster.secret.get_secret_value()
     secret = SecretStr(plain)
 
-    _create_update_user(cluster_id, cluster.grafana_endpoint, cluster.grafana_secret, secret, update_secret=True)
+    # A cluster created without monitoring has nothing outside FDB to update.
+    if not cluster.disable_monitoring:
+        _sync_grafana_user(cluster_id, cluster.grafana_endpoint, cluster.grafana_secret, secret)
+        if cluster.mode == "kubernetes":
+            if not utils.rotate_prometheus_configmap_secret(old, plain):
+                logger.warning(
+                    f"{utils.PROMETHEUS_CONFIGMAP} does not carry the secret of cluster {cluster_id}, "
+                    f"so Prometheus is not scraping it with that secret; left unchanged")
+        else:
+            _rotate_docker_monitoring_secret(cluster_id, old, plain)
 
-    cluster.secret = secret
-    cluster.write_to_db(db_controller.kv_store)
+    def _apply(c):
+        c.secret = secret
+
+    db_controller.atomic_update(cluster, _apply)
 
 
 def set_fabric(cluster_id, fabric) -> None:
@@ -3435,6 +3763,15 @@ def get_log_events(cluster_id, limit=EVENT_LOG_TAIL) -> builtins.list[EventObj]:
     events = db_controller.get_events(cluster_id, limit=limit, reverse=True)
     events.reverse()
     return events
+
+
+def set_lvol_geometry(cluster_id, enable) -> None:
+    """Enable or disable LVol geometry cluster-wide. Applies to lvols
+    created from now on; existing lvols keep their ndcs/npcs."""
+    db_controller.atomic_update(
+        db_controller.get_cluster_by_id(cluster_id),
+        lambda c: setattr(c, "lvol_geometry_enabled", bool(enable)))
+    logger.info(f"LVol geometry {'enabled' if enable else 'disabled'} on cluster {cluster_id}")
 
 
 def get_logs(cluster_id, limit=50, **kwargs) -> builtins.list[dict]:
@@ -3538,7 +3875,7 @@ def _grafana_provisioning_dirs(cluster_docker) -> tuple[str, str]:
     return os.path.dirname(sources[GRAFANA_DATASOURCE_TARGET]), sources[GRAFANA_ALERTING_TARGET]
 
 
-def _install_provisioning_on_all_managers(files: dict[str, str]) -> None:
+def _install_provisioning_on_all_managers(files: dict[str, str], image: str) -> None:
     """Write Grafana's provisioning files onto every management node.
 
     Grafana is constrained to node.role == manager and may be rescheduled to
@@ -3563,7 +3900,7 @@ def _install_provisioning_on_all_managers(files: dict[str, str]) -> None:
             node_docker = docker.DockerClient(
                 base_url=f"tcp://{node.docker_ip_port}", version="auto", timeout=60)
             node_docker.containers.run(
-                constants.SIMPLY_BLOCK_DOCKER_IMAGE, ["sh", "-c", script], user="root",
+                image, ["sh", "-c", script], user="root",
                 volumes=[f"{directory}:{directory}" for directory in volumes],
                 remove=True, detach=False)
             logger.info("Provisioning files written on %s", node.mgmt_ip)
@@ -3576,6 +3913,88 @@ def _install_provisioning_on_all_managers(files: dict[str, str]) -> None:
             + "; ".join(f"{ip} ({reason})" for ip, reason in failed.items())
             + ". Fix those nodes and re-run; Grafana provisions nothing on a node it cannot "
               "read them from")
+
+
+PROMETHEUS_CONFIG_TARGET = "/etc/prometheus/prometheus.yml"
+
+
+def _service_mount_source(service, target: str) -> str | None:
+    mounts = service.attrs['Spec']['TaskTemplate']['ContainerSpec'].get('Mounts') or []
+    return {mount.get('Target'): mount.get('Source') for mount in mounts}.get(target)
+
+
+def _run_on_mgmt_node(node, command: builtins.list[str], directory: str, image: str) -> bytes:
+    """Run ``command`` as root on a management node, with ``directory`` mounted.
+
+    Host paths of the monitoring stack belong to root, and the image runs as
+    USER simplyblock; see _install_provisioning_on_all_managers. ``image`` is
+    the management image as the cluster pulls it (Cluster.prefixed_image): the
+    node may hold it under no other name, and may reach no other registry.
+    """
+    node_docker = docker.DockerClient(base_url=f"tcp://{node.docker_ip_port}", version="auto", timeout=60)
+    return node_docker.containers.run(
+        image, command, user="root",
+        volumes=[f"{directory}:{directory}"], remove=True, detach=False)
+
+
+def _rotate_secret_on_all_managers(nodes, path: str, old: str, new: str, image: str) -> bool:
+    """Swap ``old`` for ``new`` in the host file ``path`` on every management node.
+
+    Each manager holds its own copy (the monitoring services are global on, or
+    reschedule among, the managers). Rewritten in place, so a single-file bind
+    mount keeps its inode. Returns whether any copy carried ``old``.
+    """
+    directory = os.path.dirname(path)
+    changed = False
+    failed = {}
+    for node in nodes:
+        try:
+            current = _run_on_mgmt_node(node, ["cat", path], directory, image).decode('utf-8')
+            rotated, count = utils.replace_secret_token(current, old, new)
+            if count:
+                encoded = base64.b64encode(rotated.encode('utf-8')).decode('ascii')
+                _run_on_mgmt_node(
+                    node, ["sh", "-c", f"echo {encoded} | base64 -d > {shlex.quote(path)}"], directory, image)
+                changed = True
+        except DockerException as e:
+            failed[node.mgmt_ip] = str(e)
+
+    if failed:
+        raise MonitoringConfigError(
+            f"Could not rotate the cluster secret in {path} on: "
+            + "; ".join(f"{ip} ({reason})" for ip, reason in failed.items())
+            + ". Fix those nodes and re-run")
+    return changed
+
+
+def _rotate_docker_monitoring_secret(cluster_id, old: str, new: str) -> None:
+    """Rotate the secret in the docker monitoring stack's config files.
+
+    Prometheus scrapes /cluster/metrics with it, and the event log alert data
+    source (present only once `cluster event-alerts` enabled it) queries the
+    API with it. A service whose file changed is restarted to load it.
+    """
+    cluster_docker = utils.get_docker_client(cluster_id)
+    nodes = db_controller.get_mgmt_nodes()
+    image = db_controller.get_cluster_by_id(cluster_id).prefixed_image(constants.SIMPLY_BLOCK_DOCKER_IMAGE)
+    for service_name, target, required in (
+            (constants.MONITORING_PROMETHEUS_SERVICE, PROMETHEUS_CONFIG_TARGET, True),
+            (constants.MONITORING_GRAFANA_SERVICE, GRAFANA_EVENT_DATASOURCE_TARGET, False)):
+        try:
+            service = cluster_docker.services.get(service_name)
+        except docker.errors.NotFound as e:
+            raise MonitoringConfigError(
+                f"Service {service_name} not found: the monitoring stack is not deployed") from e
+
+        source = _service_mount_source(service, target)
+        if not source:
+            if required:
+                raise MonitoringConfigError(f"Service {service_name} has no bind mount at {target}")
+            continue
+
+        if _rotate_secret_on_all_managers(nodes, source, old, new, image):
+            logger.info(f"Restarting {service_name} to load the rotated secret...")
+            service.force_update()
 
 
 def set_event_alerts(cluster_id, enabled=True, log_limit=None, interval=None, pending_period=None,
@@ -3617,7 +4036,7 @@ def set_event_alerts(cluster_id, enabled=True, log_limit=None, interval=None, pe
         os.path.join(alerting_dir, utils.EVENT_ALERT_RULES_FILE):
             rendered[utils.EVENT_ALERT_RULES_FILE],
         datasource_path: rendered[utils.EVENT_ALERT_DATASOURCE_FILE],
-    })
+    }, cluster.prefixed_image(constants.SIMPLY_BLOCK_DOCKER_IMAGE))
 
     # --force recreates the task, which is what makes Grafana re-read
     # provisioning; a single-file bind mount also tracks the inode it started
@@ -3773,9 +4192,7 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
     logger.info("Updating mgmt cluster")
     if cluster.mode == "docker":
         cluster_docker = utils.get_docker_client(cluster_id)
-        service_image = constants.SIMPLY_BLOCK_DOCKER_IMAGE
-        if mgmt_image:
-            service_image = mgmt_image
+        service_image = cluster.prefixed_image(mgmt_image or constants.SIMPLY_BLOCK_DOCKER_IMAGE)
         logger.info(f"Pulling image {service_image}")
         pull_docker_image_with_retry(cluster_docker, service_image)
         service_names = []
@@ -3869,7 +4286,7 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
         apps_v1 = k8s_client.AppsV1Api()
         namespace = constants.K8S_NAMESPACE
         image_parts = ["simplyblock-io/simplyblock:", "simplyblock/simplyblock:", "simply-block/simplyblock:"]
-        service_image = mgmt_image or constants.SIMPLY_BLOCK_DOCKER_IMAGE
+        service_image = cluster.prefixed_image(mgmt_image or constants.SIMPLY_BLOCK_DOCKER_IMAGE)
         deployment_names = []
         # Update Deployments
         deployments = apps_v1.list_namespaced_deployment(namespace=namespace)
@@ -3936,9 +4353,7 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
         for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
             if node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
                 node_docker = docker.DockerClient(base_url=f"tcp://{node.mgmt_ip}:2375", version="auto", timeout=60 * 5)
-                img = constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE
-                if spdk_image:
-                    img = spdk_image
+                img = cluster.prefixed_image(spdk_image or constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
                 logger.info(f"Pulling image {img}")
                 pull_docker_image_with_retry(node_docker, img)
 
@@ -4317,6 +4732,10 @@ def delete_cluster(cl_id, force=False) -> None:
     if pools:
         raise ValueError("Can only remove Empty cluster, Pools found")
 
+    # Multi-attach cluster with an array: the only place its LUNs are
+    # deleted, with the array credentials in the KMS. No-op otherwise.
+    array_controller.delete_cluster_luns(cluster, force=force)
+
     logger.info(f"Deleting Cluster {cl_id}")
     cluster_events.cluster_delete(cluster)
     cluster.remove(db_controller.kv_store)
@@ -4358,7 +4777,18 @@ def set_(cl_id, attr, value) -> bool:
                 cluster.write_to_db()
                 return True
     else:
-        value = cluster.get_attrs_map()[attr]['type'](value)
+        attr_type = cluster.get_attrs_map()[attr]['type']
+        if attr_type is bool and isinstance(value, str):
+            # bool("false") is True; parse the CLI's string form explicitly.
+            lowered = value.strip().lower()
+            if lowered in ("1", "true", "yes", "on"):
+                value = True
+            elif lowered in ("0", "false", "no", "off"):
+                value = False
+            else:
+                raise ValueError(f"Not a boolean value for {attr}: {value!r}")
+        else:
+            value = attr_type(value)
         logger.info(f"Setting {attr} to {value}")
         if attr == "two_node_arbitration":
             set_two_node_arbitration(cl_id, value)

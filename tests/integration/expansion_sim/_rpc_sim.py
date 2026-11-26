@@ -366,6 +366,9 @@ class RpcServerSim:
     def alceml_set_qos_weights(self, *_, **__):
         return True
 
+    def distrib_set_qos_weights(self, *_, **__):
+        return True
+
     def __getattr__(self, attr):
         """Fallback for any RPC the simulator does not yet model. Logs the
         call, records it, and returns True. Phase 2 will tighten this to

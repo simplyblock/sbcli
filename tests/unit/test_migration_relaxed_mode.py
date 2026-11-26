@@ -28,10 +28,17 @@ class TestNeedsRelaxedPlacement(unittest.TestCase):
         self.assertTrue(mig.needs_relaxed_placement(5, 4, 2))
         self.assertTrue(mig.needs_relaxed_placement(3, 2, 2))
 
+    def test_exactly_as_many_nodes_as_chunks_is_relaxed(self):
+        """Every node holds a chunk of every stripe: a strict migration away
+        from one of them has nowhere to go (the migration dead end)."""
+        self.assertTrue(mig.needs_relaxed_placement(3, 2, 1))
+        self.assertTrue(mig.needs_relaxed_placement(6, 4, 2))
+        self.assertTrue(mig.needs_relaxed_placement(4, 2, 2))
+
     def test_enough_nodes_stay_strict(self):
         self.assertFalse(mig.needs_relaxed_placement(3, 1, 1))
-        self.assertFalse(mig.needs_relaxed_placement(3, 2, 1))
-        self.assertFalse(mig.needs_relaxed_placement(6, 4, 2))
+        self.assertFalse(mig.needs_relaxed_placement(4, 2, 1))
+        self.assertFalse(mig.needs_relaxed_placement(7, 4, 2))
 
 
 class TestMigrationRelaxedLookup(unittest.TestCase):
@@ -51,7 +58,7 @@ class TestMigrationRelaxedLookup(unittest.TestCase):
     def test_offline_member_still_counts(self):
         cluster = mock.Mock(distr_ndcs=2, distr_npcs=1)
         nodes = self._nodes(StorageNode.STATUS_ONLINE, StorageNode.STATUS_ONLINE,
-                            StorageNode.STATUS_OFFLINE)
+                            StorageNode.STATUS_ONLINE, StorageNode.STATUS_OFFLINE)
         with mock.patch.object(mig, "db") as db:
             db.get_cluster_by_id.return_value = cluster
             db.get_storage_nodes_by_cluster_id.return_value = nodes
@@ -79,6 +86,37 @@ class TestRpcSendsRelaxedMode(unittest.TestCase):
         c.distr_migration_expansion_start("d")
         self.assertNotIn("relaxed_mode", c._request.call_args.kwargs)
 
+    def test_affinity_floor_is_gated_by_the_constant(self):
+        """Older data planes reject unknown parameters: affinity_floor and
+        allow_device_colocation go out only once DISTR_AFFINITY_FLOOR_RPC is on."""
+        c = self._client()
+        c.bdev_get = mock.Mock(return_value=None)
+        with mock.patch.object(rpc_mod.constants, "DISTR_AFFINITY_FLOOR_RPC", False):
+            c.distr_migration_failure_start("d", 3, affinity_floor="relaxed")
+            self.assertNotIn("affinity_floor", c._request.call_args.kwargs)
+            c.distr_migration_expansion_start("d", affinity_floor="device")
+            self.assertNotIn("affinity_floor", c._request.call_args.kwargs)
+            c.bdev_distrib_create("d", 1, 2, 1, 10, 4096, ["jm"], 4096, allow_device_colocation=True)
+            self.assertNotIn("allow_device_colocation", c._request.call_args.kwargs)
+        with mock.patch.object(rpc_mod.constants, "DISTR_AFFINITY_FLOOR_RPC", True):
+            c.distr_migration_failure_start("d", 3, affinity_floor="relaxed")
+            self.assertEqual(c._request.call_args.kwargs["affinity_floor"], "relaxed")
+            c.distr_migration_expansion_start("d", affinity_floor="device")
+            self.assertEqual(c._request.call_args.kwargs["affinity_floor"], "device")
+            c.distr_migration_expansion_start("d")
+            self.assertNotIn("affinity_floor", c._request.call_args.kwargs)
+            c.bdev_distrib_create("d", 1, 2, 1, 10, 4096, ["jm"], 4096, allow_device_colocation=True)
+            self.assertIs(c._request.call_args.kwargs["allow_device_colocation"], True)
+            c.bdev_distrib_create("d", 1, 2, 1, 10, 4096, ["jm"], 4096)
+            self.assertNotIn("allow_device_colocation", c._request.call_args.kwargs)
+
+    def test_affinity_floor_follows_raid_devices(self):
+        self.assertEqual(mig.migration_affinity_floor(mock.Mock(raid_devices=True)), "relaxed")
+        self.assertEqual(mig.migration_affinity_floor(mock.Mock(raid_devices=False)), "device")
+        with mock.patch.object(mig, "db") as db:
+            db.get_cluster_by_id.return_value = mock.Mock(raid_devices=True)
+            self.assertEqual(mig.migration_affinity_floor("c1"), "relaxed")
+
 
 class TestRunnersPassRelaxedMode(unittest.TestCase):
     """Every migration runner hands the cluster's relaxed decision to the RPC."""
@@ -94,6 +132,7 @@ class TestRunnersPassRelaxedMode(unittest.TestCase):
         for mod in (tasks_runner_failed_migration, tasks_runner_migration, tasks_runner_new_dev_migration):
             src = inspect.getsource(mod)
             self.assertIn("relaxed_mode=mig.migration_relaxed(", src, mod.__name__)
+            self.assertIn("affinity_floor=mig.migration_affinity_floor(", src, mod.__name__)
 
 
 if __name__ == "__main__":

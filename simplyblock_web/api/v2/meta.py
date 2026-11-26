@@ -13,6 +13,15 @@ def health() -> Response:
     return Response(status_code=204)
 
 
+@api.get('/fdb-datacenters')
+def fdb_datacenters() -> dict:
+    """The FoundationDB data centers (``dcid``) with processes in the database.
+    A stretched control plane's operator reads it to learn that the other
+    site's region has joined (docs/stretched-control-plane.md)."""
+    from simplyblock_core.controllers import control_plane_controller
+    return {"datacenters": control_plane_controller.current_fdb_datacenters()}
+
+
 @api.get('/ready', status_code=204, response_class=Response)
 def ready() -> Response:
     """Readiness probe: succeeds when the FoundationDB backend is reachable."""

@@ -37,24 +37,33 @@ def test_spdk_is_killed_whatever_the_status_after_the_node_is_fenced(status):
                          side_effect=lambda uuid: order.append(("cancel", uuid))), \
             patch.object(storage_node_ops, "_kill_spdk_until_dead",
                          side_effect=lambda node: order.append(("kill", node.get_id())) or True), \
+            patch.object(storage_node_ops, "_release_host_huge_pages",
+                         side_effect=lambda node: order.append(("release", node.get_id()))), \
             patch.object(storage_node_ops, "delete_storage_node",
                          side_effect=lambda nid, force=False: order.append(("delete", force))):
         stopped = storage_node_ops.force_delete_storage_node("n1")
 
     assert stopped is True
-    assert order == [("status", StorageNode.STATUS_REMOVED), ("cancel", "t1"), ("kill", "n1"), ("delete", True)]
+    # The host is released once SPDK is dead, which is when its pages are free,
+    # and before the node's record, which names its agent, is deleted.
+    assert order == [("status", StorageNode.STATUS_REMOVED), ("cancel", "t1"), ("kill", "n1"),
+                     ("release", "n1"), ("delete", True)]
 
 
 @pytest.mark.parametrize("kill", [MagicMock(return_value=False), MagicMock(side_effect=RuntimeError("unreachable"))])
 def test_an_unconfirmed_kill_is_reported_and_the_node_still_deleted(kill, caplog):
     delete = MagicMock()
+    release = MagicMock()
     with patch.object(storage_node_ops, "DBController", return_value=_db(StorageNode.STATUS_ONLINE)), \
             patch.object(storage_node_ops, "set_node_status"), \
             patch.object(storage_node_ops.tasks_controller, "get_active_node_tasks", return_value=[]), \
             patch.object(storage_node_ops, "_kill_spdk_until_dead", kill), \
+            patch.object(storage_node_ops, "_release_host_huge_pages", release), \
             patch.object(storage_node_ops, "delete_storage_node", delete):
         stopped = storage_node_ops.force_delete_storage_node("n1")
 
     assert stopped is False
     delete.assert_called_once_with("n1", force=True)
+    # An SPDK that may still run holds its huge pages: they are not taken from it.
+    release.assert_not_called()
     assert any("n1" in r.getMessage() and r.levelname == "ERROR" for r in caplog.records)

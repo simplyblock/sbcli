@@ -19,7 +19,7 @@ and one regression scenario per finding, in CI:
 | the arbiter's default helpers: leadership restore, device check, rebuild-task bookkeeping, the leaderless reconcile and its probe | the network (storage link, management link, client link, lossy link) |
 | every `RPCClient` wrapper — only `RPCClient._request` is routed to the simulated node | the client's NVMe multipath IO (KATO 4 s, fast_io_fail 8 s) |
 | the guards the flows consult: `_single_peer_jm_is_complete`, `_two_node_fence_holds_ports`, `_may_unblock_peer_port`, `_jc_compression_status_with_retry`, `_failover_primary_ana`, `_failback_primary_ana`, `_set_lvol_ana_on_node` | the outer shell of the flows the arbiter does not own: monitor (offline, auto-restart, stale-port remediation), restart runner, port-allow runner, migration runner, shutdown flow. Each keeps the real guard calls and models only the RPC-heavy work |
-| `tasks_controller` task records, `set_node_status`, all FDB reads and writes (real FoundationDB, as the integration tier requires) | the Go event collector (same contract: in order per node, `ha_resync` on a new instance) |
+| `tasks_controller` task records, `set_node_status`, all FDB reads and writes (real FoundationDB, as the integration tier requires) | the event collector (same contract: in order per node, `ha_resync` on a new instance) |
 
 Time is virtual (`vclock.py`): `time.time`/`monotonic`/`sleep` and the
 arbiter's clock read one clock; nothing sleeps or waits on the wall clock. A
@@ -70,6 +70,7 @@ main and asserts that it passes.
 - Faults are injected 0.5 s into a second of fio's log; the bed's alignment was random, so a bed stall can be one second shorter or longer.
 - The flows' shells are models: a change inside `exec_port_allow_task`, the restart flow or the monitor that is not one of the guards above is not exercised here.
 - `TWO_NODE_STABLE_FOR_S` is 5 s in the simulator (30 s in production); it only delays the heal.
+- F6's restart remedy (`F6c-partition-restart-remedy`, `F6b-restart-precheck-fenced-peer`): the condition `jm_reconnect_ineffective` makes only a node restart bring the remote JMs back (c1/c2), so the partition recovery hands a node to the restart flow. The restart's jc_compression precheck then runs on the presumed acting leader (the real `_presumed_acting_leader`), the fenced peer. With `jc_error_while_fenced` that peer's JC is in error mode (ultra keeps a holding or fenced vuid in JCERR until `jc_grant_solo`/`jc_unfence`) and answers -6, and the restart aborts: F6b is open on main (review of #1559). The restart runner's retries are not modelled; each would meet the same fenced peer, because the arbiter unfences only after the restarting node is healthy.
 
 ## Adding a finding
 

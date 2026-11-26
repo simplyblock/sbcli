@@ -80,6 +80,7 @@ class SPDKParams(BaseModel):
     l_cores: str | None = Field(None)
     spdk_mem: int = Field(core_utils.parse_size('4GiB'))
     total_mem: int | str | None = Field('')
+    system_mem: int | None = Field(None)  # SPDK container memory limit (non-hugepage)
     multi_threading_enabled: bool | None = Field(False)
     timeout: int | None = Field(5 * 60)
     spdk_image: str | None = Field(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
@@ -89,6 +90,45 @@ class SPDKParams(BaseModel):
     socket: int | None = Field(None, ge=0)
     cluster_id: str
     mcp_max_unavailable: int | None = Field(None)  # OpenShift-only (MCP); ignored here
+
+
+#: Where the agent keeps the last log lines of an SPDK container that died on
+#: its own, before a restart removes it (host-mounted /etc/simplyblock).
+SPDK_CRASH_LOG_DIR = os.environ.get("SPDK_CRASH_LOG_DIR", "/etc/simplyblock/spdk-crash-logs")
+SPDK_CRASH_LOG_LINES = 30000
+SPDK_CRASH_LOG_KEEP = 10
+
+
+def _preserve_exited_spdk_logs(client, name):
+    """Save the log tail and exit state of ``name`` if its container already
+    exited -- SPDK died on its own -- before a restart removes it with its
+    logs (2026-11-20 FTT2 bed: three SPDKs died in a cascade, every trace of
+    why went with the containers). A running container (a deliberate kill)
+    is left alone; best-effort, never raises."""
+    try:
+        container = client.containers.get(name)
+        state = (container.attrs or {}).get("State") or {}
+        if state.get("Status") not in ("exited", "dead"):
+            return None
+        os.makedirs(SPDK_CRASH_LOG_DIR, exist_ok=True)
+        stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
+        path = os.path.join(SPDK_CRASH_LOG_DIR, f"{name.strip('/')}-{stamp}.log")
+        logs = container.logs(tail=SPDK_CRASH_LOG_LINES, timestamps=True)
+        with open(path, "wb") as f:
+            exit_state = {k: state.get(k) for k in (
+                "ExitCode", "OOMKilled", "Error", "StartedAt", "FinishedAt")}
+            f.write(json.dumps(exit_state).encode() + os.linesep.encode())
+            f.write(logs if isinstance(logs, bytes) else str(logs).encode())
+        kept = sorted(Path(SPDK_CRASH_LOG_DIR).glob("spdk_*.log"), key=lambda q: q.stat().st_mtime)
+        for old in kept[:-SPDK_CRASH_LOG_KEEP]:
+            old.unlink(missing_ok=True)
+        logger.warning("SPDK container %s had exited (code %s, OOM %s); its log kept in %s",
+                       name, state.get("ExitCode"), state.get("OOMKilled"), path)
+        return path
+    except Exception as exc:                                 # noqa: BLE001
+        logger.info("no crash log kept for %s: %s", name, exc)
+        return None
+
 
 
 @api.post('/spdk_process_start', responses={
@@ -106,6 +146,7 @@ def spdk_process_start(body: SPDKParams):
     node_docker = get_docker_client(timeout=60 * 3)
     spdk_names = [f"/spdk_{body.rpc_port}", f"/spdk_proxy_{body.rpc_port}"]
     for name in spdk_names:
+        _preserve_exited_spdk_logs(node_docker, name)
         core_utils.remove_container(node_docker, name, graceful_timeout=0)
 
     # Confirm the previous instances are actually gone before we start a fresh
@@ -143,12 +184,16 @@ def spdk_process_start(body: SPDKParams):
     else:
         log_config = LogConfig(type=LogConfig.types.JOURNALD)
 
+    # Hard memory limit of the SPDK container (hugepages are not part of it):
+    # the node's system memory, never below the base.
+    mem_limit = max(int(body.system_mem or 0), constants.SYS_MEMORY_BASE_BYTES)
     container = node_docker.containers.run(
         body.spdk_image,
         f"sudo -E /root/scripts/run_distr_with_ssd.sh {body.l_cores} {spdk_mem_mib} {spdk_debug}",
         name=f"spdk_{body.rpc_port}",
         detach=True,
         privileged=True,
+        mem_limit=mem_limit,
         network_mode="host",
         log_config=log_config,
         volumes=[
@@ -258,6 +303,7 @@ def spdk_process_kill(query: utils.RPCPortParams):
     # SIGKILLing whatever currently answers to the name.
     targets = []
     for name in names:
+        _preserve_exited_spdk_logs(client, name)
         try:
             targets.append(client.containers.get(name))
         except NotFound:
@@ -327,6 +373,7 @@ def spdk_process_cleanup(query: utils.RPCPortParams):
     names = [f"/spdk_{query.rpc_port}", f"/spdk_proxy_{query.rpc_port}"]
     ok = True
     for name in names:
+        _preserve_exited_spdk_logs(client, name)
         try:
             container = client.containers.get(name)
         except NotFound:
@@ -652,6 +699,22 @@ def wipe_block_device(body: _WipeBlockDeviceParams):
     return utils.get_response(True)
 
 
+class _LunInfoParams(BaseModel):
+    wwn: str
+
+
+@api.post('/lun_info', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'array',
+        'items': {'type': 'object', 'additionalProperties': True},
+    })}}},
+})
+def lun_info(body: _LunInfoParams):
+    """Multi-attach array LUN mode: the local disks carrying LUN ``wwn``, with
+    whether block 0 holds the alceml signature. Read-only."""
+    return utils.get_response(node_utils.find_lun_devices(body.wwn))
+
+
 class _RescanBlockDeviceParams(BaseModel):
     device_path: str
 
@@ -673,6 +736,22 @@ def rescan_block_device(body: _RescanBlockDeviceParams):
     try:
         return utils.get_response(node_utils.rescan_block_device(body.device_path))
     except (ValueError, OSError) as e:
+        return utils.get_response(None, str(e))
+
+
+@api.post('/scan_new_luns', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'object',
+        'properties': {'scanned': {'type': 'array', 'items': {'type': 'string'}}},
+    })}}},
+})
+def scan_new_luns():
+    """Look for LUNs / namespaces a storage array newly presented to this
+    host (SCSI host scan, NVMe namespace rescan). Existing devices are not
+    touched."""
+    try:
+        return utils.get_response(node_utils.scan_for_new_luns())
+    except OSError as e:
         return utils.get_response(None, str(e))
 
 
@@ -767,6 +846,9 @@ def get_info():
         "network_interface": core_utils.get_nics_data(),
 
         "cloud_instance": node_info["cloud_info"],
+        # SAN initiators (IQN, FC WWPNs, NVMe host NQN, SDC GUID): how a storage
+        # array knows this host (simplyblock_core.array.san).
+        "san_initiators": node_utils.get_san_initiators(),
 
         "lsblk": get_node_lsblk(),
         "nodes_config": get_nodes_config(),
@@ -1042,6 +1124,22 @@ def persist_node_config(body: PersistNodeConfigParams):
     # (this same add_node's own idempotent retry included) sees a mismatch
     # and refuses with "run sbcli sn configure-upgrade".
     core_utils.store_config_file(node_info, constants.NODES_CONFIG_FILE, create_read_only_file=True)
+    return utils.get_response(True)
+
+
+@api.post('/release_hugepages', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'boolean'
+    })}}},
+})
+def release_hugepages():
+    """Give back the huge pages simplyblock set on this host and remove its
+    records of them. The control plane calls it once no storage node is left
+    on the host."""
+    try:
+        core_utils.release_hugepages()
+    except core_utils.HugePagesNotReleasedError as e:
+        return utils.get_response(False, str(e))
     return utils.get_response(True)
 
 

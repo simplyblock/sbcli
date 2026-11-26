@@ -130,6 +130,12 @@ def build_nvme_connect_entry(
         # reconnect 2 s (docs/design/two-node-arbitration.md, client
         # requirements). Clusters without arbitration keep the defaults.
         keep_alive_tmo = constants.TWO_NODE_CLIENT_KEEP_ALIVE_TO
+    elif getattr(cluster, "multi_attach", False) is True:
+        # Multi-attach (1+0): a node lost without closing its connections
+        # leaves its own volumes' paths dead until the host's keep-alive
+        # notices (constants.MULTI_ATTACH_CLIENT_KEEP_ALIVE_TO). Regular
+        # clusters keep the defaults.
+        keep_alive_tmo = constants.MULTI_ATTACH_CLIENT_KEEP_ALIVE_TO
     client_data_nic_str = f"--host-iface={cluster.client_data_nic}" if cluster.client_data_nic else ""
     tls_str = host_auth_str = ""
     if host_entry:

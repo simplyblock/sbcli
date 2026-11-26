@@ -8,7 +8,13 @@ import uuid
 from collections.abc import Callable
 from typing import NamedTuple
 
-from simplyblock_core import constants, db_controller, storage_node_ops, utils
+from simplyblock_core import (
+    constants,
+    db_controller,
+    multi_attach,
+    storage_node_ops,
+    utils,
+)
 from simplyblock_core.controllers import (
     activation_gate,
     device_controller,
@@ -204,6 +210,18 @@ def task_lease_heartbeat(task, owner=None):
     def _beat():
         while not stop.wait(constants.TASK_LEASE_HEARTBEAT_SEC):
             try:
+                # A control plane that stopped leading the stretched cluster
+                # (docs/stretched-control-plane.md) lets its task leases go
+                # stale instead of refreshing them: the new leader's runner
+                # then resumes the task, which is the hand-over the lease
+                # was designed for. Imported lazily: the controller imports
+                # the DB layer, which this module's importers already pull in.
+                from simplyblock_core.controllers import control_plane_controller
+                enabled, reason = control_plane_controller.services_enabled()
+                if not enabled:
+                    logger.warning(f"Lease heartbeat of task {task.uuid} stopped: "
+                                   f"this control plane does not lead ({reason})")
+                    return
                 if not refresh_task_lease(task, owner):
                     return
             except Exception as e:
@@ -421,6 +439,16 @@ def _add_task(function_name, cluster_id, node_id, device_id,
         task_obj.function_params = function_params
     task_obj.max_retry = max_retry
     task_obj.status = JobSchedule.STATUS_NEW
+    if function_name == JobSchedule.FN_SNAPSHOT_REPLICATION:
+        # The scan above is a check-then-write: two replication workers
+        # enqueueing the same chain ancestor 100 ms apart both passed it and
+        # wrote two tasks for one snapshot (bed bf32 2026-11-21). The write
+        # itself is the atomic claim.
+        active_id, created = db.ensure_snapshot_replication_task(task_obj)
+        if not created:
+            logger.info(f"Task found, skip adding new task: {active_id}")
+            return False
+        return task_obj.uuid
     task_obj.write_to_db(db.kv_store)
     if send_to_cluster_log:
         tasks_events.task_create(task_obj)
@@ -848,7 +876,13 @@ def add_node_to_auto_restart(node):
         for sn in db.get_storage_nodes_by_cluster_id(node.cluster_id):
             if node.get_id() != sn.get_id() and sn.status != StorageNode.STATUS_ONLINE and node.mgmt_ip != sn.mgmt_ip:
                 offline_nodes += 1
-        if offline_nodes > cluster.distr_npcs and cluster.status != Cluster.STATUS_SUSPENDED:
+        # A multi-attach cluster runs 1+0 (npcs 0) and tolerates FTT node
+        # losses through LUN takeovers: with npcs, two nodes down at FTT 2
+        # blocked each other's restart for good while the cluster stayed
+        # DEGRADED (2026-11-20 FTT2 bed, network cut + SPDK kill).
+        tolerated = (cluster.max_fault_tolerance if multi_attach.is_multi_attach(cluster)
+                     else cluster.distr_npcs)
+        if offline_nodes > tolerated and cluster.status != Cluster.STATUS_SUSPENDED:
             logger.info("Node found that is not online, skip node auto restart")
             return False
     return _add_task(JobSchedule.FN_NODE_RESTART, node.cluster_id, node.get_id(), "", max_retry=11)

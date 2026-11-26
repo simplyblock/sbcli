@@ -1,13 +1,11 @@
-"""No new cadence snapshot while the source cluster is past its capacity
-warning threshold.
+"""Capacity thresholds are informational: a cadence snapshot is taken whatever
+the cluster's utilization.
 
-A cadence snapshot pins every block overwritten while it is outstanding: under
-sustained overwrites faster than replication ships them, one outstanding
-snapshot per volume pins up to the volume's whole used size (twice that raw,
-with 1+1). The EKS bed of 2026-10-22 went 81% -> 90% in three minutes, the
-cluster turned read_only, writes failed with EIO and the storage nodes went
-down. Holding new snapshots past cap_warn lets retention reclaim what already
-replicated instead of pinning more.
+The cadence used to hold past cap_warn (EKS bed 2026-10-22: the cluster went
+81% -> 90% in three minutes and turned read_only, and writes failed with EIO).
+The EIO came from the read_only switch, which marked every device
+cannot_allocate at a threshold; that switch is gone (bed bf25, 2026-11-16), and
+a held cadence only stalls replication and migration.
 """
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.snapshot import SnapShot
@@ -44,6 +42,9 @@ def _db(util):
         def get_mini_snapshots(self):
             return []
 
+        def get_snapshots_by_lvol_id(self, lvol_id):
+            return []
+
         def get_replication_policies(self, cluster_id=None):
             return []
 
@@ -69,8 +70,12 @@ def _run(monkeypatch, util):
     return calls
 
 
-def test_no_cadence_snapshot_past_the_warning_threshold(monkeypatch):
-    assert _run(monkeypatch, 85) == []
+def test_cadence_snapshot_past_the_warning_threshold(monkeypatch):
+    assert _run(monkeypatch, 85) == ["LV1"]
+
+
+def test_cadence_snapshot_at_the_critical_threshold(monkeypatch):
+    assert _run(monkeypatch, 99) == ["LV1"]
 
 
 def test_cadence_snapshot_below_the_threshold(monkeypatch):
@@ -79,12 +84,6 @@ def test_cadence_snapshot_below_the_threshold(monkeypatch):
 
 def test_no_capacity_reading_does_not_block(monkeypatch):
     assert _run(monkeypatch, None) == ["LV1"]
-
-
-def test_the_reason_names_the_utilization_and_the_threshold(monkeypatch):
-    monkeypatch.setattr(sm, "db", _db(91))
-    reason = sm._cadence_capacity_hold("CL1")
-    assert "91%" in reason and "80%" in reason
 
 
 def test_only_the_nodes_first_migrating_volume_takes_cadence_snapshots(monkeypatch):

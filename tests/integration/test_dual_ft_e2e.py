@@ -487,6 +487,7 @@ _CLUSTER_DISPATCH = {
     'bdev_nvme_set_options':                 _bdev_nvme_set_options,
     'bdev_PT_NoExcl_create':                 _bdev_PT_NoExcl_create,
     'alceml_set_qos_weights':                _alceml_set_qos_weights,
+    'bdev_distrib_set_qos_weights':          _alceml_set_qos_weights,
     'jc_get_jm_status':                      _jc_get_jm_status,
     'nvmf_get_blocked_ports_rdma':           _nvmf_get_blocked_ports_rdma,
     'bdev_distrib_force_to_non_leader':      _bdev_distrib_force_to_non_leader,
@@ -672,9 +673,10 @@ def cluster_env(ensure_cluster, mock_rpc_servers):
         n.active_tcp = True
         n.active_rdma = False
         n.data_nics = [_make_nic("127.0.0.1")]
-        # Give each primary node 2 devices (need ndcs+npcs+1=4 total across cluster)
+        # Give each primary node 3 devices: 6 in all, at or above the 1+2
+        # scheme's data-device floor (n+2k = 5, simplyblock_core.floors).
         devs = []
-        for d in range(2):
+        for d in range(3):
             dev = NVMeDevice()
             dev.uuid = str(_uuid_mod.uuid4())
             dev.cluster_id = cluster.uuid

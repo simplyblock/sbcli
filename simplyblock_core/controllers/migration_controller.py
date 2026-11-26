@@ -50,6 +50,7 @@ from simplyblock_core.controllers import (
     tasks_controller,
 )
 from simplyblock_core.controllers.host_auth import _reapply_allowed_hosts
+from simplyblock_core.controllers.lvol_register import register_lvol
 from simplyblock_core.controllers.migration_bdev_ops import (
     delete_bdev_blocking as _delete_bdev_blocking,
 )
@@ -713,7 +714,7 @@ def _get_snap_ancestry(snap_uuid):
 # Cleanup safety helpers
 # ---------------------------------------------------------------------------
 
-def get_snaps_safe_to_delete_on_source(migration):
+def get_snaps_safe_to_delete_on_source(migration, moving_lvol_ids=frozenset()):
     """
     Return the set of snapshot UUIDs (from the migration plan) that are safe
     to delete from the *source* node after a successful migration.
@@ -732,12 +733,19 @@ def get_snaps_safe_to_delete_on_source(migration):
 
     Intermediate snapshots created during migration always belong to the
     migrating volume, so they are always included as initial candidates.
+
+    *moving_lvol_ids* are lvols treated as already gone from the source even
+    though their records still say otherwise -- a batch group's siblings,
+    which are leaving with this migration. A snapshot the result only
+    contains because of them must not be deleted yet: the siblings' source
+    bdevs still clone from it. See _handle_cleanup_source's deferral.
     """
     candidates = set(migration.intermediate_snaps)  # always owned by migrating lvol
 
     # Build the set of lvol UUIDs still on the source node so we can distinguish
     # "owner still on SRC" (must protect) from "owner already migrated" (safe to clean up).
-    source_lvols = db.get_lvols_by_node_id(migration.source_node_id)
+    source_lvols = [lv for lv in db.get_lvols_by_node_id(migration.source_node_id)
+                    if lv.uuid not in moving_lvol_ids]
     source_lvol_ids = {lv.uuid for lv in source_lvols}
 
     for snap_uuid in migration.snap_migration_plan:
@@ -765,6 +773,17 @@ def get_snaps_safe_to_delete_on_source(migration):
             candidates -= _collect_snap_ancestry(lvol.cloned_from_snap)
 
     return candidates
+
+
+def source_lvols_cloning_from(snap_uuid, source_node_id):
+    """uuids of lvols on *source_node_id* whose clone ancestry includes *snap_uuid*.
+
+    The same reference test get_snaps_safe_to_delete_on_source's Rule 2
+    applies, for a single snapshot: non-empty means its source copy is still
+    some volume's backing data and must stay.
+    """
+    return [lv.uuid for lv in db.get_lvols_by_node_id(source_node_id)
+            if lv.cloned_from_snap and snap_uuid in _collect_snap_ancestry(lv.cloned_from_snap)]
 
 
 def get_snaps_to_delete_on_target(migration):
@@ -1394,10 +1413,11 @@ def _create_migration_impl(lvol_id, target_node_id, ctrl_loss_tmo, host_nqn,
                         f"create_migration: {composite} already on secondary "
                         f"{_pre_sec_node.get_id()} — skipping bdev_lvol_register")
                 elif _tgt_blobid is not None and _tgt_uuid is not None:
-                    ret_sec = _sec_rpc_reg.bdev_lvol_register(
-                        bdev_short, tgt_node.lvstore, _tgt_uuid, _tgt_blobid,
+                    ret_sec = register_lvol(
+                        _sec_rpc_reg, bdev_short, tgt_node.lvstore, _tgt_uuid, _tgt_blobid,
                         qos_controller.wire_priority_class(
-                            tgt_node.cluster_id, lvol.lvol_priority_class))
+                            tgt_node.cluster_id, lvol.lvol_priority_class),
+                        cluster_id=tgt_node.cluster_id, node_label=_pre_sec_node.get_id())
                     if ret_sec:
                         undo.replicas["secondary"] = (_sec_rpc_reg, _pre_sec_node)
                         _sec_rpc_reg.bdev_lvol_set_migration_flag(composite)
@@ -1426,10 +1446,11 @@ def _create_migration_impl(lvol_id, target_node_id, ctrl_loss_tmo, host_nqn,
                         f"create_migration: {composite} already on tertiary "
                         f"{_pre_ter_node.get_id()} — skipping bdev_lvol_register")
                 elif _tgt_blobid is not None and _tgt_uuid is not None:
-                    ret_ter = _ter_rpc_reg.bdev_lvol_register(
-                        bdev_short, tgt_node.lvstore, _tgt_uuid, _tgt_blobid,
+                    ret_ter = register_lvol(
+                        _ter_rpc_reg, bdev_short, tgt_node.lvstore, _tgt_uuid, _tgt_blobid,
                         qos_controller.wire_priority_class(
-                            tgt_node.cluster_id, lvol.lvol_priority_class))
+                            tgt_node.cluster_id, lvol.lvol_priority_class),
+                        cluster_id=tgt_node.cluster_id, node_label=_pre_ter_node.get_id())
                     if ret_ter:
                         undo.replicas["tertiary"] = (_ter_rpc_reg, _pre_ter_node)
                         _ter_rpc_reg.bdev_lvol_set_migration_flag(composite)
@@ -2201,7 +2222,7 @@ def create_group_migration(lvol_id, target_node_id,
     "connect_strings"}]}`` and records it on every group in the scope.
     """
     try:
-        db.get_lvol_by_id(lvol_id)
+        lvol = db.get_lvol_by_id(lvol_id)
     except KeyError:
         raise ValueError(f"LVol {lvol_id} not found")
     try:
@@ -2217,10 +2238,22 @@ def create_group_migration(lvol_id, target_node_id,
         if g is not None:
             groups[g.get_id()] = g
     for g in groups.values():
+        if getattr(g, "subsystem_move", None):
+            raise MigrationConflictError(
+                f"Consistency group {g.get_id()} has an active subsystem move "
+                f"{g.subsystem_move.get('id', '')}; migrate it once the move ended")
         if g.migration:
             raise MigrationConflictError(
                 f"Consistency group {g.get_id()} already has an active migration "
                 f"to {g.migration.get('target_node_id')}")
+    # A subsystem a move holds (its sources and its target) can hold volumes
+    # of no group, so the groups' own records above do not cover it.
+    from simplyblock_core.controllers import lvol_controller
+    held = set(lvol_controller._moving_nqns_on_node(lvol.node_id, db)) & set(by_nqn)
+    if held:
+        raise MigrationConflictError(
+            f"subsystem(s) {sorted(held)} are held by a consistency-group subsystem move; "
+            f"migrate once the move ended")
 
     items = []
     try:
