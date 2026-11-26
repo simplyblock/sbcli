@@ -124,6 +124,12 @@ class LandingRequest(BaseModel):
     #: volume it failed over (it holds the failover record); empty skips that
     #: check, as from a source that predates the field.
     source_lvol_id: str = ""
+    #: Why the source cannot call an in_creation landing volume abandoned -- a
+    #: live task of the same snapshot may be creating it ("task <id> of the
+    #: same snapshot is live"), or its task table could not be read. Empty
+    #: when no other task of the snapshot is live. The target then also
+    #: checks its own creates in flight and the volume's age (bed bf32).
+    source_busy: str = ""
 
 
 class LandingResponse(BaseModel):
@@ -142,6 +148,9 @@ class LandingResponse(BaseModel):
     node_id: str = ""
     pool_id: str = ""
     reason: str = ""
+    #: With ``retry``: a landing volume under the name may still be under
+    #: creation; the source waits without spending a retry.
+    waiting: bool = False
 
 
 class HubPath(BaseModel):

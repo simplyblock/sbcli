@@ -67,11 +67,6 @@ _WORKERS = None
 _HUB_LOCKS: dict = {}
 _HUB_LOCKS_GUARD = threading.Lock()
 
-# Names of the landing volumes this process is creating right now
-# (_create_landing_volume). A record wearing one of them is in_creation
-# because its create is still running here, not because an attempt died.
-_LANDING_CREATING: dict = {}            # name -> number of creates in flight
-_LANDING_CREATING_GUARD = threading.Lock()
 
 
 def _hub_lock(source_node_id, hub_node_id):
@@ -1014,7 +1009,8 @@ def process_snap_replicate_start(task, snapshot):
                 max_namespace_per_subsys=snapshot.lvol.max_namespace_per_subsys or 0,
                 data_uuid=snapshot.data_uuid or "", node_hint=node_hint or "",
                 pool_hints=_pool_hints(dest_lvol, snode.cluster_id, destination_cluster_id),
-                counterpart_hint=counterpart_hint, source_lvol_id=snapshot.lvol.get_id()))
+                counterpart_hint=counterpart_hint, source_lvol_id=snapshot.lvol.get_id(),
+                source_busy=_landing_busy_here(task)))
         except PeerNotFoundError as e:
             msg = f"Replication destination is gone ({e}), stopping task"
             logger.error(msg)
@@ -1044,6 +1040,11 @@ def process_snap_replicate_start(task, snapshot):
             task.function_result = msg
             task.status = JobSchedule.STATUS_DONE
             task.write_to_db()
+            return
+        if landing.state != "ready" and landing.waiting:
+            # In creation, maybe by another worker or runner (bf32): waited
+            # out without spending a retry.
+            _suspend_for_retry(task, landing.reason, count=False, level=logging.INFO)
             return
         if landing.state != "ready":
             _suspend_for_retry(task, f"{landing.reason}, retrying")
@@ -2832,6 +2833,18 @@ def _wait(seconds, wake):
             return
         time.sleep(min(remaining, constants.REPL_ENDGAME_WAKE_POLL_SEC))
         _check_endgame_wake(wake)
+
+
+def _landing_busy_here(task):
+    """Why this cluster cannot call an in_creation landing volume of *task*'s
+    snapshot abandoned: another live task of the snapshot may be creating it
+    (bed bf32). Empty when none is live. Sent with the landing request
+    (LandingRequest.source_busy); the destination adds what it knows."""
+    try:
+        siblings = _live_siblings(task)
+    except Exception as e:                                # noqa: BLE001
+        return f"the task table cannot be read ({e})"
+    return f"task {siblings[0].uuid} of the same snapshot is live" if siblings else ""
 
 
 def _live_siblings(task):

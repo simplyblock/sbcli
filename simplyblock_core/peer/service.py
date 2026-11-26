@@ -6,9 +6,11 @@ Each function answers for a cluster managed by THIS control plane. The v2
 control plane, so both paths run the same code.
 """
 import contextlib
+import errno
 import logging
 import threading
 import time
+from datetime import datetime
 from uuid import UUID, uuid5
 
 from simplyblock_core import constants, xfer_timing
@@ -260,15 +262,26 @@ def prepare_landing(cluster_id: str, request: LandingRequest) -> LandingResponse
         if existing.status == LVol.STATUS_IN_DELETION:
             return LandingResponse(state="retry",
                                    reason=f"stale landing volume {request.landing_name} still deleting")
-        why = ("its size differs from the snapshot" if existing.status == LVol.STATUS_ONLINE
+        replacing = existing.status == LVol.STATUS_ONLINE      # its size differs
+        why = ("its size differs from the snapshot" if replacing
                else f"it is half-created ({existing.status})")
+        # Only a provably abandoned one (bed bf32 2026-11-21: the volume
+        # deleted here was being created by another worker).
+        busy = "" if replacing else _landing_creation_live(existing, request)
+        if busy:
+            return LandingResponse(
+                state="retry", waiting=True,
+                reason=(f"landing volume {request.landing_name} is in_creation and may still "
+                        f"be under creation ({busy}); waiting"))
         logger.warning("Clearing landing volume %s (%s): %s", existing.get_id(),
                        request.landing_name, why)
+        members = _landing_member_nodes(db, existing)
         try:
             lvol_controller.delete_lvol(existing, force_delete=True)
         except PreconditionError as e:
             return LandingResponse(state="retry", reason=f"could not clear landing volume "
                                                          f"{request.landing_name}: {e}")
+        _confirm_landing_gone(db, existing, members)
         return LandingResponse(state="retry", reason=f"cleared stale landing volume "
                                                      f"{request.landing_name} ({why})")
 
@@ -280,10 +293,11 @@ def prepare_landing(cluster_id: str, request: LandingRequest) -> LandingResponse
     # would stop replication on a full node, exactly when the transfers that
     # let retention free slots are needed. The source volume's subsystem
     # packing is carried over, so clones taken from the copy can share one.
-    lvol_id, err = lvol_controller.add_lvol_ha(
-        request.landing_name, request.size, node.get_id(), request.ha_type, pool_uuid,
-        internal=True, namespaced=max_ns > 1, max_namespace_per_subsys=max_ns,
-        lvol_priority_class=landing_class)
+    with _landing_creating(request.landing_name):
+        lvol_id, err = lvol_controller.add_lvol_ha(
+            request.landing_name, request.size, node.get_id(), request.ha_type, pool_uuid,
+            internal=True, namespaced=max_ns > 1, max_namespace_per_subsys=max_ns,
+            lvol_priority_class=landing_class)
     if not lvol_id:
         raise LandingVolumeError(f"Error creating remote lvol: {err}")
     try:
@@ -292,6 +306,137 @@ def prepare_landing(cluster_id: str, request: LandingRequest) -> LandingResponse
         # created but not readable back yet: the id is what matters
         return LandingResponse(state="ready", lvol_id=lvol_id, lvs_name=node.lvstore,
                                node_id=node.get_id(), pool_id=pool_uuid)
+
+
+# Names of the landing volumes this process is creating right now. A record
+# wearing one of them is in_creation because its create is still running here,
+# not because an attempt died (bed bf32 2026-11-21).
+_LANDING_CREATING: dict = {}            # name -> number of creates in flight
+_LANDING_CREATING_GUARD = threading.Lock()
+
+
+@contextlib.contextmanager
+def _landing_creating(name):
+    """Register *name* as under creation while the block runs (add_lvol_ha)."""
+    with _LANDING_CREATING_GUARD:
+        _LANDING_CREATING[name] = _LANDING_CREATING.get(name, 0) + 1
+    try:
+        yield
+    finally:
+        with _LANDING_CREATING_GUARD:
+            left = _LANDING_CREATING.get(name, 1) - 1
+            if left > 0:
+                _LANDING_CREATING[name] = left
+            else:
+                _LANDING_CREATING.pop(name, None)
+
+
+def _landing_age_sec(lvol, now=None):
+    """Seconds since *lvol*'s record was created; None when unknown."""
+    try:
+        created = datetime.fromisoformat(str(lvol.create_dt))
+    except (TypeError, ValueError):
+        return None
+    return ((datetime.now() if now is None else now) - created).total_seconds()
+
+
+def _landing_creation_live(existing, request):
+    """Why the in_creation landing volume *existing* may still be under
+    creation -- "" only when it is provably abandoned.
+
+    bed bf32 (2026-11-21): a second task of the same snapshot took the landing
+    volume another worker was creating for a dead attempt's leftover and
+    deleted it; the delete ran on the leader while the creator was still
+    registering the volume on the secondary and tertiary, which kept a stale
+    registration that SPDK later crashed on. A landing volume is abandoned only
+    when nothing here is creating it, the source knows of no other live task
+    of the snapshot (request.source_busy), and it has been in_creation longer
+    than any create takes (REPL_LANDING_ABANDON_SEC, which also covers a create
+    in another process, e.g. an old runner pod during a rolling update)."""
+    with _LANDING_CREATING_GUARD:
+        if _LANDING_CREATING.get(request.landing_name):
+            return "its create is running in this runner"
+    if request.source_busy:
+        return request.source_busy
+    age = _landing_age_sec(existing)
+    if age is not None and age < constants.REPL_LANDING_ABANDON_SEC:
+        return (f"it is only {int(age)}s old "
+                f"(abandoned after {constants.REPL_LANDING_ABANDON_SEC}s)")
+    return ""
+
+
+def _landing_member_nodes(db, lvol):
+    """Every node the landing volume may be registered on: its own nodes and
+    the members of its lvstore (a register can land before the record lists
+    the node)."""
+    ids = []
+    for nid in [lvol.node_id] + list(lvol.nodes or []):
+        if nid and nid not in ids:
+            ids.append(nid)
+    try:
+        primary = db.get_storage_node_by_id(lvol.node_id)
+        for nid in (getattr(primary, "secondary_node_id", ""),
+                    getattr(primary, "tertiary_node_id", "")):
+            if nid and nid not in ids:
+                ids.append(nid)
+    except KeyError:
+        pass
+    return ids
+
+
+def _confirm_landing_gone(db, lvol, member_ids):
+    """After a half-created landing volume's delete: confirm its bdev is gone
+    on every member, sync-deleting a registration left behind. Returns the
+    members where removal is not confirmed; each of them gets a durable
+    sync-delete task, so no registration is left behind untracked.
+
+    A record still present (in_deletion) is the lvol monitor's to finish;
+    nothing is probed then."""
+    try:
+        db.get_lvol_by_id(lvol.get_id())
+        return []
+    except KeyError:
+        pass
+    if not lvol.lvol_bdev or not lvol.lvs_name:
+        return []
+    bdev = f"{lvol.lvs_name}/{lvol.lvol_bdev}"
+    unconfirmed = []
+    for nid in member_ids:
+        try:
+            node = db.get_storage_node_by_id(nid)
+        except KeyError:
+            continue                    # gone with its lvstore: owes nothing
+        confirmed = False
+        if node.status == StorageNode.STATUS_ONLINE:
+            try:
+                rpc = node.rpc_client(timeout=5, retry=2)
+                if rpc.bdev_get(bdev) is None:
+                    confirmed = True
+                else:
+                    logger.warning("Landing volume %s left %s registered on %s; "
+                                   "deleting it there", lvol.get_id(), bdev, nid[:8])
+                    try:
+                        rpc.delete_lvol(bdev, sync=True)
+                    except RPCException as e:
+                        if getattr(e, "code", None) != -errno.ENODEV:
+                            raise
+                    confirmed = rpc.bdev_get(bdev) is None
+            except Exception as e:                        # noqa: BLE001
+                logger.warning("Cannot confirm %s is gone on %s: %s", bdev, nid[:8], e)
+        if not confirmed:
+            unconfirmed.append(nid)
+            try:
+                from simplyblock_core.controllers import tasks_controller
+                tasks_controller.add_lvol_sync_del_task(
+                    node.cluster_id, nid, bdev, lvol.node_id)
+            except Exception as e:                        # noqa: BLE001
+                logger.error("Could not queue the delete of %s on %s: %s",
+                             bdev, nid[:8], e)
+    if unconfirmed:
+        logger.error("Removal of landing volume %s (%s) not confirmed on %s; "
+                     "a durable sync delete is queued for each",
+                     lvol.get_id(), bdev, [n[:8] for n in unconfirmed])
+    return unconfirmed
 
 
 def _refuse_superseded_source(db, cluster_id, source_lvol_id):
