@@ -104,14 +104,17 @@ class TestRunnerUsesTheSpare:
 
     def test_the_start_adopts_a_spare_before_creating_a_landing_volume(self):
         src = inspect.getsource(sr.process_snap_replicate_start)
-        adopt = src.index("replication_spare.adopt(snapshot, rep_name, remote_pool_uuid)")
-        create = src.index("_create_landing_volume(\n            f\"REP_{snapshot.snap_name}\"")
+        adopt = src.index("replication_spare.adopt(snapshot, rep_name)")
+        # the destination creates the landing volume (prepare_landing) after
+        create = src.index("landing = _peer_for(dest_lvol, destination_cluster_id).prepare_landing(")
         assert adopt < create
+        # spares only where one database holds both clusters
+        assert src.rindex("if _target_is_local(snapshot.lvol):", 0, adopt) < adopt
 
     def test_the_spare_is_prestaged_after_the_submit_outside_an_endgame(self):
         src = inspect.getsource(sr.process_snap_replicate_start)
         submit = src.index("task.status = JobSchedule.STATUS_RUNNING")
-        prestage = src.index("replication_spare.prestage(snapshot, remote_lv, _create_landing_volume,")
+        prestage = src.index("replication_spare.prestage(snapshot, remote_lv, _create_spare_landing,")
         assert submit < prestage
         guard = src.rindex("if not _cutover_owns(", 0, prestage)
         assert guard < prestage

@@ -9,6 +9,7 @@ from simplyblock_core import (
     constants,
     db_controller,
     migration_turn,
+    replication_spare,
     snapshot_retention,
     utils,
     xfer_timing,
@@ -1001,6 +1002,19 @@ def process_snap_replicate_start(task, snapshot):
         #   - a pre-staged cutover round is adopted the same way;
         #   - else the landing volume is created in the first hinted pool.
         _t_landing = xfer_timing.now()
+        # A spare created after the previous cycle's submit carries a name of
+        # its own; renamed, it is this transfer's landing volume and the
+        # destination adopts it instead of creating one (see replication_spare).
+        # Spares need both clusters' records in one database: they are kept
+        # when this control plane manages the destination, not across a peer.
+        if _target_is_local(snapshot.lvol):
+            rep_name = f"REP_{snapshot.snap_name}"
+            with contextlib.suppress(KeyError):
+                db.get_lvol_by_name(rep_name, include_deleted=True)
+                rep_name = ""                   # the name is taken: nothing to adopt
+            if rep_name and replication_spare.adopt(snapshot, rep_name) is not None:
+                xfer_timing.stamp("landing_spare_adopted", snap=snapshot.get_id(),
+                                  lvol=snapshot.lvol.get_id())
         try:
             landing = _peer_for(dest_lvol, destination_cluster_id).prepare_landing(LandingRequest(
                 source_cluster_id=snode.cluster_id, snapshot_id=snapshot.get_id(),
@@ -1234,6 +1248,15 @@ def process_snap_replicate_start(task, snapshot):
     # now, while this transfer runs, so the next round adopts it instead of
     # paying for the create on its critical path (_prestage_next_landing).
     _prestage_next_landing(snapshot, remote_lv)
+    # Outside an endgame the next snapshot's name is unknown: keep one spare
+    # landing volume per volume instead, renamed when the next cycle adopts it
+    # (only where this control plane manages the destination, see above).
+    if not _cutover_owns(snapshot.lvol.get_id(), task.cluster_id) and \
+            _target_is_local(snapshot.lvol):
+        with xfer_timing.phase("landing_spare_prestage", snap=snapshot.get_id(),
+                               lvol=snapshot.lvol.get_id()):
+            replication_spare.prestage(snapshot, remote_lv, _create_spare_landing,
+                                       task.cluster_id)
 
     # Do not hand the transfer back to the pass loop and forget about it: wait
     # for it here, polling every 100ms, and finish it in this same pass. Before
@@ -1781,6 +1804,25 @@ def merge_backlog(source_lvol, cluster_id, exclude_snapshot_id=""):
     count = len(pending) + len(merging) + landing
     return count, (f"{len(pending)} beyond retention, {len(merging)} being merged, "
                    f"{landing} landing copies merging"), len(pending)
+
+
+def _create_spare_landing(name, snapshot, remote_node, pool_uuid):
+    """replication_spare.prestage's landing-volume factory: create *name* on the
+    destination, through its prepare_landing (create_only), so the create is
+    registered as in flight there like any landing volume's (bf32).
+    Returns (lvol id, error)."""
+    try:
+        answer = LocalPeerClient(remote_node.cluster_id).prepare_landing(LandingRequest(
+            source_cluster_id=snapshot.cluster_id, snapshot_id=snapshot.get_id(),
+            landing_name=name, size=snapshot.size, ha_type=snapshot.lvol.ha_type,
+            max_namespace_per_subsys=snapshot.lvol.max_namespace_per_subsys or 0,
+            node_hint=remote_node.get_id(), pool_hints=[pool_uuid] if pool_uuid else [],
+            create_only=True, source_lvol_id=snapshot.lvol.get_id()))
+    except Exception as e:                                # noqa: BLE001
+        return None, str(e)
+    if answer.state != "ready":
+        return None, answer.reason or answer.state
+    return answer.lvol_id, None
 
 
 def _target_is_local(source_lvol):
