@@ -32,6 +32,10 @@ EVENT_ARRAY_LUN = "ARRAY_LUN"
 #: A replication step on the target keeps failing (e.g. the landing merge
 #: cannot get memory); the control plane backs off and keeps retrying.
 EVENT_REPLICATION_STALLED = "REPLICATION_STALLED"
+#: SPDK refused a replication delta because the destination's base is not
+#: reachable from the source (simplyblock/spdk#108); the control plane sent
+#: that transfer in full instead, which costs the whole volume on the wire.
+EVENT_REPLICATION_FULL_SEND = "REPLICATION_FULL_SEND"
 
 DOMAIN_CLUSTER = "cluster"
 DOMAIN_MANAGEMENT = "management"
