@@ -312,6 +312,13 @@ def get_block_devices_info() -> list[dict]:
     serial is derived from the parent disk's serial plus the PARTUUID
     ("<parent-serial>-part-<partuuid>") — stable across disk renames and
     unique per partition. Partitions without a PARTUUID get a synthetic id.
+
+    lsblk prints no PARTUUID in the storage-node container (it reads the udev
+    database, which is not mounted there), so the PARTUUID is then probed
+    from the device. Such a partition used to get the synthetic id, which is
+    seeded from its kernel name and changes with it; that id is still
+    reported, as ``legacy_serial``, for the nodes that recorded the partition
+    under it (simplyblock_core.utils.lblk_identity).
     """
     import hashlib
 
@@ -385,13 +392,17 @@ def get_block_devices_info() -> list[dict]:
                 continue
             part_name = child.get("name", "")
             partuuid = (child.get("partuuid") or "").strip()
+            probed = not partuuid
+            if probed:
+                partuuid = _probe_partuuid(part_name)
             part_paths = persistent.get(part_name, [])
             part_synthetic = False
+            seed = f"{hostname}|{serial}|{part_name}|{child.get('size') or 0}"
+            synthetic_serial = "SYN-" + hashlib.sha1(seed.encode()).hexdigest()[:16]
             if partuuid:
                 part_serial = f"{serial}-part-{partuuid.lower()}"
             else:
-                seed = f"{hostname}|{serial}|{part_name}|{child.get('size') or 0}"
-                part_serial = "SYN-" + hashlib.sha1(seed.encode()).hexdigest()[:16]
+                part_serial = synthetic_serial
                 part_synthetic = True
             devices.append({
                 "name": part_name,
@@ -420,6 +431,8 @@ def get_block_devices_info() -> list[dict]:
                 "physical_block_size": physical_bs,
                 "start_bytes": _partition_start_bytes(name, part_name),
             })
+            if probed and partuuid:
+                devices[-1]["legacy_serial"] = synthetic_serial
     devices += _multipath_maps(data, devices, persistent)
     logger.debug("function:get_block_devices_info end")
     return devices

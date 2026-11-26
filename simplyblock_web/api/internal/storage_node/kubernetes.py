@@ -22,6 +22,7 @@ from simplyblock_core import constants
 from simplyblock_core import utils as core_utils
 from simplyblock_core.settings import Settings
 from simplyblock_core.storage_network import NetworkAttachment
+from simplyblock_core.utils import lblk_identity
 from simplyblock_core.utils import shell as shell_utils
 from simplyblock_web import node_utils, node_utils_k8s, utils
 from simplyblock_web.api.internal.storage_node import network_attachments, pod_service
@@ -323,16 +324,27 @@ def get_info():
     })
 
 
+class _BlockDevicesQuery(BaseModel):
+    # "partuuid": a partition whose PARTUUID lsblk does not print is reported
+    # under its PARTUUID-based serial, with the id it used to have as
+    # legacy_serial. A control plane that predates this sends nothing and gets
+    # such a partition under that former id, the only one it knows it by.
+    partition_serials: str = "legacy"
+
+
 @api.get('/blockdevices', responses={
     200: {'content': {'application/json': {'schema': utils.response_schema({
         'type': 'array',
         'items': {'type': 'object', 'additionalProperties': True},
     })}}},
 })
-def get_blockdevices():
+def get_blockdevices(query: _BlockDevicesQuery):
     """Whole-disk inventory for the lblk cluster mode (eligibility fields,
     serial/WWN identity, by-id path, NUMA)."""
-    return utils.get_response(node_utils.get_block_devices_info())
+    devices = node_utils.get_block_devices_info()
+    if query.partition_serials != "partuuid":
+        devices = lblk_identity.with_legacy_partition_serials(devices)
+    return utils.get_response(devices)
 
 
 class _WipeBlockDeviceParams(BaseModel):

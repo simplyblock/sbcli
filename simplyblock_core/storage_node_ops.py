@@ -104,6 +104,7 @@ from simplyblock_core.snode_client import SNodeClient, SNodeClientException
 from simplyblock_core.utils import (
     dial_backoff,
     hublvol_reconnect,
+    lblk_identity,
     nvmf_listener,
     peer_address,
     pull_docker_image_with_retry,
@@ -4653,7 +4654,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         if ssd_pcie or lblk_configured:
             action, existing = _classify_existing_endpoint_record(
                 db_controller, cluster_id, node_addr, ssd_pcie,
-                lblk_serials=[e.get("serial") for e in lblk_configured])
+                lblk_serials=utils.lblk_device_serials(lblk_configured))
             if action == "cleanup":
                 # Repeated partial attempts can leave several stale records
                 # for the same endpoint; we clean one per task retry.
@@ -10166,6 +10167,9 @@ def _restart_storage_node_impl(
         lblk_resolved, lblk_missing = utils.resolve_lblk_entries(
             snode.lblk_devices, blk_inventory,
             name_fallback=not multi_attach.is_multi_attach(cluster))
+        # A partition recorded without its PARTUUID gets it now, while it is
+        # still found; snode is written to the DB after the reconcile below.
+        lblk_identity.remember_partuuids(snode.lblk_devices, blk_inventory)
         for entry in lblk_missing:
             logger.warning(f"Configured block device {entry.get('path') or entry.get('name')} "
                            f"(serial {entry.get('serial')}) not found on host")
