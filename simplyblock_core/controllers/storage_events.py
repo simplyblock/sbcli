@@ -235,6 +235,114 @@ def snode_lvs_member_register_failing(node, lvs_name, lvol_count, window_sec, la
         node_id=node.get_id())
 
 
+def snode_lvs_member_repair(node, lvs_name, stage, detail, previous_repair_at=None,
+                            caused_by=ec.CAUSED_BY_MONITOR):
+    """The control plane reloads ``node``'s copy of ``lvs_name`` because it keeps
+    failing registrations (controllers/lvs_member_repair).
+
+    ``stage``: "started", "done" or "failed". ``previous_repair_at``: when the
+    previous reload of the same copy ran, if the failures came back after it --
+    then the reload does not help and the event says so."""
+    import time as _time
+    if stage == "started":
+        level = EventObj.LEVEL_WARN
+        msg = (f"Reloading this node's copy of {lvs_name}: it keeps failing to register "
+               f"volumes the leader created ({detail}).")
+    elif stage == "done":
+        level = EventObj.LEVEL_INFO
+        msg = (f"This node's copy of {lvs_name} was reloaded ({detail}). Registrations "
+               f"of the volumes it is missing are retried; LVS_MEMBER_REGISTER_FAILING "
+               f"comes back if they still fail.")
+    else:
+        level = EventObj.LEVEL_ERROR
+        msg = f"Reloading this node's copy of {lvs_name} failed: {detail}."
+    if previous_repair_at:
+        ago = int(_time.time() - previous_repair_at)
+        msg += (f" A reload of the same copy {ago}s ago did not stop the failures: the "
+                f"node's data layer does not see what the leader writes (e.g. its journal "
+                f"copy is excluded), which a reload cannot fix. Restart this storage node "
+                f"to rebuild its copy of {lvs_name}.")
+        if level == EventObj.LEVEL_INFO:
+            level = EventObj.LEVEL_WARN
+    ec.log_event_cluster(
+        cluster_id=node.cluster_id,
+        domain=ec.DOMAIN_CLUSTER,
+        event=ec.EVENT_LVS_MEMBER_REPAIR,
+        db_object=node,
+        caused_by=caused_by,
+        event_level=level,
+        message=msg,
+        node_id=node.get_id())
+
+
+def snode_lvs_member_auto_restart(node, lvs_name, stage, detail,
+                                  caused_by=ec.CAUSED_BY_MONITOR):
+    """The automatic restart of ``node`` because its copy of ``lvs_name`` keeps
+    failing registrations after a reload (controllers/lvs_member_repair).
+
+    ``stage``:
+      * "restarting": the gates passed; the node is shut down gracefully and its
+        auto-restart queued (warning);
+      * "queued": the shutdown finished and the restart task is queued (info);
+      * "skipped": a safety gate held, ``detail`` says which; tried again at the
+        next alert (warning);
+      * "manual": no more automation for this node -- the limit of one automatic
+        restart per interval is reached, or the failures persist after one, or
+        the cluster type is never auto-restarted for this (error);
+      * "failed": the shutdown or the queueing failed (error)."""
+    if stage == "restarting":
+        level = EventObj.LEVEL_WARN
+        msg = (f"Restarting this node: its copy of {lvs_name} keeps failing to register "
+               f"volumes after a reload, which a reload cannot repair. Graceful shutdown, "
+               f"then the automatic restart rebuilds its copy of the lvstore ({detail}).")
+    elif stage == "queued":
+        level = EventObj.LEVEL_INFO
+        msg = (f"This node was shut down to rebuild its copy of {lvs_name}; its automatic "
+               f"restart is queued ({detail}).")
+    elif stage == "skipped":
+        level = EventObj.LEVEL_WARN
+        msg = (f"Not restarting this node to rebuild its copy of {lvs_name} now: {detail}. "
+               f"Tried again at the next alert while the registrations keep failing.")
+    elif stage == "manual":
+        level = EventObj.LEVEL_ERROR
+        msg = (f"This node's copy of {lvs_name} keeps failing to register volumes and the "
+               f"control plane will not restart it automatically: {detail}. Manual action "
+               f"is needed: check the node's SPDK log, then restart the node.")
+    else:
+        level = EventObj.LEVEL_ERROR
+        msg = (f"The automatic restart of this node to rebuild its copy of {lvs_name} "
+               f"failed: {detail}. Manual action is needed.")
+    ec.log_event_cluster(
+        cluster_id=node.cluster_id,
+        domain=ec.DOMAIN_CLUSTER,
+        event=ec.EVENT_LVS_MEMBER_AUTO_RESTART,
+        db_object=node,
+        caused_by=caused_by,
+        event_level=level,
+        message=msg,
+        node_id=node.get_id())
+
+
+def snode_lvs_member_blocks_delta(node, lvs_name, transfers, since_sec, last_error,
+                                  caused_by=ec.CAUSED_BY_MONITOR):
+    """Replication into ``lvs_name`` sent ``transfers`` landing volumes in full
+    in the last ``since_sec`` seconds because ``node`` (a member) could not be
+    chained. Warning: correct, but each such transfer copies the whole volume."""
+    ec.log_event_cluster(
+        cluster_id=node.cluster_id,
+        domain=ec.DOMAIN_CLUSTER,
+        event=ec.EVENT_LVS_MEMBER_BLOCKS_DELTA,
+        db_object=node,
+        caused_by=caused_by,
+        event_level=EventObj.LEVEL_WARN,
+        message=(f"Replication into {lvs_name} sent {transfers} volume(s) in full within "
+                 f"{since_sec}s instead of a delta: this member could not chain the landing "
+                 f"volume ({last_error}). A delta is only correct with the landing volume "
+                 f"chained on every member of the lvstore, so full copies continue until "
+                 f"this member's copy of {lvs_name} is repaired."),
+        node_id=node.get_id())
+
+
 def snode_fence_loop_detected(node, port, lvstore, releases, window_sec,
                               caused_by=ec.CAUSED_BY_MONITOR):
     """The control plane stopped reopening a client port SPDK keeps fencing.
