@@ -76,12 +76,83 @@ class _MdsBase(_PnfsBase):
     #: a minute late is still a takeover that should not have happened.
     QUIET_SECONDS = 150
 
+    #: Name of the throwaway claim used to summon a metadata server. Not a
+    #: case's own claim: it exists for seconds and is deleted again.
+    BOOTSTRAP_CLAIM = "pnfs-mds-bootstrap"
+
+    #: How long the operator gets to build the StatefulSet once an export
+    #: has asked for one. It took 8s on run 45906141173; this is slack.
+    MDS_BOOTSTRAP_TIMEOUT = 300
+
     def setup(self):
         super().setup()
         self.sts_name = None
         self.mds_ns = self.k8s_utils.namespace
 
     # ── the gate ─────────────────────────────────────────────────────────
+
+    def _ensure_mds_exists(self):
+        """Make a metadata server exist, because asking is what creates one.
+
+        The operator builds the MDS StatefulSet *lazily*, for the first
+        NFSExport that needs one -- not when ``spec.pnfs`` is set, and not
+        at cluster bring-up. The S3 run shows the order plainly::
+
+            23:05:09  NFSExport nfsexp-4dbbc02d...  WaitingForActiveMDS:
+                      "StatefulSet simplyblock-pnfs-mds-... does not exist yet"
+            23:05:17  link: peer linked  mds/...-1
+            23:05:22  MDSPromoted  ...-1 is the active at epoch 1, cause First
+
+        Every case in this file calls its gate as the first statement of
+        ``run()``, before the claim that would summon the server. So on a
+        cluster where no pNFS volume had ever been made, all thirteen
+        refused -- run 45945639150, on a cluster whose pNFS gate had just
+        passed with 7 kvm-capable nodes and the mds-proxy 7/7 Ready::
+
+            [pnfs] cluster gate passed: NFSExport CRD present, 7
+                   kvm-capable node(s), mds-proxy Ready (7/7)
+            PnfsProbeError: no pnfs-mds StatefulSet in simplyblock
+
+        There were no NFSExports in that run at all. The gate was not
+        wrong about what it saw; it was asking before anything had caused
+        the thing it asks about.
+
+        The claim is deleted once the StatefulSet is up. The MDS outlives
+        its exports -- the S3 run kept one across eighteen tests that each
+        deleted their buckets -- and leaving an export behind would hand
+        every case one it did not create, which the cases that count
+        exports would read as the product's.
+        """
+        if mds_statefulset(self.k8s_utils, self.mds_ns):
+            return
+        self.logger.info(
+            "[mds] no metadata server on this cluster yet; creating claim "
+            "%s to summon one, since the operator builds the StatefulSet "
+            "for the first export that needs it", self.BOOTSTRAP_CLAIM)
+        self._make_storage_class()
+        self._make_rwx_claim(self.BOOTSTRAP_CLAIM)
+        deadline = time.time() + self.MDS_BOOTSTRAP_TIMEOUT
+        sts = {}
+        while time.time() < deadline:
+            sts = mds_statefulset(self.k8s_utils, self.mds_ns)
+            if sts:
+                break
+            sleep_n_sec(5)
+        try:
+            self.k8s_utils.delete_pvc(self.BOOTSTRAP_CLAIM)
+        except Exception as exc:
+            self.logger.warning("[mds] could not delete %s: %s",
+                                self.BOOTSTRAP_CLAIM, exc)
+        if not sts:
+            raise PnfsProbeError(
+                f"a bound RWX pNFS claim ({self.BOOTSTRAP_CLAIM}) existed "
+                f"for {self.MDS_BOOTSTRAP_TIMEOUT}s and the operator still "
+                f"built no pnfs-mds StatefulSet in {self.mds_ns}. An export "
+                f"that never gets a metadata server is a product failure, "
+                f"not a missing prerequisite.")
+        self.logger.info(
+            "[mds] metadata server appeared: %s",
+            (sts.get("metadata") or {}).get("name"))
 
     def assert_mds_cluster(self, want_standbys=True):
         """Refuse the case unless there is a standby topology to test.
@@ -94,6 +165,7 @@ class _MdsBase(_PnfsBase):
         Running an F- case against that shape would report the product
         broken for doing exactly what `standbys: 0` asks of it.
         """
+        self._ensure_mds_exists()
         sts = mds_statefulset(self.k8s_utils, self.mds_ns)
         if not sts:
             raise PnfsProbeError(
