@@ -10586,6 +10586,9 @@ def _restart_storage_node_impl(
         except Exception as e:
             logger.error(e)
             _abort_restart(f"LVS recreation failed: {e}")
+            # The attempt may have taken a leadership before it failed: seat
+            # a leader now, not on the node monitor's next pass.
+            hand_back_lvs_leadership_after_abort(snode)
             return False
         if not ret:
             # Restart abort path. recreate_all_lvstores returning False is
@@ -10596,6 +10599,7 @@ def _restart_storage_node_impl(
             # name". 10:58:11 in the AWS soak run hit exactly this gap.
             _set_lvstore_status_atomic(snode.get_id(), "failed", db_controller)
             _abort_restart("recreate_all_lvstores returned False")
+            hand_back_lvs_leadership_after_abort(snode)
             return False
 
         # === Phase 10: Finalization — post all LVS recreation ===
@@ -12907,6 +12911,90 @@ def restart_before_lvstore_handoff(node_id, lvs_name):
     if is_up:
         return False, f"SPDK of {node_id[:8]} is running (its restart is under way)"
     return True, f"SPDK of {node_id[:8]} is down; its restart has not reached {lvs_name}"
+
+
+def _restart_member_lvstores(snode, db):
+    """``(lvs_name, members)`` for every lvstore ``snode`` belongs to: its own
+    (as primary) and those it holds a secondary or tertiary role in."""
+    from simplyblock_core.controllers.lvol_controller import role_secondary_ids
+    result = []
+    for owner in db.get_storage_nodes_by_cluster_id(snode.cluster_id):
+        if not owner.lvstore:
+            continue
+        ids = [owner.get_id()] + role_secondary_ids(owner)
+        if snode.get_id() not in ids:
+            continue
+        members = []
+        for nid in ids:
+            try:
+                members.append(owner if nid == owner.get_id() else db.get_storage_node_by_id(nid))
+            except KeyError:
+                continue
+        result.append((owner.lvstore, members))
+    return result
+
+
+def hand_back_lvs_leadership_after_abort(snode):
+    """Right after a restart attempt of ``snode`` aborted (SPDK killed and
+    confirmed dead, node OFFLINE), give every lvstore it belongs to a leader
+    again at once: ``[(lvs_name, leader_id or None)]``.
+
+    A restart rebuilds the node's own lvstore first and takes its leadership
+    there (demoting the acting leader), then rebuilds the lvstores it is a
+    secondary or tertiary of. When one of those fails, the whole attempt
+    aborts and kills SPDK -- with the leadership just taken. Nobody led until
+    the node monitor's takeover came round (its interval, then the proof
+    window), and the next attempt took it again: bf36 R3b (2026-11-26),
+    LVS_22 flapped between 6344ccd0 and the restarting 0b26b6da (16:59:41
+    taken, 16:59:52 a non-leader rebuild failed, 17:01:30 back on 6344ccd0;
+    again at 17:03:51), with a leaderless gap of ~100 s each time.
+
+    The leadership is not taken later instead: in a restart of several nodes
+    at once, each one's non-leader rebuilds need the other lvstores' leaders,
+    which the other restarting nodes seat in their first step.
+
+    The grant is the node monitor's proven takeover (find_leader_with_failover
+    with ``pre_handoff_restart_of``), run now rather than on its next pass:
+    only for an lvstore whose handoff cannot be under way
+    (restart_before_lvstore_handoff: SPDK of ``snode`` confirmed down, no
+    restart phase recorded), never granting while a member may still lead
+    (_leadership_proven_free). An lvstore that already has a leader keeps it.
+    Not on sync-replication clusters nor on two-node arbitrated ones, as the
+    node monitor. Never raises."""
+    db = DBController()
+    out: list[tuple[str, str | None]] = []
+    try:
+        snode = db.get_storage_node_by_id(snode.get_id())
+        if _sync_site(snode) or _cluster_two_node_arbitrated(snode.cluster_id, db=db):
+            return out
+        member_lvstores = _restart_member_lvstores(snode, db)
+    except Exception as e:                                  # noqa: BLE001
+        logger.error("Leadership hand-back after the aborted restart of %s: %s", snode.get_id(), e)
+        return out
+    for lvs_name, members in member_lvstores:
+        if not any(m.get_id() != snode.get_id() and m.status == StorageNode.STATUS_ONLINE
+                   for m in members):
+            continue
+        ok, why = restart_before_lvstore_handoff(snode.get_id(), lvs_name)
+        if not ok:
+            logger.info("No leadership hand-back for %s: %s", lvs_name, why)
+            continue
+        try:
+            leader, _ = find_leader_with_failover(members, lvs_name,
+                                                  pre_handoff_restart_of=snode.get_id())
+        except Exception as e:                              # noqa: BLE001
+            logger.error("Leadership hand-back for %s after the aborted restart of %s failed: %s",
+                         lvs_name, snode.get_id(), e)
+            continue
+        if leader is None:
+            logger.warning("%s has no leader after the aborted restart of %s; no member could "
+                           "be proven safe to lead yet (the node monitor retries)",
+                           lvs_name, snode.get_id())
+        else:
+            logger.info("%s is led by %s after the aborted restart of %s",
+                        lvs_name, leader.get_id(), snode.get_id())
+        out.append((lvs_name, leader.get_id() if leader else None))
+    return out
 
 
 def _leadership_moving_tasks_active(cluster_id, node_ids, lvs_name=None,
