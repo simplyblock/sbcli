@@ -50,6 +50,7 @@ from utils.pnfs_utils import (
     NFS_LEASE_DEFAULT,
     PnfsEvidenceError,
     PnfsProbeError,
+    mds_active_pod,
     mds_pods,
     mds_record,
     mds_standby_supported,
@@ -227,6 +228,28 @@ class _MdsBase(_PnfsBase):
 
     def record(self):
         return mds_record(mds_statefulset(self.k8s_utils, self.mds_ns))
+
+    def active_pod(self, active, tag):
+        """The pod running the record's active instance.
+
+        Every case that acts on "the active" needs a pod name, and the
+        record does not hold one -- it holds
+        ``<instance-uuid>/containerd://<container-id>``. Going through a
+        lookup is what keeps ``kubectl delete pod`` pointed at a pod that
+        exists; see ``mds_active_pod`` for why the record is right to be
+        shaped that way.
+        """
+        name, _node = mds_active_pod(self.k8s_utils, active,
+                                     self.sts_name, self.mds_ns)
+        if not name:
+            pods = mds_pods(self.k8s_utils, self.sts_name, self.mds_ns)
+            raise PnfsProbeError(
+                f"{tag} the record's active instance {active!r} resolves to "
+                f"none of the metadata server pods {[p[0] for p in pods]} by "
+                f"container id, pod uid or name. A record naming a guest "
+                f"that no pod is running means no client can be served and "
+                f"no takeover can be aimed at anything.")
+        return name
 
     def assert_no_promotion(self, from_epoch, seconds, what):
         """Watch for *seconds* and fail if the epoch moves.
@@ -495,11 +518,17 @@ class PnfsMdsDefaultTopologyK8s(_MdsBase):
                 f"[E-01] the StatefulSet carries no {ANNO_MDS_EPOCH} / "
                 f"active-instance record, so no guest has been promoted and "
                 f"no export can be served. Pods present: {names}")
-        if active not in names:
+        # Resolved, not compared: the record holds an instance id, so
+        # ``active in names`` is false on every healthy cluster and this
+        # check would have reported the product broken for our own
+        # misreading of a correct record.
+        active_name = self.active_pod(active, "[E-01]")
+        if active_name not in names:
             raise PnfsEvidenceError(
-                f"[E-01] the record names {active!r} as active, but the pods "
-                f"that exist are {names}. A record pointing at a pod that is "
-                f"gone is how a takeover gets skipped.")
+                f"[E-01] the record's active instance {active!r} runs in pod "
+                f"{active_name}, which is not among the running pods "
+                f"{names}. A record pointing at a pod that is gone is how a "
+                f"takeover gets skipped.")
         if epoch < 1:
             raise PnfsEvidenceError(
                 f"[E-01] the record's epoch is {epoch}; the design writes 1 "
@@ -563,10 +592,12 @@ class PnfsMdsActiveDeletedK8s(_MdsBase):
                 "[F-01] no active guest is recorded, so there is nothing to "
                 "delete and no takeover to observe.")
 
+        victim = self.active_pod(active, "[F-01]")
         killed_at = time.time()
         self.k8s_utils._exec_kubectl(
-            f"kubectl delete pod {active} -n {self.mds_ns} --wait=false")
-        self.logger.info("[F-01] deleted the active guest %s", active)
+            f"kubectl delete pod {victim} -n {self.mds_ns} --wait=false")
+        self.logger.info("[F-01] deleted the active guest %s (instance %s)",
+                         victim, active)
 
         new_active, new_epoch, took = wait_mds_promotion(
             self.k8s_utils, self.sts_name, epoch,
@@ -682,7 +713,8 @@ class PnfsMdsLockAcrossTakeoverK8s(_MdsBase):
 
         active, epoch = self.record()
         self.k8s_utils._exec_kubectl(
-            f"kubectl delete pod {active} -n {self.mds_ns} --wait=false")
+            f"kubectl delete pod {self.active_pod(active, '[F-12]')} "
+            f"-n {self.mds_ns} --wait=false")
         new_active, new_epoch, took = wait_mds_promotion(
             self.k8s_utils, self.sts_name, epoch,
             timeout=self.TAKEOVER_TIMEOUT, namespace=self.mds_ns)
@@ -822,10 +854,12 @@ class PnfsMdsNoStandbyRecoversK8s(_MdsBase):
         sleep_n_sec(20)
         active, epoch = self.record()
 
+        victim = self.active_pod(active, "[E-03]")
         lost_at = time.time()
         self.k8s_utils._exec_kubectl(
-            f"kubectl delete pod {active} -n {self.mds_ns} --wait=false")
-        self.logger.info("[E-03] deleted the only guest %s", active)
+            f"kubectl delete pod {victim} -n {self.mds_ns} --wait=false")
+        self.logger.info("[E-03] deleted the only guest %s (instance %s)",
+                         victim, active)
 
         deadline = time.time() + 600
         back = None
@@ -980,7 +1014,8 @@ class PnfsMdsManyExportsTakeoverK8s(_MdsBase):
         active, epoch = self.record()
         started = time.time()
         self.k8s_utils._exec_kubectl(
-            f"kubectl delete pod {active} -n {self.mds_ns} --wait=false")
+            f"kubectl delete pod {self.active_pod(active, '[F-10]')} "
+            f"-n {self.mds_ns} --wait=false")
         new_active, new_epoch, took = wait_mds_promotion(
             self.k8s_utils, self.sts_name, epoch,
             timeout=self.TAKEOVER_TIMEOUT, namespace=self.mds_ns)
@@ -1119,7 +1154,8 @@ class PnfsMdsSecondTakeoverK8s(_MdsBase):
 
         first_active, epoch0 = self.record()
         self.k8s_utils._exec_kubectl(
-            f"kubectl delete pod {first_active} -n {self.mds_ns} --wait=false")
+            f"kubectl delete pod {self.active_pod(first_active, '[F-09]')} "
+            f"-n {self.mds_ns} --wait=false")
         second_active, epoch1, took1 = wait_mds_promotion(
             self.k8s_utils, self.sts_name, epoch0,
             timeout=self.TAKEOVER_TIMEOUT, namespace=self.mds_ns)
@@ -1130,8 +1166,8 @@ class PnfsMdsSecondTakeoverK8s(_MdsBase):
         # Inside the grace period of the promotion that just happened.
         sleep_n_sec(max(5, MDS_TERMINATION_GRACE // 3))
         self.k8s_utils._exec_kubectl(
-            f"kubectl delete pod {second_active} -n {self.mds_ns} "
-            f"--wait=false")
+            f"kubectl delete pod {self.active_pod(second_active, '[F-09]')} "
+            f"-n {self.mds_ns} --wait=false")
         third_active, epoch2, took2 = wait_mds_promotion(
             self.k8s_utils, self.sts_name, epoch1,
             timeout=self.TAKEOVER_TIMEOUT, namespace=self.mds_ns)
@@ -1216,7 +1252,8 @@ class PnfsMdsExportGrownBeforeTakeoverK8s(_MdsBase):
         marker = self.start_writer(pods[0])
         active, epoch = self.record()
         self.k8s_utils._exec_kubectl(
-            f"kubectl delete pod {active} -n {self.mds_ns} --wait=false")
+            f"kubectl delete pod {self.active_pod(active, '[F-19]')} "
+            f"-n {self.mds_ns} --wait=false")
         new_active, new_epoch, took = wait_mds_promotion(
             self.k8s_utils, self.sts_name, epoch,
             timeout=self.TAKEOVER_TIMEOUT, namespace=self.mds_ns)
@@ -1330,10 +1367,12 @@ class PnfsMdsRestartWithClientDownK8s(_MdsBase):
             raise PnfsProbeError(
                 "[F-16] no active guest is recorded, so there is nothing to "
                 "restart.")
+        guest = self.active_pod(active, "[F-16]")
         killed_at = time.time()
         self.k8s_utils._exec_kubectl(
-            f"kubectl delete pod {active} -n {self.mds_ns} --wait=false")
-        self.logger.info("[F-16] deleted the active guest %s", active)
+            f"kubectl delete pod {guest} -n {self.mds_ns} --wait=false")
+        self.logger.info("[F-16] deleted the active guest %s (instance %s)",
+                         guest, active)
 
         new_active, new_epoch, took = wait_mds_promotion(
             self.k8s_utils, self.sts_name, epoch,
@@ -1505,13 +1544,26 @@ class _MdsNodeOutageBase(_MdsBase):
                     f"before any outage: {ready}. The StatefulSet is "
                     f"declared one replica and never more, because two "
                     f"guests mounting one filesystem lose data.")
-            active, node = ready[0]
+            pod, node = ready[0]
         else:
-            node = next((h for n, h, _p, _r in pods if n == active), None)
+            # By lookup, because the record holds an instance id and not a
+            # pod name. Comparing it to one found nothing, and the case
+            # then blamed the product -- run 45952090637 failed both node
+            # outage cases with "the serving guest
+            # 20ed5865-.../containerd://b6bf... reports no node" on a
+            # cluster whose two guests were both placed and running.
+            pod, node = mds_active_pod(self.k8s_utils, active,
+                                       self.sts_name, self.mds_ns)
+            if not pod:
+                raise PnfsProbeError(
+                    f"{tag} the record's active instance {active!r} resolves "
+                    f"to none of the metadata server pods "
+                    f"{[p[0] for p in pods]}.")
         if not node or node == "<none>":
             raise PnfsProbeError(
-                f"{tag} the serving guest {active} reports no node.")
-        return active, node, epoch
+                f"{tag} the serving guest {pod} (instance {active!r}) is on "
+                f"no node, so there is no host to take out. Pods: {pods}")
+        return pod, node, epoch
 
     def wait_mds_serving(self, tag, was_pod, was_epoch, timeout=None):
         """Wait until a metadata server is serving again. Returns seconds.
@@ -1521,6 +1573,12 @@ class _MdsNodeOutageBase(_MdsBase):
         assertion, because there is nothing else that could have taken
         over, and a case that waited for an epoch that no cluster
         publishes would simply time out and call the product broken.
+
+        A **pod name** is returned in both modes, so that the callers'
+        "is it still the guest that was there before" check compares two
+        things of the same kind. Returning the record's instance id here
+        and a pod name there is how that check becomes a no-op that never
+        fires and never says it did not.
         """
         timeout = timeout or self.TAKEOVER_TIMEOUT
         start = time.time()
@@ -1528,9 +1586,26 @@ class _MdsNodeOutageBase(_MdsBase):
             new_active, new_epoch, took = wait_mds_promotion(
                 self.k8s_utils, self.sts_name, was_epoch, timeout=timeout,
                 namespace=self.mds_ns)
-            self.logger.info("%s promoted to %s at epoch %s after %ss",
-                             tag, new_active, new_epoch, took)
-            return new_active, new_epoch, took
+            new_pod, new_node = None, None
+            settle = time.time() + 60
+            while time.time() < settle:
+                new_pod, new_node = mds_active_pod(
+                    self.k8s_utils, new_active, self.sts_name, self.mds_ns)
+                if new_pod:
+                    break
+                sleep_n_sec(5)
+            if not new_pod:
+                self.logger.warning(
+                    "%s promoted to instance %s at epoch %s after %ss, but "
+                    "that instance matches no pod of %s, so this case cannot "
+                    "check whether the guest that took over is the one that "
+                    "was lost", tag, new_active, new_epoch, took,
+                    self.sts_name)
+                return new_active, new_epoch, took
+            self.logger.info("%s promoted to %s on %s (instance %s) at epoch "
+                             "%s after %ss", tag, new_pod, new_node,
+                             new_active, new_epoch, took)
+            return new_pod, new_epoch, took
         deadline = start + timeout
         seen = []
         while time.time() < deadline:

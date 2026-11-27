@@ -641,6 +641,65 @@ def mds_pods(k8s, sts_name=None, namespace=None):
     return sorted(rows)
 
 
+def mds_active_pod(k8s, active, sts_name=None, namespace=None):
+    """``(pod, node)`` behind the record's active instance, or ``(None, None)``.
+
+    **The record does not name a pod.** Run 45952090637 read it as::
+
+        pods=['simplyblock-pnfs-mds-b494...-0', 'simplyblock-pnfs-mds-b494...-1']
+        active='20ed5865-50ae-4995-a9d4-ba74b6cde37a/containerd://b6bf4bb7c39e...'
+
+    and the operator's own link log says what the two halves are::
+
+        link/hub.go:355  link: peer linked
+          {"peer": "mds/simplyblock-pnfs-mds-b494...-0",
+           "instance": "20ed5865-50ae-4995-a9d4-ba74b6cde37a",
+           "remote": "10.42.4.17:35214"}
+
+    -- a guest instance id and the container it runs in. That is a
+    *stronger* identity than a pod name, and deliberately so: a StatefulSet
+    pod keeps its name across a reschedule and comes back as a different
+    guest, so a name cannot distinguish "still the same active" from "a new
+    one took over". The record is right; reading it as a name is not.
+
+    Resolving it is therefore a lookup, not a string comparison. Matching
+    the raw value against pod names makes every case that deletes "the
+    active" delete nothing, makes the node lookup return nothing, and makes
+    E-01's "the record points at a pod that is gone" check fire on a
+    perfectly healthy cluster -- a product defect reported for our own
+    misreading. Matched most specific first: the container id is unique to
+    one running container, the uid to one pod object, and a bare name is
+    accepted last so a cluster that does publish one still works.
+    """
+    if not active:
+        return None, None
+    ns = namespace or k8s.namespace
+    out, _err = k8s._exec_kubectl(
+        f"kubectl get pods -n {ns} "
+        f"-o custom-columns=NAME:.metadata.name,NODE:.spec.nodeName,"
+        f"UID:.metadata.uid,CID:.status.containerStatuses[*].containerID "
+        f"--no-headers 2>/dev/null || true", supress_logs=True)
+    rows = []
+    for line in (out or "").splitlines():
+        parts = line.split()
+        if len(parts) < 4 or "pnfs-mds" not in parts[0]:
+            continue
+        if sts_name and not parts[0].startswith(sts_name):
+            continue
+        rows.append(parts[:4])
+
+    #: Either half on its own identifies the guest, so a record carrying
+    #: only one of them still resolves.
+    wanted = [t for t in str(active).split("/", 1) if t]
+    wanted += [str(active)]
+    for token in wanted:
+        for name, node, uid, cids in rows:
+            cid_set = {c for c in cids.split(",") if c and c != "<none>"}
+            if token in cid_set or token == uid or token == name:
+                return name, (None if node == "<none>" else node)
+    return None, None
+
+
 def wait_mds_promotion(k8s, sts_name, from_epoch, timeout=300,
                        namespace=None, poll=5):
     """Wait for the epoch to advance past *from_epoch*.
