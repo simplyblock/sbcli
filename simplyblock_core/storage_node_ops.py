@@ -13039,6 +13039,48 @@ def _sync_grant_guard(cluster_id, lvs_name, owner_id, taker_id, *, timeout=0):
         yield permitted and not on_lost
 
 
+def _release_nonleader_examine(rpc, node_id, lvs_name):
+    """Tell *node_id*'s SPDK that it does not lead *lvs_name* (set-leader 0 -> 0),
+    right after an examine there. ``True`` once sent.
+
+    An examine on a non-leader reads the md journal and KEEPS the result
+    "until the set-leader call" (SPDK bs_md_journal_examine_complete: "overlay
+    kept, writes go directly HOME"), so that a promotion right after can skip
+    the journal read. Nothing ever sent that call to a node that stays a
+    non-leader, so the result lingered -- and a promotion hours later reused it
+    without reading the journal and zeroed the entries the leader had written
+    since. bf36 R3b (2026-11-26): 6344ccd0 examined LVS_22 at 13:42:42 as its
+    secondary; promoted at 16:55:20 "from the examine result, no journal read",
+    it lost the leader's unhomed metadata and resurrected a deleted volume
+    (LVS_22 unloadable). The 0 -> 0 call drops the kept result (SPDK
+    bs_md_journal_pause: "the examine result is not needed").
+
+    Only when the node's own SPDK reports that it does NOT lead the lvstore:
+    the call is a demotion for a leader. Called before the node is connected
+    to the leader's hub or its port is opened, so no IO can promote it in
+    between. Best effort: a failure leaves the result kept, as before."""
+    try:
+        lvs = rpc.get_lvstore(lvs_name)
+    except Exception as e:                                  # noqa: BLE001
+        logger.warning("Not releasing the examine of %s on %s: lvstore query failed: %s",
+                       lvs_name, node_id[:8], e)
+        return False
+    if not isinstance(lvs, dict):
+        # absent, or an answer without the leadership field: not provably non-leader
+        return False
+    if lvs.get("lvs leadership"):
+        logger.warning("Not releasing the examine of %s on %s: it reports leadership",
+                       lvs_name, node_id[:8])
+        return False
+    try:
+        rpc.bdev_lvol_set_leader(lvs_name, leader=False, bs_nonleadership=True)
+    except Exception as e:                                  # noqa: BLE001
+        logger.warning("Releasing the examine of %s on %s failed: %s", lvs_name, node_id[:8], e)
+        return False
+    logger.info("Released the examine result of %s on non-leader %s", lvs_name, node_id[:8])
+    return True
+
+
 def _lvs_leadership_reported(node, lvs_name):
     """Whether *node*'s own SPDK reports leadership of *lvs_name*; False when
     it answers that it has no such lvstore. RAISES when it cannot be asked.
@@ -15229,6 +15271,10 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
                 logger.error("Non-leader build aborted: %s", reason)
                 _set_restart_phase(snode, primary_node.lvstore, "", db_controller)
                 return False
+
+        # The examine's journal result must not outlive this build: a later
+        # promotion would reuse it (_release_nonleader_examine).
+        _release_nonleader_examine(snode_rpc_client, snode.get_id(), primary_node.lvstore)
 
         # Track the deferred failover-path attach so we can run it AFTER the
         # leader port is unblocked. The in-freeze attach below uses a single
@@ -20360,6 +20406,8 @@ def create_lvstore(snode: StorageNode, ndcs, npcs, distr_bs, distr_chunk_bs, pag
         sec_rpc_client = sec_node.rpc_client()
         sec_rpc_client.bdev_examine(snode.raid)
         sec_rpc_client.bdev_wait_for_examine()
+        # A secondary never keeps its examine result (_release_nonleader_examine).
+        _release_nonleader_examine(sec_rpc_client, sec_node.get_id(), lvs_name)
 
         sec_node.write_to_db()
 
