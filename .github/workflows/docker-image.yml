@@ -6,98 +6,37 @@ on:
     branches:
       - '**'
 
-env:
-  IMAGE_NAME: simplyblock/simplyblock
-  ECR_IMAGE_NAME: public.ecr.aws/simply-block/simplyblock
-  INTERNAL_IMAGE_NAME: registry.simplyblock.ai/simplyblock/simplyblock
-
 jobs:
 
-  build:
-
+  resolve:
     runs-on: ubuntu-latest
-
+    permissions: {}
+    outputs:
+      tag: ${{ steps.get_info.outputs.tag }}
+      short_sha: ${{ steps.get_info.outputs.short_sha }}
     steps:
-    - uses: actions/checkout@v7
-
     - name: Set docker image tag
       id: get_info
       run: |
         if [[ "${{github.ref}}" == refs/pull/* ]]; then
           tag=${GITHUB_REF/\/merge/}
-          echo "TAG=$(echo pr-${tag:10})" >> $GITHUB_ENV
+          tag=$(echo pr-${tag:10})
         else
-          echo "TAG=$(echo ${GITHUB_REF#refs/*/} | sed 's/\//-/g')" >> $GITHUB_ENV
+          tag=$(echo ${GITHUB_REF#refs/*/} | sed 's/\//-/g')
         fi
-        echo "BRANCH=$([ -z '${{ github.event.pull_request.head.sha }}' ] && echo ${GITHUB_REF#refs/*/} || echo $GITHUB_HEAD_REF)" >> $GITHUB_ENV
-        SHA=$([ -z '${{ github.event.pull_request.head.sha }}' ] && echo $GITHUB_SHA || echo '${{ github.event.pull_request.head.sha }}')
-        echo "SHA=$SHA" >> $GITHUB_ENV
-        echo "SHORT_SHA=$(echo $SHA | head -c 8)" >> $GITHUB_ENV
+        sha=$([ -z '${{ github.event.pull_request.head.sha }}' ] && echo $GITHUB_SHA || echo '${{ github.event.pull_request.head.sha }}')
+        echo "tag=$tag" >> "$GITHUB_OUTPUT"
+        echo "short_sha=$(echo $sha | head -c 8)" >> "$GITHUB_OUTPUT"
 
-    # UTC date, so the OS-package layers are rebuilt from scratch once a day
-    # and an upstream security fix reaches the image within 24 hours.
-    - name: Set base layer cache key
-      run: echo "CACHE_KEY=$(date -u +%F)" >> $GITHUB_ENV
-
-    - name: Login to Docker Hub
-      uses: docker/login-action@v4
-      with:
-        username: hamdysimplyblock
-        password: ${{ secrets.DOCKER_PASS }}
-
-    - name: Login to Internal Registry
-      uses: docker/login-action@v4
-      with:
-        registry: registry.simplyblock.ai
-        username: ${{ secrets.INTERNAL_USERNAME }}
-        password: ${{ secrets.INTERNAL_PASSWORD }}
-
-    - name: Configure AWS Credentials
-      uses: aws-actions/configure-aws-credentials@v4
-      with:
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID_HAMDI }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY_HAMDI }}
-        aws-region: us-east-1
-
-    - name: Login to ECR
-      id: login-ecr
-      uses: aws-actions/amazon-ecr-login@v2
-      with:
-        registry-type: public
-
-    - name: Set up QEMU
-      uses: docker/setup-qemu-action@v3
-
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
-
-    - name: Extract metadata
-      id: meta
-      uses: docker/metadata-action@v5
-      with:
-        images: |
-          ${{ env.IMAGE_NAME }}
-          ${{ env.ECR_IMAGE_NAME }}
-          ${{ env.INTERNAL_IMAGE_NAME }}
-        tags: |
-          type=raw,value=${{ env.TAG }}
-          type=raw,value=${{ env.TAG }}-${{ env.SHORT_SHA }}
-
-    - name: Build & Push
-      uses: docker/build-push-action@v6
-      with:
-        context: .
-        file: docker/Dockerfile
-        platforms: linux/amd64,linux/arm64
-        push: true
-        tags: ${{ steps.meta.outputs.tags }}
-        labels: ${{ steps.meta.outputs.labels }}
-        build-args: CACHE_KEY=${{ env.CACHE_KEY }}
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
-
-    - name: Report published tags
-      run: |
-        echo "::notice title=Docker.com::${{ env.IMAGE_NAME }}:${{ env.TAG }}"
-        echo "::notice title=AWS-ECR::${{ env.ECR_IMAGE_NAME }}:${{ env.TAG }}"
-        echo "::notice title=Internal::${{ env.INTERNAL_IMAGE_NAME }}:${{ env.TAG }}"
+  build:
+    needs: resolve
+    uses: ./.github/workflows/_build_image.yml
+    permissions:
+      contents: read
+    with:
+      tag: ${{ needs.resolve.outputs.tag }}
+      short_sha: ${{ needs.resolve.outputs.short_sha }}
+      push_dockerhub: true
+      push_ecr: true
+      push_internal: true
+    secrets: inherit
