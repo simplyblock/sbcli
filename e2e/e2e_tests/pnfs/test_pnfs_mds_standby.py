@@ -156,6 +156,61 @@ class _MdsBase(_PnfsBase):
             "[mds] metadata server appeared: %s",
             (sts.get("metadata") or {}).get("name"))
 
+    def assert_cluster_sound(self, tag="[mds]"):
+        """Refuse to judge a takeover on a cluster that arrived broken.
+
+        These cases take a node out and then ask what the client saw. That
+        question has an answer only if the storage underneath was healthy
+        to begin with -- otherwise whatever the client suffered gets
+        attributed to the takeover this case performed, which is the wrong
+        defect filed against the wrong team.
+
+        Run 45960047836 is why. The reboot case took out vm204, which hosts
+        both the metadata server and a storage node; its three surviving
+        peers all raised ``node_unrecoverable_io_error`` and the cluster
+        went ``degraded``. The drain case then ran on that same cluster
+        thirteen minutes later, with those alerts still firing, and
+        reported its client's stall as a finding about draining a metadata
+        server's node.
+
+        Checked at the gate of every case rather than in the suite, so it
+        holds whichever subset is named on the command line.
+        """
+        try:
+            details = self.sbcli_utils.get_cluster_details(self.cluster_id)
+        except Exception as exc:
+            self.logger.warning(
+                "%s could not read the cluster before the takeover (%s), so "
+                "this case cannot say whether it started sound", tag, exc)
+            return
+        if isinstance(details, list):
+            details = details[0] if details else {}
+        status = (details or {}).get("status")
+        try:
+            nodes = (self.sbcli_utils.get_storage_nodes()
+                     or {}).get("results") or []
+        except Exception as exc:
+            self.logger.warning("%s could not list storage nodes (%s)",
+                                tag, exc)
+            nodes = []
+        unwell = [
+            (n.get("hostname") or n.get("mgmt_ip") or n.get("uuid"),
+             n.get("status"))
+            for n in nodes if (n.get("status") or "") != "online"]
+        self.logger.info(
+            "%s cluster before the takeover: status=%s, %d storage node(s), "
+            "%d not online", tag, status, len(nodes), len(unwell))
+        if status == "active" and not unwell:
+            return
+        raise PnfsProbeError(
+            f"{tag} this cluster was already unhealthy before the case did "
+            f"anything: cluster status={status!r}"
+            + (f", storage node(s) not online: {unwell}" if unwell else "")
+            + ". A takeover measured on top of that says nothing about the "
+            "takeover -- whatever the client suffers here was already owed "
+            "to the previous failure. Run the case on a sound cluster, or "
+            "give the previous one time to recover.")
+
     def assert_mds_cluster(self, want_standbys=True):
         """Refuse the case unless there is a standby topology to test.
 
@@ -167,6 +222,7 @@ class _MdsBase(_PnfsBase):
         Running an F- case against that shape would report the product
         broken for doing exactly what `standbys: 0` asks of it.
         """
+        self.assert_cluster_sound()
         self._ensure_mds_exists()
         sts = mds_statefulset(self.k8s_utils, self.mds_ns)
         if not sts:
@@ -414,19 +470,39 @@ class _MdsBase(_PnfsBase):
         return marker
 
     def writer_report(self, pod, marker):
-        """``(lines, max_gap_seconds, errors)`` for a writer started above.
+        """``(lines, max_gap, errors, stalled, alive)`` for a writer above.
 
         The gap is what a takeover costs a client that keeps its fd. The
-        errors are what it costs one that does not: EBADF (errno 9) here
-        means the export went away underneath an open descriptor, which no
-        application retries, and is the fingerprint of SFAM-2860.
+        errors are what it costs one that does not -- EBADF under an open
+        descriptor, which no application retries, the fingerprint of
+        SFAM-2860.
+
+        ``stalled`` is the part that used to be missing. The gap was
+        measured only *between* lines the writer managed to record, so a
+        client blocked from its last line until the report was taken
+        contributed **nothing** -- a write that hangs in the kernel does
+        not raise, so there is no errno either, and the file simply stops
+        growing. Run 45960047836 is the case: the writer in pnfs-mdsnd-0
+        logged 2 lines of an expected ~74 at one a second, then blocked
+        for the whole takeover, and the case reported "only 2 line(s), so
+        there is nothing to judge the takeover by" -- a measurement it in
+        fact had. Worse, the same blindness passes a client that stalls
+        forever as long as it recorded five lines first.
+
+        So the trailing interval is measured too, against the clock in the
+        pod rather than the runner's, and ``alive`` separates "blocked in
+        a write" from "the writer exited".
         """
         out, _ = self.k8s_utils.exec_in_pod(
             pod,
             f"cut -d' ' -f1 {marker} 2>/dev/null | tail -4000; "
-            f"echo '---ERR---'; cat /tmp/writer.err 2>/dev/null || true",
+            f"echo '---ERR---'; cat /tmp/writer.err 2>/dev/null || true; "
+            f"echo '---NOW---'; date +%s; "
+            f"echo '---ALIVE---'; pgrep -f writer.py | wc -l",
             timeout=120)
-        body, _, errs = (out or "").partition("---ERR---")
+        body, _, rest = (out or "").partition("---ERR---")
+        errs, _, rest = rest.partition("---NOW---")
+        now_s, _, alive_s = rest.partition("---ALIVE---")
         stamps = []
         for tok in body.split():
             try:
@@ -436,30 +512,58 @@ class _MdsBase(_PnfsBase):
         gap = 0.0
         for a, b in itertools.pairwise(stamps):
             gap = max(gap, b - a)
+        try:
+            now = float(now_s.split()[0])
+        except (IndexError, ValueError):
+            now = 0.0
+        # A clock we could not read must not quietly become "no stall".
+        stalled = round(now - stamps[-1], 1) if (now and stamps) else None
+        try:
+            alive = int(alive_s.split()[0]) > 0
+        except (IndexError, ValueError):
+            alive = None
         errors = [ln for ln in errs.splitlines() if ln.strip()]
-        return len(stamps), round(gap, 1), errors
+        return len(stamps), round(gap, 1), errors, stalled, alive
 
     def assert_client_survived(self, pod, marker, what, max_gap):
-        lines, gap, errors = self.writer_report(pod, marker)
+        lines, gap, errors, stalled, alive = self.writer_report(pod, marker)
         if errors:
             raise PnfsEvidenceError(
                 f"{what}: the writer in {pod} took {len(errors)} I/O "
                 f"error(s) across the takeover: {errors[:5]}. "
                 f"{writer_errno_note(errors)}. A takeover is supposed to "
                 f"stall a client, not break it.")
-        if lines < 5:
+
+        # A stall that has not ended is a gap -- a floor on one, in fact,
+        # since nothing says when it would have finished. Folding it in
+        # here is what makes two lines and seventy seconds of silence a
+        # measurement rather than "too few lines to judge".
+        open_stall = stalled is not None and stalled > 5
+        worst = round(max(gap, stalled or 0.0), 1)
+
+        if lines == 0 or (stalled is None and lines < 5):
             raise PnfsProbeError(
-                f"{what}: the writer in {pod} produced only {lines} line(s), "
-                f"so there is nothing to judge the takeover by.")
-        if gap > max_gap:
+                f"{what}: the writer in {pod} recorded {lines} line(s) and "
+                f"its clock could not be read, so nothing bounds what the "
+                f"client saw and there is nothing to judge the takeover by. "
+                f"The writer is {'alive' if alive else 'gone'}.")
+        if worst > max_gap:
             raise PnfsEvidenceError(
-                f"{what}: the writer in {pod} stalled {gap}s across the "
-                f"takeover, over the {max_gap}s this case allows. Every "
-                f"client of every export on this metadata server stalled "
-                f"with it.")
-        self.logger.info("[mds] %s: %d lines, worst gap %ss, no errors",
-                         what, lines, gap)
-        return gap
+                f"{what}: the writer in {pod} went {worst}s without a write "
+                f"across the takeover, over the {max_gap}s this case allows "
+                f"({lines} line(s) at one a second, last one {stalled}s ago, "
+                f"writer {'still blocked' if alive else 'gone'}). "
+                + ("The stall had not ended when this was read, so that is "
+                   "a floor on what it cost, not the whole of it. "
+                   if open_stall else "")
+                + "Every client of every export on this metadata server "
+                "stalled with it.")
+        self.logger.info(
+            "[mds] %s: %d lines, worst %ss without a write (between lines "
+            "%ss, since the last line %ss, writer %s), no errors",
+            what, lines, worst, gap, stalled,
+            "alive" if alive else "gone")
+        return worst
 
 
 class PnfsMdsDefaultTopologyK8s(_MdsBase):
@@ -880,12 +984,14 @@ class PnfsMdsNoStandbyRecoversK8s(_MdsBase):
 
         self.wait_exports_ready(1, timeout=420,
                                 what="[E-03] export after the guest returned")
-        lines, gap, errors = self.writer_report(pods[0], marker)
+        lines, gap, errors, stalled, _alive = self.writer_report(
+            pods[0], marker)
         self.logger.info(
             "[E-03] PASS: guest %s back Ready after %ss, export served "
-            "again; the client saw a %ss gap and %d error(s) -- recorded, "
-            "not bounded, because standbys=0 promises no window",
-            back[0], recovered, gap, len(errors))
+            "again; the client saw a %ss gap, %ss since its last line and "
+            "%d error(s) in %d line(s) -- recorded, not bounded, because "
+            "standbys=0 promises no window",
+            back[0], recovered, gap, stalled, len(errors), lines)
         if errors:
             self.logger.warning(
                 "[E-03] client errors across an unprotected restart: %s",

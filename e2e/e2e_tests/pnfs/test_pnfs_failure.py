@@ -699,9 +699,13 @@ class _ClientFaultBase(_FailBase):
         out, _ = self.k8s_utils.exec_in_pod(
             pod,
             f"cut -d' ' -f1 {marker} 2>/dev/null | tail -8000; "
-            f"echo '---ERR---'; cat /tmp/writer.err 2>/dev/null || true",
+            f"echo '---ERR---'; cat /tmp/writer.err 2>/dev/null || true; "
+            f"echo '---NOW---'; date +%s; "
+            f"echo '---ALIVE---'; pgrep -f writer.py | wc -l",
             timeout=120)
-        body, _, errs = (out or "").partition("---ERR---")
+        body, _, rest = (out or "").partition("---ERR---")
+        errs, _, rest = rest.partition("---NOW---")
+        now_s, _, alive_s = rest.partition("---ALIVE---")
         stamps = []
         for tok in body.split():
             try:
@@ -711,26 +715,53 @@ class _ClientFaultBase(_FailBase):
         gap = 0.0
         for a, b in itertools.pairwise(stamps):
             gap = max(gap, b - a)
+        try:
+            now = float(now_s.split()[0])
+        except (IndexError, ValueError):
+            now = 0.0
+        # The trailing interval. A write blocked in the kernel raises
+        # nothing and records nothing, so measuring only the gaps between
+        # recorded lines misses a stall that has not ended -- see
+        # test_pnfs_mds_standby.writer_report for the run that proved it.
+        stalled = round(now - stamps[-1], 1) if (now and stamps) else None
+        try:
+            alive = int(alive_s.split()[0]) > 0
+        except (IndexError, ValueError):
+            alive = None
         return len(stamps), round(gap, 1), [
-            ln for ln in errs.splitlines() if ln.strip()]
+            ln for ln in errs.splitlines() if ln.strip()], stalled, alive
 
     def assert_writer_survived(self, pod, marker, what, max_gap):
-        lines, gap, errors = self.writer_report(pod, marker)
+        lines, gap, errors, stalled, alive = self.writer_report(pod, marker)
         if errors:
             raise PnfsEvidenceError(
                 f"{what}: the writer in {pod} took {len(errors)} I/O "
                 f"error(s): {errors[:5]}. {writer_errno_note(errors)}.")
-        if lines < 5:
+        # The trailing silence counts as a gap; see
+        # test_pnfs_mds_standby.assert_client_survived for why.
+        open_stall = stalled is not None and stalled > 5
+        worst = round(max(gap, stalled or 0.0), 1)
+
+        if lines == 0 or (stalled is None and lines < 5):
             raise PnfsProbeError(
-                f"{what}: the writer in {pod} produced only {lines} line(s), "
-                f"so there is nothing to judge the fault by.")
-        if gap > max_gap:
+                f"{what}: the writer in {pod} recorded {lines} line(s) and "
+                f"its clock could not be read, so nothing bounds what the "
+                f"client saw and there is nothing to judge the fault by. "
+                f"The writer is {'alive' if alive else 'gone'}.")
+        if worst > max_gap:
             raise PnfsEvidenceError(
-                f"{what}: the writer in {pod} stalled {gap}s, over the "
-                f"{max_gap}s this case allows.")
-        self.logger.info("[pnfs] %s: %d lines, worst gap %ss, no errors",
-                         what, lines, gap)
-        return gap
+                f"{what}: the writer in {pod} went {worst}s without a write, "
+                f"over the {max_gap}s this case allows ({lines} line(s) at "
+                f"one a second, last one {stalled}s ago, writer "
+                f"{'still blocked' if alive else 'gone'})."
+                + (" The stall had not ended when this was read, so that is "
+                   "a floor on what it cost." if open_stall else ""))
+        self.logger.info(
+            "[pnfs] %s: %d lines, worst %ss without a write (between lines "
+            "%ss, since the last line %ss, writer %s), no errors",
+            what, lines, worst, gap, stalled,
+            "alive" if alive else "gone")
+        return worst
 
 
 class PnfsClientNodeRebootK8s(_ClientFaultBase):
