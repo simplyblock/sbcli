@@ -2088,7 +2088,18 @@ jobs:
         run: |
           NAMESPACE=simplyblock
           ADMIN_POD=""
-          MAX_POLL=300
+          # Both loops below are bounded by the WALL CLOCK, not by a poll
+          # count. Run 45979367229 is why: MAX_POLL=300 at ~16s an iteration
+          # (a 10s sleep plus three kubectl round trips) is ~81 minutes, just
+          # over this step's own 80-minute timeout-minutes. The loop was
+          # killed seven polls from the end, so the fall-through that prints
+          # "will attempt force-activate" never ran -- and because the step
+          # ended in failure rather than success, `Verify and force-activate
+          # cluster if needed`, the step that exists to rescue exactly this,
+          # was skipped. A poll count cannot be reasoned about against a
+          # timeout; a deadline can. Both budgets stay well inside it.
+          SNODE_BUDGET=$((20 * 60))
+          ACTIVE_BUDGET=$((40 * 60))
 
           echo "=== Waiting for admin pod to be ready ==="
           for i in $(seq 1 60); do
@@ -2119,9 +2130,10 @@ jobs:
           # Expected number of snode-spdk pods = number of worker nodes
           IFS=',' read -ra NODES <<< "${WORKER_NODES}"
           EXPECTED_SNODES=${#NODES[@]}
-          echo "=== Waiting for $EXPECTED_SNODES snode-spdk pods to be ready (MAX_POLL=$MAX_POLL) ==="
+          echo "=== Waiting for $EXPECTED_SNODES snode-spdk pods to be ready (budget ${SNODE_BUDGET}s) ==="
 
-          for i in $(seq 1 $MAX_POLL); do
+          SNODE_DEADLINE=$(( $(date +%s) + SNODE_BUDGET ))
+          while :; do
             TOTAL=$(kubectl -n $NAMESPACE get pods -l role=simplyblock-storage-node --no-headers 2>/dev/null | wc -l)
             READY=$(kubectl -n $NAMESPACE get pods -l role=simplyblock-storage-node --no-headers 2>/dev/null | grep -c "Running" || true)
 
@@ -2130,10 +2142,12 @@ jobs:
               break
             fi
 
-            echo "snode-spdk pods: $READY/$EXPECTED_SNODES Running (total=$TOTAL) ($i/$MAX_POLL)"
-            if [ "$i" -eq "$MAX_POLL" ]; then
-              echo "ERROR: snode-spdk pods did not become ready within timeout"
-              kubectl -n $NAMESPACE get pods
+            LEFT=$(( SNODE_DEADLINE - $(date +%s) ))
+            echo "snode-spdk pods: $READY/$EXPECTED_SNODES Running (total=$TOTAL) (${LEFT}s left)"
+            if [ "$LEFT" -le 0 ]; then
+              echo "ERROR: snode-spdk pods did not become ready within ${SNODE_BUDGET}s"
+              kubectl -n $NAMESPACE get pods -o wide
+              kubectl -n $NAMESPACE get events --sort-by=.lastTimestamp 2>/dev/null | tail -40 || true
               exit 1
             fi
             sleep 10
@@ -2165,8 +2179,11 @@ jobs:
             exit 1
           fi
 
-          echo "=== Polling cluster status (MAX_POLL=$MAX_POLL) ==="
-          for i in $(seq 1 $MAX_POLL); do
+          echo "=== Polling cluster status (budget ${ACTIVE_BUDGET}s) ==="
+          ACTIVE_DEADLINE=$(( $(date +%s) + ACTIVE_BUDGET ))
+          i=0
+          while [ "$(date +%s)" -lt "$ACTIVE_DEADLINE" ]; do
+            i=$((i + 1))
             # Re-resolve admin pod each iteration in case it gets recreated
             NEW_POD=$(kubectl -n $NAMESPACE get pods \
               -l app=simplyblock-admin-control \
@@ -2178,10 +2195,10 @@ jobs:
               ADMIN_POD="$NEW_POD"
             fi
 
-            echo "[poll $i/$MAX_POLL] Using admin pod: $ADMIN_POD"
+            echo "[poll $i] Using admin pod: $ADMIN_POD"
             OUTPUT=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
               sbctl cluster list) || true
-            echo "[poll $i/$MAX_POLL] sbctl cluster list output:"
+            echo "[poll $i] sbctl cluster list output:"
             echo "$OUTPUT"
 
             if echo "$OUTPUT" | grep -qi "active"; then
@@ -2239,13 +2256,41 @@ jobs:
               exit 0
             fi
 
-            echo "Cluster not active yet ($i/$MAX_POLL)..."
+            echo "Cluster not active yet (poll $i, $(( ACTIVE_DEADLINE - $(date +%s) ))s left)..."
             sleep 10
           done
 
           echo "WARNING: Cluster did not become active within timeout — will attempt force-activate"
-          kubectl -n $NAMESPACE get pods
-          kubectl -n $NAMESPACE exec "$ADMIN_POD" -- sbctl cluster list 2>&1 || true
+
+          # Dump what the next person needs before handing over to the
+          # force-activate step. Run 45979367229 spent 80 minutes in
+          # IN_ACTIVATION and left nothing behind but the status word: the
+          # test never started, so no run directory was made on the NFS
+          # share and the Graylog collector skipped itself for want of a
+          # TEST_START_TIME. A bring-up that fails has to say why on its own.
+          echo "=== pods ==="
+          kubectl -n $NAMESPACE get pods -o wide || true
+          echo "=== recent events ==="
+          kubectl -n $NAMESPACE get events --sort-by=.lastTimestamp 2>/dev/null | tail -60 || true
+          echo "=== sbctl cluster list ==="
+          CL=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- sbctl cluster list 2>&1) || true
+          echo "$CL"
+          STUCK_ID=$(printf '%s\n' "$CL" | tr -d '\r' \
+            | grep -oiE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' \
+            | head -1)
+          if [ -n "$STUCK_ID" ]; then
+            echo "=== sbctl storage-node list $STUCK_ID ==="
+            kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
+              sbctl storage-node list "$STUCK_ID" 2>&1 | tail -40 || true
+          fi
+          echo "=== admin-control log (tail) ==="
+          kubectl -n $NAMESPACE logs "$ADMIN_POD" --tail=200 2>&1 | tail -200 || true
+          for p in $(kubectl -n $NAMESPACE get pods \
+              -l role=simplyblock-storage-node -o name 2>/dev/null); do
+            echo "=== $p (tail) ==="
+            kubectl -n $NAMESPACE logs "$p" --all-containers --tail=120 2>&1 \
+              | tail -120 || true
+          done
 
       - name: Verify and force-activate cluster if needed
         if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
