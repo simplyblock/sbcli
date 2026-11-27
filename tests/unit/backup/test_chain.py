@@ -14,7 +14,11 @@ from uuid import UUID
 import pytest
 
 from simplyblock_core import constants
-from simplyblock_core.controllers.backup.chain import BackupChain, location_of
+from simplyblock_core.controllers.backup.chain import (
+    BackupChain,
+    SuccessorIndex,
+    location_of,
+)
 from simplyblock_core.controllers.backup.manifest import (
     BackupManifest,
     FDBKeyDescriptor,
@@ -36,7 +40,7 @@ ELSEWHERE = BackupLocation(bucket_name="other-bucket", region="eu-central-1")
 
 
 def _record(name, prev=None, s3_id=1, location=LOCATION, encrypted=False,
-            status=Backup.STATUS_COMPLETED) -> Backup:
+            status=Backup.STATUS_COMPLETED, lvol_id=None) -> Backup:
     backup = Backup()
     backup.uuid = str(_id(name))
     backup.s3_id = s3_id
@@ -44,6 +48,11 @@ def _record(name, prev=None, s3_id=1, location=LOCATION, encrypted=False,
     backup.location = location.model_dump(exclude_none=True)
     backup.encrypted = encrypted
     backup.status = status
+    # Matches _manifest's hardcoded ManifestVolume.lvol_id, so a record line
+    # and a manifest line describe the same volume by default -- which is
+    # what BackupChain.assemble's lvol_id coherence check now requires of a
+    # chain that spans both shapes (TestImporting).
+    backup.lvol_id = str(_id("volume")) if lvol_id is None else lvol_id
     return backup
 
 
@@ -181,17 +190,23 @@ class TestCoherence:
             BackupChain.of_manifests(line[-1], line, LOCATION)
 
     def test_an_empty_chain_is_coherent(self):
-        assert BackupChain.assemble(LOCATION, False, []).links == ()
+        assert BackupChain.assemble(LOCATION, False, str(_id("volume")), []).links == ()
 
     def test_assemble_holds_links_to_the_declared_settings(self):
         """The creation path declares what it INTENDS to write, so a cluster
         repointed mid-chain is caught rather than inherited."""
         with pytest.raises(PreconditionError, match="other-bucket"):
-            BackupChain.assemble(LOCATION, False, _line_of_records(2, location=ELSEWHERE))
+            BackupChain.assemble(LOCATION, False, str(_id("volume")),
+                                 _line_of_records(2, location=ELSEWHERE))
 
     def test_assemble_catches_a_volume_that_gained_encryption(self):
         with pytest.raises(PreconditionError, match="encrypted"):
-            BackupChain.assemble(LOCATION, True, _line_of_records(2))
+            BackupChain.assemble(LOCATION, True, str(_id("volume")), _line_of_records(2))
+
+    def test_assemble_catches_a_chain_spanning_volumes(self):
+        with pytest.raises(PreconditionError, match="span volumes"):
+            BackupChain.assemble(LOCATION, False, str(_id("volume")),
+                                 _line_of_records(2, lvol_id=str(_id("other-volume"))))
 
 
 class TestImporting:
@@ -246,7 +261,7 @@ class TestRequireRestorable:
     def test_the_eventual_length_is_what_counts_at_creation(self):
         """At creation the ancestors are snapshots with no backup yet, so the
         chain is shorter than what it is about to become."""
-        chain = BackupChain.assemble(LOCATION, False, [])
+        chain = BackupChain.assemble(LOCATION, False, str(_id("volume")), [])
         chain.require_restorable(length=constants.BACKUP_MAX_CHAIN_LENGTH)
         with pytest.raises(PreconditionError, match="at most"):
             chain.require_restorable(length=constants.BACKUP_MAX_CHAIN_LENGTH + 1)
@@ -256,7 +271,7 @@ class TestRequireRestorable:
         restore path can never address."""
         tiering = BackupLocation(bucket_name="tiering", snapshot_backups=False)
         with pytest.raises(PreconditionError, match="snapshot_backups"):
-            BackupChain.assemble(tiering, False, []).require_restorable()
+            BackupChain.assemble(tiering, False, str(_id("volume")), []).require_restorable()
 
     def test_an_unfinished_link_is_refused_only_when_asked(self):
         line = _line_of_records(2)
@@ -271,6 +286,65 @@ class TestRequireRestorable:
         with pytest.raises(PreconditionError, match="This snapshot chain"):
             self._chain(constants.BACKUP_MAX_CHAIN_LENGTH + 1).require_restorable(
                 what="This snapshot chain")
+
+
+class TestSuccessorIndex:
+
+    def test_a_backup_with_no_dependent_has_no_successor(self):
+        index = SuccessorIndex.of_lvol(_line_of_records(2))
+        assert index.successor_of(str(_id("b-1"))) is None
+
+    def test_finds_the_backup_naming_it_as_prev(self):
+        line = _line_of_records(3)
+        index = SuccessorIndex.of_lvol(line)
+        successor_of_0 = index.successor_of(str(_id("b-0")))
+        successor_of_1 = index.successor_of(str(_id("b-1")))
+        assert successor_of_0 is not None and successor_of_0.uuid == str(_id("b-1"))
+        assert successor_of_1 is not None and successor_of_1.uuid == str(_id("b-2"))
+
+    def test_order_of_the_population_does_not_matter(self):
+        line = _line_of_records(3)
+        index = SuccessorIndex.of_lvol(list(reversed(line)))
+        successor = index.successor_of(str(_id("b-0")))
+        assert successor is not None and successor.uuid == str(_id("b-1"))
+
+    def test_a_backup_naming_no_predecessor_is_ignored(self):
+        """A full backup's empty prev_backup_id must not collide with another
+        full backup's, as if both were "the successor of nothing"."""
+        a = _record("full-a")
+        b = _record("full-b")
+        index = SuccessorIndex.of_lvol([a, b])
+        assert index.successor_of("") is None
+
+    def test_two_backups_naming_the_same_predecessor_is_a_fork(self):
+        base = _record("base")
+        fork_a = _record("fork-a", prev="base")
+        fork_b = _record("fork-b", prev="base")
+        with pytest.raises(PreconditionError, match="multiple successors"):
+            SuccessorIndex.of_lvol([base, fork_a, fork_b])
+
+
+class TestLiveSuccessorOf:
+    """D7 of docs/reviews/backup-deletion-review.md: a FAILED successor was
+    never restorable (no manifest, nothing to protect), so it does not block
+    a direct delete the way a live one does."""
+
+    def test_a_completed_successor_is_live(self):
+        base = _record("base")
+        nxt = _record("next", prev="base", status=Backup.STATUS_COMPLETED)
+        index = SuccessorIndex.of_lvol([base, nxt])
+        successor = index.live_successor_of(str(_id("base")))
+        assert successor is not None and successor.uuid == str(_id("next"))
+
+    def test_a_failed_successor_does_not_count(self):
+        base = _record("base")
+        nxt = _record("next", prev="base", status=Backup.STATUS_FAILED)
+        index = SuccessorIndex.of_lvol([base, nxt])
+        assert index.live_successor_of(str(_id("base"))) is None
+
+    def test_no_successor_at_all_is_none(self):
+        index = SuccessorIndex.of_lvol(_line_of_records(2))
+        assert index.live_successor_of(str(_id("b-1"))) is None
 
 
 class TestS3Ids:

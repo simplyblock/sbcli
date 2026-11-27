@@ -116,7 +116,7 @@ class TestImplicitNode:
 
         _restore()
 
-        cluster_id, node_id, *_ = tasks.add_backup_restore_task.call_args.args
+        source_lvol_id, cluster_id, node_id, *_ = tasks.add_backup_restore_task.call_args.args
         assert cluster_id == TARGET_CLUSTER
         assert node_id == "target-node"
 
@@ -201,10 +201,14 @@ class TestFailures:
         with pytest.raises(RuntimeError, match="Failed to create restore volume"):
             _restore()
 
-    def test_task_creation_failure_is_a_runtime_error(self, db, add_lvol_ha, tasks):
-        tasks.add_backup_restore_task.return_value = False
+    def test_task_creation_failure_is_a_precondition_error(self, db, add_lvol_ha, tasks):
+        # add_backup_restore_task itself raises PreconditionError now (D6 of
+        # docs/reviews/backup-deletion-review.md) -- restore_backup no longer
+        # wraps a False return in its own, generic message.
+        tasks.add_backup_restore_task.side_effect = PreconditionError(
+            "the source chain is being merged or deleted")
 
-        with pytest.raises(RuntimeError, match="Failed to create restore task"):
+        with pytest.raises(PreconditionError, match="source chain is being merged or deleted"):
             _restore()
 
 

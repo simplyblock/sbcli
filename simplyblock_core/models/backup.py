@@ -29,6 +29,14 @@ class Backup(BaseModel):
     STATUS_MERGING = 'merging'
     STATUS_MERGED = 'merged'
     STATUS_DELETING = 'deleting'
+    #: Its S3 data is confirmed gone (the delete/merge got far enough to touch
+    #: the data plane or remove the objects itself), but the manifest/record
+    #: cleanup that follows has not finished -- the single-backup analog of
+    #: ``GroupBackup.STATUS_BROKEN``. Never reverted to COMPLETED: that would
+    #: claim the data is still there. Lingers until re-driven (``delete_backup``/
+    #: ``delete_backups`` resume it; see the module AGENTS.md's "No automated
+    #: reconciler" note).
+    STATUS_BROKEN = 'broken'
 
     _STATUS_CODE_MAP: ClassVar[dict] = {
         STATUS_PENDING: 0,
@@ -38,6 +46,7 @@ class Backup(BaseModel):
         STATUS_MERGING: 4,
         STATUS_DELETING: 5,
         STATUS_MERGED: 6,
+        STATUS_BROKEN: 7,
     }
 
     s3_id: int = 0

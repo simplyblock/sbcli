@@ -5,6 +5,7 @@ import logging
 import os.path
 import struct
 import time
+import uuid
 from typing import Any, ClassVar
 
 import fdb
@@ -1537,6 +1538,265 @@ class DBController(metaclass=Singleton):
         transactional = fdb.transactional(DBController._release_backup_chain_locks_tx)
         transactional(self, self.kv_store, ordered_snapshot_ids)
 
+    # ---- Backup chain operation guard (Single FDB Transaction) ----
+    #
+    # Mutual exclusion between a delete, a merge and a restore on the same
+    # volume's backup chain. Unlike acquire_backup_chain_locks above (which
+    # only protects the creation-time enqueue window), this guards the whole
+    # of a destructive operation -- but it does so WITHOUT holding anything
+    # open: the chain is bounded (constants.BACKUP_MAX_CHAIN_LENGTH), so
+    # reading every sibling and flipping the target(s) fits in one
+    # transaction, and FDB's serializable isolation is what makes two
+    # concurrent claims over the same chain mutually exclusive (see
+    # simplyblock_core/AGENTS.md: a critical section that fits in one
+    # transaction needs no separate lock, distributed or otherwise). The
+    # status this writes -- MERGING or DELETING -- IS the lock for everything
+    # after the claim: every other caller refuses to touch a chain holding
+    # either, which is what makes a long-running merge/delete task safe
+    # without this transaction, or anything else, staying open for its
+    # duration.
+
+    def _claim_backup_chain_op_tx(self, tr, lvol_id, target_ids, new_status):
+        idx = indices.get_index(Backup, 'lvol_id')
+        sibling_ids = [
+            idx.entry_id(Backup, bytes(key), bytes(value))
+            for key, value in tr.get_range_startswith(idx.prefix(Backup, (lvol_id,)))
+        ]
+        # Keyed by the bare uuid, not get_id(): every caller holds a Backup's
+        # uuid, never its "<cluster_id>/<uuid>" composite id, and a chain
+        # never spans clusters -- so the uuid alone is already unambiguous
+        # within one lvol_id's siblings.
+        siblings = {}
+        for sibling_id in sibling_ids:
+            rows = Backup().read_from_db(tr, id=sibling_id)
+            if rows:
+                siblings[rows[0].uuid] = rows[0]
+
+        target_set = set(target_ids)
+        # A sibling already MERGING/DELETING blocks the claim UNLESS it is one
+        # of this call's own targets AND already sitting in new_status: that
+        # is what makes resuming an interrupted delete/merge (the caller is
+        # retrying, not racing itself) safe. A target held in the OTHER
+        # status -- claimed by a genuinely different operation -- still
+        # blocks, same as any other sibling.
+        blocking = next((b for b in siblings.values()
+                         if b.status in (Backup.STATUS_MERGING, Backup.STATUS_DELETING)
+                         and not (b.uuid in target_set and b.status == new_status)), None)
+        if blocking is not None:
+            return False, f"backup {blocking.uuid} of this chain is already {blocking.status}"
+
+        restore_idx = indices.get_index(JobSchedule, 'restore_chain_s3_id')
+        for backup in siblings.values():
+            restoring = any(True for _ in tr.get_range_startswith(
+                restore_idx.prefix(JobSchedule, (backup.s3_id,)), limit=1))
+            if restoring:
+                return False, f"backup {backup.uuid} is being read by an active restore"
+
+        missing = [t for t in target_ids if t not in siblings]
+        if missing:
+            return False, (f"backup(s) {', '.join(missing)} not found in volume "
+                           f"{lvol_id}'s chain")
+
+        # A direct delete (new_status DELETING) must have no live dependent,
+        # checked here -- inside the same transaction that reads every
+        # sibling and claims the target(s) -- rather than by a caller's
+        # earlier, non-transactional read. Without this, a concurrent
+        # backup_lvol can pick a target as its new prev_backup_id between
+        # that earlier read and this claim committing, and the claim would
+        # go on to delete data the new backup's chain now depends on. A
+        # STATUS_MERGING claim is exempt: it WANTS a live dependent -- that
+        # dependent is the backup the target is being folded into. Mirrors
+        # chain.SuccessorIndex.live_successor_of's rule (a FAILED dependent
+        # was never restorable and protects nothing) without importing the
+        # controllers layer from here.
+        if new_status == Backup.STATUS_DELETING:
+            for target_id in target_ids:
+                dependent = next(
+                    (b for b in siblings.values()
+                     if b.prev_backup_id == target_id
+                     and b.uuid not in target_set
+                     and b.status != Backup.STATUS_FAILED),
+                    None)
+                if dependent is not None:
+                    return False, (
+                        f"backup {target_id} now has a live dependent "
+                        f"{dependent.uuid}; it cannot be deleted directly")
+
+        index_list = Backup.active_indexes(tr)
+        for target_id in target_ids:
+            target = siblings[target_id]
+            if target.status == Backup.STATUS_BROKEN:
+                # Terminal: its data is already confirmed gone, and only the
+                # retire step moves it out of BROKEN. Resetting it back to
+                # new_status (DELETING) here would re-enter the S3-delete
+                # branch for data that is not there any more -- harmless only
+                # because delete_data_objects happens to be idempotent, which
+                # this claim's own contract never relied on (F9 of
+                # docs/reviews/backup-deletion-review-round3.md).
+                continue
+            old_keys = BaseModel.index_keys(Backup, index_list, target)
+            target.status = new_status
+            target.updated_at = str(datetime.datetime.now(datetime.UTC))
+            if index_list:
+                BaseModel._apply_index_diff(tr, Backup, index_list, old_keys, target)
+            tr[target.get_db_id().encode()] = json.dumps(target.to_dict(unwrap_secrets=True)).encode()
+            scope = target.watch_scope()
+            tr.add(watches.watch_index_rollup_key(Backup, scope), watches.ONE_LE64)
+            tr.add(watches.watch_index_version_key(Backup, scope, target.get_id()), watches.ONE_LE64)
+
+        return True, None
+
+    def claim_backup_chain_op(self, lvol_id, target_ids, new_status):
+        """Atomically claim one or more backups of ``lvol_id``'s chain (named
+        by their bare ``uuid``, not ``get_id()``) for a destructive operation
+        (merge or delete).
+
+        Refuses, as ``(False, reason)``, if any backup of the chain is already
+        ``MERGING``/``DELETING`` under a status other than ``new_status`` --
+        whether or not it is one of ``target_ids`` -- or if any backup in the
+        chain (target or not) is named by an active restore's own chain
+        (``JobSchedule.restore_chain_s3_id``). For ``new_status=STATUS_DELETING``
+        (a direct delete, never a merge), also refuses if any target now has a
+        live dependent outside ``target_ids`` -- checked fresh, in this same
+        transaction, immediately before claiming, which is what closes the gap
+        a caller's own earlier, non-transactional dependents check leaves open
+        (a target claimed here, directly deleting its data, destroys a backup
+        a concurrently-created dependent needs). A FAILED dependent does not
+        count: it was never restorable. On success, every id in ``target_ids``
+        is flipped to ``new_status`` and ``(True, None)`` is returned.
+
+        Idempotent by design, not exclusive between identical claims: a target
+        already in ``new_status`` -- this call resuming one that claimed it
+        but did not finish queuing the task that follows -- does not block
+        itself. Two callers racing to claim the very same ids at once can
+        therefore BOTH succeed (one commits, the other retries on conflict,
+        re-reads the now-already-``new_status`` targets, and finds nothing of
+        its own to object to) -- what this guarantees is that no OTHER,
+        genuinely different claim can interleave with either, not that only
+        one of two identical ones wins. Callers rely on idempotency further
+        downstream (``manifest.mark_deleting`` is a no-op if already marked)
+        to make a repeat claim of the same ids harmless rather than merely
+        admitted. Called from task execution, not admission
+        (``tasks_runner_backup._run_backup_delete``/``_run_backup_delete_chain``;
+        F2/F3 of docs/reviews/backup-deletion-review-round3.md) -- a task's own
+        retry/resume cycle is exactly the repeat caller this idempotency is
+        for, since ``ensure_backup_delete_task`` already guarantees only one
+        task is ever open per chain.
+
+        Assumes ``Backup``'s ``lvol_id`` index is ready, which it already is in
+        any deployment old enough to run this: an index still ``building`` would
+        make this read incomplete rather than merely slow, so this does not fall
+        back to a scan the way a read through ``query()`` would.
+        """
+        if not self.kv_store or not target_ids:
+            return False, "No DB connection" if not self.kv_store else "No targets given"
+        transactional = fdb.transactional(DBController._claim_backup_chain_op_tx)
+        return transactional(self, self.kv_store, lvol_id, list(target_ids), new_status)
+
+    # backup_delete_task/<cluster_id>/<lvol_id> -> db key of the lvol's open
+    # FN_BACKUP_DELETE/FN_BACKUP_DELETE_CHAIN task, whichever was admitted
+    # first. Read and written in the transaction that creates the task, the
+    # same shape _repl_snap_task_key/_ensure_snapshot_replication_task_tx uses
+    # for a snapshot's replication task (bed bf32 2026-11-21) -- what makes
+    # admission exclusive per chain instead of the scan-then-write race
+    # add_backup_delete_task/add_backup_delete_chain_task used to run (F2/F3
+    # of docs/reviews/backup-deletion-review-round3.md).
+    BACKUP_DELETE_TASK_PREFIX = "backup_delete_task"
+
+    def _backup_delete_task_key(self, cluster_id, lvol_id):
+        return f"{self.BACKUP_DELETE_TASK_PREFIX}/{cluster_id}/{lvol_id}".encode()
+
+    def _ensure_backup_delete_task_tx(self, tr, task, lvol_id, index_list):
+        claim_key = self._backup_delete_task_key(task.cluster_id, lvol_id)
+        raw = tr.get(claim_key).wait()
+        if raw is not None and raw.present():
+            current = BaseModel._read_record(tr, bytes(raw), JobSchedule)
+            if (current is not None and current.status != JobSchedule.STATUS_DONE
+                    and not current.canceled):
+                return current.uuid, False
+        task.updated_at = str(datetime.datetime.now(datetime.UTC))
+        self._put_tx(tr, task, index_list)
+        tr[claim_key] = task.get_db_id().encode()
+        return task.uuid, True
+
+    def ensure_backup_delete_task(self, task: JobSchedule, lvol_id: str) -> tuple[str, bool]:
+        """Create ``task`` (an FN_BACKUP_DELETE or FN_BACKUP_DELETE_CHAIN task)
+        unless ``lvol_id``'s chain already has one that is neither done nor
+        canceled -- checked and written in ONE transaction with the chain's
+        claim key, so admission is exclusive per chain: whichever of a
+        single-backup delete and a whole-chain delete is requested first for a
+        given ``lvol_id`` wins, and the other is refused ("chain busy") rather
+        than racing it or preempting it the way
+        ``add_backup_delete_chain_task`` used to (F2/F3 of
+        docs/reviews/backup-deletion-review-round3.md). The two task types
+        share one claim key per ``lvol_id``, not one each, which is what makes
+        them mutually exclusive rather than independently deduped.
+
+        Returns ``(uuid of the chain's active task, whether it is task)``.
+        """
+        return self._transact(DBController._ensure_backup_delete_task_tx,
+                              task, lvol_id, JobSchedule.active_indexes(self.kv_store))
+
+    def _create_backup_restore_task_tx(self, tr, source_lvol_id, cluster_id, node_id,
+                                       function_params, max_retry, task_uuid, task_date):
+        idx = indices.get_index(Backup, 'lvol_id')
+        sibling_ids = [
+            idx.entry_id(Backup, bytes(key), bytes(value))
+            for key, value in tr.get_range_startswith(idx.prefix(Backup, (source_lvol_id,)))
+        ]
+        for sibling_id in sibling_ids:
+            rows = Backup().read_from_db(tr, id=sibling_id)
+            if rows and rows[0].status in (Backup.STATUS_MERGING, Backup.STATUS_DELETING):
+                return None, f"backup {rows[0].uuid} of this chain is {rows[0].status}"
+
+        task_obj = JobSchedule()
+        task_obj.uuid = task_uuid
+        task_obj.cluster_id = cluster_id
+        task_obj.node_id = node_id
+        task_obj.date = task_date
+        task_obj.function_name = JobSchedule.FN_BACKUP_RESTORE
+        task_obj.function_params = function_params
+        task_obj.max_retry = max_retry
+        task_obj.status = JobSchedule.STATUS_NEW
+
+        index_list = JobSchedule.active_indexes(tr)
+        if index_list:
+            BaseModel._apply_index_diff(
+                tr, JobSchedule, index_list, BaseModel.index_keys(JobSchedule, index_list, None),
+                task_obj)
+        tr[task_obj.get_db_id().encode()] = json.dumps(task_obj.to_dict(unwrap_secrets=True)).encode()
+        scope = task_obj.watch_scope()
+        tr.add(watches.watch_index_rollup_key(JobSchedule, scope), watches.ONE_LE64)
+        tr.add(watches.watch_index_version_key(JobSchedule, scope, task_obj.get_id()), watches.ONE_LE64)
+
+        return task_obj, None
+
+    def create_backup_restore_task_if_chain_clear(self, source_lvol_id, cluster_id, node_id,
+                                                   function_params, max_retry):
+        """Create the FN_BACKUP_RESTORE task that drives a restore, atomically
+        with checking that no backup of ``source_lvol_id``'s chain is already
+        ``MERGING``/``DELETING``.
+
+        Joining the check and the task's creation in one transaction is what
+        closes the gap a plain ``chain.require_restorable()`` followed by a
+        separate ``write_to_db()`` would leave open: without it, a delete or
+        merge could claim the chain (``claim_backup_chain_op``) in between,
+        and this task would start reading objects that operation is about to
+        remove. The task itself, once created, is what ``claim_backup_chain_op``
+        then sees (via the ``restore_chain_s3_id`` index) and refuses to let a
+        later delete or merge touch -- see that method and the index's
+        declaration on ``JobSchedule``.
+
+        Returns ``(task, None)`` on success, or ``(None, reason)`` if refused.
+        """
+        if not self.kv_store:
+            return None, "No DB connection"
+        task_uuid = str(uuid.uuid4())
+        task_date = int(time.time())
+        transactional = fdb.transactional(DBController._create_backup_restore_task_tx)
+        return transactional(self, self.kv_store, source_lvol_id, cluster_id, node_id,
+                             function_params, max_retry, task_uuid, task_date)
+
     # ---- Per-lvstore snapshot-mutation lock (Single FDB Transaction) ----
 
     def _try_acquire_lvstore_lock_tx(self, tr, cluster_id, lvs_name, owner, now, ttl):
@@ -2259,9 +2519,10 @@ class DBController(metaclass=Singleton):
     # old allocator was max-plus-one over the local cluster's Backup records,
     # which had three problems: it raced (two concurrent backups got the same
     # id), it recycled the id of a deleted backup whose objects may still exist
-    # (nothing reclaims them -- bdev_lvol_s3_delete does not exist on the data
-    # plane), and after an import it counted foreign backups it should not have.
-    # A monotonic sequence makes reuse impossible by construction.
+    # (deletion removes them, but not atomically with the record disappearing,
+    # so a window exists where the old id's objects are still reachable), and
+    # after an import it counted foreign backups it should not have. A
+    # monotonic sequence makes reuse impossible by construction.
     #
     # Unlike vuid this space is NOT unbounded: the data plane packs s3_id into
     # 30 bits and masks rather than validates, so callers must check

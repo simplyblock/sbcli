@@ -197,5 +197,29 @@ class TestResumeSemantics(unittest.TestCase):
         self.assertIn("n2", reason)
 
 
+class TestBackupFamilyIsBlocking(unittest.TestCase):
+    """F4 of docs/reviews/backup-deletion-review.md: EXPANSION_BLOCKING_TASK_FNS
+    used to hand-list three of the backup family's six task functions and had
+    gone stale -- FN_BACKUP_DELETE and the group-backup commit/delete tasks
+    were all missing, and an in-flight one would have been invisible to
+    expansion. It now reads JobSchedule.BACKUP_FUNCTIONS instead of
+    hand-listing a subset, so the two cannot drift apart again."""
+
+    def test_every_backup_function_blocks_expansion(self):
+        self.assertTrue(set(JobSchedule.BACKUP_FUNCTIONS) <= EXPANSION_BLOCKING_TASK_FNS)
+
+    def test_an_open_backup_delete_task_blocks_a_fresh_expansion(self):
+        db = _db(nodes=[_node("n1")], tasks=[_task(JobSchedule.FN_BACKUP_DELETE)])
+        ok, reason = check_expansion_preconditions(_cluster(), db)
+        self.assertFalse(ok)
+        self.assertIn(JobSchedule.FN_BACKUP_DELETE, reason)
+
+    def test_an_open_group_backup_delete_task_blocks_a_fresh_expansion(self):
+        db = _db(nodes=[_node("n1")], tasks=[_task(JobSchedule.FN_GROUP_BACKUP_DELETE)])
+        ok, reason = check_expansion_preconditions(_cluster(), db)
+        self.assertFalse(ok)
+        self.assertIn(JobSchedule.FN_GROUP_BACKUP_DELETE, reason)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -20,6 +20,7 @@ from simplyblock_core.controllers import (
     device_controller,
     tasks_events,
 )
+from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lock import DbLock, DbLockBusyError
@@ -320,6 +321,27 @@ def _validate_new_task_node_add(cluster_id, node_addr):
     return False
 
 
+def _new_job_schedule(function_name, cluster_id, node_id, device_id,
+                      max_retry, function_params) -> JobSchedule:
+    """Build a NEW, not-yet-written ``JobSchedule`` -- the construction
+    ``_add_task`` and ``add_backup_delete_task``/``add_backup_delete_chain_task``
+    share, the latter two writing it through their own atomic admission gate
+    (``DBController.ensure_backup_delete_task``) rather than ``_add_task``'s
+    generic path."""
+    task_obj = JobSchedule()
+    task_obj.uuid = str(uuid.uuid4())
+    task_obj.cluster_id = cluster_id
+    task_obj.node_id = node_id
+    task_obj.device_id = device_id
+    task_obj.date = int(time.time())
+    task_obj.function_name = function_name
+    if function_params and type(function_params) is dict:
+        task_obj.function_params = function_params
+    task_obj.max_retry = max_retry
+    task_obj.status = JobSchedule.STATUS_NEW
+    return task_obj
+
+
 def _add_task(function_name, cluster_id, node_id, device_id,
               max_retry=constants.TASK_EXEC_RETRY_COUNT, function_params=None, send_to_cluster_log=True):
 
@@ -428,17 +450,8 @@ def _add_task(function_name, cluster_id, node_id, device_id,
             logger.info(f"Task found, skip adding new task: {task_id}")
             return False
 
-    task_obj = JobSchedule()
-    task_obj.uuid = str(uuid.uuid4())
-    task_obj.cluster_id = cluster_id
-    task_obj.node_id = node_id
-    task_obj.device_id = device_id
-    task_obj.date = int(time.time())
-    task_obj.function_name = function_name
-    if function_params and type(function_params) is dict:
-        task_obj.function_params = function_params
-    task_obj.max_retry = max_retry
-    task_obj.status = JobSchedule.STATUS_NEW
+    task_obj = _new_job_schedule(function_name, cluster_id, node_id, device_id,
+                                 max_retry, function_params)
     if function_name == JobSchedule.FN_SNAPSHOT_REPLICATION:
         # The scan above is a check-then-write: two replication workers
         # enqueueing the same chain ancestor 100 ms apart both passed it and
@@ -1572,7 +1585,7 @@ def add_group_backup_delete_task(group_backup):
     one is already open for it.
 
     Like the commit task it does no data-plane RPC of its own (a member's merge
-    is its own FN_BACKUP_MERGE task), so it carries no node. Returns the task
+    is its own FN_BACKUP_DELETE task), so it carries no node. Returns the task
     id, or False when one is already open.
     """
     for task in db.get_job_tasks_by_function(group_backup.cluster_id,
@@ -1612,9 +1625,17 @@ def add_group_backup_commit_task(group_backup):
     )
 
 
-def add_backup_restore_task(cluster_id, node_id, backup_id, lvol_name, chain_ids,
-                            lvol_id="", s3_config=None):
+def add_backup_restore_task(source_lvol_id, cluster_id, node_id, backup_id, lvol_name,
+                            chain_ids, lvol_id="", s3_config=None):
     """Create the task that restores an S3 backup chain into a new lvol.
+
+    Unlike every other task type, this does not go through ``_add_task``: its
+    creation has to be atomic with checking that no backup of the SOURCE
+    chain (``source_lvol_id`` -- the volume the backup was taken from, not
+    ``lvol_id``, the new volume being restored into) is already
+    ``MERGING``/``DELETING``, so a delete or merge cannot slip into the gap
+    between that check and the task actually existing. See
+    ``DBController.create_backup_restore_task_if_chain_clear``.
 
     Args:
         s3_config: set when the backup lives in a bucket that is not the
@@ -1623,13 +1644,12 @@ def add_backup_restore_task(cluster_id, node_id, backup_id, lvol_name, chain_ids
             and deletes it -- scrubbing this field -- once the restore reaches
             a terminal state. Unset, the restore reads through the device the
             node already has for the cluster's own bucket.
+
+    Raises:
+        PreconditionError: the source chain is being merged or deleted.
     """
-    return _add_task(
-        JobSchedule.FN_BACKUP_RESTORE,
-        cluster_id,
-        node_id,
-        "",
-        max_retry=constants.BACKUP_MAX_RETRIES,
+    task, reason = db.create_backup_restore_task_if_chain_clear(
+        source_lvol_id, cluster_id, node_id,
         function_params={
             "backup_id": backup_id,
             "lvol_name": lvol_name,
@@ -1637,22 +1657,92 @@ def add_backup_restore_task(cluster_id, node_id, backup_id, lvol_name, chain_ids
             "chain_ids": chain_ids,
             "s3_config": s3_config,
         },
-    )
-
-
-def add_backup_merge_task(cluster_id, node_id, keep_backup_id, old_backup_id):
-    """Create the task that merges two S3 backups."""
-    return _add_task(
-        JobSchedule.FN_BACKUP_MERGE,
-        cluster_id,
-        node_id,
-        "",
         max_retry=constants.BACKUP_MAX_RETRIES,
-        function_params={
-            "keep_backup_id": keep_backup_id,
-            "old_backup_id": old_backup_id,
-        },
     )
+    if task is None:
+        raise PreconditionError(reason)
+    tasks_events.task_create(task)
+    return task.uuid
+
+
+def _queue_backup_delete_task(task: JobSchedule, lvol_id: str) -> tuple[bool, str | None]:
+    """Queue ``task`` (an FN_BACKUP_DELETE or FN_BACKUP_DELETE_CHAIN task)
+    through the one atomic admission gate both share, keyed by ``lvol_id``
+    (``DBController.ensure_backup_delete_task``): at most one open task of
+    either type per chain, admitted exclusively rather than deduped
+    scan-then-write (F2/F3 of docs/reviews/backup-deletion-review-round3.md).
+
+    Returns ``(True, None)`` once queued, or ``(False, reason)`` if the chain
+    already has one open -- "busy, try again", the same shape
+    ``backup_controller.delete_backups`` already gave a MERGING sibling before
+    this gate existed.
+    """
+    active_id, created = db.ensure_backup_delete_task(task, lvol_id)
+    if not created:
+        return False, (f"volume {lvol_id}'s backup chain is busy with another "
+                       f"delete/merge task ({active_id}); try again once it finishes")
+    tasks_events.task_create(task)
+    return True, None
+
+
+def add_backup_delete_task(cluster_id, node_id, lvol_id, backup_id) -> tuple[bool, str | None]:
+    """Queue the task that deletes (or folds into its successor) one backup.
+
+    The target is not claimed (MERGING/DELETING) yet by the time this is
+    called: that now happens as the first thing the task's own execution does
+    (``tasks_runner_backup._run_backup_delete``), re-validating every
+    precondition fresh, rather than here (F2/F3 of
+    docs/reviews/backup-deletion-review-round3.md) -- closing the crash
+    window between a claim committing and its task existing, since neither
+    can happen without the other any more. One task per ``backup_id`` covers
+    both the direct-delete and fold-into-successor cases: the runner decides
+    which, at execution time, from the backup's current status and chain.
+
+    max_retry is ``BACKUP_MAX_RETRIES``, the longer ceiling restore and the
+    former standalone merge task used -- not ``BACKUP_TASK_MAX_RETRIES`` (the
+    chain-delete task's own, shorter one): a fold-into-successor that gives up
+    mid-merge cannot be cleanly retried from scratch, the same reasoning
+    ``BACKUP_TASK_MAX_RETRIES``'s docstring gives for merge. Since this task
+    covers that case too now (D5/D8), it keeps that ceiling for both branches.
+
+    Returns ``(True, None)`` once the task is queued, or ``(False, reason)``
+    if ``lvol_id``'s chain already has one open -- see
+    ``_queue_backup_delete_task``.
+    """
+    task = _new_job_schedule(
+        JobSchedule.FN_BACKUP_DELETE, cluster_id, node_id, "",
+        constants.BACKUP_MAX_RETRIES,
+        {"lvol_id": lvol_id, "backup_id": backup_id})
+    return _queue_backup_delete_task(task, lvol_id)
+
+
+def add_backup_delete_chain_task(cluster_id, node_id, lvol_id) -> tuple[bool, str | None]:
+    """Queue the task that deletes every backup of one volume -- a direct S3
+    delete, never a merge: nothing outside the volume's own chain survives to
+    chain against any of its members.
+
+    Shares ``add_backup_delete_task``'s admission gate, keyed by the same
+    ``lvol_id``: a single-backup delete and a whole-chain delete requested for
+    the same volume mutually exclude each other, whichever is admitted first,
+    instead of one superseding the other. This REPLACES the cancel-and-
+    supersede dance this function used to run on an open single-backup
+    ``FN_BACKUP_DELETE`` task of one of the volume's members -- the mechanism
+    that produced F2's two-tasks-on-one-backup window in the first place --
+    rather than hardening it (F2/F3 of
+    docs/reviews/backup-deletion-review-round3.md). The trade-off: an
+    operator who escalates from "delete one backup" to "delete the whole
+    volume" while the narrower delete is still open now gets "busy, retry"
+    instead of immediate takeover.
+
+    Returns ``(True, None)`` once the task is queued, or ``(False, reason)``
+    if ``lvol_id``'s chain already has one open -- see
+    ``_queue_backup_delete_task``.
+    """
+    task = _new_job_schedule(
+        JobSchedule.FN_BACKUP_DELETE_CHAIN, cluster_id, node_id, "",
+        constants.BACKUP_TASK_MAX_RETRIES,
+        {"lvol_id": lvol_id})
+    return _queue_backup_delete_task(task, lvol_id)
 
 
 def _check_snap_instance_on_node(snapshot_id: str , node_id: str):

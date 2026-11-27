@@ -25,6 +25,7 @@ from simplyblock_core.controllers.backup import controller as backup_controller
 from simplyblock_core.controllers.backup import manifest as backup_manifest
 from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.models.backup import Backup, GroupBackup
+from simplyblock_core.models.job_schedule import JobSchedule
 
 logger = utils.get_logger(__name__)
 
@@ -624,13 +625,33 @@ def _config_for_deleting(db, group_backup):
 
 
 def _members_touched(db, group_backup) -> bool:
-    """Whether retiring a member has begun: a member deleted, merging, or merged."""
+    """Whether retiring a member has begun: a member deleted, merging,
+    merged, claimed for deletion (DELETING), or BROKEN -- not yet actually
+    gone, but its own FN_BACKUP_DELETE task may already be destroying its S3
+    objects, which is exactly the in-flight state a restore back to
+    COMPLETED must not paper over.
+
+    A member can also be open-but-unclaimed: ``_retire_members`` queues a
+    member's delete/merge task through ``backup_controller.delete_backup``/
+    ``trigger_merge``, but the claim itself -- the status flip this function
+    used to rely on alone -- now happens only at that task's own execution
+    (F2/F3 of docs/reviews/backup-deletion-review-round3.md), so a member can
+    still read COMPLETED here with its task already open and about to run.
+    Checked by task existence rather than status for that case.
+    """
+    open_delete_tasks = {
+        t.function_params.get("backup_id")
+        for t in db.get_job_tasks_by_function(group_backup.cluster_id, JobSchedule.FN_BACKUP_DELETE)
+        if t.status != JobSchedule.STATUS_DONE and not t.canceled}
     for backup_id in group_backup.member_backup_ids:
         try:
             member = db.get_backup_by_id(backup_id)
         except KeyError:
             return True
-        if member.status in (Backup.STATUS_MERGING, Backup.STATUS_MERGED):
+        if member.status in (Backup.STATUS_MERGING, Backup.STATUS_MERGED,
+                             Backup.STATUS_DELETING, Backup.STATUS_BROKEN):
+            return True
+        if member.uuid in open_delete_tasks:
             return True
     return False
 
@@ -652,8 +673,18 @@ def _retire_members(db, group_backup) -> bool:
             continue                    # deleted
         if member.status == Backup.STATUS_MERGED:
             continue
+        if member.status == Backup.STATUS_DELETING:
+            # Already claimed by an earlier pass; its own FN_BACKUP_DELETE
+            # task is retiring it. Not retired until that task actually
+            # removes the record (the KeyError branch above, on a later
+            # pass) -- re-claiming it here would needlessly re-queue the task.
+            retired = False
+            continue
         chain = db.get_backups_by_lvol_id(member.lvol_id)
-        successor = next((b for b in chain if b.prev_backup_id == member.uuid), None)
+        # A FAILED successor does not count (D7 of
+        # docs/reviews/backup-deletion-review.md): it was never restorable,
+        # so it protects nothing a direct delete would destroy.
+        successor = backup_chain.SuccessorIndex.of_lvol(chain).live_successor_of(member.uuid)
         busy = (member.status in (Backup.STATUS_PENDING, Backup.STATUS_IN_PROGRESS)
                 or any(b.status == Backup.STATUS_MERGING for b in chain))
         if successor is None and not busy:
@@ -661,16 +692,34 @@ def _retire_members(db, group_backup) -> bool:
                 backup_controller.delete_backup(member.uuid)
             except KeyError:
                 pass                    # deleted concurrently
-            logger.info("Group backup %s: member %s deleted, nothing chains against it",
-                        group_backup.uuid, member.uuid[:8])
+            # A FAILED member is removed synchronously (nothing was ever
+            # uploaded for it, so there is no manifest or task to wait on);
+            # a COMPLETED one is only claimed -- DELETING now, actually gone
+            # once its own FN_BACKUP_DELETE task finishes. Checked rather
+            # than branched on the member's status before the call, so this
+            # reads the one fact that actually answers it either way.
+            try:
+                db.get_backup_by_id(member.uuid)
+            except KeyError:
+                logger.info("Group backup %s: member %s deleted, nothing "
+                            "chains against it", group_backup.uuid, member.uuid[:8])
+            else:
+                logger.info("Group backup %s: member %s claimed for deletion, "
+                            "nothing chains against it",
+                            group_backup.uuid, member.uuid[:8])
+                retired = False
             continue
         retired = False
         if (successor is not None and not busy
                 and member.status == Backup.STATUS_COMPLETED
                 and successor.status == Backup.STATUS_COMPLETED):
-            backup_controller.trigger_merge(successor, member)
-            logger.info("Group backup %s: member %s merging into its successor %s",
-                        group_backup.uuid, member.uuid[:8], successor.uuid[:8])
+            ok, reason = backup_controller.trigger_merge(successor, member)
+            if ok:
+                logger.info("Group backup %s: member %s merging into its successor %s",
+                            group_backup.uuid, member.uuid[:8], successor.uuid[:8])
+            else:
+                logger.info("Group backup %s: member %s not merged into %s yet: %s",
+                            group_backup.uuid, member.uuid[:8], successor.uuid[:8], reason)
     return retired
 
 
@@ -710,11 +759,13 @@ def retire_orphaned_member_backups(lvol_ids, db=None):
                 db.get_group_backup_by_id(b.group_backup_id)
             except KeyError:
                 orphans.append(b)
-        by_prev = {b.prev_backup_id: b for b in chain if b.prev_backup_id}
+        successors = backup_chain.SuccessorIndex.of_lvol(chain)
         # Oldest first: the base of the chain is the one whose merge unblocks
         # the next, and a leaf is only a leaf once nothing is below it.
         for old in sorted(orphans, key=lambda b: (b.created_at, b.uuid)):
-            successor = by_prev.get(old.uuid)
+            # A FAILED successor does not count (D7): see the matching note
+            # in _retire_members above.
+            successor = successors.live_successor_of(old.uuid)
             if successor is None:
                 try:
                     backup_controller.delete_backup(old.uuid)

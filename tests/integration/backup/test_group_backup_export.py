@@ -68,12 +68,12 @@ def source_cluster(db):
 
 
 def _member_backup(db, index, cluster=SOURCE_CLUSTER, prev=None,
-                   group_backup_id="", status=Backup.STATUS_COMPLETED):
+                   group_backup_id="", status=Backup.STATUS_COMPLETED, lvol_id=None):
     b = Backup()
     b.uuid = _backup_id(index)
     b.s3_id = index
     b.cluster_id = cluster
-    b.lvol_id = _lvol_id(index)
+    b.lvol_id = lvol_id or _lvol_id(index)
     b.lvol_name = f"vol-{index}"
     b.snapshot_id = _snapshot_id(index)
     b.snapshot_name = f"snap-{index}"
@@ -112,9 +112,12 @@ def _seed_two_member_group(db):
 
     Member 1 is a full backup; member 2 chains onto its own ancestor (backup 3),
     so the export has to carry that ancestor for the group to be restorable.
+    The ancestor shares member 2's lvol_id: they describe the same volume's
+    chain, which BackupChain.assemble's lvol coherence check now requires (F5
+    of docs/reviews/backup-deletion-review-round3.md).
     """
     composite = f"{SOURCE_CLUSTER}/{GROUP_BACKUP_UUID}"
-    ancestor = _member_backup(db, 3)                      # member 2's parent
+    ancestor = _member_backup(db, 3, lvol_id=_lvol_id(2))  # member 2's parent
     m1 = _member_backup(db, 1, group_backup_id=composite)
     m2 = _member_backup(db, 2, prev=3, group_backup_id=composite)
     return _group_backup(db, [m1, m2]), ancestor, m1, m2

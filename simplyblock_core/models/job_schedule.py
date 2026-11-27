@@ -35,6 +35,22 @@ class JobSchedule(BaseModel):
             and t.function_params.get('snapshot_id')
             else []
         )),
+        # Every backup s3_id a non-terminal FN_BACKUP_RESTORE task is reading
+        # (its chain_ids -- see FN_BACKUP_RESTORE below -- are s3_ids, not
+        # backup uuids). db_controller.claim_backup_chain_op reads this before
+        # letting a delete or merge touch a chain, so a restore in flight blocks
+        # them. Self-maintaining: the extractor yields nothing once the task
+        # reaches STATUS_DONE or is canceled, so the entry disappears in the
+        # same transaction as that write -- nothing decrements it by hand, and
+        # nothing can leak it.
+        Index('restore_chain_s3_id', arity=1, extract=lambda t: (
+            [(s3_id,) for s3_id in (t.function_params.get('chain_ids') or [])]
+            if t.function_name == t.FN_BACKUP_RESTORE
+            and isinstance(t.function_params, dict)
+            and t.status != t.STATUS_DONE
+            and not t.canceled
+            else []
+        )),
     )
 
     STATUS_NEW = 'new'
@@ -63,7 +79,21 @@ class JobSchedule(BaseModel):
     FN_LVOL_BATCH_MIG = "lvol_batch_migration"
     FN_BACKUP = "s3_backup"
     FN_BACKUP_RESTORE = "s3_backup_restore"
-    FN_BACKUP_MERGE = "s3_backup_merge"
+    # Delete (or fold into its successor) ONE backup that has been claimed
+    # for removal: remove its S3 objects directly if nothing chains against
+    # it, or merge it into its successor (the data plane's bdev_lvol_s3_merge)
+    # if something does -- the runner decides which, at execution time, from
+    # the backup's current status and chain (tasks_runner_backup, D5/D8 of
+    # docs/reviews/backup-deletion-review.md). Replaces a formerly separate
+    # FN_BACKUP_MERGE task: dedup is then one check, by backup id, instead of
+    # two. metadata-before-data on the way in (claim_backup_chain_op marks the
+    # record DELETING first), data-before-metadata on the way out.
+    FN_BACKUP_DELETE = "s3_backup_delete"
+    # Delete every backup of one volume: always a direct S3 delete, never a
+    # merge -- nothing outside the volume's own chain survives to chain
+    # against any of its members. One task per lvol_id, carrying no explicit
+    # backup list: the runner re-reads the volume's backups at execution time.
+    FN_BACKUP_DELETE_CHAIN = "s3_backup_delete_chain"
     # Consistency-group backup commit: watch the member backups of one group
     # generation and publish the group manifest once every member completed,
     # the all-or-nothing barrier.
@@ -71,6 +101,16 @@ class JobSchedule(BaseModel):
     # Consistency-group backup delete: retire the member backups of a group
     # backup marked deleting, then remove its manifest and record.
     FN_GROUP_BACKUP_DELETE = "group_backup_delete"
+
+    #: Every backup task function, in one place so `tasks_runner_backup`
+    #: (which owns and drives them) and anything else that needs "is this a
+    #: backup-family task" (e.g. cluster-expansion preconditions) read the
+    #: same tuple instead of each hand-listing a subset that can drift stale.
+    BACKUP_FUNCTIONS: ClassVar[tuple] = (
+        FN_BACKUP, FN_BACKUP_RESTORE, FN_BACKUP_DELETE, FN_BACKUP_DELETE_CHAIN,
+        FN_GROUP_BACKUP_COMMIT, FN_GROUP_BACKUP_DELETE,
+    )
+
     FN_CLUSTER_EXPAND = "cluster_expand"
     # Cross-cluster replication cutover: freeze source IO, transfer the final
     # lvol delta to the target, flip ANA so the client fails over. Used for
