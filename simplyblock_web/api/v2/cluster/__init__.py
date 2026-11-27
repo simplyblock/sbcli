@@ -139,7 +139,7 @@ class ClusterParams(BaseModel):
     #: lvstore cluster (and raid0 strip) of a fixed 8 MiB whatever the
     #: erasure-coding scheme, instead of one page per data chunk.
     flex_geometry: bool = False
-    page_copy: bool = False
+    page_copy: bool = True
     md_journal: bool = True
     # The cluster's workload names: the Services its storage nodes are reached
     # through, the SPDK proxy's certificate Secret, and the suffix on a node's
