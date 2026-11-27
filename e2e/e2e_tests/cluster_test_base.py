@@ -2931,7 +2931,11 @@ class TestClusterBase:
         # Collect subtasks for all master tasks (mirrors docker path behaviour)
         if self.cluster_id:
             try:
-                tasks = k8s.get_cluster_tasks(self.cluster_id)
+                # ``get_cluster_tasks`` is on K8sSbcliUtils, not on the
+                # K8sUtils that ``k8s`` holds, so every k8s run logged
+                # "'K8sUtils' object has no attribute get_cluster_tasks"
+                # and collected no subtasks at all.
+                tasks = self.sbcli_utils.get_cluster_tasks(self.cluster_id)
                 for task in tasks:
                     tid = task["id"]
                     try:
@@ -3793,9 +3797,10 @@ class TestClusterBase:
                 self.sbcli_utils.delete_all_storage_pools()
                 sleep_n_sec(2)
                 latest_util = self.get_latest_cluster_util()
-                size_used = latest_util["size_used"]
-                if size_used >= 500 * 1024 * 1024:
-                    self.logger.warning(f"Cluster capacity more than 500MB after cleanup: {size_used // (1024 * 1024)}MB")
+                if latest_util:
+                    size_used = latest_util["size_used"]
+                    if size_used >= 500 * 1024 * 1024:
+                        self.logger.warning(f"Cluster capacity more than 500MB after cleanup: {size_used // (1024 * 1024)}MB")
                 # for node in self.fio_node:
                 #     self.ssh_obj.remove_dir(node, "/mnt/*")
             except Exception as _:
@@ -6204,7 +6209,21 @@ class TestClusterBase:
                 )
 
     def get_latest_cluster_util(self):
+        """Newest capacity record, or ``None`` when the cluster reports none.
+
+        ``cluster get-capacity`` answered ``[]`` on every teardown of run
+        45906141173 -- 18 of 18 -- and indexing that raised an IndexError
+        into teardown's blanket ``except``, where it became a traceback
+        nobody reads. The post-cleanup capacity check never ran and never
+        said it had not run. An absent record is a thing to report, not a
+        thing to crash on.
+        """
         result = self.sbcli_utils.get_cluster_capacity()
+        if not result:
+            self.logger.warning(
+                "[capacity] cluster get-capacity returned no records; the "
+                "post-cleanup capacity check cannot run for this teardown")
+            return None
         sorted_results = sorted(result, key=lambda x: x["date"], reverse=True)
         latest_entry = sorted_results[0]
 

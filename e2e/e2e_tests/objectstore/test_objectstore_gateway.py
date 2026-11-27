@@ -791,26 +791,47 @@ class S3GatewayPodKilledK8s(_ObjectStoreBase):
         # Traffic during the roll, so the question is "what does a client
         # see", not "did the pods come back".
         errors, oks = [], 0
+        #: One entry per read the driver *attempted*, monotonic. Counting
+        #: outcomes is not enough: the window a read landed in is what says
+        #: whether the roll was measured at all.
+        attempts = []
         stop = threading.Event()
 
         def drive():
             nonlocal oks
-            i = 0
             while not stop.is_set():
-                i += 1
-                res = client.call(cfg, "get_object", bucket=name,
-                                  key="seed.bin", size=16 * 1024 ** 2,
-                                  seed="tc021", timeout=120)
-                if res.get("status") == 200 and res.get("match"):
+                started = time.monotonic()
+                try:
+                    res = client.call(cfg, "get_object", bucket=name,
+                                      key="seed.bin", size=16 * 1024 ** 2,
+                                      seed="tc021", timeout=120)
+                except Exception as exc:
+                    # A refused connection mid-roll is the very thing this
+                    # case measures, and ``client.call`` *raises* it rather
+                    # than returning a status -- so the ``else`` below never
+                    # saw it. Run 45906141173: the roll started at 02:33:18,
+                    # this thread died ~2s in with ConnectionRefusedError,
+                    # and the case reported "4 successful reads, 0 failed"
+                    # at 02:33:41 -- all four from the baseline before the
+                    # roll. A counter that dies reads exactly like a clean
+                    # run, so the loop has to outlive its own errors.
+                    errors.append((time.strftime("%H:%M:%S"), "raised",
+                                   str(exc).splitlines()[0][:160]))
+                    attempts.append((started, False))
+                    continue
+                ok = res.get("status") == 200 and bool(res.get("match"))
+                if ok:
                     oks += 1
                 else:
                     errors.append((time.strftime("%H:%M:%S"),
                                    res.get("status"), res.get("code")))
+                attempts.append((started, ok))
 
         driver = threading.Thread(target=drive, daemon=True)
         driver.start()
         time.sleep(10)
         roll_started = time.time()
+        roll_started_mono = time.monotonic()
         self.k8s_utils._exec_kubectl(
             f"kubectl rollout restart deployment/{self.STORE} -n {self.ns} "
             f"2>/dev/null || kubectl delete pods -n {self.ns} "
@@ -820,13 +841,30 @@ class S3GatewayPodKilledK8s(_ObjectStoreBase):
             f"--timeout=600s 2>/dev/null || true")
         s3.wait_gateway_pods(self.k8s_utils, self.STORE, replicas, timeout=600)
         roll_seconds = time.time() - roll_started
+        roll_ended_mono = time.monotonic()
         time.sleep(15)
         stop.set()
         driver.join(timeout=180)
 
+        in_roll = [ok for at, ok in attempts
+                   if roll_started_mono <= at <= roll_ended_mono]
         self.logger.info(
-            "[TC-S3-022] roll took %.0fs, %d successful reads, %d failed: %s",
-            roll_seconds, oks, len(errors), errors[:10])
+            "[TC-S3-022] roll took %.0fs, %d successful reads, %d failed: %s "
+            "(%d read(s) landed inside the roll window, %d of them ok)",
+            roll_seconds, oks, len(errors), errors[:10],
+            len(in_roll), sum(in_roll))
+
+        # The reads outside the window say nothing about a roll. If none
+        # landed inside it, the measurement is vacuous and the case must not
+        # report on it -- that is the shape of the false pass above, and it
+        # stays impossible only while something checks for it.
+        if not in_roll:
+            raise s3.S3EvidenceError(
+                f"[TC-S3-022] no read landed while the gateway rolled "
+                f"({roll_seconds:.0f}s), so what a client sees during a roll "
+                f"was never measured. {len(attempts)} read(s) were attempted "
+                f"in total and the driver thread is "
+                f"{'alive' if driver.is_alive() else 'finished'}.")
 
         # Data is the assertion. Availability during a roll of a
         # single-replica Deployment is not something to fail on -- it is
