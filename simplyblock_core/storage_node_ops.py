@@ -812,6 +812,20 @@ def _device_connect_lock(device_id, node_id):
     with _device_connect_locks_guard:
         return _device_connect_locks.setdefault((device_id, node_id), threading.Lock())
 
+#: Serializes the controller detach and reattach that follow partitioning,
+#: across the devices of one node. Partitioning runs one thread per device,
+#: and a PCIe detach is a hot remove in DPDK: two at once on one SPDK target
+#: time out, and the device removed second is gone until SPDK restarts
+#: (attach fails with -19, dev-ocp 2026-11-19). Process-local is sufficient:
+#: the threads that overlap are the per-device jobs of one partitioning call.
+_pcie_reattach_locks_guard = threading.Lock()
+_pcie_reattach_locks: dict = {}
+
+
+def _pcie_reattach_lock(node_id):
+    with _pcie_reattach_locks_guard:
+        return _pcie_reattach_locks.setdefault(node_id, threading.Lock())
+
 #: Serializes lvstore port allocation + persistence in create_lvstore.
 #: get_next_lvstore_ports has no reservation step, so concurrent creates
 #: (parallel activation Pass 1) would allocate colliding ports without this.
@@ -2344,16 +2358,21 @@ def _create_device_partitions(rpc_client, nvme, snode: StorageNode, num_partitio
         )(rpc_client.nbd_get_disk, nbd_device)
     except RetryError:
         logger.warning(f"nbd device {nbd_device} still present 10s after nbd_stop_disk")
-    rpc_client.bdev_nvme_detach_controller(nvme.nvme_controller)
-    for i in range(10):
-        if not rpc_client.bdev_nvme_controller_list(nvme.nvme_controller):
-            break
-        time.sleep(1)
-    try:
-        rpc_client.bdev_nvme_controller_attach(nvme.nvme_controller, nvme.pcie_address)
-    except RPCException as e:
-        logger.error('Failed to create device partitions: ' + str(e))
-        return False
+    with _pcie_reattach_lock(snode.get_id()):
+        rpc_client.bdev_nvme_detach_controller(nvme.nvme_controller)
+        try:
+            Retrying(
+                stop=stop_after_attempt(10),
+                wait=wait_fixed(1),
+                retry=retry_if_result(bool),
+            )(rpc_client.bdev_nvme_controller_list, nvme.nvme_controller)
+        except RetryError:
+            logger.warning(f"controller {nvme.nvme_controller} still listed 10s after its detach")
+        try:
+            rpc_client.bdev_nvme_controller_attach(nvme.nvme_controller, nvme.pcie_address)
+        except RPCException as e:
+            logger.error('Failed to create device partitions: ' + str(e))
+            return False
     time.sleep(1)
     rpc_client.bdev_examine(nvme.nvme_bdev)
     time.sleep(1)
