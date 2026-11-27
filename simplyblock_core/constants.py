@@ -791,6 +791,11 @@ LVS_MEMBER_REGISTER_FAIL_REALERT_SEC = 3600
 # another member leads), at most once per this interval per (member, lvstore).
 LVS_MEMBER_REPAIR_INTERVAL_SEC = 1800
 LVS_MEMBER_REPAIR_RPC_TIMEOUT_SEC = 60
+# When the registrations fail again after a successful reload, the control plane
+# restarts the member's node (the reload cannot rebuild a stale data-layer view),
+# at most once per this interval per node (persisted on the node). Failures after
+# that automatic restart, or within the interval, need manual action.
+LVS_MEMBER_AUTO_RESTART_INTERVAL_SEC = 6 * 3600
 # Replication into an lvstore with a member that cannot be chained sends full
 # copies (a delta needs the landing volume on every member): reported at most
 # once per this interval per (lvstore, member), with the count since.

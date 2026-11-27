@@ -179,28 +179,38 @@ def _note_member_registration(node, lvs_name, lvol_id, err=None, now=None):
     return True
 
 
+_RESTART_OUTCOMES = (lvs_member_repair.RESTART_STARTED, lvs_member_repair.RESTART_SKIPPED,
+                     lvs_member_repair.RESTART_MANUAL)
+
+
 def _repair_member(node, lvs_name, now):
-    """Reload the failing member's copy of the lvstore (lvs_member_repair), at
+    """Repair the failing member's copy of the lvstore (lvs_member_repair), at
     most once per constants.LVS_MEMBER_REPAIR_INTERVAL_SEC per (member, lvstore).
 
-    A reload that worked restarts the count: the next alert needs fresh
-    failures. When the failures come back after a reload, the next repair's
-    events say the reload does not help and the node needs a restart."""
+    First a reload. A reload that worked restarts the count: the next alert
+    needs fresh failures. When they come back soon after it (the next alert
+    window), the reload does not help: the node is restarted instead
+    (lvs_member_repair.auto_restart_member, gated and limited to one per node per
+    LVS_MEMBER_AUTO_RESTART_INTERVAL_SEC, persisted). A reload that failed is
+    tried again."""
     key = (node.get_id(), lvs_name)
-    last = _member_repaired.get(key)
+    last, last_outcome = _member_repaired.get(key, (None, None))
     if last is not None and now - last < constants.LVS_MEMBER_REPAIR_INTERVAL_SEC:
         return None
-    # Failing again soon after a reload: that reload did not help.
     recent = last if last is not None and now - last < 2 * constants.LVS_MEMBER_REGISTER_FAIL_REALERT_SEC else None
     try:
-        outcome, detail = lvs_member_repair.repair_member_copy(
-            node, lvs_name, db=db, previous_repair_at=recent)
+        if recent is not None and (last_outcome == lvs_member_repair.REPAIRED
+                                   or last_outcome in _RESTART_OUTCOMES):
+            outcome, detail = lvs_member_repair.auto_restart_member(node, lvs_name, db=db, now=now)
+        else:
+            outcome, detail = lvs_member_repair.repair_member_copy(
+                node, lvs_name, db=db, previous_repair_at=recent)
     except Exception as e:                                  # noqa: BLE001
         logger.error("Repair of %s on %s raised: %s", lvs_name, node.get_id(), e)
         return None
     if outcome == lvs_member_repair.SKIPPED:
         return outcome
-    _member_repaired[key] = now
+    _member_repaired[key] = (now, outcome)
     if outcome == lvs_member_repair.REPAIRED:
         _member_register_failures.pop(key, None)
     logger.warning("Repair of %s on %s: %s (%s)", lvs_name, node.get_id(), outcome, detail)

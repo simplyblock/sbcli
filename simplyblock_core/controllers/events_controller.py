@@ -26,6 +26,8 @@ EVENT_FENCE_LOOP = "FENCE_LOOP"
 EVENT_LVS_MEMBER_REGISTER_FAILING = "LVS_MEMBER_REGISTER_FAILING"
 #: The control plane reloaded (or tried to reload) such a member's copy of the lvstore.
 EVENT_LVS_MEMBER_REPAIR = "LVS_MEMBER_REPAIR"
+#: ... and, when a reload did not help, restarted (or decided not to restart) its node.
+EVENT_LVS_MEMBER_AUTO_RESTART = "LVS_MEMBER_AUTO_RESTART"
 #: Replication into an lvstore sent full copies because one member could not be chained.
 EVENT_LVS_MEMBER_BLOCKS_DELTA = "LVS_MEMBER_BLOCKS_DELTA"
 #: Multi-attach array LUN mode: a LUN was (or could not be) taken over by

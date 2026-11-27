@@ -125,6 +125,12 @@ class StorageNode(BaseNodeObject):
     # the node transitions to ONLINE (which only a deliberate `sn restart`
     # can achieve while auto-restart is blocked). See add_node_to_auto_restart.
     auto_restart_disabled: bool = False
+    # When the control plane last restarted this node because one of its
+    # lvstore copies kept failing registrations after a reload
+    # (controllers/lvs_member_repair). Persisted, so a restart of the monitor
+    # or the task runner cannot reset the limit of one such restart per
+    # LVS_MEMBER_AUTO_RESTART_INTERVAL_SEC.
+    lvs_member_auto_restart_at: float = 0.0
     baseboard_sn: str = ""
     cloud_instance_id: str = ""
     cloud_instance_public_ip: str = ""

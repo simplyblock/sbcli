@@ -172,19 +172,36 @@ def test_the_alert_repairs_the_member(clean_runner):
     assert ("T", "LVS_19") not in runner._member_register_failures
 
 
-def test_at_most_once_per_interval_and_the_next_one_knows(clean_runner):
+def test_failing_again_after_a_reload_restarts_the_node(clean_runner):
     node = SimpleNamespace(get_id=lambda: "T", cluster_id="C")
     realert = constants.LVS_MEMBER_REGISTER_FAIL_REALERT_SEC
     assert constants.LVS_MEMBER_REPAIR_INTERVAL_SEC <= realert
     with patch.object(runner.storage_events, "snode_lvs_member_register_failing"), \
             patch.object(runner.lvs_member_repair, "repair_member_copy",
-                         return_value=(rep.REPAIRED, "reloaded")) as repair:
+                         return_value=(rep.REPAIRED, "reloaded")) as repair, \
+            patch.object(runner.lvs_member_repair, "auto_restart_member",
+                         return_value=(rep.RESTART_STARTED, "graceful shutdown")) as restart:
         _fail_until_alert(node, 100)
-        # within the interval: no second reload, even if asked directly
+        # within the interval: nothing, even if asked directly
         assert runner._repair_member(node, "LVS_19", 100 + 60) is None
-        # the failures come back: the next alert repairs again, naming the first reload
+        # the failures come back in the next alert window: a restart, not a second reload
+        _fail_until_alert(node, 100 + realert + 10)
+    assert repair.call_count == 1
+    restart.assert_called_once()
+    assert restart.call_args.args[:2] == (node, "LVS_19")
+
+
+def test_a_failed_reload_is_retried_as_a_reload(clean_runner):
+    node = SimpleNamespace(get_id=lambda: "T", cluster_id="C")
+    realert = constants.LVS_MEMBER_REGISTER_FAIL_REALERT_SEC
+    with patch.object(runner.storage_events, "snode_lvs_member_register_failing"), \
+            patch.object(runner.lvs_member_repair, "repair_member_copy",
+                         return_value=(rep.FAILED, "returned False")) as repair, \
+            patch.object(runner.lvs_member_repair, "auto_restart_member") as restart:
+        _fail_until_alert(node, 100)
         _fail_until_alert(node, 100 + realert + 10)
     assert repair.call_count == 2
+    restart.assert_not_called()
     assert repair.call_args.kwargs["previous_repair_at"] == 100 + constants.LVS_MEMBER_REGISTER_FAIL_ALERT_LVOLS - 1
 
 
