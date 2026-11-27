@@ -764,6 +764,7 @@ class TestApplyConfigSizingUnchanged(unittest.TestCase):
         with patch.object(k8s_node.core_utils, 'load_config', return_value={"nodes": nodes}), \
                 patch.object(k8s_node.core_utils, 'validate_config', return_value=True), \
                 patch.object(k8s_node.core_utils, 'set_hugepages_if_needed') as set_hp, \
+                patch.object(k8s_node, '_hugepages_claimed_by_other_pods', return_value=None), \
                 patch.object(k8s_node.utils, 'get_response', side_effect=lambda d, error=None, http_code=None: (d, error)):
             k8s_node.apply_config()
         self.assertEqual([c.args for c in set_hp.call_args_list],
