@@ -1982,6 +1982,35 @@ jobs:
               -p "{\"spec\":{\"storageNodes\":{\"reservedSystemCPU\":\"${RESERVED_SYSTEM_CPU}\"}}}"
           fi
 
+          # WORKAROUND, NOT A TUNING CHOICE -- remove when SFAM-2864 is fixed.
+          #
+          # The operator's default for the storage-node agent container is
+          # 512Mi (defaultContainerResources, in the operator at
+          # internal/utils/storage_node_workload.go:44). The agent's working
+          # peak under outage churn is 450-470Mi, so it is OOM-killed
+          # routinely: 11 kills across three of four nodes in run
+          # 45994302851. The agent serves the node's API endpoint, so each
+          # kill marks that storage node unreachable about five seconds
+          # later, the peers force its devices unavailable on
+          # remote_io_quorum, and the node goes offline and rebalances.
+          #
+          # That costs a run twice over. The cluster then sits below its
+          # resource floor, and the control plane correctly refuses the next
+          # `sn shutdown` with "nodes online 2 < floor 3 (n+2k)" -- so a
+          # failover suite cannot take a healthy node down at all. That is
+          # how 45994302851 failed, five hours in, on an outage that was
+          # never allowed to start.
+          #
+          # 1Gi is twice the observed peak. It is here so the harness stops
+          # measuring the operator's limit instead of the product, and it
+          # must go when the agent's footprint is understood: a run that
+          # passes only because we doubled the limit is not evidence that
+          # the agent is well behaved.
+          kubectl -n ${NAMESPACE} patch storagecluster simplyblock-cluster \
+            --type=merge \
+            -p '{"spec":{"storageNodes":{"containerResources":{"requests":{"cpu":"200m","memory":"512Mi"},"limits":{"cpu":"500m","memory":"1Gi"}}}}}'
+          echo "[SFAM-2864] storage-node agent memory limit is now $(kubectl -n ${NAMESPACE} get storagecluster simplyblock-cluster -o jsonpath='{.spec.storageNodes.containerResources.limits.memory}')"
+
           echo "=== Applying pools ==="
           cat <<EOF | kubectl apply -f -
           apiVersion: storage.simplyblock.io/v1alpha2
