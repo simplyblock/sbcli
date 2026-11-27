@@ -71,6 +71,7 @@ from utils.pnfs_utils import (
     pvc_volume_ref,
     reset_nvme_controllers,
     wait_nvme_live,
+    writer_errno_note,
 )
 
 #: csi-driver/internal/csi/node/pnfs_report.go:28-29. Mirrored, not
@@ -718,8 +719,7 @@ class _ClientFaultBase(_FailBase):
         if errors:
             raise PnfsEvidenceError(
                 f"{what}: the writer in {pod} took {len(errors)} I/O "
-                f"error(s): {errors[:5]}. errno 9 is EBADF -- the mount went "
-                f"away under an open descriptor, which nothing retries.")
+                f"error(s): {errors[:5]}. {writer_errno_note(errors)}.")
         if lines < 5:
             raise PnfsProbeError(
                 f"{what}: the writer in {pod} produced only {lines} line(s), "

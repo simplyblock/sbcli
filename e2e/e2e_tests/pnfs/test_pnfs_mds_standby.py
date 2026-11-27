@@ -58,6 +58,7 @@ from utils.pnfs_utils import (
     mountstats,
     nfsexport_status,
     wait_mds_promotion,
+    writer_errno_note,
 )
 
 
@@ -443,10 +444,9 @@ class _MdsBase(_PnfsBase):
         if errors:
             raise PnfsEvidenceError(
                 f"{what}: the writer in {pod} took {len(errors)} I/O "
-                f"error(s) across the takeover: {errors[:5]}. errno 9 is "
-                f"EBADF -- the export went away under an open descriptor, "
-                f"which nothing retries. A takeover is supposed to stall a "
-                f"client, not break it.")
+                f"error(s) across the takeover: {errors[:5]}. "
+                f"{writer_errno_note(errors)}. A takeover is supposed to "
+                f"stall a client, not break it.")
         if lines < 5:
             raise PnfsProbeError(
                 f"{what}: the writer in {pod} produced only {lines} line(s), "

@@ -641,6 +641,44 @@ def mds_pods(k8s, sts_name=None, namespace=None):
     return sorted(rows)
 
 
+#: What a client-side write error means, by the errno the writer recorded.
+#: Each entry says what the kernel did, because that is what separates a
+#: stall the client rode out from a failure it handed to the application.
+_WRITER_ERRNO = {
+    "5": "EIO -- the write failed outright and the error reached the "
+         "application; a hard NFS mount is supposed to retry instead",
+    "9": "EBADF -- the export went away under an open descriptor, which "
+         "nothing retries",
+    "13": "EACCES -- the server refused the write it had been allowing",
+    "103": "ECONNABORTED -- the connection was torn down under the write",
+    "110": "ETIMEDOUT -- the client gave up waiting rather than stalling",
+    "116": "ESTALE -- the file handle no longer resolves on the server, so "
+           "the client's open file is gone even though the export is back",
+}
+
+
+def writer_errno_note(errors):
+    """One clause naming the errnos actually seen, for an assertion message.
+
+    Written because the two client-survival assertions used to state
+    "errno 9 is EBADF" whatever the writer recorded, and run 45960047836
+    reported exactly that for two ``errno=5`` lines. A message that names
+    the wrong errno sends whoever reads it after the wrong failure, which
+    costs more than saying nothing.
+    """
+    seen = []
+    for line in errors:
+        m = re.search(r"errno=(\d+)", line)
+        if m and m.group(1) not in seen:
+            seen.append(m.group(1))
+    if not seen:
+        return ("No line carried an errno=, so what the kernel returned is "
+                "not recorded")
+    return "; ".join(
+        f"errno {n} is {_WRITER_ERRNO.get(n, 'not one this harness names')}"
+        for n in seen)
+
+
 def mds_active_pod(k8s, active, sts_name=None, namespace=None):
     """``(pod, node)`` behind the record's active instance, or ``(None, None)``.
 
