@@ -358,7 +358,17 @@ class _MdsBase(_PnfsBase):
     # ── exports ──────────────────────────────────────────────────────────
 
     def exports_ready(self):
-        """``(ready, total)`` over every NFSExport in the namespace."""
+        """``(ready, total)`` over every NFSExport in the namespace.
+
+        ``MDSReady`` counts as well as ``Ready``, because an export is
+        reachable only if a metadata server is actually serving it and
+        those are separate conditions. Run 45960047836 read "the export
+        after the node outage: 1/1 Ready" at 08:06:51 on an export that
+        had carried ``MDSReadyFalse`` -- "no session with the metadata
+        server" -- since 08:06:27 and did not get ``MDSReadyTrue`` back
+        until 08:09:38. The client was taking EIO throughout, which is
+        precisely what this call claimed to have ruled out.
+        """
         items = nfsexport_status(self.k8s_utils, namespace=self.mds_ns) or []
         ready = 0
         for it in items:
@@ -366,7 +376,11 @@ class _MdsBase(_PnfsBase):
             phase = st.get("phase") or st.get("state") or ""
             conds = {c.get("type"): c.get("status")
                      for c in (st.get("conditions") or [])}
-            if phase == "Ready" or conds.get("Ready") == "True":
+            served = conds.get("MDSReady")
+            if served == "False":
+                continue
+            if phase == "Ready" or conds.get("Ready") == "True" \
+                    or served == "True":
                 ready += 1
         return ready, len(items)
 

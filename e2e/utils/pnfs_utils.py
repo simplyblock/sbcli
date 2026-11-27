@@ -738,6 +738,32 @@ def mds_active_pod(k8s, active, sts_name=None, namespace=None):
     return None, None
 
 
+def mds_promotion_events(k8s, namespace=None, epoch=None):
+    """``(promoted, fence_failed)`` event notes, newest last.
+
+    Read with their notes, not just their reasons, because the note is
+    where the product states what actually happened -- the duration on
+    ``MDSPromoted`` and, on ``MDSFenceFailed``, which device the promotion
+    could not take. Filtered to *epoch* when given, since a case drives
+    several takeovers and only one of them is the one being judged.
+    """
+    ns = namespace or k8s.namespace
+    out, _err = k8s._exec_kubectl(
+        f"kubectl get events -n {ns} "
+        f"-o jsonpath='{{range .items[*]}}{{.reason}}|{{.message}}{{\"\\n\"}}"
+        f"{{end}}' 2>/dev/null || true", supress_logs=True)
+    promoted, failed = [], []
+    for line in (out or "").splitlines():
+        reason, _, note = line.strip().strip("'").partition("|")
+        if epoch is not None and f"epoch {epoch}" not in note:
+            continue
+        if reason == EVENT_MDS_PROMOTED:
+            promoted.append(note)
+        elif reason == EVENT_MDS_FENCE_FAILED:
+            failed.append(note)
+    return promoted, failed
+
+
 def wait_mds_promotion(k8s, sts_name, from_epoch, timeout=300,
                        namespace=None, poll=5):
     """Wait for the epoch to advance past *from_epoch*.
@@ -748,18 +774,63 @@ def wait_mds_promotion(k8s, sts_name, from_epoch, timeout=300,
     ``(active, epoch, seconds)``, and raises on timeout rather than
     returning a sentinel, because every caller treats "no promotion" as
     the finding.
+
+    **The epoch alone does not mean the takeover finished.** The record is
+    written when the promotion is *attempted*, and the product's own
+    ``MDSPromoted`` event is what says it completed. Run 45960047836::
+
+        08:06:50  record reads epoch=2        <- what this used to return
+        08:06:48  MDSFenceFailed  "the promotion of ...-1 at epoch 2
+                  mounted nothing: register /dev/nvme1n1: reservation
+                  status 0x2"                 (retried through 08:08:15)
+        08:09:36  mds-agent  "promoted at epoch 2 with key 1ad960900000002"
+        08:09:39  MDSPromoted  "...-1 is the active at epoch 2, cause
+                  Lost, after 2m51.153s"
+
+    Returning at the first line reported a 15.5s takeover for one the
+    product itself measured at 2m51s, and the two client EIOs at 08:06:47
+    and 08:07:49 fell in the part that went unmeasured. So once the epoch
+    moves, wait for the event that names it, and keep the fence failures
+    to report -- they are the reason the window was that long.
     """
     import time as _time
     started = _time.time()
     deadline = started + timeout
     last = (None, from_epoch)
+    moved_at = None
     while _time.time() < deadline:
         sts = mds_statefulset(k8s, namespace)
         active, epoch = mds_record(sts)
         last = (active, epoch)
         if epoch > from_epoch:
-            return active, epoch, round(_time.time() - started, 1)
+            if moved_at is None:
+                moved_at = _time.time()
+            promoted, failed = mds_promotion_events(k8s, namespace, epoch)
+            if promoted:
+                took = round(_time.time() - started, 1)
+                if failed:
+                    k8s.logger.warning(
+                        "[mds] the promotion to epoch %s was refused the "
+                        "state volume %d time(s) before it completed, and "
+                        "the record read epoch %s for %.1fs of that: %s",
+                        epoch, len(failed), epoch,
+                        round(_time.time() - moved_at, 1), failed[-1][:200])
+                k8s.logger.info(
+                    "[mds] epoch %s completed; the operator reports: %s",
+                    epoch, promoted[-1][:200])
+                return active, epoch, took
         _time.sleep(poll)
+    if moved_at is not None:
+        _promoted, failed = mds_promotion_events(k8s, namespace, last[1])
+        raise PnfsEvidenceError(
+            f"the record advanced to epoch {last[1]} "
+            f"{round(_time.time() - moved_at, 1)}s ago and no "
+            f"{EVENT_MDS_PROMOTED} event says that promotion ever "
+            f"completed, so nothing is serving at the epoch the record "
+            f"advertises."
+            + (f" The operator reports the promotion mounted nothing: "
+               f"{failed[-1][:300]}" if failed else
+               " The operator has said nothing about why."))
     raise PnfsEvidenceError(
         f"the metadata server did not promote within {timeout}s: the "
         f"record still reads active={last[0]!r} epoch={last[1]}, which is "
