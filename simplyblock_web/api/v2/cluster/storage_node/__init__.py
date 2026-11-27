@@ -70,6 +70,9 @@ class StorageNodeParams(BaseModel):
     spdk_sys_mem: str | None = None
     failure_domain: int | None = None
     site: str | None = None
+    #: The worker's routable address, for a node the leading control plane
+    #: cannot reach by name (the other site of a stretched control plane).
+    node_ip: str | None = None
     expand: bool = False
     force_format: bool = False
     # The networks the SPDK pod attaches to. With any, the pod leaves the host network.
@@ -127,6 +130,7 @@ def add(request: Request, cluster: Cluster, parameters: StorageNodeParams, respo
             "force_format": parameters.force_format,
             **({"networks": [network.model_dump(exclude_defaults=True) for network in parameters.networks]} if parameters.networks else {}),
             **({"pod_network": True} if parameters.pod_network else {}),
+            **({"node_ip": parameters.node_ip} if parameters.node_ip else {}),
         }
     )
     if not task_id_or_false:
@@ -322,6 +326,11 @@ class _RestartParams(BaseModel):
     reattach_volume: bool = False
     node_address: str | None = None
     new_ssd_pcie: builtins.list[str] = []
+    # The images to start the node on. Unset or empty keeps the images the node
+    # was last started with. The control plane stores what it starts a node
+    # with, so a later restart of its own keeps them as well.
+    spdk_image: str | None = None
+    spdk_proxy_image: str | None = None
 
 
 @instance_api.post('/start', name='clusters:storage-nodes:start', status_code=202, responses={202: {"content": None}})  # Same as restart for now
@@ -335,6 +344,8 @@ def restart(cluster: Cluster, storage_node: StorageNode, parameters: _RestartPar
             "node_address": parameters.node_address,
             "reattach_volume": parameters.reattach_volume,
             "new_ssd_pcie": parameters.new_ssd_pcie,
+            "spdk_image": parameters.spdk_image or None,
+            "spdk_proxy_image": parameters.spdk_proxy_image or None,
         }
     ).start()
 

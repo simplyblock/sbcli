@@ -546,7 +546,8 @@ class TestLvolInheritsDhchapFromPool:
     def test_lvol_allowed_hosts_set_from_pool(self, db, cluster):
         """When pool.dhchap=True, add_lvol_ha populates lvol.allowed_hosts from pool."""
         node = _write_node(db)
-        secondary = _write_node(db, uuid="node-dhchap-2", devices=0)
+        # One data device: every online primary member needs >= 1 (floors).
+        secondary = _write_node(db, uuid="node-dhchap-2", devices=1)
         node.secondary_node_id = secondary.get_id()
         node.write_to_db(db.kv_store)
         pool = _write_pool(db, hosts=[HOST_A, HOST_B])

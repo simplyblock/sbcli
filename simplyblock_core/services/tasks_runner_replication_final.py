@@ -37,7 +37,11 @@ from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol, LVolReplication
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.rpc_client import RPCConnectionError, RPCRemoteError
+from simplyblock_core.rpc_client import (
+    RPCConnectionError,
+    RPCRemoteError,
+    transfer_base_unreachable,
+)
 from simplyblock_core.services import replication_final_step
 from simplyblock_core.services.task_runner_base import (
     RunnerSpec,
@@ -598,6 +602,7 @@ def _acquire_lvs_claim(task, lvol, tasks):
     extra = {} if params.get("endgame_started_at") else {"endgame_started_at": time.time()}
     task = _record(task, cutover_lvs=lvs_name, cutover_group=own_group,
                    cutover_cluster=cluster_id, cutover_claimed_at=time.time(), **extra)
+    task = drop_params(task, *_ENDGAME_QUEUE_PARAMS) or task
     return _confirm_cluster_endgame_slot(task, own_group, cluster_id)
 
 
@@ -641,12 +646,84 @@ def _cluster_endgame_slots_taken(task, tasks, own_group, cluster_id):
              if t.get_id() != task.get_id()}
     if own_group and own_group in units:
         return ""
+    now = time.time()
     if len(units) < limit:
-        return ""
-    _record(task, shrink_deadline=(
-        int(time.time()) + constants.REPL_CUTOVER_SHRINK_TIMEOUT_SEC))
+        # A free slot goes to whoever has waited longest (see
+        # REPL_ENDGAME_QUEUE_FRESH_SEC), not to whichever pass comes first:
+        # otherwise a volume that cannot converge takes the slot again right
+        # after each back-off, ahead of every volume queued behind it.
+        ahead = _queued_ahead(task, tasks, own_group, cluster_id, now)
+        if not ahead:
+            return ""
+        _mark_endgame_queued(task, cluster_id, now)
+        return (f"queued for an endgame slot of source cluster {cluster_id}: "
+                f"{len(ahead)} volume(s) queued earlier")
+    _mark_endgame_queued(task, cluster_id, now)
     return (f"queued for an endgame slot of source cluster {cluster_id}: "
             f"{len(units)} of {limit} in use")
+
+
+_ENDGAME_QUEUE_PARAMS = ("endgame_queued_at", "endgame_queue_seen", "endgame_queue_cluster")
+
+
+def _mark_endgame_queued(task, cluster_id, now):
+    """Record that *task* waits for an endgame slot of *cluster_id*: since
+    when (kept across passes) and that it still does (renewed every pass)."""
+    params = task.function_params or {}
+    queued_at = params.get("endgame_queued_at")
+    if params.get("endgame_queue_cluster") != cluster_id:
+        queued_at = None
+    _record(task, shrink_deadline=int(now) + constants.REPL_CUTOVER_SHRINK_TIMEOUT_SEC,
+            endgame_queued_at=queued_at or now, endgame_queue_seen=now,
+            endgame_queue_cluster=cluster_id)
+
+
+def _queued_ahead(task, tasks, own_group, cluster_id, now):
+    """The other volumes still waiting for an endgame slot of *cluster_id* that
+    started waiting before *task* (a consistency-group sibling is not ahead:
+    the group cuts over as one)."""
+    params = task.function_params or {}
+    own_key = (float(params.get("endgame_queued_at") or now)
+               if params.get("endgame_queue_cluster") == cluster_id else now, task.get_id())
+    ahead = []
+    for t in tasks or ():
+        if t.get_id() == task.get_id() or t.function_name != JobSchedule.FN_REPLICATION_FINAL:
+            continue
+        if t.status == JobSchedule.STATUS_DONE or t.canceled:
+            continue
+        p = t.function_params or {}
+        if p.get("cutover_lvs") or p.get("endgame_queue_cluster") != cluster_id:
+            continue
+        if own_group and p.get("cutover_group") == own_group:
+            continue
+        if now - float(p.get("endgame_queue_seen") or 0) > constants.REPL_ENDGAME_QUEUE_FRESH_SEC:
+            continue
+        if (float(p.get("endgame_queued_at") or now), t.get_id()) < own_key:
+            ahead.append(t)
+    return ahead
+
+
+def _endgame_waiters(task, cluster_id, now=None):
+    """How many other volumes are waiting for an endgame slot of *cluster_id*
+    right now; 0 when the task table cannot be read."""
+    now = time.time() if now is None else now
+    try:
+        fresh = db.get_job_tasks(task.cluster_id)
+    except Exception as e:                                # noqa: BLE001
+        logger.warning("cannot read the tasks of cluster %s: %s", task.cluster_id, e)
+        return 0
+    n = 0
+    for t in fresh:
+        if t.get_id() == task.get_id() or t.function_name != JobSchedule.FN_REPLICATION_FINAL:
+            continue
+        if t.status == JobSchedule.STATUS_DONE or t.canceled:
+            continue
+        p = t.function_params or {}
+        if p.get("cutover_lvs") or p.get("endgame_queue_cluster") != cluster_id:
+            continue
+        if now - float(p.get("endgame_queue_seen") or 0) <= constants.REPL_ENDGAME_QUEUE_FRESH_SEC:
+            n += 1
+    return n
 
 
 def _confirm_cluster_endgame_slot(task, own_group, cluster_id):
@@ -1735,13 +1812,28 @@ def _submit_direct_round(task, lvol):
                     rnd, why or f"base {base.get_id()} has no blob id")
     read_class = (constants.QOS_REPLICATION_WIRE_CLASS
                   if snapshot_replication._replication_class_on(snap.cluster_id) else 0)
+    xfer = dict(name=snap.snap_bdev, offset=0,
+                batch_size=constants.REPL_XFER_PARTIAL_BATCH, bdev_name=hub_bdev,
+                operation="replicate", lvol_id=params["tgt_map_id"],
+                priority_class=read_class, dest_clone=True)
     try:
-        src_rpc.bdev_lvol_transfer(
-            name=snap.snap_bdev, offset=0,
-            batch_size=constants.REPL_XFER_PARTIAL_BATCH, bdev_name=hub_bdev,
-            operation="replicate", lvol_id=params["tgt_map_id"],
-            allow_partial=bool(partial_base), partial_base=partial_base,
-            priority_class=read_class, dest_clone=True)
+        try:
+            src_rpc.bdev_lvol_transfer(allow_partial=bool(partial_base),
+                                       partial_base=partial_base, **xfer)
+        except RPCRemoteError as e:
+            if not (partial_base and transfer_base_unreachable(e)):
+                raise
+            # simplyblock/spdk#108: the round's base is not reachable from its
+            # snapshot through snapshots open on the source; SPDK sent nothing.
+            # The same delta would be refused on every resubmit: send the
+            # round in whole clusters now.
+            logger.warning("cutover for lvol %s: SPDK refused round %s's delta against "
+                           "base %#x (not reachable through open snapshots: %s); "
+                           "sending it in whole clusters", lvol.get_id(), rnd,
+                           partial_base, e)
+            snapshot_replication._full_send_event(lvol, f"cutover round {rnd}", partial_base, e)
+            partial_base = 0
+            src_rpc.bdev_lvol_transfer(allow_partial=False, partial_base=0, **xfer)
     except RPCRemoteError as e:
         if "decode" in str(e):
             return None, _direct_unsupported(task, lvol, snap, e)
@@ -2154,7 +2246,17 @@ def _shrink_step(task, lvol, tasks=()):
                 return
             # A residual that takes longer than this to copy fails the final
             # step at SPDK's terminate timeout, after the source was fenced.
-            # Keep converging; shrink_deadline bounds it.
+            # Keep converging while nobody waits; shrink_deadline bounds it.
+            # With volumes queued for the cluster's endgame slot, give it up
+            # now rather than at the deadline: past the round cap more rounds
+            # rarely converge, and holding the slot stops every other cutover
+            # of the cluster (bf36 R8a: one volume held it most of 150 min).
+            waiting = _endgame_waiters(task, params.get("cutover_cluster") or task.cluster_id)
+            if waiting:
+                _abandon_endgame(task, lvol, (
+                    f"did not converge in {params['shrink_round']} rounds (last round "
+                    f"{elapsed:.2f}s > {constants.REPL_CUTOVER_FREEZE_MAX_ROUND_SEC:.1f}s safe); "
+                    f"yielding the endgame slot to {waiting} queued volume(s)"))
             logger.warning(
                 "cutover convergence: lvol=%s did not converge in %d rounds "
                 "(last round %.2fs > %.1fs safe for the %ds final step); not "
@@ -2286,7 +2388,8 @@ def _abandon_endgame(task, lvol, reason) -> NoReturn:
     xfer_timing.stamp("endgame_abandoned", lvol=lvol.get_id(),
                       round=task.function_params.get("shrink_round"))
     task = _discard_spare_landing(task) or task
-    drop_params(task, *_ENDGAME_ROUND_PARAMS)
+    # back of the queue after the back-off: a fresh wait mark (_mark_endgame_queued)
+    drop_params(task, *_ENDGAME_ROUND_PARAMS, *_ENDGAME_QUEUE_PARAMS)
     _release_lvs_claim(task)
     raise TaskRetry(reason)
 

@@ -103,6 +103,55 @@ def _wait_for_node_sync_delete(node, timeout=None, poll=0.5):
     return True
 
 
+# The error a snapshot create returns while the volume's newest snapshot is
+# still being deleted; callers that retry on their own match on it.
+SNAPSHOT_DELETE_PENDING = "the volume's newest snapshot is still being deleted"
+
+
+def parent_snapshot_delete_in_flight(lvol_id):
+    """The snapshots of *lvol_id* whose delete must finish before a new snapshot
+    of the volume is taken: its newest snapshot (the volume's parent in the blob
+    tree), when that one is in deletion.
+
+    A snapshot delete has two phases. The leader's async delete marks the
+    snapshot pending removal and re-parents the volume (its clone) to the
+    snapshot below; the snapshot monitor sends the peers their sync deletes only
+    once that async pass has completed, seconds to minutes later. A snapshot of
+    the volume taken in between registers on the peers while they still list the
+    volume under the snapshot being deleted, and moves it to the new snapshot
+    there. The peer's later sync delete then re-parented the volume a second time
+    and left it listed under two parents (bf28, 2026-11-19, LVS_1: replication
+    deleted SNAP_615 of LVOL_33 at 14:12:57, took SNAP_619 of it at 14:13:41, and
+    the peers' sync deletes ran at 14:14:43; spdk #96). The node-level
+    sync-delete gate does not cover this: it is set only when a peer was down at
+    delete time.
+
+    Only the newest snapshot matters: an older snapshot's clone is the snapshot
+    above it, which a new snapshot of the volume does not touch. Retention and
+    chain collapse delete older replication snapshots all the time, so waiting
+    on those would only slow replication down."""
+    # list(): the query returns an iterator, which is truthy even when empty
+    snaps = list(db_controller.get_snapshots_by_lvol_id(lvol_id))
+    if not snaps:
+        return []
+    newest = max(int(s.created_at or 0) for s in snaps)
+    return [s for s in snaps
+            if int(s.created_at or 0) == newest and s.status == SnapShot.STATUS_IN_DELETION]
+
+
+def _wait_for_parent_snapshot_delete(lvol_id, timeout, poll=0.5):
+    """Wait up to *timeout* seconds for :func:`parent_snapshot_delete_in_flight`
+    to clear; return what is still in flight (empty once clear). With timeout 0
+    it only looks: a caller that itself runs the snapshot monitor's delete pass
+    must not wait for it."""
+    deadline = time.time() + max(0.0, timeout)
+    while True:
+        pending = parent_snapshot_delete_in_flight(lvol_id)
+        if not pending or time.time() >= deadline:
+            return pending
+        time.sleep(poll)
+
+
 def _new_lvstore_lock_owner():
     """Unique owner id for one critical section: host + pid + thread + nonce, so
     a stale lock is never mistaken for a live holder's and an owner-scoped
@@ -764,7 +813,14 @@ def reap_snapshot_intents(cluster_id, now_ts=None, max_age=None):
 
 
 def add(lvol_id, snapshot_name, lock=True, all_snaps=None, all_lvols=None,
-        bypass_migration_check=False, snap_type=SnapShot.TYPE_USER, replicate=True):
+        bypass_migration_check=False, snap_type=SnapShot.TYPE_USER, replicate=True,
+        delete_wait=None):
+    """Take a snapshot of a volume.
+
+    ``delete_wait`` bounds how long the create waits for the volume's newest
+    snapshot to finish deleting (see parent_snapshot_delete_in_flight). None
+    shares the node sync-delete gate's budget (LVOL_SYNC_DELETE_WAIT_SEC); the
+    snapshot monitor passes 0, because it runs those deletes itself."""
     try:
         lvol = db_controller.get_lvol_by_id(lvol_id)
     except KeyError:
@@ -838,9 +894,23 @@ def add(lvol_id, snapshot_name, lock=True, all_snaps=None, all_lvols=None,
 
     snode = db_controller.get_storage_node_by_id(lvol.node_id)
 
-    if lock and not _wait_for_node_sync_delete(snode):
+    # One budget for both waits, so the API timeout budget (constants.py) holds.
+    wait_deadline = time.time() + (constants.LVOL_SYNC_DELETE_WAIT_SEC
+                                   if delete_wait is None else delete_wait)
+    if lock and not _wait_for_node_sync_delete(
+            snode, timeout=max(0.0, wait_deadline - time.time())):
         msg = f"Timed out waiting for in-flight LVol sync deletion to drain on node: {snode.get_id()}"
         logger.error(msg)
+        return False, msg
+
+    # Not tied to ``lock``: the one caller without it (clone_lvol) holds no
+    # lock either, and the deletes waited for take only the snapshot's own lock.
+    pending = _wait_for_parent_snapshot_delete(
+        lvol.get_id(), max(0.0, wait_deadline - time.time()))
+    if pending:
+        msg = (f"{SNAPSHOT_DELETE_PENDING}: {', '.join(s.snap_bdev or s.get_id() for s in pending)} "
+               f"of {lvol.get_id()}; retry once its delete has finished on every member")
+        logger.warning(msg)
         return False, msg
 
     # Hard per-lvstore object cap (lvols + clones + snapshots).

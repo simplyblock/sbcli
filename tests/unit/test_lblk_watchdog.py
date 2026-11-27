@@ -217,6 +217,64 @@ class TestDevicePresence(WatchdogBase):
         node.client.assert_not_called()
 
 
+def _ma_dev(serving="", fenced=(), node_id="node-1"):
+    d = _aio_dev()
+    d.multi_attach = True
+    d.node_id = node_id
+    d.serving_node_id = serving
+    d.fenced_node_ids = list(fenced)
+    return d
+
+
+class TestMultiAttachNotLocal(WatchdogBase):
+    """2026-11-19 FTT1 bed: a multi-attach device whose LUN another node
+    serves (or whose owner is fenced from it) is not the owner's to sweep:
+    the fence detached the LUN from the owner's host, and a hot-removal
+    verdict turned into device_remove and a cluster suspension."""
+
+    def _absent(self, dev):
+        node = _node([dev])
+        client = MagicMock()
+        client.get_blockdevices.return_value = ([{"name": "sdz", "serial": "ZZ"}], None)
+        node.client.return_value = client
+        return node
+
+    def test_served_elsewhere_never_reported_absent(self):
+        dev = _ma_dev(serving="node-2")
+        node = self._absent(dev)
+        for _ in range(constants.AIO_DEVICE_ABSENT_POLLS + 2):
+            self.assertEqual(_check_aio_device_presence(node), [])
+
+    def test_fenced_owner_never_reported_absent(self):
+        dev = _ma_dev(fenced=["node-1"])
+        node = self._absent(dev)
+        for _ in range(constants.AIO_DEVICE_ABSENT_POLLS + 2):
+            self.assertEqual(_check_aio_device_presence(node), [])
+
+    def test_served_here_still_swept(self):
+        dev = _ma_dev()
+        node = self._absent(dev)
+        for _ in range(constants.AIO_DEVICE_ABSENT_POLLS - 1):
+            self.assertEqual(_check_aio_device_presence(node), [])
+        self.assertEqual(_check_aio_device_presence(node), [dev])
+
+    def test_served_elsewhere_never_stalls(self):
+        dev = _ma_dev(serving="node-2")
+        node = _node([dev])
+        rpc = _rpc_with_stats({dev.nvme_bdev: _stat(100, 5)})
+        for _ in range(constants.AIO_HUNG_IO_STALL_POLLS + 2):
+            self.assertEqual(_check_aio_hung_io(node, rpc), [])
+        rpc.get_lvol_stats.assert_not_called()
+
+    def test_repair_not_due_when_served_elsewhere(self):
+        from simplyblock_core.controllers import device_controller
+        dev = _ma_dev(serving="node-2")
+        dev.status = NVMeDevice.STATUS_UNAVAILABLE
+        self.assertFalse(device_controller.device_repair_due(dev))
+        dev.serving_node_id = ""
+        self.assertTrue(device_controller.device_repair_due(dev))
+
+
 class TestSweepActions(WatchdogBase):
 
     def _sweep(self, node, stalled=None, gone=None):

@@ -9,12 +9,16 @@ from simplyblock_core import (
     cluster_ops,
     constants,
     db_controller,
+    floors,
+    multi_attach,
     storage_network,
     storage_node_ops,
     utils,
 )
 from simplyblock_core.controllers import (
     activation_gate,
+    cluster_events,
+    control_plane_controller,
     device_controller,
     health_controller,
     port_release_budget,
@@ -657,14 +661,65 @@ def _count_status(cluster, snodes, jm_repl_by_node, dp_quorum_by_node, cluster_t
                                    online_nodes, online_devices, jm_replication_tasks)
 
 
+# cluster id -> the floor violations last reported for it (the event and the
+# warning are emitted when the set changes, not on every 3s tick).
+_floor_violations_reported: dict = {}
+
+
+def _apply_floors(cluster, snodes, status):
+    """DEGRADED, naming the floor, while the ONLINE resources are below a
+    floor (simplyblock_core.floors) and the existing rules did not already
+    SUSPEND the cluster. The suspension rules are untouched: an outage may
+    take a running cluster below the floors, nothing is suspended for that
+    alone -- the data plane keeps serving and migrating and the rebalance
+    restores the protection. The floor is recorded as a cluster event and a
+    warning whenever the set of violated floors changes."""
+    violations = floors.evaluate(cluster, snodes)
+    key = cluster.get_id()
+    previous = _floor_violations_reported.get(key)
+    if violations != previous:
+        if violations:
+            logger.warning("Cluster %s below resource floor: %s", key, "; ".join(violations))
+            try:
+                cluster_events.cluster_floor_violation(cluster, violations)
+            except Exception as e:  # noqa: BLE001 - the status verdict must not fail on an event
+                logger.debug("floor event not recorded: %s", e)
+        elif previous:
+            logger.info("Cluster %s back at or above every resource floor", key)
+            try:
+                cluster_events.cluster_floor_restored(cluster)
+            except Exception as e:  # noqa: BLE001
+                logger.debug("floor event not recorded: %s", e)
+        _floor_violations_reported[key] = violations
+    if violations and status != Cluster.STATUS_SUSPENDED:
+        return Cluster.STATUS_DEGRADED
+    return status
+
+
 def _status_verdict(cluster, snodes, affected_physical_nodes, online_nodes,
                     online_devices, jm_replication_tasks):
-    """The cluster status for one set of affected hosts."""
+    """The cluster status for one set of affected hosts: the suspension /
+    degradation rules (``_status_verdict_rules``), then the floors."""
+    status = _status_verdict_rules(cluster, snodes, affected_physical_nodes, online_nodes,
+                                   online_devices, jm_replication_tasks)
+    return _apply_floors(cluster, snodes, status)
+
+
+def _status_verdict_rules(cluster, snodes, affected_physical_nodes, online_nodes,
+                          online_devices, jm_replication_tasks):
+    """The suspension / degradation rules for one set of affected hosts."""
     affected_nodes = len(affected_physical_nodes)
     # ndcs n = 2
     # npcs k = 1
     n = cluster.distr_ndcs
     k = cluster.distr_npcs
+    if getattr(cluster, "multi_attach", False) is True:
+        # Multi-attach array LUNs run 1+0: no parity, but a lost node's LUN is
+        # taken over by a standby (controllers/lun_takeover), so the cluster
+        # survives as many lost nodes as its FTT. With k = npcs = 0 the first
+        # node loss suspended the cluster, which shut the other nodes down
+        # and with them the takeover's standby (found on the multi-attach bed).
+        k = max(k, int(getattr(cluster, "max_fault_tolerance", 0) or 1))
 
     # Failure-domain-aware suspend criteria. When the cluster was created with
     # --enable-failure-domain, chunks are spread across distinct domains, so it
@@ -1119,8 +1174,9 @@ def _spawn_recovery_shutdown(node):
     def _run():
         try:
 
+            # hand_over_luns=False: the whole cluster drains to offline.
             storage_node_ops.shutdown_storage_node(
-                node_id, force=True, keep_auto_restart=True)
+                node_id, force=True, keep_auto_restart=True, hand_over_luns=False)
         except Exception as e:
             logger.error("Suspend-recovery shutdown of %s failed: %s", node_id, e)
 
@@ -1143,10 +1199,7 @@ def _force_offline_lost_site_node(node):
     tasks_controller.cancel_pending_node_restart_tasks(node.cluster_id, node.get_id())
     storage_node_ops.set_node_status(node.get_id(), StorageNode.STATUS_OFFLINE,
                                      caused_by="sync_site_lost")
-    for dev in node.nvme_devices:
-        if dev.status in (NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY,
-                          NVMeDevice.STATUS_CANNOT_ALLOCATE):
-            device_controller.device_set_unavailable(dev.get_id())
+    _set_node_devices_unavailable(node, "site lost")
 
 
 def _drain_nodes(nodes, what, gone=None) -> bool:
@@ -1843,6 +1896,86 @@ def _take_over_leaderless_lvstores(snode):
                         lvs_name, leader.get_id(), snode.get_id(), snode.status)
 
 
+#: Device states that are lost with their node (set unavailable).
+_DEV_SERVING_STATES = (NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY,
+                       NVMeDevice.STATUS_CANNOT_ALLOCATE)
+
+#: device id -> running LUN takeover thread (multi-attach clusters).
+lun_takeover_threads: dict[str, threading.Thread] = {}
+
+
+def _lun_takeover_worker(device_id, failed_node_id, reason, started):
+    """Take over one LUN; mark the device unavailable when it was not taken
+    over (the regular node-loss behaviour). When the LUN was fenced but no
+    standby could read it, the peers keep holding I/O: the device is marked
+    unavailable only when their hold has run out."""
+    from simplyblock_core.controllers import lun_takeover
+    try:
+        outcome = lun_takeover.take_over_lun_outcome(device_id, failed_node_id, reason)
+    except Exception as e:                                  # noqa: BLE001
+        logger.error("LUN takeover of %s raised: %s", device_id, e)
+        outcome = lun_takeover.FAILED
+    if outcome in (lun_takeover.TAKEN_OVER, lun_takeover.IN_PROGRESS):
+        return
+    if outcome == lun_takeover.NO_STANDBY:
+        wait = started + constants.MULTI_ATTACH_HOLD_SEC - time.monotonic()
+        if wait > 0:
+            time.sleep(wait)
+    try:
+        dev = db.get_storage_device_by_id(device_id)
+    except KeyError:
+        return
+    if dev.serving_node() != failed_node_id or dev.status not in _DEV_SERVING_STATES:
+        return
+    logger.warning("LUN of device %s not taken over (%s); setting it unavailable",
+                   device_id, outcome)
+    device_controller.device_set_unavailable(device_id)
+
+
+def _start_lun_takeover(device_id, failed_node_id, reason):
+    existing = lun_takeover_threads.get(device_id)
+    if existing is not None and existing.is_alive():
+        logger.info("LUN takeover of %s already running", device_id)
+        return
+    t = threading.Thread(target=_lun_takeover_worker,
+                         args=(device_id, failed_node_id, reason, time.monotonic()),
+                         name=f"lun-takeover-{device_id[:8]}", daemon=True)
+    lun_takeover_threads[device_id] = t
+    t.start()
+
+
+def _set_node_devices_unavailable(node, reason):
+    """The devices lost with ``node``: set unavailable, as always.
+
+    Multi-attach clusters (only): a LUN the node served -- its own or one it
+    had taken over -- is taken over by a standby instead, each in its own
+    thread, started before anything else so the fence comes first and the
+    takeover fits in the peers' hold; a LUN of the node that another node
+    serves is not lost with it and is left alone. Only devices whose takeover
+    fails are set unavailable (by the takeover thread)."""
+    try:
+        cluster = db.get_cluster_by_id(node.cluster_id)
+    except Exception as e:                                  # noqa: BLE001
+        # Unknown cluster mode: the regular behaviour (never a takeover).
+        logger.warning("Cluster of %s not read (%s); devices set unavailable", node.get_id(), e)
+        cluster = None
+    if not multi_attach.is_multi_attach(cluster):
+        for dev in node.nvme_devices:
+            if dev.status in _DEV_SERVING_STATES:
+                # Default cause is correct: node going offline cascades
+                # to all its devices, that does not count as a flap.
+                device_controller.device_set_unavailable(dev.get_id())
+        return
+    node_id = node.get_id()
+    for _owner, dev in multi_attach.devices_served_by(
+            db.get_storage_nodes_by_cluster_id(node.cluster_id), node_id):
+        if dev.status in _DEV_SERVING_STATES:
+            _start_lun_takeover(dev.get_id(), node_id, reason)
+    for dev in node.nvme_devices:
+        if dev.status in _DEV_SERVING_STATES and not multi_attach.is_multi_attach(dev):
+            device_controller.device_set_unavailable(dev.get_id())
+
+
 #: lvstore key -> monotonic time of the last healthy-leaderless probe.
 _healthy_leaderless_checked: dict[tuple, float] = {}
 #: lvstore key -> monotonic time it was first seen leaderless with every
@@ -1946,12 +2079,9 @@ def set_node_offline(node):
                            StorageNode.STATUS_RESTARTING]:
         try:
             storage_node_ops.set_node_status(node.get_id(), StorageNode.STATUS_OFFLINE)
-            for dev in node.nvme_devices:
-                if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY,
-                                  NVMeDevice.STATUS_CANNOT_ALLOCATE]:
-                    # Default cause is correct: node going offline cascades
-                    # to all its devices, that does not count as a flap.
-                    device_controller.device_set_unavailable(dev.get_id())
+            # Multi-attach: LUN takeovers start here, before the LVS ANA
+            # failover below (they run in parallel with it).
+            _set_node_devices_unavailable(node, "node offline")
         except Exception as e:
             logger.debug("Setting node to OFFLINE state failed")
             logger.error(e)
@@ -1987,6 +2117,96 @@ def set_node_offline(node):
             logger.error("add_node_to_auto_restart for %s failed: %s", node.get_id(), ar_e)
 
 
+def _take_over_luns_of_unreachable(node):
+    """Multi-attach clusters (only): start the takeover of the LUNs a node
+    serves as soon as it is UNREACHABLE. Usually the fast probe
+    (services/lun_watchdog) has started it seconds earlier; this is its
+    backstop. The takeover fences the node at the array first; each LUN gets
+    one thread (_start_lun_takeover is idempotent across monitor cycles)."""
+    node_id = node.get_id()
+    try:
+        cluster = db.get_cluster_by_id(node.cluster_id)
+    except Exception as e:                                  # noqa: BLE001
+        logger.warning("Cluster of %s not read (%s); no LUN takeover", node_id, e)
+        return
+    if not multi_attach.is_multi_attach(cluster):
+        return
+    for _owner, dev in multi_attach.devices_served_by(
+            db.get_storage_nodes_by_cluster_id(node.cluster_id), node_id):
+        if dev.status in _DEV_SERVING_STATES:
+            _start_lun_takeover(dev.get_id(), node_id, "node unreachable")
+
+
+#: device id -> time.monotonic() the stopped-node backstop last started its
+#: takeover; it starts one at most every STOPPED_NODE_TAKEOVER_INTERVAL_SEC.
+_stopped_node_takeover_last: dict = {}
+STOPPED_NODE_TAKEOVER_INTERVAL_SEC = 60
+#: An IN_SHUTDOWN node's LUNs are left this long to its own shutdown, which
+#: hands them over right after it stops SPDK (shutdown_storage_node).
+STOPPED_NODE_IN_SHUTDOWN_GRACE_SEC = 30
+
+
+def _take_over_luns_of_stopped_node(node) -> list:
+    """Multi-attach clusters (only): backstop for a node that is OFFLINE, or
+    IN_SHUTDOWN with its SPDK stopped, and still the serving node of a LUN in
+    a serving state: start that LUN's takeover, as when the node is lost.
+
+    The node-loss takeovers run only when the monitor itself declares the
+    node lost (set_node_offline, set_node_unreachable, the LUN watchdog); a
+    node whose OFFLINE is written by anything else -- a planned shutdown
+    whose handover did not complete (its process exited, a takeover failed
+    to settle), the failed-restart cleanup of restart_storage_node -- left
+    its LUN unserved for good (2026-11-26 bed: one `sn shutdown` on a 1+0
+    cluster, LVS_2/LVS_8 leaderless, cluster suspended).
+
+    Never while a restart owns the node: RESTARTING is not acted on, nor an
+    OFFLINE / IN_SHUTDOWN node with a live restart claim (the restart may be
+    building the LUN's stack this moment). A restart that comes after the
+    takeover finds the LUN served elsewhere and comes back as a standby
+    (multi_attach.not_servable_here, lun_takeover.reintegrate_fenced_node),
+    as after a crash. A device that is already unavailable (a whole-cluster
+    stop, a takeover given up) is left alone. Idempotent: one takeover
+    thread per LUN (_start_lun_takeover) and one lease across processes
+    (lun_takeover). Returns the ids of the devices whose takeover it
+    started."""
+    if node.status not in (StorageNode.STATUS_OFFLINE, StorageNode.STATUS_IN_SHUTDOWN):
+        return []
+    node_id = node.get_id()
+    try:
+        cluster = db.get_cluster_by_id(node.cluster_id)
+    except Exception as e:                                  # noqa: BLE001
+        logger.debug("LUN backstop of %s: cluster not read: %s", node_id, e)
+        return []
+    if not multi_attach.is_multi_attach(cluster) or cluster.status == Cluster.STATUS_IN_ACTIVATION:
+        return []
+    served = [dev for _owner, dev in multi_attach.devices_served_by(
+        db.get_storage_nodes_by_cluster_id(node.cluster_id), node_id)
+        if dev.status in _DEV_SERVING_STATES]
+    if not served:
+        return []
+    holder = db_controller.restart_claim_active(node)
+    if holder:
+        logger.info("LUN backstop of %s: a restart owns the node (%s); its LUNs are left to it",
+                    node_id, holder)
+        return []
+    if node.status == StorageNode.STATUS_IN_SHUTDOWN and not (
+            _in_shutdown_longer_than(node, STOPPED_NODE_IN_SHUTDOWN_GRACE_SEC)
+            and _spdk_is_dead(node)):
+        return []
+    now = time.monotonic()
+    started = []
+    for dev in served:
+        device_id = dev.get_id()
+        if now - _stopped_node_takeover_last.get(device_id, -1e9) < STOPPED_NODE_TAKEOVER_INTERVAL_SEC:
+            continue
+        _stopped_node_takeover_last[device_id] = now
+        logger.warning("LUN %s (device %s) is still served by node %s, which is %s; taking it over",
+                       dev.lun_wwn, device_id, node_id, node.status)
+        _start_lun_takeover(device_id, node_id, f"node {node.status}, still serving the LUN")
+        started.append(device_id)
+    return started
+
+
 def set_node_unreachable(node):
     # Same rationale as set_node_offline: when the runner owns the node's
     # status transitions (IN_SHUTDOWN → OFFLINE → IN_RESTART → ONLINE), the
@@ -2000,6 +2220,11 @@ def set_node_unreachable(node):
         except Exception as e:
             logger.debug("Setting node to UNREACHABLE state failed")
             logger.error(e)
+
+    try:
+        _take_over_luns_of_unreachable(node)
+    except Exception as e:                                  # noqa: BLE001
+        logger.error("LUN takeover trigger for unreachable node %s failed: %s", node.get_id(), e)
 
     # Check data-plane health from surviving nodes.  If all online peers
     # report the unreachable node's remote JM as disconnected, the data
@@ -2253,10 +2478,7 @@ def set_node_schedulable(node):
             # initiate shutdown
             # initiate restart
             # tasks_controller.add_node_to_auto_restart(node)
-            for dev in node.nvme_devices:
-                if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY,
-                                  NVMeDevice.STATUS_CANNOT_ALLOCATE]:
-                    device_controller.device_set_unavailable(dev.get_id())
+            _set_node_devices_unavailable(node, "node schedulable")
             update_cluster_status(node.cluster_id)
         except Exception as e:
             logger.debug("Setting node to SCHEDULABLE state failed")
@@ -2283,6 +2505,60 @@ def node_rpc_timeout_check_and_report(node):
     # RPC timeout detected, send to cluster log
     storage_events.snode_rpc_timeout(node, int(time.time() - start_time))
     return False
+
+
+#: Node id -> (cluster id, monotonic time) of its last failed port check, for
+#: the correlation guard below. Cleared by a passing check.
+_port_failed_at: dict = {}
+_port_failed_lock = threading.Lock()
+#: A failed port check counts toward the correlation for this long: a few node
+#: check cycles.
+PORT_FAILURE_CORRELATION_SEC = 30.0
+_correlated_event_at: dict = {}
+
+
+def _multi_attach_cluster(cluster_id) -> bool:
+    try:
+        return multi_attach.is_multi_attach(db.get_cluster_by_id(cluster_id))
+    except Exception:                                       # noqa: BLE001
+        return False
+
+
+def _note_port_check(snode, result):
+    with _port_failed_lock:
+        if result is False:
+            _port_failed_at[snode.get_id()] = (snode.cluster_id, time.monotonic())
+        elif result is True:
+            _port_failed_at.pop(snode.get_id(), None)
+
+
+def _correlated_port_failure(cluster, snode) -> str:
+    """Multi-attach clusters (only): why a failed port check of ``snode`` must
+    not set it DOWN, or "". Nodes that pass every liveness probe and fail only
+    the port check, more of them at once than the cluster tolerates, point at a
+    device or data-path condition (one bad LUN fences every LVS of a 1+0
+    cluster), not at the nodes: setting them DOWN breaks the node floor and
+    suspends the cluster (2026-11-20 FTT2 bed). Same rule as the LUN
+    watchdog's observer guard."""
+    if not multi_attach.is_multi_attach(cluster):
+        return ""
+    now = time.monotonic()
+    cid = cluster.get_id()
+    with _port_failed_lock:
+        failing = sorted(nid for nid, (c, t) in _port_failed_at.items()
+                         if c == cid and now - t <= PORT_FAILURE_CORRELATION_SEC)
+    ftt = max(1, int(getattr(cluster, "max_fault_tolerance", 1) or 1))
+    if len(failing) <= ftt:
+        return ""
+    reason = (f"{len(failing)} nodes fail only their port check at once ({failing}), more "
+              f"than the cluster tolerates ({ftt}): a data-path condition, not node failures")
+    if now - _correlated_event_at.get(cid, 0) > 60:
+        _correlated_event_at[cid] = now
+        try:
+            storage_events.snode_port_check_correlated(snode, reason)
+        except Exception as e:                              # noqa: BLE001
+            logger.warning("Correlated port-check event not sent: %s", e)
+    return reason
 
 
 def node_port_check_fun(snode):
@@ -2341,11 +2617,19 @@ def node_port_check_fun(snode):
             port_lvs_owner[_p] = snode.get_id()
             own_port = _p
 
+        # Multi-attach (1+0): a port SPDK reports blocked is its own fence
+        # (failed IO queued, leadership change), and one bad device fences
+        # every LVS of the cluster at once. The node's own port gets the
+        # grace peer-owned ports have, so the leak remediation can act before
+        # the block counts against the node (2026-11-20 FTT2 bed: three
+        # healthy nodes set DOWN within 4 s of such a fence).
+        own_port_grace = _multi_attach_cluster(snode.cluster_id)
+
         # Batched: one nvmf_get_blocked_ports fetch answers every port, so
         # carrying the advisory ports costs no extra RPC.
         try:
             port_results = health_controller.check_ports_on_node(snode, ports)
-            if own_port is not None and port_results.get(own_port) is False:
+            if own_port is not None and port_results.get(own_port) is False and not own_port_grace:
                 _reread_blocked_own_port(snode, own_port, port_results)
             for port, ret in port_results.items():
                 if port in advisory_ports:
@@ -2354,13 +2638,14 @@ def node_port_check_fun(snode):
                         f"(advisory: peer owns this LVS and may be fencing it)")
                     continue
                 owner_id = port_lvs_owner.get(port)
-                if ret is False and owner_id and owner_id != snode.get_id():
+                if ret is False and owner_id and (owner_id != snode.get_id() or own_port_grace):
                     held = _blocked_port_age(snode, port)
                     if held < PEER_PORT_FENCE_GRACE_SEC:
+                        whose = "peer-owned" if owner_id != snode.get_id() else "own"
                         logger.info(
                             f"Check: node port {snode.mgmt_ip}, {port} ... {ret} "
-                            f"(peer-owned LVS fenced {held:.0f}s, within the "
-                            f"{PEER_PORT_FENCE_GRACE_SEC:.0f}s takeover grace; not counted)")
+                            f"({whose} LVS fenced {held:.0f}s, within the "
+                            f"{PEER_PORT_FENCE_GRACE_SEC:.0f}s fence grace; not counted)")
                         continue
                 logger.info(f"Check: node port {snode.mgmt_ip}, {port} ... {ret}")
                 node_port_check &= ret
@@ -2830,6 +3115,8 @@ def check_node(snode):
     snode = db.get_storage_node_by_id(snode.get_id())
     if snode.status == StorageNode.STATUS_ONLINE:
         storage_network.publish_ports(snode, at_most_every=PORT_PUBLISH_INTERVAL_SEC)
+        _reintegrate_fenced_luns(snode)
+        _ensure_warm_standbys(snode)
 
     # Self-heal a node stranded in IN_SHUTDOWN. A completed shutdown flips the
     # node to OFFLINE; if it is still IN_SHUTDOWN well past the grace window the
@@ -2840,6 +3127,14 @@ def check_node(snode):
     # OFFLINE once SPDK is confirmed dead so the node is restartable again.
     # auto_restart_disabled (set at shutdown) stays set, so this does NOT trigger
     # an unwanted auto-restart of an intentionally-stopped node.
+    if snode.status in (StorageNode.STATUS_OFFLINE, StorageNode.STATUS_IN_SHUTDOWN):
+        # Multi-attach: a stopped node must not stay the serving node of a LUN.
+        try:
+            _take_over_luns_of_stopped_node(snode)
+        except Exception as e:                              # noqa: BLE001
+            logger.error("LUN backstop for %s node %s failed: %s",
+                         snode.status, snode.get_id(), e)
+
     if snode.status == StorageNode.STATUS_IN_SHUTDOWN:
         if _in_shutdown_longer_than(snode, IN_SHUTDOWN_RECONCILE_GRACE_SEC) and _spdk_is_dead(snode):
             logger.warning(
@@ -3090,9 +3385,14 @@ def check_node(snode):
     else:
         node_port_check = port_check_holder["result"]
 
+    _note_port_check(snode, node_port_check)
     if node_port_check is False:
         cluster = db.get_cluster_by_id(snode.cluster_id)
         if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
+            held = _correlated_port_failure(cluster, snode)
+            if held:
+                logger.error("Port check failed on %s, node not set down: %s", snode.get_id(), held)
+                return True
             logger.error("Port check failed")
             set_node_down(snode)
             return True
@@ -3119,6 +3419,7 @@ def check_node(snode):
         )
         storage_node_ops.set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE)
         readmit_devices_after_node_online(snode.get_id())
+        _retire_taken_over_luns(snode)
         return
 
     if snode.status == StorageNode.STATUS_ONLINE:
@@ -3127,6 +3428,104 @@ def check_node(snode):
         except Exception as e:                              # noqa: BLE001
             logger.error("Leadership check of %s on %s failed: %s",
                          snode.lvstore, snode.get_id(), e)
+
+
+def _retire_taken_over_luns(snode):
+    """Multi-attach clusters (only): a node back ONLINE without a restart
+    drops what it still holds of LUNs taken over while it was unreachable
+    (lun_takeover.retire_stale_local_stack)."""
+    try:
+        if not multi_attach.is_multi_attach(db.get_cluster_by_id(snode.cluster_id)):
+            return
+        from simplyblock_core.controllers import lun_takeover
+        lun_takeover.retire_stale_local_stack(snode)
+    except Exception as e:                                  # noqa: BLE001
+        logger.error("Retiring taken-over LUN stacks on %s failed: %s", snode.get_id(), e)
+
+
+_reintegrate_last: dict = {}
+_reintegrate_threads: dict = {}
+REINTEGRATE_INTERVAL_SEC = 30
+
+
+def _reintegrate_fenced_luns(snode):
+    """Multi-attach clusters (only): an ONLINE node a takeover fenced from a
+    LUN becomes a standby of it again (lun_takeover.reintegrate_fenced_node),
+    checked at most every REINTEGRATE_INTERVAL_SEC per node."""
+    node_id = snode.get_id()
+    if not any(multi_attach.fenced_from(d, node_id)
+               for n in db.get_storage_nodes_by_cluster_id(snode.cluster_id)
+               for d in n.nvme_devices or []):
+        return
+    now = time.monotonic()
+    if now - _reintegrate_last.get(node_id, 0) < REINTEGRATE_INTERVAL_SEC:
+        return
+    t = _reintegrate_threads.get(node_id)
+    if t is not None and t.is_alive():
+        return
+    _reintegrate_last[node_id] = now
+
+    def _run():
+        try:
+            from simplyblock_core.controllers import lun_takeover
+            lun_takeover.reintegrate_fenced_node(snode)
+        except Exception as e:                              # noqa: BLE001
+            logger.error("Reintegrating fenced LUNs of %s failed: %s", node_id, e)
+    # Off the node check: its agent calls on a node that is just lost held
+    # the liveness checks 30 s (2026-11-20 FTT2 bed, hard reset of sn3).
+    t = threading.Thread(target=_run, name=f"reintegrate-{node_id[:8]}", daemon=True)
+    _reintegrate_threads[node_id] = t
+    t.start()
+
+
+_warm_standby_last: dict = {}
+_warm_standby_threads: dict = {}
+
+
+def _ensure_warm_standbys(snode):
+    """Warm-standby multi-attach clusters (only, Cluster.multi_attach_warm_standby):
+    an ONLINE node keeps a standby alceml of every LUN it is an attached
+    standby of, and closes the ones it is no longer a standby of
+    (lun_takeover.ensure_warm_standbys), at most every
+    MULTI_ATTACH_WARM_STANDBY_INTERVAL_SEC per node, in its own thread."""
+    try:
+        cluster = db.get_cluster_by_id(snode.cluster_id)
+    except Exception as e:                                  # noqa: BLE001
+        logger.debug("Warm standbys of %s: cluster not read: %s", snode.get_id(), e)
+        return
+    if not (multi_attach.is_multi_attach(cluster)
+            and getattr(cluster, "multi_attach_warm_standby", False) is True):
+        return
+    node_id = snode.get_id()
+    now = time.monotonic()
+    if now - _warm_standby_last.get(node_id, 0) < constants.MULTI_ATTACH_WARM_STANDBY_INTERVAL_SEC:
+        return
+    t = _warm_standby_threads.get(node_id)
+    if t is not None and t.is_alive():
+        return
+    _warm_standby_last[node_id] = now
+
+    def _run():
+        from simplyblock_core.controllers import lun_takeover
+        lun_takeover.ensure_warm_standbys(snode)
+    t = threading.Thread(target=_run, name=f"warm-standby-{node_id[:8]}", daemon=True)
+    _warm_standby_threads[node_id] = t
+    t.start()
+
+
+#: Device states a node's return to ONLINE does not touch. ONLINE needs
+#: nothing. REMOVED, FAILED and FAILED_AND_MIGRATED were decided by an operator
+#: or by the failure handling, not by the outage the node came back from, and
+#: have paths of their own back into the cluster (device restart, failure
+#: migration, new-device-from-failed). NEW is not part of the cluster yet: it
+#: has no place in the cluster map to be re-admitted to.
+_NOT_READMITTED = (
+    NVMeDevice.STATUS_ONLINE,
+    NVMeDevice.STATUS_REMOVED,
+    NVMeDevice.STATUS_FAILED,
+    NVMeDevice.STATUS_FAILED_AND_MIGRATED,
+    NVMeDevice.STATUS_NEW,
+)
 
 
 def readmit_devices_after_node_online(node_id):
@@ -3143,16 +3542,14 @@ def readmit_devices_after_node_online(node_id):
     device left unavailable here counts toward affected_nodes forever, and a
     later unrelated dual outage then suspends the whole cluster (incidents
     2026-07-02, x3). So: now that the node IS online (guard passes), re-admit
-    its devices. REMOVED is terminal; FAILED transitions are owned by the
-    explicit device-restart / failure-migration paths.
+    its devices -- those the outage made unavailable, not the ones in a state
+    somebody decided on (_NOT_READMITTED).
     """
     try:
         fresh = db.get_storage_node_by_id(node_id)
         readmitted = 0
         for dev in fresh.nvme_devices:
-            if dev.status in (NVMeDevice.STATUS_ONLINE,
-                              NVMeDevice.STATUS_REMOVED,
-                              NVMeDevice.STATUS_FAILED):
+            if dev.status in _NOT_READMITTED:
                 continue
             logger.info(
                 f"Re-admitting device {dev.get_id()} (was {dev.status}) "
@@ -3224,6 +3621,7 @@ def _start_housekeeping():
 def loop_for_node(snode):
     # Not catching errors: Failures should propagate to avoid cross-loop failures from sticking
     while True:
+        control_plane_controller.wait_until_services_enabled("storage-node-monitor/node")
         check_node(snode)
         logger.info(f"Sleeping for {constants.NODE_MONITOR_INTERVAL_SEC} seconds")
         time.sleep(constants.NODE_MONITOR_INTERVAL_SEC)
@@ -3259,8 +3657,12 @@ def main():
     logger.info("Starting node monitor")
     threads_maps: dict[str, threading.Thread] = {}
     _start_housekeeping()
+    # Multi-attach clusters only; idle otherwise.
+    from simplyblock_core.services import lun_watchdog
+    lun_watchdog.start(_start_lun_takeover)
 
     while True:
+        control_plane_controller.wait_until_services_enabled("storage-node-monitor")
         clusters = db.get_clusters()
         for cluster in clusters:
             cluster_id = cluster.get_id()

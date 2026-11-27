@@ -1,8 +1,8 @@
 import statistics
 import time
 
-from simplyblock_core import constants, db_controller, utils
-from simplyblock_core.controllers import device_events
+from simplyblock_core import constants, db_controller, multi_attach, utils
+from simplyblock_core.controllers import control_plane_controller, device_events
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.stats import (
     ClusterStatObject,
@@ -158,6 +158,13 @@ def add_device_stats(cl, device, capacity_dict, stats_dict, tick_rate=0):
         # size_prov and with the lvol/snapshot figures, which are effective by
         # construction. The raw numbers are kept in the *_raw fields.
         size_total_raw = int(capacity_dict['npages_nmax']*capacity_dict['pba_page_size'])
+        # alceml spans its whole block device (npages_nmax follows the backend
+        # size). After a LUN grew by more than the cluster-wide growth factor,
+        # only ``size`` of it is usable: placement fills every device in
+        # proportion to its frozen weight, so the rest is never reached.
+        backend_size, dev_size = getattr(device, "backend_size", 0), getattr(device, "size", 0)
+        if isinstance(backend_size, int) and isinstance(dev_size, int) and backend_size > dev_size > 0:
+            size_total_raw = size_total_raw * dev_size // backend_size
         size_used_raw = int(capacity_dict['npages_used']*capacity_dict['pba_page_size'])
         size_free_raw = size_total_raw - size_used_raw
 
@@ -357,6 +364,22 @@ def add_cluster_stats(cl, records):
 
 
 
+def device_stats_source(device, owner, owner_rpc, nodes_by_id):
+    """``(rpc_client, base_bdev)`` to read the capacity and I/O stats of
+    ``device`` from: its owner, or for a multi-attach device whose LUN
+    another node took over (lun_takeover), the serving node, where its
+    alceml runs now, with the base bdev the takeover recorded there. None
+    while that node is not online."""
+    if not multi_attach.served_elsewhere(device, owner.get_id()):
+        return owner_rpc, device.nvme_bdev
+    host = nodes_by_id.get(device.serving_node())
+    if host is None or host.status != StorageNode.STATUS_ONLINE:
+        return None
+    path = (device.node_paths or {}).get(host.get_id()) or {}
+    base = path.get("bdev") or utils.aio_bdev_name_for_serial(device.serial_number)
+    return host.rpc_client(timeout=5, retry=2), base
+
+
 # get DB controller
 db = db_controller.DBController()
 
@@ -364,6 +387,7 @@ db = db_controller.DBController()
 def main():
     logger.info("Starting capacity and stats collector...")
     while True:
+        control_plane_controller.wait_until_services_enabled("capacity-and-stats-collector")
         try:
             db.get_clusters()
         except Exception as e:
@@ -377,6 +401,7 @@ def main():
                 logger.error(f"Cluster has no storage nodes: {cl.get_id()}")
 
             all_lvols =  db.get_mini_lvols()
+            nodes_by_id = {n.get_id(): n for n in snodes}
             node_records = []
             cluster_device_records = []
             for node in snodes:
@@ -396,13 +421,19 @@ def main():
                     if device.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY, NVMeDevice.STATUS_CANNOT_ALLOCATE]:
                         logger.info(f"Device is skipped: {device.get_id()} status: {device.status}")
                         continue
+                    source = device_stats_source(device, node, rpc_client, nodes_by_id)
+                    if source is None:
+                        logger.info(f"Device is skipped: {device.get_id()} its serving node "
+                                    f"{device.serving_node()} is not online")
+                        continue
+                    dev_rpc, base_bdev = source
                     try:
-                        capacity_dict = rpc_client.alceml_get_capacity(device.alceml_name)
+                        capacity_dict = dev_rpc.alceml_get_capacity(device.alceml_name)
                     except Exception as e:
                         logger.error(e)
                         continue
                     try:
-                        ret = rpc_client.get_lvol_stats(device.nvme_bdev)
+                        ret = dev_rpc.get_lvol_stats(base_bdev)
                     except RPCException as e:
                         logger.error("Failed to get iostat for device %s: %s", device.get_id(), e)
                         continue

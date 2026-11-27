@@ -16,3 +16,6 @@ class MgmtNode(BaseNodeObject):
     hostname: str = ""
     mgmt_ip: str = ""
     mode: str = ""
+    # The site this management node runs in on a stretched control plane
+    # (docs/stretched-control-plane.md); "" on a cluster that is not stretched.
+    site: str = ""

@@ -272,6 +272,30 @@ class TestResolveLblkEntries(unittest.TestCase):
         names = {e["name"] for e in resolved}
         self.assertEqual(names, {"sdb", "sdc"})
 
+    def test_no_name_fallback_for_array_luns(self):
+        # Multi-attach: S1 is a LUN the node is fenced from; after a reboot
+        # its old name sdb is another disk (FTT1 bed: the journal volume).
+        host = [_blk("sdb", serial="JOURNAL"), _blk("sdc", serial="S2")]
+        resolved, missing = utils.resolve_lblk_entries(self.CONFIGURED, host,
+                                                       name_fallback=False)
+        self.assertEqual([e["serial"] for e in resolved], ["S2"])
+        self.assertEqual([e["serial"] for e in missing], ["S1"])
+
+    def test_serial_less_entry_still_falls_back_by_name(self):
+        configured = [{"name": "sdb", "serial": "", "by_id": "", "size": 100, "numa": 0}]
+        resolved, missing = utils.resolve_lblk_entries(configured, [_blk("sdb", serial="X")],
+                                                       name_fallback=False)
+        self.assertEqual((len(resolved), missing), (1, []))
+
+    def test_node_paths_turn_name_fallback_off_on_multi_attach(self):
+        from simplyblock_core import storage_node_ops
+        from tests._source import code_of
+        for fn in (storage_node_ops.add_node, storage_node_ops._restart_storage_node_impl):
+            code = code_of(fn)
+            self.assertIn("resolve_lblk_entries(", code, fn.__name__)
+            self.assertIn("name_fallback=not multi_attach.is_multi_attach(cluster)", code,
+                          fn.__name__)
+
     def test_missing_device_reported(self):
         host = [_blk("sdc", serial="S2")]
         resolved, missing = utils.resolve_lblk_entries(self.CONFIGURED, host)
@@ -355,6 +379,12 @@ class TestValidateNodeConfig(unittest.TestCase):
     def test_single_lblk_entry_rejected(self):
         node = self._node(lblk_devices=[{"name": "sdb", "serial": "S1", "size": 100}])
         self.assertFalse(utils.validate_node_config(node))
+
+    def test_single_journal_only_entry_valid(self):
+        # sn configure --lblk-journal-only: the data device is the array LUN
+        # added at add-node, which checks the minimum again with it counted.
+        node = self._node(lblk_devices=[{"name": "sdb", "serial": "S1", "size": 100, "journal": True}])
+        self.assertTrue(utils.validate_node_config(node))
 
     def test_two_journal_flags_rejected(self):
         node = self._node(lblk_devices=[

@@ -3,7 +3,7 @@ import logging
 import re
 import threading
 
-from simplyblock_core import utils
+from simplyblock_core import multi_attach, utils
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.nvme_device import NVMeDevice, RemoteDevice
 from simplyblock_core.models.storage_node import StorageNode
@@ -407,10 +407,15 @@ def get_distr_cluster_map(snodes, target_node, distr_name="", home_site=None):
             dev_w_gib = utils.convert_size(dev.weight_size(), 'GiB') or 1
             name = None
             dev_status = dev.status
-            if snode.get_id() == target_node.get_id():
-                name = dev.alceml_bdev
+            own = snode.get_id() == target_node.get_id()
+            if own:
                 local_node_index = index
+            if own and not multi_attach.is_multi_attach(dev):
+                name = dev.alceml_bdev
             else:
+                # A peer's device, or an own multi-attach device: the owner's
+                # distribs reach it through its loopback controller too, so a
+                # takeover path covers them as well.
                 dev2 = target_remote_by_id.get(dev.get_id())
                 if dev2 is not None:
                     name = dev2.remote_bdev
@@ -766,7 +771,7 @@ def send_cluster_map_add_device(device: NVMeDevice, target_node: StorageNode):
     if target_node.status == StorageNode.STATUS_ONLINE:
         rpc_client = target_node.rpc_client(timeout=3)
 
-        if target_node.get_id() == dnode.get_id():
+        if target_node.get_id() == dnode.get_id() and not multi_attach.is_multi_attach(device):
             name = device.alceml_bdev
         else:
             name = f"remote_{device.alceml_bdev}n1"

@@ -1,10 +1,15 @@
 
 import os
+import threading
 import time
 from datetime import datetime
 
 from simplyblock_core import constants, db_controller, utils
-from simplyblock_core.controllers import health_controller, mgmt_events
+from simplyblock_core.controllers import (
+    control_plane_controller,
+    health_controller,
+    mgmt_events,
+)
 from simplyblock_core.models.mgmt_node import MgmtNode
 
 logger = utils.get_logger(__name__)
@@ -100,7 +105,15 @@ def main():
 
     logger.info(f"Using backend: {backend_type}")
 
+    # The stretched control plane's lease agent runs beside the monitor on
+    # every management node (docs/stretched-control-plane.md). The monitor's
+    # own loop below is gated like every other service: only the leading site
+    # judges management nodes.
+    threading.Thread(target=control_plane_controller.lease_agent_forever,
+                     daemon=True, name="control-plane-lease-agent").start()
+
     while True:
+        control_plane_controller.wait_until_services_enabled("mgmt-node-monitor")
         try:
             db.get_clusters()
         except Exception as e:

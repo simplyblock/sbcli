@@ -393,7 +393,7 @@ def ping_host(ip):
     logger.debug(f"Pinging ip ... {ip}")
     try:
         result = subprocess.run(
-            ["sudo", "ping", "-c", "2", "-W", "2", ip],
+            ["ping", "-c", "2", "-W", "2", ip],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         up = result.returncode == 0
     except Exception as e:
@@ -796,6 +796,37 @@ def _hp_memory_for_node(small_pool_count, large_pool_count, lvol_count, cpu_coun
     return int(total * constants.HP_OVERHEAD_FACTOR) + constants.HP_RESERVE_BYTES
 
 
+HUGEPAGE_2MI_BYTES = 2 * 1024 * 1024
+
+
+def hugepages_2mi_pages(huge_page_memory) -> int:
+    """The 2 MiB huge pages a storage node needs: its huge-page memory (the
+    figure calculate_minimum_hp_memory and the max_prov floor give), rounded up
+    to whole pages and nothing more. That figure already carries its overhead
+    factor and reserve.
+
+    The host's reservation and the SPDK pod's hugepages-2Mi request are both
+    this number of pages, so they cannot drift apart: the kubelet caps a
+    container's huge pages at its request, and a page reserved beyond it is
+    taken from the node's ordinary memory without ever being used."""
+    return math.ceil(int(huge_page_memory) / HUGEPAGE_2MI_BYTES)
+
+
+def hugepages_per_numa(nodes) -> dict:
+    """2 MiB pages to reserve on each NUMA node for a host's node configs: the
+    sum of hugepages_2mi_pages over the storage nodes on it, each rounded up on
+    its own so that each SPDK pod's request fits. A node config's max_size
+    raises its figure where larger."""
+    pages: dict = {}
+    for node_config in nodes:
+        hg_memory = int(node_config["huge_page_memory"])
+        if int(node_config.get("max_size") or 0) > 0:
+            hg_memory = max(hg_memory, int(node_config["max_size"]))
+        numa = node_config["socket"]
+        pages[numa] = pages.get(numa, 0) + hugepages_2mi_pages(hg_memory)
+    return pages
+
+
 def sys_memory_for_capacity(raw_capacity_bytes) -> int:
     """System (non-hugepage) memory of the SPDK container for a node with this
     much raw device capacity: SYS_MEMORY_BASE_BYTES + SYS_MEMORY_PER_TIB_BYTES
@@ -1076,6 +1107,21 @@ def storage_mco_names(cluster_id: str) -> StorageMcoNames:
     )
 
 
+def lvstore_cluster_size(flex_geometry: bool, ndcs: int, page_size: int) -> int:
+    """The lvstore cluster size of a cluster, in bytes; also its raid0 strip.
+
+    Without flex geometry it is one full stripe of user data: a page per data
+    chunk (1+x: 2 MiB, 2+x: 4 MiB, 4+x: 8 MiB off the 2 MiB page), so a
+    one-cluster allocation writes whole stripes. With flex geometry it is
+    constants.FLEX_GEOMETRY_LVS_CLUSTER_SIZE (8 MiB) whatever the scheme.
+    ``ndcs`` 0 (unset) counts as one page.
+    """
+    from simplyblock_core import constants
+    if flex_geometry:
+        return constants.FLEX_GEOMETRY_LVS_CLUSTER_SIZE
+    return page_size * max(int(ndcs or 0), 1)
+
+
 def nearest_upper_power_of_2(n):
     # Check if n is already a power of 2
     if (n & (n - 1)) == 0:
@@ -1169,7 +1215,7 @@ def _get_active_port_reservations(cluster_id):
         for res in PortReservation().read_from_db(db_controller.kv_store, id=cluster_id):
             if res.cluster_id != cluster_id:
                 continue
-            if (now - res.created_at) > constants.PORT_RESERVATION_TTL_SEC:
+            if res.expired(now):
                 continue
             reserved.add(res.port)
     except Exception:
@@ -1656,7 +1702,7 @@ def _unsafe_live_device_reason(dev):
     return None
 
 
-def resolve_lblk_entries(configured_entries, host_devices):
+def resolve_lblk_entries(configured_entries, host_devices, *, name_fallback=True):
     """Match the node's configured lblk devices against the live host
     inventory, SERIAL-FIRST: kernel names shift across reboots, so the stored
     name is only a fallback for devices without a resolvable serial. Partition
@@ -1677,9 +1723,17 @@ def resolve_lblk_entries(configured_entries, host_devices):
     (mounted, held, or backing the root filesystem) is demoted to `missing`
     rather than returned as resolved — a fallback match by name/partuuid
     must clear the same safety bar `filter_eligible_block_devices` enforces
-    at add-node time, not just "something is attached at that name now"."""
+    at add-node time, not just "something is attached at that name now".
+
+    ``name_fallback=False`` (multi-attach clusters): an entry with a serial is
+    matched by serial or partuuid only. An array LUN keeps its identity; when
+    it is absent the node is fenced from it or it is detached, and its old
+    kernel name may now be another disk of the host: on the FTT1 bed, after a
+    hard reset of a node fenced from its LUN, the LUN's name nvme2n1 was the
+    node's journal volume, which the restart took up as a data device."""
     by_path = _index_by_selector(host_devices)
-    by_serial = {d["serial"]: d for d in host_devices}
+    # A path of a multipath map shares the map's serial; the map is the device.
+    by_serial = {d["serial"]: d for d in host_devices if not d.get("multipath_map")}
     by_name = {d["name"]: d for d in host_devices}
     by_partuuid = {d["partuuid"].lower(): d for d in host_devices
                    if d.get("partuuid")}
@@ -1699,7 +1753,7 @@ def resolve_lblk_entries(configured_entries, host_devices):
             if live is None and entry.get("partuuid"):
                 live = by_partuuid.get(entry["partuuid"].lower())
                 matched_by = "partuuid"
-            if live is None:
+            if live is None and (name_fallback or not entry.get("serial")):
                 live = by_name.get(entry.get("name"))
                 matched_by = "name"
         if live is None:
@@ -1726,13 +1780,319 @@ def resolve_lblk_entries(configured_entries, host_devices):
         }
         if path:
             resolved_entry["path"] = path
+        if live.get("wwn"):
+            # LUN identity of a multi-attach (array LUN) device.
+            resolved_entry["wwn"] = live["wwn"]
         if entry.get("type") == "part" or live.get("type") == "part":
             resolved_entry["type"] = "part"
             resolved_entry["partuuid"] = live.get("partuuid") or entry.get("partuuid", "")
         if entry.get("journal"):
             resolved_entry["journal"] = True
+        # A LUN the cluster's array plugin created (multi-attach): its
+        # identity at the array, for multi_attach.mark_lun_devices.
+        for key in ("lun_wwn", "array_lun_id"):
+            if entry.get(key):
+                resolved_entry[key] = entry[key]
+        # Block-size inputs for a new device's AIO bdev (choose_aio_block_size).
+        # An agent that predates them sends none; the chooser copes.
+        for key in ("logical_block_size", "physical_block_size", "start_bytes"):
+            if live.get(key) is not None:
+                resolved_entry[key] = live[key]
+        # The block size this device was formatted with, kept on the config
+        # entry as a second copy of NVMeDevice.aio_block_size. Only for the
+        # very same device: a different device in the same slot is new.
+        if entry.get("aio_block_size") and resolved_entry["serial"] == entry.get("serial"):
+            resolved_entry["aio_block_size"] = int(entry["aio_block_size"])
+        # I/O engine inputs: the kernel name and lsblk type (an agent that
+        # predates them sends neither; a /dev/mapper/ or /dev/dm- path still
+        # shows a device-mapper node), the engine the rule gives, and the
+        # engine recorded on the config entry for the very same device.
+        if live.get("kname"):
+            resolved_entry["kname"] = live["kname"]
+        if live.get("type"):
+            resolved_entry["dev_type"] = live["type"]
+        resolved_entry["io_engine"] = lblk_io_engine_for(resolved_entry)
+        if (entry.get("lblk_io_engine") in constants.LBLK_IO_ENGINES
+                and resolved_entry["serial"] == entry.get("serial")):
+            resolved_entry["lblk_io_engine"] = entry["lblk_io_engine"]
         resolved.append(resolved_entry)
     return resolved, missing
+
+
+def choose_aio_block_size(entry) -> int:
+    """Block size for the AIO bdev of a NEW lblk device (inventory or
+    resolved entry): AIO_DEFAULT_BLOCK_SIZE (4096) whenever the device allows
+    it, the device's logical block size otherwise. 4096 is possible when it is
+    a multiple of the logical block size, the device size is a multiple of it,
+    and, for a partition whose start is known, the start is 4096-aligned.
+
+    An agent that predates ``logical_block_size`` does not send it. 4096 is
+    still chosen then when the size allows it: every logical block size up to
+    4096 divides it, so SPDK accepts it, and addAioDevices retries a new
+    device without a block size if SPDK refuses (logical block size above
+    4096). When 4096 is not possible, 0 (SPDK picks the logical block size) is
+    returned instead of a guessed 512, which SPDK would refuse on a 4Kn
+    device. Never used for a device that already has a record: that one keeps
+    the block size it was formatted with (recorded_aio_block_size)."""
+    target = constants.AIO_DEFAULT_BLOCK_SIZE
+    try:
+        logical = int(entry.get("logical_block_size") or 0)
+    except (TypeError, ValueError):
+        logical = 0
+    fallback = max(0, logical)
+    if logical > target or (logical > 0 and target % logical):
+        return fallback
+    size = int(entry.get("size") or 0)
+    if size <= 0 or size % target:
+        return fallback
+    start = entry.get("start_bytes")
+    if start is not None and int(start) % target:
+        return fallback
+    return target
+
+
+def recorded_aio_block_size(snode, serial):
+    """The block size the AIO bdev of the device with this serial was created
+    with, from what the control plane recorded about it: its NVMeDevice
+    record, the node's journal device record, and the node's ``lblk_devices``
+    config entry (a plain dict, which a control-plane service that predates
+    NVMeDevice.aio_block_size keeps intact on a read-modify-write of the
+    node, while it drops the unknown model field).
+
+    Returns the recorded size, 0 for a device recorded before block sizes were
+    (legacy: create without a block size, as it was formatted), or None when
+    nothing is recorded: a new device, which gets choose_aio_block_size."""
+    known = False
+    sizes = []
+    devices = getattr(snode, "nvme_devices", None)
+    for dev in devices if isinstance(devices, list) else []:
+        if getattr(dev, "serial_number", None) == serial:
+            known = True
+            sizes.append(int(getattr(dev, "aio_block_size", 0) or 0))
+    jm = getattr(snode, "jm_device", None)
+    if jm is not None:
+        data = getattr(jm, "device_data_dict", None)
+        data = data if isinstance(data, dict) else {}
+        if data.get("serial_number") == serial or getattr(jm, "serial_number", None) == serial:
+            known = True
+            sizes.append(int(data.get("aio_block_size") or 0))
+            sizes.append(int(getattr(jm, "aio_block_size", 0) or 0))
+    entries = getattr(snode, "lblk_devices", None)
+    for entry in entries if isinstance(entries, list) else []:
+        if isinstance(entry, dict) and entry.get("serial") == serial:
+            sizes.append(int(entry.get("aio_block_size") or 0))
+    recorded = next((s for s in sizes if s > 0), 0)
+    if recorded:
+        conflicting = sorted({s for s in sizes if s > 0 and s != recorded})
+        if conflicting:
+            logger.warning(f"Device {serial}: conflicting recorded AIO block sizes "
+                           f"{[recorded] + conflicting}; using {recorded}")
+        return recorded
+    return 0 if known else None
+
+
+def remember_aio_block_size(snode, serial, block_size):
+    """Store the block size of a device's AIO bdev on the node's
+    ``lblk_devices`` entry, next to NVMeDevice.aio_block_size (see
+    recorded_aio_block_size). 0 (legacy) is never written."""
+    entries = getattr(snode, "lblk_devices", None)
+    if not block_size or not isinstance(entries, list):
+        return
+    for entry in entries:
+        if isinstance(entry, dict) and entry.get("serial") == serial:
+            entry["aio_block_size"] = int(block_size)
+
+
+def check_aio_block_size(name, bdev, block_size):
+    """Raise when the AIO bdev does not have the expected (non-zero) block
+    size. A bdev that reports no block size is not checked."""
+    if not block_size or not isinstance(bdev, dict):
+        return
+    actual = bdev.get("block_size")
+    if isinstance(actual, int) and actual != block_size:
+        raise Exception(f"AIO bdev {name} has block size {actual}, expected "
+                        f"{block_size}; refusing to use it as storage")
+
+
+_DM_PATH_PREFIXES = ("/dev/dm-", "/dev/mapper/")
+_DM_BY_ID_PREFIXES = ("dm-name-", "dm-uuid-")
+
+
+def _is_dm_path(path) -> bool:
+    """A device path that names a device-mapper node: /dev/dm-N,
+    /dev/mapper/<map>, or a /dev/disk/by-id/dm-name-* / dm-uuid-* link."""
+    if not isinstance(path, str) or not path:
+        return False
+    if path.startswith(_DM_PATH_PREFIXES):
+        return True
+    return (path.startswith("/dev/disk/by-id/")
+            and path.rsplit("/", 1)[-1].startswith(_DM_BY_ID_PREFIXES))
+
+
+def lblk_io_engine_for(dev) -> str:
+    """The I/O engine the rule gives a block device (inventory dict,
+    resolved entry, or a dict of paths): "uring" for a device-mapper node,
+    "aio" for everything else (see constants.LBLK_IO_ENGINE_URING).
+
+    A device-mapper node is one whose kernel name starts with "dm-" (this
+    includes a partition kpartx mapped from a multipath map), whose lsblk
+    TYPE is one of LBLK_DM_TYPES, or, for an agent that predates ``kname``
+    and the type, whose path is /dev/dm-*, /dev/mapper/* or a by-id
+    dm-name-* / dm-uuid-* link. Whole disks, sd*/nvme* partitions and md
+    arrays stay on aio: md honours RWF_NOWAIT (EAGAIN is retried by SPDK)."""
+    if not isinstance(dev, dict):
+        return constants.LBLK_IO_ENGINE_AIO
+    for key in ("kname", "name"):
+        if str(dev.get(key) or "").startswith("dm-"):
+            return constants.LBLK_IO_ENGINE_URING
+    for key in ("dev_type", "type"):
+        if dev.get(key) in constants.LBLK_DM_TYPES:
+            return constants.LBLK_IO_ENGINE_URING
+    for key in ("path", "filename", "device_path", "current_path", "by_id", "by_id_path"):
+        if _is_dm_path(dev.get(key)):
+            return constants.LBLK_IO_ENGINE_URING
+    return constants.LBLK_IO_ENGINE_AIO
+
+
+def recorded_lblk_io_engine(snode, serial):
+    """The I/O engine recorded for the device with this serial: its
+    NVMeDevice record, the node's journal device record and the node's
+    ``lblk_devices`` entry (see recorded_aio_block_size for why all three).
+    "uring" when any of them says so (a device is never moved back from
+    uring implicitly), "aio" when it is recorded otherwise, None when nothing
+    is recorded."""
+    engines = []
+    devices = getattr(snode, "nvme_devices", None)
+    for dev in devices if isinstance(devices, list) else []:
+        if getattr(dev, "serial_number", None) == serial:
+            engines.append(getattr(dev, "lblk_io_engine", None))
+    jm = getattr(snode, "jm_device", None)
+    if jm is not None:
+        data = getattr(jm, "device_data_dict", None)
+        data = data if isinstance(data, dict) else {}
+        if data.get("serial_number") == serial or getattr(jm, "serial_number", None) == serial:
+            engines.append(data.get("lblk_io_engine"))
+            engines.append(getattr(jm, "lblk_io_engine", None))
+    entries = getattr(snode, "lblk_devices", None)
+    for entry in entries if isinstance(entries, list) else []:
+        if isinstance(entry, dict) and entry.get("serial") == serial:
+            engines.append(entry.get("lblk_io_engine"))
+    engines = [e for e in engines if e in constants.LBLK_IO_ENGINES]
+    if constants.LBLK_IO_ENGINE_URING in engines:
+        return constants.LBLK_IO_ENGINE_URING
+    return constants.LBLK_IO_ENGINE_AIO if engines else None
+
+
+def choose_lblk_io_engine(recorded, derived, what="") -> str:
+    """The engine to create a device's base bdev with, from the recorded
+    engine (None: nothing recorded) and the one the rule gives now
+    (lblk_io_engine_for). The engine does not change the on-disk format, so
+    it may be re-derived; the recorded one is kept, except that the rule's
+    uring wins over a recorded aio: bdev_aio cannot serve a device-mapper
+    node at all (e.g. a device recorded before the engine existed)."""
+    if derived == constants.LBLK_IO_ENGINE_URING:
+        if recorded == constants.LBLK_IO_ENGINE_AIO:
+            logger.warning(f"{what}: recorded I/O engine is aio, but the device is a "
+                           f"device-mapper node, which bdev_aio cannot serve; using uring")
+        return constants.LBLK_IO_ENGINE_URING
+    if recorded == constants.LBLK_IO_ENGINE_URING:
+        return constants.LBLK_IO_ENGINE_URING
+    return constants.LBLK_IO_ENGINE_AIO
+
+
+def lblk_io_engine_of_device(snode, dev, live=None, filename=None) -> str:
+    """The engine for (re-)creating the base bdev of an existing lblk device
+    record ``dev``: its recorded engine (the record itself, the journal
+    record, the node's config entry), with the rule applied to the live
+    inventory dict ``live`` (if any), the ``filename`` the bdev is opened on
+    and the stored paths."""
+    serial = getattr(dev, "serial_number", None)
+    engines = [recorded_lblk_io_engine(snode, serial), getattr(dev, "lblk_io_engine", None)]
+    engines = [e for e in engines if e in constants.LBLK_IO_ENGINES]
+    recorded = None
+    if engines:
+        recorded = (constants.LBLK_IO_ENGINE_URING
+                    if constants.LBLK_IO_ENGINE_URING in engines
+                    else constants.LBLK_IO_ENGINE_AIO)
+    probe = {"device_path": getattr(dev, "device_path", "") or "",
+             "by_id_path": getattr(dev, "by_id_path", "") or ""}
+    if isinstance(live, dict):
+        probe.update(live)
+    probe["filename"] = filename or ""
+    return choose_lblk_io_engine(recorded, lblk_io_engine_for(probe),
+                                 what=f"Device {serial}")
+
+
+def remember_lblk_io_engine(snode, serial, io_engine):
+    """Store a device's I/O engine on the node's ``lblk_devices`` entry, next
+    to NVMeDevice.lblk_io_engine (see recorded_lblk_io_engine)."""
+    entries = getattr(snode, "lblk_devices", None)
+    if io_engine not in constants.LBLK_IO_ENGINES or not isinstance(entries, list):
+        return
+    for entry in entries:
+        if isinstance(entry, dict) and entry.get("serial") == serial:
+            entry["lblk_io_engine"] = io_engine
+
+
+def bdev_io_engine(bdev):
+    """The engine of a live bdev (a bdev_get result) by its driver-specific
+    info: "aio", "uring", or None when it does not say."""
+    driver = bdev.get("driver_specific") if isinstance(bdev, dict) else None
+    if isinstance(driver, dict):
+        for engine in (constants.LBLK_IO_ENGINE_URING, constants.LBLK_IO_ENGINE_AIO):
+            if engine in driver:
+                return engine
+    return None
+
+
+def _lblk_bdev_rpc(rpc_client, io_engine, op):
+    """The bdev_aio_<op> or bdev_uring_<op> method of ``rpc_client``."""
+    if io_engine == constants.LBLK_IO_ENGINE_URING:
+        return getattr(rpc_client, f"bdev_uring_{op}"), f"bdev_uring_{op}"
+    return getattr(rpc_client, f"bdev_aio_{op}"), f"bdev_aio_{op}"
+
+
+def delete_lblk_bdev(rpc_client, name, io_engine=constants.LBLK_IO_ENGINE_AIO):
+    """bdev_aio_delete or bdev_uring_delete, by the device's I/O engine."""
+    delete, _ = _lblk_bdev_rpc(rpc_client, io_engine, "delete")
+    return delete(name)
+
+
+def rescan_lblk_bdev(rpc_client, name, io_engine=constants.LBLK_IO_ENGINE_AIO):
+    """bdev_aio_rescan or bdev_uring_rescan (re-read the size of the block
+    device), by the device's I/O engine."""
+    rescan, _ = _lblk_bdev_rpc(rpc_client, io_engine, "rescan")
+    return rescan(name)
+
+
+def create_aio_bdev(rpc_client, name, filename, block_size=0, new_device=False,
+                    verify=True, io_engine=constants.LBLK_IO_ENGINE_AIO):
+    """Create the base bdev of an lblk device: bdev_aio_create, or for
+    ``io_engine`` "uring" bdev_uring_create (same arguments, same block-size
+    rules), with ``block_size`` (0: none, SPDK uses the logical block size),
+    then (``verify``) check that the bdev has that block size; a caller that
+    reads the bdev anyway passes verify=False and runs check_aio_block_size
+    itself. Returns the block size requested. Raises when the bdev cannot be
+    created or its block size differs from the one requested: building
+    alceml over a bdev of another block size would make the device's data
+    unreadable. Only for a ``new_device`` (nothing formatted on it yet) a
+    refused block size is retried without one."""
+    create, rpc_name = _lblk_bdev_rpc(rpc_client, io_engine, "create")
+    if block_size:
+        ret = create(name, filename, block_size=block_size)
+        if not ret and new_device:
+            logger.warning(f"{rpc_name} {name} ({filename}) with block size "
+                           f"{block_size} failed on {rpc_client.host}; retrying with "
+                           f"the device's logical block size")
+            block_size = 0
+            ret = create(name, filename)
+    else:
+        ret = create(name, filename)
+    if not ret:
+        raise Exception(f"{rpc_name} failed for {name} ({filename}) on {rpc_client.host}")
+    if verify:
+        check_aio_block_size(name, rpc_client.bdev_get(name), block_size)
+    return block_size
 
 
 def addAioDevices(rpc_client, snode, blk_entries):
@@ -1745,27 +2105,57 @@ def addAioDevices(rpc_client, snode, blk_entries):
     next_physical_label = snode.physical_label
     for entry in blk_entries:
         bdev_name = aio_bdev_name_for_serial(entry["serial"])
+        # A device the cluster knows is re-created with the block size it was
+        # formatted with (0: legacy, none); only a new one gets the default.
+        recorded = recorded_aio_block_size(snode, entry["serial"])
+        if recorded is None and entry.get("aio_block_size"):
+            recorded = int(entry["aio_block_size"])
+        # The I/O engine: the recorded one, unless the rule says uring (a
+        # device-mapper node, which bdev_aio cannot serve).
+        recorded_engine = recorded_lblk_io_engine(snode, entry["serial"])
+        if recorded_engine is None and entry.get("lblk_io_engine") in constants.LBLK_IO_ENGINES:
+            recorded_engine = entry["lblk_io_engine"]
+        io_engine = choose_lblk_io_engine(
+            recorded_engine, entry.get("io_engine") or lblk_io_engine_for(entry),
+            what=f"Block device {entry.get('name')} ({bdev_name})")
         ret = rpc_client.bdev_get(bdev_name)
         if not ret:
             # A path the caller selected the device by is opened as given.
             # Otherwise prefer the by-id path as the filename so a udev rename
             # between resolution and create cannot swap devices under us.
             filename = entry.get("path") or entry.get("by_id") or entry["current_path"]
-            ret = rpc_client.bdev_aio_create(bdev_name, filename)
-            if not ret:
-                raise Exception(
-                    f"bdev_aio_create failed for {bdev_name} ({filename}) "
-                    f"on {rpc_client.host}")
+            if recorded is None:
+                expected = create_aio_bdev(rpc_client, bdev_name, filename,
+                                           choose_aio_block_size(entry),
+                                           new_device=True, verify=False,
+                                           io_engine=io_engine)
+            else:
+                expected = create_aio_bdev(rpc_client, bdev_name, filename,
+                                           recorded, verify=False,
+                                           io_engine=io_engine)
+        else:
+            expected = recorded
+            # A bdev that is still there is used as it is; record its engine.
+            live_engine = bdev_io_engine(ret)
+            if live_engine and live_engine != io_engine:
+                logger.warning(f"Base bdev {bdev_name} exists as a {live_engine} bdev, "
+                               f"expected {io_engine}; using it as it is")
+                io_engine = live_engine
         rpc_client.bdev_examine(bdev_name)
         rpc_client.bdev_wait_for_examine()
 
         bdev = rpc_client.bdev_get(bdev_name)
         if not bdev:
             raise Exception(f"AIO bdev {bdev_name} not found after create on {rpc_client.host}")
+        check_aio_block_size(bdev_name, bdev, expected)
         total_size = bdev['block_size'] * bdev['num_blocks']
         if total_size == 0:
             logger.warning(f"Skipping zero-size block device {entry['name']} ({bdev_name})")
             continue
+        # A new device is formatted at the block size its bdev has now.
+        aio_block_size = int(bdev['block_size']) if recorded is None else recorded
+        remember_aio_block_size(snode, entry["serial"], aio_block_size)
+        remember_lblk_io_engine(snode, entry["serial"], io_engine)
 
         # Queue-depth sampling feeds the control-plane hung-IO watchdog
         # (AIO has no bdev_nvme-style timeout/action_on_timeout).
@@ -1787,6 +2177,8 @@ def addAioDevices(rpc_client, snode, blk_entries):
                 'nvme_bdev': bdev_name,
                 'nvme_controller': "",
                 'bdev_type': "aio",
+                'aio_block_size': aio_block_size,
+                'lblk_io_engine': io_engine,
                 'device_path': entry["current_path"],
                 'by_id_path': entry.get("path") or entry.get("by_id", ""),
                 'node_id': snode.get_id(),
@@ -2436,6 +2828,21 @@ def previous_lblk_dedicated_journal_serials(config_paths=None) -> set:
     return serials
 
 
+def lblk_journal_only_layout(lblk_entries, socket=0):
+    """``sn configure --lblk-journal-only``: the node's one selected disk or
+    partition becomes its journal, flagged, and is used whole (a disk is
+    never partitioned). The node then has no local data device: on a
+    multi-attach cluster whose array plugin creates each node's data LUN at
+    add-node, that LUN is its data device. Raises ValueError unless exactly
+    one disk or partition is selected."""
+    if len(lblk_entries) != 1:
+        raise ValueError(
+            f"--lblk-journal-only needs exactly one disk or partition for the node on socket "
+            f"{socket}; selected: {sorted(lblk_entries)}")
+    name, entry = next(iter(lblk_entries.items()))
+    return {name: dict(entry, journal=True)}
+
+
 def lblk_node_journal_layout(lblk_entries, jm_percent=3, journal_device=False,
                              keep_serials=()):
     """Give one storage node's devices their journal.
@@ -2491,7 +2898,11 @@ def lblk_node_journal_layout(lblk_entries, jm_percent=3, journal_device=False,
 
 def node_config_device_count(node) -> int:
     """Number of storage devices a node-config entry carries — ssd_pcis for
-    nvme mode, lblk_devices for lblk mode."""
+    nvme mode, lblk_devices for lblk mode. A node configured with
+    --lblk-array-only carries none: its array plugin creates its journal LUN
+    and data LUN at add-node, so it counts those two."""
+    if node.get("lblk_array_only"):
+        return 2
     return len(node.get("lblk_devices") or []) or len(node.get("ssd_pcis") or [])
 
 
@@ -2508,15 +2919,16 @@ def lblk_device_serials(lblk_devices) -> set[str]:
     return {e["serial"] for e in (lblk_devices or []) if e.get("serial")}
 
 
-def node_config_min_sys_memory(node) -> int:
+def node_config_min_sys_memory(node, extra_capacity=0) -> int:
     """Minimum system memory for a node-config entry: sys_memory_for_capacity
     of its total device capacity. lblk entries carry their sizes; nvme entries
     carry ssd_capacity, measured by generate_configs before it unbound the
     devices, since nvme-cli no longer sees them afterwards. An entry written
-    before that field existed goes through nvme-cli."""
+    before that field existed goes through nvme-cli. ``extra_capacity``
+    (lblk only): the LUNs an array plugin creates for the node at add-node."""
     lblk = node.get("lblk_devices") or []
-    if lblk:
-        capacity = sum(int(e.get("size") or 0) for e in lblk)
+    if lblk or node.get("lblk_array_only"):
+        capacity = sum(int(e.get("size") or 0) for e in lblk) + int(extra_capacity or 0)
     elif node.get("ssd_capacity"):
         capacity = int(node["ssd_capacity"])
     else:
@@ -2876,6 +3288,8 @@ def regenerate_config(new_config, old_config, force=False):
         old_config["nodes"][i]["ssd_pcis"] = new_config["nodes"][i]["ssd_pcis"]
         if new_config["nodes"][i].get("lblk_devices") is not None:
             old_config["nodes"][i]["lblk_devices"] = new_config["nodes"][i]["lblk_devices"]
+        if "lblk_array_only" in new_config["nodes"][i]:
+            old_config["nodes"][i]["lblk_array_only"] = new_config["nodes"][i]["lblk_array_only"]
         old_config["nodes"][i]["nic_ports"] = new_config["nodes"][i]["nic_ports"]
         for nic in old_config["nodes"][i]["nic_ports"]:
             if nic not in all_nics:
@@ -2937,7 +3351,14 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
     nics = detect_nics()
     lblk_mode = lblk_selection is not None
     lblk_entries: dict = {}
-    if lblk_mode:
+    array_only = bool(lblk_mode and lblk_selection.get("array_only"))
+    if array_only:
+        # sn configure --lblk-array-only: no local device at all. The array
+        # plugin creates the node's journal LUN and data LUN at add-node.
+        lblk_units: dict = {}
+        lblk_keep_serials: set = set()
+        nvmes: dict = {}
+    elif lblk_mode:
         # lblk cluster mode: eligible Linux block devices instead of NVMe
         # PCIe controllers. No driver unbind, no formatting here (--force
         # only marks partitioned disks eligible; the wipe happens at
@@ -3108,7 +3529,10 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
             node_info["number_of_distribs"] = number_of_distribs
 
             nvme_neg1_list = all_nvmes_neg1_per_node[node_index]
-            if lblk_mode:
+            if array_only:
+                node_info["lblk_devices"] = []
+                node_info["lblk_array_only"] = True
+            elif lblk_mode:
                 node_entries = {}
                 for unit in list(nvme_neg1_list) + list(nvme_per_core_group[idx]):
                     for dev_name in lblk_units[unit]:
@@ -3116,11 +3540,15 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
                         entry.pop("_pair", None)
                         node_entries[dev_name] = entry
                 try:
-                    node_entries = lblk_node_journal_layout(
-                        node_entries, jm_percent=jm_percent,
-                        journal_device=bool(lblk_selection.get("journal_device")),
-                        keep_serials=lblk_keep_serials)
-                    if node_entries and len(node_entries) < constants.LBLK_MIN_DEVICES_PER_NODE:
+                    if lblk_selection.get("journal_only"):
+                        node_entries = lblk_journal_only_layout(node_entries, nid)
+                    else:
+                        node_entries = lblk_node_journal_layout(
+                            node_entries, jm_percent=jm_percent,
+                            journal_device=bool(lblk_selection.get("journal_device")),
+                            keep_serials=lblk_keep_serials)
+                    if (node_entries and not lblk_selection.get("journal_only")
+                            and len(node_entries) < constants.LBLK_MIN_DEVICES_PER_NODE):
                         raise ValueError(
                             f"lblk mode requires at least {constants.LBLK_MIN_DEVICES_PER_NODE} "
                             f"partitions or SSDs per node; only {len(node_entries)} unit(s) "
@@ -3544,7 +3972,14 @@ def validate_node_config(node):
     # Exactly one device source: PCIe SSDs (nvme mode) or Linux block
     # devices (lblk mode). Both empty, or both populated, is a broken config.
     lblk_devices = node.get("lblk_devices") or []
-    if bool(node["ssd_pcis"]) == bool(lblk_devices):
+    if node.get("lblk_array_only"):
+        # sn configure --lblk-array-only: no local device; the array plugin
+        # creates the node's journal and data LUNs at add-node.
+        if node["ssd_pcis"] or lblk_devices:
+            logger.error(f"A node configured with --lblk-array-only carries no devices, "
+                         f"node {node.get('socket')} does")
+            return False
+    elif bool(node["ssd_pcis"]) == bool(lblk_devices):
         logger.error(
             f"Node config must carry exactly one non-empty device list of "
             f"'ssd_pcis' / 'lblk_devices' in node: {node.get('socket')}")
@@ -3566,7 +4001,11 @@ def validate_node_config(node):
                          f"'size' in node: {node.get('socket')}")
             return False
     if lblk_devices:
-        if len(lblk_devices) < constants.LBLK_MIN_DEVICES_PER_NODE:
+        # sn configure --lblk-journal-only: the node's one entry is its flagged
+        # journal disk; its data device is the array LUN added at add-node,
+        # where the minimum is checked again with that LUN counted.
+        journal_only = len(lblk_devices) == 1 and bool(lblk_devices[0].get("journal"))
+        if len(lblk_devices) < constants.LBLK_MIN_DEVICES_PER_NODE and not journal_only:
             logger.error(
                 f"lblk mode requires at least {constants.LBLK_MIN_DEVICES_PER_NODE} "
                 f"partitions or SSDs per node; node {node.get('socket')} carries "
@@ -5101,7 +5540,10 @@ def configure_kms_on_k8s(cluster):
 
 
 def calculate_hp_only(max_lvol, number_of_devices, sockets_to_use, nodes_per_socket, vcpu_count=0):
-    minimum_hp_memory = 0
+    """The 2 MiB huge pages the host needs for the storage nodes it would be
+    configured with: hugepages_2mi_pages per storage node, the same figure
+    apply_config reserves."""
+    hp_pages = 0
     cores_by_numa = get_numa_cores()
     node_cores = generate_core_allocation(cores_by_numa, sockets_to_use, nodes_per_socket, vcpu_count)
     node_index = 0
@@ -5124,11 +5566,11 @@ def calculate_hp_only(max_lvol, number_of_devices, sockets_to_use, nodes_per_soc
                                                                       number_of_poller_cores or len(
                                                                           core_group["isolated"]),
                                                                       max_lvol)
-            minimum_hp_memory += calculate_minimum_hp_memory(small_pool_count, large_pool_count, max_lvol,
-                                                            0, len(core_group["isolated"])) + 1000000000
+            hp_pages += hugepages_2mi_pages(calculate_minimum_hp_memory(
+                small_pool_count, large_pool_count, max_lvol, 0, len(core_group["isolated"])))
 
             node_index += 1
-    return convert_size(minimum_hp_memory, 'MB')
+    return hp_pages
 
 def recalculate_cores_distribution(cores, number_of_alcemls):
     distribution = calculate_core_allocations(cores, number_of_alcemls)

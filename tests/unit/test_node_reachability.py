@@ -144,3 +144,15 @@ def test_exactly_the_cap_is_allowed():
     addresses = [f"192.0.2.{i + 1}" for i in range(health_controller.MAX_REACHABILITY_ADDRESSES)]
     with patch.object(health_controller, "_check_node_ping", return_value=True):
         assert len(health_controller.address_reachability(addresses)) == len(addresses)
+
+
+def test_ping_host_runs_ping_without_sudo():
+    """The control plane pods may run as a random UID without privilege
+    escalation (OpenShift restricted-v2), where sudo fails. They allow
+    unprivileged ICMP sockets through net.ipv4.ping_group_range instead, so
+    ping_host must call ping directly."""
+    from simplyblock_core import utils
+    with patch.object(utils.subprocess, "run") as run:
+        run.return_value.returncode = 0
+        assert utils.ping_host("10.0.0.1") is True
+    assert run.call_args.args[0][0] == "ping"

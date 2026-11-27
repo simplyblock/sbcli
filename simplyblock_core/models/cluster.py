@@ -216,6 +216,66 @@ class Cluster(BaseModel):
     node_label_suffix: str = ""
     disable_monitoring: bool = False
     strict_node_anti_affinity: bool = False
+    # Cluster-create-time, immutable declaration that every data device is
+    # protected below simplyblock (hardware RAID LUN, md or dm RAID). Lowers
+    # the data-device floor from n+2k to n+k (simplyblock_core.floors) and
+    # lets the data plane place several chunks of a stripe on one device when
+    # no other device is writable (allow_device_colocation on the distribs,
+    # affinity_floor "relaxed" on migrations).
+    raid_devices: bool = False
+    # Cluster-create-time, immutable: multi-attach array LUN mode. Every data
+    # device is an array LUN presented to several storage nodes; the cluster
+    # runs 1+0 and tolerates max_fault_tolerance node failures by reopening
+    # an owner's LUN on another node and adding it as an extra NVMe-oF path.
+    # Requires raid_devices. Gates every multi-attach path (device NQN,
+    # controller-ID ranges, hold timeouts, owner loopback).
+    multi_attach: bool = False
+    # Multi-attach clusters, opt-in: keep a warm standby alceml (standby=true,
+    # page map kept warm in hugepages) of every LUN on each attached
+    # non-serving node, so a takeover activates it on the first I/O instead of
+    # loading the whole page map cold (lun_takeover.ensure_warm_standbys).
+    # Costs the page-map memory of every such LUN on each standby node.
+    multi_attach_warm_standby: bool = False
+    # Multi-attach clusters: the storage array the LUNs live on. A LUN is
+    # taken over by another node only after its serving node is fenced at the
+    # array, through the plugin named here (entry point in the group
+    # simplyblock.array_plugins, see simplyblock_core.array). Empty = no
+    # plugin: a takeover is refused (never reopen a LUN unfenced). The array
+    # is registered through controllers/array_controller (POST
+    # /clusters/{id}/arrays). Its credentials are never kept here, only a
+    # reference to them (array_credential_ref).
+    array_plugin: str = ""
+    array_endpoint: str = ""
+    array_options: dict = default_factory(dict)
+    # Id of the registered array ("" = none, or configured before arrays were
+    # registered) and whether credentials were stored for it in the KMS.
+    array_id: str = ""
+    array_has_credentials: bool = False
+    # Where the array's credentials are (simplyblock_core.credentials): a
+    # "managed" reference (wrapped by the cluster's credentials key in its
+    # KMS, bound to array id + endpoint), or an external "vault-kv" /
+    # "kmip-secret" secret. {} with array_has_credentials = an array
+    # registered before references existed: its secret is in the KMS at
+    # cluster/<id>/array/<array_id>.
+    array_credential_ref: dict = default_factory(dict)
+    # Size in bytes of the LUN created for each node added to the cluster
+    # while an array is registered; 0 = node adds create no LUN (the LUNs are
+    # presented by the operator, as in phase 2/3).
+    array_lun_size: int = 0
+    # Where each node's journal is kept when the array plugin creates the
+    # nodes' LUNs (array_lun_size > 0):
+    # - "local": a disk or partition of the node's host, named at sn configure
+    #   (--lblk-journal-only); never shared.
+    # - "lun": a LUN of its own the plugin creates at node add, next to the
+    #   data LUN, presented to that node only (never multi-attached). It is
+    #   created with array_options updated by array_journal_options (e.g.
+    #   {"pool": "fast-pool"}: a pool of higher performance or priority) and
+    #   array_journal_lun_size bytes (0 = 3% of array_lun_size, at least
+    #   2 GiB). The node's host then needs no local device
+    #   (sn configure --lblk-array-only).
+    array_journal: str = "local"
+    array_journal_lun_size: int = 0
+    array_journal_options: dict = default_factory(dict)
     tls: bool = False
     tls_config: dict = default_factory(dict)
     is_re_balancing: bool = False
@@ -385,6 +445,24 @@ class Cluster(BaseModel):
     site_activation_site: str = ""
     site_activation_since: str = ""
     site_activation_heartbeat: str = ""
+    # Stretched control plane (docs/stretched-control-plane.md): a control
+    # plane on each of the cluster's two sites over one FoundationDB, one of
+    # them leading (ControlPlaneLease). Deploy-time only, like
+    # sync_replication. Allowed with sync_replication (any n+k, two sites),
+    # or with enable_failure_domain and 1+1 (two sites) / 1+2 (three
+    # storage sites) where the failure domain of a node is its site
+    # (site_failure_domains). leader_site is then the site that should lead
+    # the control plane as well: the lease follows it, moved by an operator.
+    stretched_control_plane: bool = False
+    # site -> failure-domain id, assigned at the first add-node of a site on
+    # a stretched cluster without sync replication; never reassigned.
+    site_failure_domains: dict = default_factory(dict)
+    # site -> the API endpoint of that site's control plane
+    # ("https://host:port"), where a standby control plane sends the
+    # mutating calls it receives. Set at create / control-plane add.
+    site_api_endpoints: dict = default_factory(dict)
+    # Lease timing of the stretched control plane; 0 = the constants.
+    control_plane_lease_ttl_sec: int = 0
     # Storage-device mode for the whole cluster. "nvme" (default): NVMe PCIe
     # controllers auto-detected and attached through the SPDK nvme bdev.
     # "lblk": arbitrary Linux block devices wrapped in SPDK AIO bdevs (one
@@ -405,6 +483,9 @@ class Cluster(BaseModel):
     # sends force_4k_atomic so the data plane skips its >=4K block-size gate for
     # fallback-mode inline checksum. Frozen at cluster create time.
     atomic_4k: bool = False
+    # Flex geometry: the lvstore cluster size (and the raid0 strip under it) is
+    # a fixed 8 MiB instead of ndcs pages. Frozen at cluster create time.
+    flex_geometry: bool = False
     # Journal blobstore metadata pages so a write torn by a power loss cannot
     # leave a half-written page behind. Needed when a device is not 4K-write
     # atomic. The lvstore records it in its super block at creation, so it is
@@ -430,17 +511,18 @@ class Cluster(BaseModel):
     # migration for every create/update. Empty dict = no external KMS (LocalKMS).
     kms_settings: dict = default_factory(dict)
     hashicorp_vault_settings: HashicorpVaultSettings | None = None
+    # Explicit opt-in to keep credentials for external systems (storage
+    # arrays, ...) with no external KMS configured. LocalKMS only encodes, so
+    # such credentials would sit effectively in plaintext in FoundationDB;
+    # without this flag simplyblock_core.credentials refuses to store or read
+    # them unless a Vault or KMIP backend is configured.
+    allow_local_kms_credentials: bool = False
 
     # Single-node-expansion resumability cursor. Empty dict means no expansion
     # is in flight. Populated/advanced/cleared via the helpers in
     # ``simplyblock_core.controllers.cluster_expansion.planner``. See the feature plan
     # ``single_node_expansion_plan.md`` for the schema.
     expand_state: dict = default_factory(dict)
-    # Set while new device weights (placement sizes after an uneven growth of
-    # lblk devices) are written but not yet pushed to every node and handed to
-    # a rebalance. A re-run of `cluster grow-devices` finishes the job. See
-    # device_controller.rebalance_after_growth.
-    reweight_pending: bool = False
     # State owned by release-specific upgrade plug-ins (see
     # simplyblock_core/release_upgrades/). Keys are plugin STATE_KEYs; a key
     # is set by the plugin's pre_update step (first thing `cluster update`
@@ -461,6 +543,12 @@ class Cluster(BaseModel):
     # and it is used for gelf address in the storage nodes' containers.
     # If not defined, then gelf address will be the first mgmt node's address
     cluster_vip: str = ""
+
+    def lvs_cluster_size(self) -> int:
+        """The lvstore cluster size this cluster creates its lvstores with
+        (utils.lvstore_cluster_size); also their raid0 strip."""
+        from simplyblock_core.utils import lvstore_cluster_size
+        return lvstore_cluster_size(self.flex_geometry, self.distr_ndcs, self.page_size_in_blocks)
 
     def get_status_code(self):
         if self.status in self.STATUS_CODE_MAP:
@@ -615,15 +703,30 @@ class PortReservation(BaseModel):
     redundant after that and is reclaimed by ``created_at`` TTL
     (``PORT_RESERVATION_TTL_SEC``) — no explicit release is required, and a
     crashed add self-heals when the reservation goes stale.
+
+    ``slot`` names what the port is for, when that is something an add can be
+    retried for: the rpc port of one storage node on one host. A second
+    reservation for the same slot gets the same port back instead of the next
+    free one. The SPDK pod is named after its rpc port, so a retry that kept
+    the port replaces the pod of the attempt before it; a retry that took a new
+    port started a second pod beside it, which nothing owned and which held the
+    host's huge pages. A slot reservation therefore lives much longer
+    (``PORT_RESERVATION_SLOT_TTL_SEC``).
     """
 
     cluster_id: str = ""
     port: int = 0
     owner: str = ""
     created_at: int = 0
+    slot: str = ""
 
     def get_id(self):
         return "%s/%s" % (self.cluster_id, self.port)
+
+    def expired(self, now: int) -> bool:
+        """Whether the reservation is old enough to be treated as abandoned."""
+        ttl = constants.PORT_RESERVATION_SLOT_TTL_SEC if self.slot else constants.PORT_RESERVATION_TTL_SEC
+        return (now - self.created_at) > ttl
 
 
 class DeployConfig(BaseModel):

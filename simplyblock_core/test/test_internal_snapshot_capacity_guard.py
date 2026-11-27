@@ -61,7 +61,7 @@ def _run(monkeypatch, util):
 
     class _Delta:
         # The cadence takes its snapshots through replication_delta (#1537).
-        def add_snapshot(self, lvol, name, snap_type=SnapShot.TYPE_USER):
+        def add_snapshot(self, lvol, name, snap_type=SnapShot.TYPE_USER, delete_wait=None):
             calls.append(lvol.get_id())
             return "snap-uuid", None
     monkeypatch.setattr(sm, "db", _db(util))
@@ -103,7 +103,7 @@ def test_only_the_nodes_first_migrating_volume_takes_cadence_snapshots(monkeypat
 
     class _Delta:
         # The cadence takes its snapshots through replication_delta (#1537).
-        def add_snapshot(self, lvol, name, snap_type=SnapShot.TYPE_USER):
+        def add_snapshot(self, lvol, name, snap_type=SnapShot.TYPE_USER, delete_wait=None):
             calls.append(lvol.get_id())
             return "snap-uuid", None
     monkeypatch.setattr(sm, "db", db)

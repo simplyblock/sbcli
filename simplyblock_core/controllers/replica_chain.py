@@ -118,8 +118,15 @@ def _lvol_info(info):
 
 
 def _is_snapshot(info):
+    """Converted. SPDK's ``snapshot`` flag means "has clones": a converted
+    lvol nothing is cloned from yet reports false, and only its write
+    support going away shows the convert (probed on a live SPDK)."""
+    if isinstance(info, list):
+        info = info[0] if info else None
     lv = _lvol_info(info)
-    return bool(lv.get("is_snapshot") or lv.get("snapshot"))
+    if lv.get("is_snapshot") or lv.get("snapshot"):
+        return True
+    return bool(lv) and ((info or {}).get("supported_io_types") or {}).get("write") is False
 
 
 def _names(info):

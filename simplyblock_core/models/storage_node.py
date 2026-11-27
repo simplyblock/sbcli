@@ -1,4 +1,5 @@
 import hashlib
+import json
 import time
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, ClassVar
@@ -41,6 +42,45 @@ _HOSTNAME_DIGEST = 8
 class StorageNode(BaseNodeObject):
 
     _WATCHED = True
+
+    #: Multi-attach LUN ownership fields of a device. Only atomic_update
+    #: changes them (lun_takeover: takeover, fence, unfence; array_controller:
+    #: attachment reconcile); a full-object write keeps their stored values.
+    #: A restart's full writes from a copy loaded before an unfence restored
+    #: fenced_node_ids, and the reintegrated node stayed fenced for good
+    #: (2026-11-20 FTT2 bed, net cut + SPDK kill of the owner).
+    LUN_OWNERSHIP_FIELDS = ("serving_node_id", "served_since", "fenced_node_ids", "array_attached_node_ids")
+
+    def needs_full_write_merge(self) -> bool:
+        """Only nodes with multi-attach devices pay the stored-record read
+        (every other node's write is unchanged)."""
+        return any(getattr(d, "multi_attach", False) is True for d in self.nvme_devices or [])
+
+    @staticmethod
+    def merge_on_full_write(stored: dict, value: bytes) -> bytes:
+        """``value`` (a full-object write) with the stored LUN ownership
+        fields of every multi-attach device present in both."""
+        old = {d.get("uuid"): d for d in stored.get("nvme_devices") or []
+               if isinstance(d, dict) and d.get("multi_attach") is True}
+        if not old:
+            return value
+        new = json.loads(value)
+        kept = []
+        for d in new.get("nvme_devices") or []:
+            o = old.get(d.get("uuid")) if isinstance(d, dict) else None
+            if o is None:
+                continue
+            for f in StorageNode.LUN_OWNERSHIP_FIELDS:
+                if f in o and d.get(f) != o.get(f):
+                    kept.append(f"{d.get('uuid')}.{f}: {d.get(f)!r} -> kept {o.get(f)!r}")
+                    d[f] = o[f]
+        if not kept:
+            return value
+        from simplyblock_core import utils
+        utils.get_logger(__name__).warning(
+            "[NODE-WRITE] full-object write of %s from a stale copy: LUN ownership kept from the "
+            "stored record (%s)", new.get("uuid"), "; ".join(kept))
+        return json.dumps(new).encode()
 
     # A JM built on a whole device inherits that device's uuid
     # (storage_node_ops._create_jm_stack_on_device), so a bare device id does
@@ -85,6 +125,12 @@ class StorageNode(BaseNodeObject):
     # the node transitions to ONLINE (which only a deliberate `sn restart`
     # can achieve while auto-restart is blocked). See add_node_to_auto_restart.
     auto_restart_disabled: bool = False
+    # When the control plane last restarted this node because one of its
+    # lvstore copies kept failing registrations after a reload
+    # (controllers/lvs_member_repair). Persisted, so a restart of the monitor
+    # or the task runner cannot reset the limit of one such restart per
+    # LVS_MEMBER_AUTO_RESTART_INTERVAL_SEC.
+    lvs_member_auto_restart_at: float = 0.0
     baseboard_sn: str = ""
     cloud_instance_id: str = ""
     cloud_instance_public_ip: str = ""
@@ -230,6 +276,18 @@ class StorageNode(BaseNodeObject):
     # placement and emitted verbatim into the distrib cluster map for the data
     # plane.
     failure_domain: int = -1
+    # Multi-attach array LUN clusters only: this node's stable controller-ID
+    # block (multi_attach.cntlid_range). -1 = not assigned; claimed at
+    # add-node or lazily when a multi-attach device subsystem is created.
+    cntlid_block: int = -1
+    # Multi-attach clusters with a registered array: the array's id of this
+    # node's host (ArrayPlugin.ensure_host; the EC2 instance id on EBS). ""
+    # = not known; the fence then names the host by its hostname.
+    array_host_id: str = ""
+    # Cluster.array_journal "lun": the array's id of this node's journal LUN
+    # ("" = its journal is local). Released with the node, deleted with the
+    # cluster, like its data LUN.
+    array_journal_lun_id: str = ""
     # Sync-replication site of the node (operator-supplied at add-node).
     # Mandatory on a cluster with sync_replication, empty everywhere else.
     site: str = ""

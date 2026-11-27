@@ -84,7 +84,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from simplyblock_core import constants, db_controller, utils
-from simplyblock_core.controllers import tasks_controller
+from simplyblock_core.controllers import control_plane_controller, tasks_controller
 from simplyblock_core.models.job_schedule import JobSchedule
 
 logger = utils.get_logger(__name__)
@@ -391,6 +391,10 @@ class TaskRunner:
     def run(self) -> None:
         logger.info(f"Starting {self.spec.name}...")
         while True:
+            # A control plane that does not lead its stretched cluster runs no
+            # tasks (docs/stretched-control-plane.md); a non-stretched
+            # deployment passes straight through.
+            control_plane_controller.wait_until_services_enabled(self.spec.name)
             # DB errors are intentionally uncaught: they propagate out, exit the
             # process, and the orchestrator restarts us with a fresh FDB client.
             clusters = db.get_clusters()

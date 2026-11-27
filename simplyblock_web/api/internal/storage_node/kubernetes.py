@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import threading
 import time
 import traceback
 from typing import Annotated
@@ -33,6 +34,35 @@ from . import docker as snode_ops
 logger = logging.getLogger(__name__)
 logger.setLevel(constants.LOG_LEVEL)
 api = APIBlueprint("snode", __name__, url_prefix="/snode")
+
+# The newest spdk_process_start for each SPDK pod of this host, by (cluster, rpc
+# port). A start request can run for a long time before it creates its pod: it
+# waits for the host to converge on its MachineConfigPool, which is a reboot.
+# Its caller gives up long before that and asks again, so two requests for one
+# pod wait side by side and both reach the create. The earlier one has nobody
+# left to answer and carries credentials its caller has thrown away, so it must
+# not create the pod, and must not replace the one the later request created.
+#
+# Process-local on purpose. Only this host's agent starts this host's SPDK
+# pods, and it is one process: a second process means the agent was restarted,
+# which ended every request the first one was serving.
+_start_requests_lock = threading.Lock()
+_start_requests: dict[tuple[str, int], int] = {}
+
+
+def _claim_spdk_start(cluster_id, rpc_port) -> int:
+    """Register a start request as the newest for its pod and return its ticket."""
+    key = (str(cluster_id), int(rpc_port))
+    with _start_requests_lock:
+        ticket = _start_requests.get(key, 0) + 1
+        _start_requests[key] = ticket
+        return ticket
+
+
+def _spdk_start_superseded(cluster_id, rpc_port, ticket) -> bool:
+    """Whether a later start request for the same pod has arrived since."""
+    with _start_requests_lock:
+        return _start_requests.get((str(cluster_id), int(rpc_port))) != ticket
 
 cluster_id_file = "/etc/foundationdb/sbcli_cluster_id"
 
@@ -316,6 +346,9 @@ def get_info():
         "host_ip": os.environ.get("HOST_IP", ""),
 
         "cloud_instance": node_info["cloud_info"],
+        # SAN initiators (IQN, FC WWPNs, NVMe host NQN, SDC GUID): how a storage
+        # array knows this host (simplyblock_core.array.san).
+        "san_initiators": node_utils.get_san_initiators(),
         "nodes_config": get_nodes_config(),
     })
 
@@ -350,6 +383,22 @@ def wipe_block_device(body: _WipeBlockDeviceParams):
     return utils.get_response(True)
 
 
+class _LunInfoParams(BaseModel):
+    wwn: str
+
+
+@api.post('/lun_info', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'array',
+        'items': {'type': 'object', 'additionalProperties': True},
+    })}}},
+})
+def lun_info(body: _LunInfoParams):
+    """Multi-attach array LUN mode: the local disks carrying LUN ``wwn``, with
+    whether block 0 holds the alceml signature. Read-only."""
+    return utils.get_response(node_utils.find_lun_devices(body.wwn))
+
+
 class _RescanBlockDeviceParams(BaseModel):
     device_path: str
 
@@ -371,6 +420,22 @@ def rescan_block_device(body: _RescanBlockDeviceParams):
     try:
         return utils.get_response(node_utils.rescan_block_device(body.device_path))
     except (ValueError, OSError) as e:
+        return utils.get_response(None, str(e))
+
+
+@api.post('/scan_new_luns', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'object',
+        'properties': {'scanned': {'type': 'array', 'items': {'type': 'string'}}},
+    })}}},
+})
+def scan_new_luns():
+    """Look for LUNs / namespaces a storage array newly presented to this
+    host (SCSI host scan, NVMe namespace rescan). Existing devices are not
+    touched."""
+    try:
+        return utils.get_response(node_utils.scan_for_new_luns())
+    except OSError as e:
         return utils.get_response(None, str(e))
 
 
@@ -733,20 +798,20 @@ def _hugepage_shortfall(host_hugetlb_bytes, required_mib):
 
 
 def _hugepages_per_numa(nodes):
-    """2 MiB pages to reserve on each NUMA node for this host's node configs:
-    the sizing the init Job's apply_config has always used, so a Talos host
-    (reserved through the Talos API) and any other (written to sysfs) end up
-    with the same pool. The constants are kept as they were: a flat 1 GB of
-    headroom per node config, and pages of 2,000,000 rather than 2 MiB
-    bytes, which over-reserves by about 5 %."""
-    per_numa_bytes: dict = {}
-    for node_config in nodes:
-        hg_memory = node_config["huge_page_memory"]
-        if int(node_config["max_size"]) > 0:
-            hg_memory = max(hg_memory, node_config["max_size"])
-        numa = node_config["socket"]
-        per_numa_bytes[numa] = per_numa_bytes.get(numa, 0) + hg_memory + 1000000000
-    return {numa: mem // 2000000 for numa, mem in per_numa_bytes.items()}
+    """2 MiB pages to reserve on each NUMA node for this host's node configs
+    (core_utils.hugepages_per_numa), the sizing the init Job's apply_config
+    writes, so a Talos host (reserved through the Talos API) and any other
+    (written to sysfs) end up with the same pool. Each storage node gets
+    exactly the pages its SPDK pod requests (_spdk_hugepages_mib)."""
+    return core_utils.hugepages_per_numa(nodes)
+
+
+def _spdk_hugepages_mib(spdk_mem):
+    """The SPDK pod's hugepages-2Mi request in MiB: the storage node's pages
+    (core_utils.hugepages_2mi_pages) times 2 MiB, which is what the host
+    reserves for it. The kubelet caps the container's huge pages at this
+    request, so any page reserved beyond it would go unused."""
+    return core_utils.hugepages_2mi_pages(spdk_mem) * 2
 
 
 def _talos_sysfs_patch(pages_per_numa):
@@ -1177,10 +1242,14 @@ def spdk_process_start(body: SPDKParams):
     total_mem_mib = core_utils.convert_size(core_utils.parse_size(body.total_mem), 'MB') if body.total_mem else ""
 
     first_six_cluster_id = core_utils.first_six_chars(body.cluster_id)
+    start_ticket = _claim_spdk_start(body.cluster_id, body.rpc_port)
     if _is_pod_up(body.rpc_port, first_six_cluster_id) or _is_pod_present(body.rpc_port, first_six_cluster_id):
         logger.info("SPDK pod found, removing...")
-        query = utils.RPCPortParams(rpc_port=body.rpc_port, cluster_id=body.cluster_id)
-        spdk_process_kill(query)
+        removed, err = _remove_spdk_pod(body.rpc_port, body.cluster_id)
+        if not removed:
+            # Starting anyway would fail at the create with a conflict on the
+            # name, after the preparation jobs and a reboot.
+            return utils.get_response(False, err)
 
     node_prepration_job_name = "snode-spdk-job-"
     node_prepration_ubuntu_name = "snode-spdk-ubuntu-extra-"
@@ -1268,7 +1337,7 @@ def spdk_process_start(body: SPDKParams):
             "L_CORES": body.l_cores,
             "CORES": core_utils.get_total_cpu_cores(body.l_cores),
             'SPDK_MEM': core_utils.convert_size(body.spdk_mem, 'MiB'),
-            'MEM_MEGA': (core_utils.convert_size(body.spdk_mem, 'MiB', round_up=True) // 2) * 2 + 512,
+            'MEM_MEGA': _spdk_hugepages_mib(body.spdk_mem),
             # the SPDK container's hard memory limit (request = limit), never
             # below the base
             'MEM2_MEGA': (core_utils.convert_size(max(body.system_mem or 0, constants.SYS_MEMORY_BASE_BYTES),
@@ -1482,6 +1551,18 @@ def spdk_process_start(body: SPDKParams):
         env = Environment(loader=PackageLoader('simplyblock_web', 'templates'), trim_blocks=True, lstrip_blocks=True)
         template = env.get_template('storage_deploy_spdk.yaml.j2')
         docs = yaml.safe_load_all(template.render(values))
+        # The preparation above can take as long as a reboot, so what was true
+        # at the top is checked again here, where the pod is created.
+        if _spdk_start_superseded(body.cluster_id, body.rpc_port, start_ticket):
+            msg = (f"{constants.SPDK_START_SUPERSEDED}: a later request to start the SPDK pod on port "
+                   f"{body.rpc_port} arrived while this one was preparing the host")
+            logger.warning(msg)
+            return utils.get_response(False, msg)
+        if _is_pod_present(body.rpc_port, first_six_cluster_id):
+            logger.info("SPDK pod appeared while the host was prepared, removing...")
+            removed, err = _remove_spdk_pod(body.rpc_port, body.cluster_id)
+            if not removed:
+                return utils.get_response(False, err)
         for dep in docs:
             logger.debug(dep)
             pod_name = k8s_core_v1.create_namespaced_pod(body=dep, namespace=namespace).metadata.name
@@ -1505,13 +1586,26 @@ def spdk_process_start(body: SPDKParams):
     })}}},
 })
 def spdk_process_kill(query: utils.RPCPortParams):
-    k8s_core_v1 = core_utils.get_k8s_core_client()
-    namespace = node_utils_k8s.get_namespace()
     if not query.cluster_id:
         return utils.get_response(False, "param required: cluster_id")
+    removed, err = _remove_spdk_pod(query.rpc_port, query.cluster_id)
+    if not removed:
+        return utils.get_response(False, err)
+    return utils.get_response(True)
 
-    first_six_cluster_id = core_utils.first_six_chars(query.cluster_id)
-    pod_name = f"snode-spdk-pod-{query.rpc_port}-{first_six_cluster_id}"
+
+def _remove_spdk_pod(rpc_port, cluster_id) -> tuple[bool, str]:
+    """Delete the SPDK pod on ``rpc_port`` and wait for it to be gone.
+
+    Returns ``(True, "")`` once no pod of that name is left, and
+    ``(False, reason)`` when the delete failed or the pod was still there when
+    the wait ran out. A pod that is still terminating holds its name and the
+    host's huge pages, so the caller must not go on as if it were gone."""
+    k8s_core_v1 = core_utils.get_k8s_core_client()
+    namespace = node_utils_k8s.get_namespace()
+
+    first_six_cluster_id = core_utils.first_six_chars(cluster_id)
+    pod_name = f"snode-spdk-pod-{rpc_port}-{first_six_cluster_id}"
     try:
         k8s_core_v1.delete_namespaced_pod(pod_name, namespace)
     except ApiException as e:
@@ -1524,9 +1618,9 @@ def spdk_process_kill(query: utils.RPCPortParams):
             # every later add-node attempt on that host — worker-3,
             # 2026-07-28).
             logger.error(f"Failed to delete pod {pod_name}: {e.body}")
-            return utils.get_response(False, f"Failed to delete pod {pod_name}: {e.body}")
+            return False, f"Failed to delete pod {pod_name}: {e.body}"
 
-    fluent_pod_name = f"simplyblock-fluentd-{query.rpc_port}-{first_six_cluster_id}"
+    fluent_pod_name = f"simplyblock-fluentd-{rpc_port}-{first_six_cluster_id}"
     try:
         k8s_core_v1.read_namespaced_pod(fluent_pod_name, namespace)
         logger.info(f"Deleting fluent pod {fluent_pod_name}")
@@ -1549,9 +1643,9 @@ def spdk_process_kill(query: utils.RPCPortParams):
 
     if found:
         logger.error(f"Pod {pod_name} still present {max_retries * 3}s after delete")
-        return utils.get_response(False, f"Pod {pod_name} did not terminate in time")
+        return False, f"Pod {pod_name} did not terminate in time"
 
-    return utils.get_response(True)
+    return True, ""
 
 
 @api.get('/spdk_process_cleanup', responses={

@@ -13,15 +13,35 @@ EVENT_STATUS_CHANGE = "STATUS_CHANGE"
 EVENT_OBJ_CREATED = "OBJ_CREATED"
 EVENT_OBJ_DELETED = "OBJ_DELETED"
 EVENT_CAPACITY = "CAPACITY"
+# The cluster's online resources are below an erasure-coding floor
+# (simplyblock_core.floors); the message names the floor.
+EVENT_FLOOR = "FLOOR"
 EVENT_LIMIT_REACHED = "LIMIT_REACHED"
 #: A distrib reported an IO it could not serve from the chunks it can reach.
 EVENT_DISTR_IO_ERROR = "DISTR_IO_ERROR"
 #: A client LVS port was reopened FENCE_RELEASE_BUDGET times in one window
 #: and SPDK fenced it again each time; the control plane stopped reopening it.
 EVENT_FENCE_LOOP = "FENCE_LOOP"
+#: One member of an lvstore keeps failing to register volumes the leader created.
+EVENT_LVS_MEMBER_REGISTER_FAILING = "LVS_MEMBER_REGISTER_FAILING"
+#: The control plane reloaded (or tried to reload) such a member's copy of the lvstore.
+EVENT_LVS_MEMBER_REPAIR = "LVS_MEMBER_REPAIR"
+#: ... and, when a reload did not help, restarted (or decided not to restart) its node.
+EVENT_LVS_MEMBER_AUTO_RESTART = "LVS_MEMBER_AUTO_RESTART"
+#: Replication into an lvstore sent full copies because one member could not be chained.
+EVENT_LVS_MEMBER_BLOCKS_DELTA = "LVS_MEMBER_BLOCKS_DELTA"
+#: Multi-attach array LUN mode: a LUN was (or could not be) taken over by
+#: another node after its serving node failed.
+EVENT_LUN_TAKEOVER = "LUN_TAKEOVER"
+# Multi-attach array LUN lifecycle (controllers/array_controller).
+EVENT_ARRAY_LUN = "ARRAY_LUN"
 #: A replication step on the target keeps failing (e.g. the landing merge
 #: cannot get memory); the control plane backs off and keeps retrying.
 EVENT_REPLICATION_STALLED = "REPLICATION_STALLED"
+#: SPDK refused a replication delta because the destination's base is not
+#: reachable from the source (simplyblock/spdk#108); the control plane sent
+#: that transfer in full instead, which costs the whole volume on the wire.
+EVENT_REPLICATION_FULL_SEND = "REPLICATION_FULL_SEND"
 
 DOMAIN_CLUSTER = "cluster"
 DOMAIN_MANAGEMENT = "management"

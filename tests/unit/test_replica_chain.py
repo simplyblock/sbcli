@@ -120,6 +120,25 @@ class TestAddCloneAndConvert(unittest.TestCase):
         self.assertEqual(rc.convert_on(converted, "secondary", "LVS/C"), (rc.DONE, None))
         converted.rpc_client.return_value.bdev_lvol_convert.assert_not_called()
 
+    def test_a_converted_lvol_with_no_clones_is_not_converted_again(self):
+        """What a live SPDK answers right after bdev_lvol_convert, before
+        anything is cloned from it (61 cluster, 2026-10-29): snapshot=false,
+        clone=false, only write support gone. A batch cutover that fails
+        leaves its intermediate snapshots in exactly this state, and SPDK
+        rejects converting them again."""
+        converted = _node("sec", bdev={
+            "supported_io_types": {"read": True, "write": False},
+            "driver_specific": {"lvol": {"snapshot": False, "clone": False}}})
+        self.assertEqual(rc.convert_on(converted, "secondary", "LVS/C"), (rc.DONE, None))
+        converted.rpc_client.return_value.bdev_lvol_convert.assert_not_called()
+
+    def test_a_writable_lvol_is_still_converted(self):
+        writable = _node("sec", bdev={
+            "supported_io_types": {"read": True, "write": True},
+            "driver_specific": {"lvol": {"snapshot": False, "clone": True}}})
+        self.assertEqual(rc.convert_on(writable, "secondary", "LVS/C"), (rc.DONE, None))
+        writable.rpc_client.return_value.bdev_lvol_convert.assert_called_once_with("LVS/C")
+
 
 # ---------------------------------------------------------------------------
 # Owed changes: recorded when a member is skipped, replayed when it answers

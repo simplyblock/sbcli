@@ -21,6 +21,7 @@ from simplyblock_core.models.backup import (
 )
 from simplyblock_core.models.base_model import BaseModel
 from simplyblock_core.models.cluster import Cluster, DeployConfig, PortReservation
+from simplyblock_core.models.control_plane_lease import ControlPlaneLease
 from simplyblock_core.models.events import EventObj
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_migration import LVolMigration
@@ -626,6 +627,13 @@ class DBController(metaclass=Singleton):
         if node is None:
             raise KeyError(f'No management node found for hostname {hostname}')
         return node
+
+    def get_control_plane_lease(self, cluster_id: str) -> ControlPlaneLease | None:
+        """The stretched control plane's lease of ``cluster_id``, or None
+        when no site has ever held it (docs/stretched-control-plane.md)."""
+        if not cluster_id:
+            raise KeyError('ControlPlaneLease lookup with a blank cluster id')
+        return single_or_none(ControlPlaneLease().read_from_db(self.kv_store, cluster_id))
 
     def get_lvol_stats(self, lvol, limit=20) -> list[LVolStatObject]:
         if isinstance(lvol, str):
@@ -1645,41 +1653,70 @@ class DBController(metaclass=Singleton):
 
     # ---- Node-add port reservation (Single FDB Transaction) ----
 
-    def _reserve_next_nvmf_port_tx(self, tr, cluster_id, base_port, node_used, owner, now):
+    def _reserve_next_nvmf_port_tx(self, tr, cluster_id, base_port, node_used, owner, now, slot=""):
         used = set(node_used)
+        held = None
         # Read this cluster's reservations transactionally so concurrent
         # reservers conflict-retry instead of picking the same port. Drop
         # stale ones (abandoned by a crashed add) in the same transaction.
         for res in PortReservation().read_from_db(tr, id=cluster_id):
             if res.cluster_id != cluster_id:
                 continue
-            if (now - res.created_at) > constants.PORT_RESERVATION_TTL_SEC:
+            if slot and res.slot == slot:
+                if res.port in used:
+                    # A node record took the port since: the reservation has
+                    # done its work and this slot needs a new one.
+                    del tr[res.get_db_id().encode()]
+                elif held is None:
+                    # An earlier attempt for this slot. The record still being
+                    # here means nobody else was handed the port, however old
+                    # it is, so it is not aged out.
+                    held = res
+                else:
+                    # A second reservation for this slot. One slot holds one
+                    # port, so this one frees its port instead of keeping it
+                    # out of the pool under a name that will never ask for it.
+                    del tr[res.get_db_id().encode()]
+                continue
+            if res.expired(now):
                 del tr[res.get_db_id().encode()]
                 continue
             used.add(res.port)
-        port = base_port
-        while port in used:
-            port += 1
+        if held is not None:
+            port = held.port
+        else:
+            port = base_port
+            while port in used:
+                port += 1
         res = PortReservation()
         res.cluster_id = cluster_id
         res.port = port
         res.owner = owner
         res.created_at = now
+        res.slot = slot
         tr[res.get_db_id().encode()] = json.dumps(res.to_dict()).encode()
         return port
 
-    def reserve_cluster_nvmf_port(self, cluster_id, owner):
+    def reserve_cluster_nvmf_port(self, cluster_id, owner, slot=""):
         """Atomically allocate and reserve the next free NVMe-oF port for a
         node being added. The reservation makes the chosen port visible to
         concurrent allocators until the node record itself is persisted (after
         which the node's own port fields keep it reserved and the reservation
-        ages out by TTL)."""
+        ages out).
+
+        ``slot`` names what the port is for. A reservation for a slot that
+        already holds one returns that port again; see PortReservation.
+
+        The two kinds age out differently: an unnamed reservation after
+        ``PORT_RESERVATION_TTL_SEC``, a slot's after
+        ``PORT_RESERVATION_SLOT_TTL_SEC``, and a slot's never by a reservation
+        for the same slot."""
         from simplyblock_core import utils
         base_port = utils.get_nvmf_base_port(cluster_id)
         node_used = utils.get_node_nvmf_ports(cluster_id)
         now = int(time.time())
         transactional = fdb.transactional(DBController._reserve_next_nvmf_port_tx)
-        return transactional(self, self.kv_store, cluster_id, base_port, node_used, owner, now)
+        return transactional(self, self.kv_store, cluster_id, base_port, node_used, owner, now, slot)
 
     # ---- Namespaced-subsystem slot claim/release (Single FDB Transaction) ----
 
@@ -1993,6 +2030,109 @@ class DBController(metaclass=Singleton):
             transactional = fdb.transactional(DBController._release_lvol_ns_slot_tx)
             return transactional(self, kv, lvol)
         return lvol.remove(kv)
+
+    # ---- Multi-attach controller-ID block claim (Single FDB Transaction) ----
+
+    CNTLID_BLOCK_ALLOC_PREFIX = "cntlid_block_alloc"
+
+    def _claim_cntlid_block_tx(self, tr, node_key, alloc_key, node_id, live_node_ids,
+                               max_blocks, index_list):
+        # The per-cluster allocation map {node_id: block} is the authority:
+        # every claim reads and rewrites it, so two concurrent claims in one
+        # cluster conflict and the loser retries against the winner's entry.
+        raw = tr.get(alloc_key).wait()
+        alloc = json.loads(bytes(raw).decode()) if raw.present() else {}
+        if node_id in alloc:
+            block = int(alloc[node_id])
+        else:
+            # Entries of nodes whose record is gone are reclaimed; a REMOVED
+            # node keeps its block (its record still exists).
+            alloc = {nid: b for nid, b in alloc.items() if nid in live_node_ids}
+            used = {int(b) for b in alloc.values()}
+            free = next((i for i in range(max_blocks) if i not in used), None)
+            if free is None:
+                raise ValueError(
+                    f"no free controller-ID block: a multi-attach cluster supports "
+                    f"at most {max_blocks} storage nodes")
+            block = free
+            alloc[node_id] = block
+            tr.set(alloc_key, json.dumps(alloc, sort_keys=True).encode())
+
+        def _set(node):
+            if node.cntlid_block == block:
+                return False
+            node.cntlid_block = block
+            return True
+
+        self._atomic_update_tx(tr, node_key, StorageNode, _set, index_list)
+        return block
+
+    def claim_cntlid_block(self, node, max_blocks):
+        """Claim the smallest free controller-ID block of ``node``'s cluster
+        for ``node`` (idempotent: a node that holds one gets it back) and
+        persist it on the node record, in ONE FDB transaction. Returns the
+        block index.
+
+        Raises:
+            ValueError: every block of the cluster is taken.
+        """
+        kv = self.kv_store
+        alloc_key = f"{self.CNTLID_BLOCK_ALLOC_PREFIX}/{node.cluster_id}".encode()
+        node_key = node.get_db_id().encode()
+        live_node_ids = {n.get_id() for n in self.get_storage_nodes_by_cluster_id(node.cluster_id)}
+        live_node_ids.add(node.get_id())
+        index_list = StorageNode.active_indexes(kv)
+        if kv is not None and hasattr(kv, 'create_transaction'):
+            transactional = fdb.transactional(DBController._claim_cntlid_block_tx)
+            return transactional(self, kv, node_key, alloc_key, node.get_id(),
+                                 live_node_ids, max_blocks, index_list)
+        return self._claim_cntlid_block_tx(
+            _NoTxnStore(kv), node_key, alloc_key, node.get_id(), live_node_ids,
+            max_blocks, index_list)
+
+    # ---- Multi-attach LUN takeover lease (Single FDB Transaction) ----
+
+    LUN_TAKEOVER_LOCK_PREFIX = "lun_takeover_lock"
+
+    @staticmethod
+    def _acquire_lun_takeover_lock_tx(tr, key, owner, now, ttl):
+        raw = tr.get(key).wait()
+        if raw.present():
+            held = json.loads(bytes(raw).decode())
+            if (held.get("owner") and held.get("owner") != owner
+                    and now - float(held.get("at", 0)) <= ttl):
+                return False, held.get("owner")
+        tr.set(key, json.dumps({"owner": owner, "at": now}).encode())
+        return True, None
+
+    @staticmethod
+    def _release_lun_takeover_lock_tx(tr, key, owner):
+        raw = tr.get(key).wait()
+        if raw.present() and json.loads(bytes(raw).decode()).get("owner") == owner:
+            tr.clear(key)
+
+    def acquire_lun_takeover_lock(self, device_id, owner, ttl):
+        """Take the takeover lease of one multi-attach LUN for ``owner``, so
+        two takeovers of the same LUN never run together, in this process or
+        in another. A lease older than ``ttl`` seconds (its holder died) is
+        taken over. Returns ``(True, None)`` or ``(False, holder)``."""
+        key = f"{self.LUN_TAKEOVER_LOCK_PREFIX}/{device_id}".encode()
+        now = time.time()
+        kv = self.kv_store
+        if kv is not None and hasattr(kv, 'create_transaction'):
+            transactional = fdb.transactional(DBController._acquire_lun_takeover_lock_tx)
+            return transactional(kv, key, owner, now, ttl)
+        return DBController._acquire_lun_takeover_lock_tx(_NoTxnStore(kv), key, owner, now, ttl)
+
+    def release_lun_takeover_lock(self, device_id, owner):
+        """Release the lease only if ``owner`` still holds it."""
+        key = f"{self.LUN_TAKEOVER_LOCK_PREFIX}/{device_id}".encode()
+        kv = self.kv_store
+        if kv is not None and hasattr(kv, 'create_transaction'):
+            transactional = fdb.transactional(DBController._release_lun_takeover_lock_tx)
+            transactional(kv, key, owner)
+            return
+        DBController._release_lun_takeover_lock_tx(_NoTxnStore(kv), key, owner)
 
     # ---- Generic atomic read-modify-write (Single FDB Transaction) ----
 

@@ -5,7 +5,7 @@ Two loops in one process:
 - the lease loop renews every arbitrated node's lease every
   ``TWO_NODE_LEASE_RENEW_MS`` (its own thread, so a slow decision never delays
   a renewal);
-- the decision loop folds the events the Go collector queued in FDB, decides
+- the decision loop folds the events the event collector queued in FDB, decides
   and applies verdicts every ``TWO_NODE_DECISION_TICK_MS``.
 
 Only clusters with ``two_node_arbitration`` on and exactly two members are
@@ -17,6 +17,7 @@ import time
 
 from simplyblock_core import constants, db_controller, utils
 from simplyblock_core.arbitration.arbiter import Arbiter, rpc_pool, work_pool
+from simplyblock_core.controllers import control_plane_controller
 
 logger = utils.get_logger(__name__)
 
@@ -43,6 +44,7 @@ def main() -> None:
     logger.info("Two-node arbiter started")
     interval = constants.TWO_NODE_DECISION_TICK_MS / 1000.0
     while True:
+        control_plane_controller.wait_until_services_enabled("two-node-arbiter")
         try:
             arbiter.tick()
         except Exception:                           # noqa: BLE001 - next tick retries
