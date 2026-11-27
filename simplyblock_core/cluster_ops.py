@@ -4366,7 +4366,7 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
             logger.info(f"Suspending node: {node.get_id()}")
             storage_node_ops.suspend_storage_node(node.get_id())
             logger.info(f"Shutting down node: {node.get_id()}")
-            storage_node_ops.shutdown_storage_node(node.get_id(), force=True)
+            storage_node_ops.shutdown_storage_node(node.get_id(), force=True, hand_over_luns=False)
 
     for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
         if node.status == StorageNode.STATUS_OFFLINE:
@@ -4553,7 +4553,7 @@ def cluster_grace_startup(cl_id, clear_data=False, spdk_image=None) -> None:
             logger.info(f"Skipping node {node.get_id()} with status: {node.status}")
             continue
         logger.info(f"Shutting down node: {node.get_id()}")
-        storage_node_ops.shutdown_storage_node(node.get_id(), force=True)
+        storage_node_ops.shutdown_storage_node(node.get_id(), force=True, hand_over_luns=False)
     st = db_controller.get_storage_nodes_by_cluster_id(cl_id)
     for node in st:
         if _grace_shutdown_skipped(node):
@@ -4630,7 +4630,9 @@ def cluster_grace_shutdown(cl_id) -> None:
         logger.info(f"Suspending node: {node.get_id()}")
         storage_node_ops.suspend_storage_node(node.get_id(), force=True)
         logger.info(f"Shutting down node: {node.get_id()}")
-        storage_node_ops.shutdown_storage_node(node.get_id(), force=True)
+        # hand_over_luns=False: every node goes down; a multi-attach LUN
+        # handed to the next node would only be chased along the sweep.
+        storage_node_ops.shutdown_storage_node(node.get_id(), force=True, hand_over_luns=False)
 
     # Settle check. The sweep is serial, so a node it already passed can come
     # back up behind it -- that is exactly what happened on 2026-09-03, when
@@ -4647,7 +4649,7 @@ def cluster_grace_shutdown(cl_id) -> None:
         logger.warning(
             f"Node {node.get_id()} is {node.status} after the shutdown sweep; "
             f"shutting it down again")
-        storage_node_ops.shutdown_storage_node(node.get_id(), force=True)
+        storage_node_ops.shutdown_storage_node(node.get_id(), force=True, hand_over_luns=False)
 
     st = db_controller.get_storage_nodes_by_cluster_id(cl_id)
     still_up = [n.get_id() for n in st

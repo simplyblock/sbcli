@@ -201,6 +201,17 @@ class TestGetStorageNode:
 
         nodes = client.get(f'{BASE}/').json()
         assert [node['socket'] for node in nodes] == [1]
+    def test_the_images_the_node_runs_are_reported(self, client, db, storage_node):
+        """The operator compares them with the node's desired images to tell
+        which nodes a rollout has not reached yet (operator
+        design-release-upgrade.md, P0-2)."""
+        storage_node.spdk_image = 'quay.io/simplyblock-io/ultra:26.5.0'
+        storage_node.spdk_proxy_image = 'quay.io/simplyblock-io/simplyblock:26.5.0'
+
+        body = client.get(f'{BASE}/{STORAGE_NODE_ID}/').json()
+
+        assert body['spdk_image'] == 'quay.io/simplyblock-io/ultra:26.5.0'
+        assert body['spdk_proxy_image'] == 'quay.io/simplyblock-io/simplyblock:26.5.0'
 
 
 class TestDeleteStorageNode:
@@ -323,6 +334,8 @@ class TestStorageNodeLifecycle:
             node_address='10.0.0.11:5000',
             reattach_volume=False,
             new_ssd_pcie=[],
+            spdk_image=None,
+            spdk_proxy_image=None,
         )
 
     def test_restart_passes_new_ssd_pcie(self, client, storage_node, storage_node_ops):
@@ -338,7 +351,40 @@ class TestStorageNodeLifecycle:
             node_address=None,
             reattach_volume=False,
             new_ssd_pcie=['0000:00:1e.0', '0000:00:1f.0'],
+            spdk_image=None,
+            spdk_proxy_image=None,
         )
+
+    def test_restart_passes_the_spdk_images(self, client, storage_node, storage_node_ops):
+        """A restart that names images starts the node on them. Without this the
+        node restarts on the image stored when it was added, and a rolling
+        restart cannot move a fleet to a new SPDK image (operator
+        design-release-upgrade.md, P0-1)."""
+        response = client.post(
+            f'{BASE}/{STORAGE_NODE_ID}/restart',
+            json={'spdk_image': 'quay.io/simplyblock-io/ultra:26.5.0',
+                  'spdk_proxy_image': 'quay.io/simplyblock-io/simplyblock:26.5.0'},
+        )
+
+        assert response.status_code == 202
+        storage_node_ops.restart_storage_node.assert_called_once_with(
+            node_id=STORAGE_NODE_ID,
+            force=False,
+            node_address=None,
+            reattach_volume=False,
+            new_ssd_pcie=[],
+            spdk_image='quay.io/simplyblock-io/ultra:26.5.0',
+            spdk_proxy_image='quay.io/simplyblock-io/simplyblock:26.5.0',
+        )
+
+    @pytest.mark.parametrize('field', ['spdk_image', 'spdk_proxy_image'])
+    def test_an_empty_image_is_no_image(self, client, storage_node, storage_node_ops, field):
+        """An empty string keeps the stored image rather than asking for an image
+        named "", which the restart would otherwise prefix and try to pull."""
+        response = client.post(f'{BASE}/{STORAGE_NODE_ID}/restart', json={field: ''})
+
+        assert response.status_code == 202
+        assert storage_node_ops.restart_storage_node.call_args.kwargs[field] is None
 
 
 class TestStorageNodeStats:

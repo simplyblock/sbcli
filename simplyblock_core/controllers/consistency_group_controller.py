@@ -36,8 +36,10 @@ from simplyblock_core.controllers import (
     tasks_controller,
 )
 from simplyblock_core.controllers.snapshot_controller import (
+    SNAPSHOT_DELETE_PENDING,
     _find_lvs_leader,
     _rollback_snapshot_bdev,
+    _wait_for_parent_snapshot_delete,
     lvstore_op_lock,
     object_mutation_lock,
 )
@@ -1138,7 +1140,7 @@ def generation_for_request(group, request_id):
 
 
 def create_group_snapshot_for_group(group, snap_type=SnapShot.TYPE_INTERNAL, lock=True,
-                                    request_id=""):
+                                    request_id="", delete_wait=None):
     """Take ONE crash-consistent snapshot of every group member.
 
     Returns (group_seq, None) or (None, error): the generation is what was
@@ -1162,6 +1164,20 @@ def create_group_snapshot_for_group(group, snap_type=SnapShot.TYPE_INTERNAL, loc
         return None, precheck_err
     if not members:
         return None, "consistency group has no members"
+
+    # A member whose newest snapshot is still being deleted would have its new
+    # generation snapshot register on the peers before that delete reaches them
+    # (snapshot_controller.parent_snapshot_delete_in_flight). One budget for all
+    # members; the snapshot monitor passes 0 (it runs those deletes itself).
+    wait_deadline = time.time() + (constants.LVOL_SYNC_DELETE_WAIT_SEC
+                                   if delete_wait is None else delete_wait)
+    for member in members:
+        pending = _wait_for_parent_snapshot_delete(
+            member.get_id(), max(0.0, wait_deadline - time.time()))
+        if pending:
+            return None, (f"{SNAPSHOT_DELETE_PENDING}: "
+                          f"{', '.join(s.snap_bdev or s.get_id() for s in pending)} of member "
+                          f"{member.get_id()}; retry once its delete has finished on every member")
 
     host_node = db.get_storage_node_by_id(group.node_id)
     pool = db.get_pool_by_id(members[0].pool_uuid)

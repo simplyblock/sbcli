@@ -2048,6 +2048,11 @@ def _take_intermediate_snapshot(migration):
     except ChainLockTimeout as e:
         logger.warning(f"Intermediate snapshot deferred, chain busy: {e}")
         return _SNAP_BUSY
+    if err and snapshot_controller.SNAPSHOT_DELETE_PENDING in str(err):
+        # The previous intermediate snapshot is still being deleted on the
+        # members: nothing changed, take this one on a later pass.
+        logger.info(f"Intermediate snapshot deferred: {err}")
+        return _SNAP_BUSY
     if err:
         logger.warning(f"Intermediate snapshot failed (proceeding without): {err}")
         migration.intermediate_snap_rounds = migration.max_intermediate_snap_rounds

@@ -3,6 +3,7 @@ import contextlib
 import copy
 import datetime
 import enum
+import errno
 import json
 import logging
 import math
@@ -94,6 +95,7 @@ from simplyblock_core.rpc_client import (
     JC_REMOVE_JM_NOT_USED,
     JC_REMOVE_JM_STILL_IN_USE,
     RPC_UNSUPPORTED,
+    RPCConnectionError,
     RPCErrorCode,
     RPCException,
     RPCRemoteError,
@@ -918,6 +920,31 @@ _restart_worker_sem = threading.BoundedSemaphore(constants.RESTART_WORKER_MAX_CO
 #: coordinators wait only on leaves, leaves wait on nothing.
 _restart_coordinator_sem = threading.BoundedSemaphore(
     constants.RESTART_COORDINATOR_MAX_CONCURRENCY)
+
+
+def _wait_spdk_rpc_ready(snode, timeout=None, poll=2.0):
+    """Wait until *snode*'s SPDK answers RPC at all; ``(True, None)`` once it
+    does, ``(False, last_error)`` after *timeout* seconds
+    (constants.SPDK_RPC_READY_WAIT_SEC).
+
+    Only "could not reach it" keeps waiting -- including a name that does not
+    resolve yet, which a just-started SPDK pod's spdk-proxy DNS name does until
+    the operator publishes it. Any answer, an error reply included, means the
+    endpoint is there."""
+    timeout = constants.SPDK_RPC_READY_WAIT_SEC if timeout is None else timeout
+    deadline = time.time() + timeout
+    client = snode.rpc_client(timeout=5, retry=1)
+    while True:
+        try:
+            client.get_version()
+            return True, None
+        except RPCConnectionError as e:
+            last = e
+        except RPCException:
+            return True, None
+        if time.time() >= deadline:
+            return False, last
+        time.sleep(poll)
 
 
 def _evict_node_rpc_sessions(snode):
@@ -1750,7 +1777,189 @@ def _jc_compression_status_with_retry(leader: StorageNode, jm_vuid, timeout_s=No
                            "(journal re-level in progress?)", leader.get_id(), e)
 
 
-def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode: StorageNode, after_restart):
+# --- JM journal corruption on restart: wipe once, let JC resync it ----------
+#
+# A node restart re-opens its JM stack in load mode (alceml pba_init_mode=1,
+# then bdev_jm_create on top). When the on-disk JM metadata or journal is
+# corrupt, one of those two RPCs fails the same way on every attempt, so the
+# restart failed forever and the node stayed stuck in RESTARTING.
+#
+# How the data plane reports it (ultra, DISTR_v2/src_code_app_spdk):
+#   * bdev_alceml_create: every page-map load failure -- storage signature
+#     missing (-10), page size / storage uid / checksum-mode mismatch,
+#     duplicate or inconsistent page headers (-21..-24) -- ends in
+#     bdev_alloc_emulation/bdev_alceml_impl.cpp, state bcsFinishing:
+#     ``return_final(-EFAULT)``. The RPC answers code -14, message
+#     "Bad address" (spdk_jsonrpc_send_error_response(rc, strerror(|rc|))).
+#   * bdev_jm_create: a journal history that does not preload, or fails the
+#     cross-history consistency check, ends in bdev_jm/bdev_jm_impl.cpp,
+#     state bcsFinishBdevInit, with ``errc = -EFAULT`` -> code -14 as well.
+#     A storage that cannot be opened is -ENODEV there, a bad parameter
+#     -EINVAL, an allocation failure -ENOMEM: none of those is corruption.
+# EFAULT is not exclusive to corruption: the alceml also answers it when its
+# backing bdev cannot be opened or a metadata read fails. The wipe path
+# therefore checks the backing bdev before formatting, and a bdev that cannot
+# be opened fails the formatting create the same way, so nothing is wiped.
+#
+# Recovery: a wiped JM comes back empty. JC treats it exactly like a JM that
+# returns after an outage with an old journal: the leveling pass of every
+# journal it carries finds it below the latest cross-JM sync point and makes
+# it a full-replication target (bdev_distrib/parts/alg_journal.cpp, "jm_id %d
+# is out of the sync, will add to replication targets"). The restart's
+# existing wait_for_jm_rep_tasks_to_finish / jc_disable_replication steps
+# already wait that replication out, so no extra RPC is needed.
+
+def is_jm_corruption_error(err: BaseException) -> bool:
+    """True when an alceml / JM create failed because the on-disk JM metadata
+    or journal could not be loaded (EFAULT, see above). Transport errors,
+    timeouts, ENODEV, EEXIST, EBUSY, ENOMEM, EINVAL are never corruption."""
+    return isinstance(err, RPCRemoteError) and err.posix_errno == errno.EFAULT
+
+
+def _used_jm_ids(node: StorageNode) -> list[str]:
+    """The remote JM ids ``node``'s own journal is written to: the selection
+    get_node_jm_names makes (all of them on a sync-replication cluster, else
+    the first ``ha_jm_count - 1``)."""
+    ids = [j for j in (node.jm_ids or []) if j]
+    if node.site:
+        return ids
+    return ids[:max(0, int(node.ha_jm_count or 0) - 1)]
+
+
+def jm_wipe_safety(snode: StorageNode) -> tuple[bool, str]:
+    """Whether the local JM of ``snode`` may be wiped, and why not.
+
+    SAFETY RULE: a JM may only be wiped when every journal it carries has
+    another copy on a JM that is ONLINE right now, on an ONLINE node. So HA JM
+    must be on (enable_ha_jm, ha_jm_count >= 2), and
+      * for this node's own journal: one of its remote JMs is online;
+      * for every other node's journal this JM is a replica of: that node's
+        own JM, or another of its remote JMs, is online.
+    Otherwise the corrupt JM may hold the only copy of journal records not yet
+    flushed to the distribs, and formatting it would lose them: the restart
+    keeps failing as before and the operator is told by an event instead.
+    """
+    if not snode.enable_ha_jm or int(snode.ha_jm_count or 0) < 2:
+        return False, "HA JM is not enabled on this node (single journal copy)"
+    jm_dev = snode.jm_device
+    if not jm_dev or not jm_dev.get_id():
+        return False, "the node has no JM device record"
+    my_jm = jm_dev.get_id()
+
+    db = DBController()
+    peers = [n for n in db.get_storage_nodes_by_cluster_id(snode.cluster_id)
+             if n.get_id() != snode.get_id() and n.status != StorageNode.STATUS_REMOVED]
+    online_jms = {n.jm_device.get_id() for n in peers
+                  if n.status == StorageNode.STATUS_ONLINE and n.jm_device
+                  and n.jm_device.get_id() and n.jm_device.status == JMDevice.STATUS_ONLINE}
+
+    own_remote = _used_jm_ids(snode)
+    if not any(j in online_jms for j in own_remote):
+        return False, f"no remote JM of this node's journal is online (remote JMs: {own_remote})"
+
+    for peer in peers:
+        if not peer.enable_ha_jm:
+            continue
+        used = _used_jm_ids(peer)
+        if my_jm not in used:
+            continue
+        others = [j for j in used if j != my_jm]
+        if peer.jm_device and peer.jm_device.get_id():
+            others.append(peer.jm_device.get_id())
+        if not any(j in online_jms for j in others):
+            return False, (f"this JM is a replica of node {peer.get_id()}'s journal and none "
+                           f"of that journal's other JMs is online")
+    return True, ""
+
+
+def _wait_bdev_gone(rpc_client, name, timeout_s=10.0, interval_s=0.5) -> bool:
+    deadline = time.monotonic() + timeout_s
+    while True:
+        if not rpc_client.bdev_get(name):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(interval_s)
+
+
+def _create_jm_alceml_and_bdev(rpc_client, snode: StorageNode, cluster, alceml_name, nvme_bdev,
+                               alceml_id, jm_bdev, load, wipe_on_corruption=False) -> bool:
+    """Create the JM alceml on ``nvme_bdev`` and the JM bdev on top of it.
+
+    ``load`` opens the existing alceml metadata and journal (restart), else
+    the alceml is formatted. With ``wipe_on_corruption`` (restart path only)
+    a corrupt alceml or journal (is_jm_corruption_error) is replaced ONCE by a
+    formatted alceml and a fresh JM, if jm_wipe_safety allows it; JC then
+    resyncs the empty JM from its peers. Returns True, or False when an RPC
+    answered falsy; RPC errors raise, as they always did.
+    """
+    stage = ["alceml"]
+
+    def _create(pba_init_mode):
+        stage[0] = "alceml"
+        ret = snode.create_alceml(
+            alceml_name, nvme_bdev, alceml_id,
+            pba_init_mode=pba_init_mode,
+            pba_page_size=cluster.page_size_in_blocks,
+            full_page_unmap=cluster.full_page_unmap
+        )
+        if not ret:
+            logger.error(f"Failed to create alceml bdev: {alceml_name}")
+            return False
+        stage[0] = "jm"
+        ret = rpc_client.bdev_jm_create(jm_bdev, alceml_name, jm_cpu_mask=snode.jm_cpu_mask,
+                                        shared_placement=cluster.shared_placement,
+                                        compression_thread=False,
+                                        compression_cpu_mask=snode.compression_cpu_mask)
+        if not ret:
+            logger.error(f"Failed to create {jm_bdev}")
+            return False
+        return True
+
+    try:
+        return _create(1 if load else 3)
+    except RPCRemoteError as e:
+        if not (load and wipe_on_corruption and is_jm_corruption_error(e)):
+            raise
+        corruption = e
+    failed_at = "alceml load" if stage[0] == "alceml" else "JM journal load"
+
+    node_id = snode.get_id()
+    logger.error("JM of node %s is corrupt: %s of %s failed: %s", node_id, failed_at,
+                 alceml_name if stage[0] == "alceml" else jm_bdev, corruption)
+    safe, reason = jm_wipe_safety(snode)
+    if not safe:
+        logger.error("Not wiping the corrupt JM of node %s: %s. The restart keeps failing until "
+                     "the journal is repaired or its peer JMs are back", node_id, reason)
+        storage_events.jm_corrupt_not_wiped(snode, failed_at, str(corruption), reason)
+        raise corruption
+
+    # Clean up what the failed load left behind: a failed alceml create frees
+    # itself, a failed JM create leaves the alceml (and maybe a JM) up.
+    for name, delete in ((jm_bdev, rpc_client.bdev_jm_delete),
+                         (alceml_name, rpc_client.bdev_alceml_delete)):
+        if rpc_client.bdev_get(name):
+            delete(name)
+            if not _wait_bdev_gone(rpc_client, name):
+                logger.error("%s did not go away after delete; not wiping the JM", name)
+                raise corruption
+    # EFAULT also means "backing bdev could not be opened": never format
+    # unless the backing bdev is really there.
+    if not rpc_client.bdev_get(nvme_bdev):
+        logger.error("JM backing bdev %s is missing; not wiping the JM", nvme_bdev)
+        raise corruption
+
+    logger.warning("Wiping the JM of node %s: re-creating %s on %s formatted (pba_init_mode=3) and "
+                   "%s fresh; JC resyncs it from the peer JMs", node_id, alceml_name, nvme_bdev, jm_bdev)
+    # One attempt only: if this fails, the restart fails exactly as before.
+    ret = _create(3)
+    if ret:
+        storage_events.jm_wiped_after_corruption(snode, failed_at, str(corruption))
+    return ret
+
+
+def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode: StorageNode, after_restart,
+                             wipe_on_corruption=False):
     # RAID 0+1 journal layout (see simplyblock_core/jm_raid.py):
     #   1 device   -> no raid (bare device)
     #   2 devices  -> raid1 over two single-device legs  (a 2-way mirror)
@@ -1842,24 +2051,10 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode: StorageNode, afte
     alceml_name = f"alceml_jm_{snode.get_id()}"
     nvme_bdev = raid_bdev
 
-    ret = snode.create_alceml(
-        alceml_name, nvme_bdev, alceml_id,
-        pba_init_mode=1 if after_restart else 3,
-        pba_page_size=cluster.page_size_in_blocks,
-        full_page_unmap=cluster.full_page_unmap
-    )
-
-    if not ret:
-        logger.error(f"Failed to create alceml bdev: {alceml_name}")
-        return False
-
     jm_bdev = f"jm_{snode.get_id()}"
-    ret = rpc_client.bdev_jm_create(jm_bdev, alceml_name, jm_cpu_mask=snode.jm_cpu_mask,
-                                    shared_placement=cluster.shared_placement,
-                                    compression_thread=False,
-                                    compression_cpu_mask=snode.compression_cpu_mask)
-    if not ret:
-        logger.error(f"Failed to create {jm_bdev}")
+    if not _create_jm_alceml_and_bdev(rpc_client, snode, cluster, alceml_name, nvme_bdev, alceml_id,
+                                      jm_bdev, load=after_restart,
+                                      wipe_on_corruption=wipe_on_corruption):
         return False
 
     pt_name = ""
@@ -2384,7 +2579,8 @@ def _prepare_cluster_devices_on_restart(snode: StorageNode, clear_data=False):
                 logger.error(f"BDev not found: {jm_device.jm_nvme_bdev_list[0]}")
                 jm_device.status = JMDevice.STATUS_REMOVED
                 return True
-            ret = _create_jm_stack_on_raid(rpc_client, jm_device.jm_nvme_bdev_list, snode, after_restart=not clear_data)
+            ret = _create_jm_stack_on_raid(rpc_client, jm_device.jm_nvme_bdev_list, snode, after_restart=not clear_data,
+                                           wipe_on_corruption=True)
             if not ret:
                 logger.error("Failed to create JM device")
                 return False
@@ -2402,7 +2598,8 @@ def _prepare_cluster_devices_on_restart(snode: StorageNode, clear_data=False):
                 logger.error(f"JM bdev not found: {bdev_name}")
 
         if len(jm_bdevs_found) > 1:
-            ret = _create_jm_stack_on_raid(rpc_client, jm_bdevs_found, snode, after_restart=not clear_data)
+            ret = _create_jm_stack_on_raid(rpc_client, jm_bdevs_found, snode, after_restart=not clear_data,
+                                           wipe_on_corruption=True)
             if not ret:
                 logger.error("Failed to create JM device")
                 return False
@@ -2423,24 +2620,10 @@ def _prepare_cluster_devices_on_restart(snode: StorageNode, clear_data=False):
             nvme_bdev = jm_device.testing_bdev
 
         cluster = db_controller.get_cluster_by_id(snode.cluster_id)
-        ret = snode.create_alceml(
-            jm_device.alceml_bdev, nvme_bdev, jm_device.get_id(),
-            pba_init_mode=3 if clear_data else 1,
-            pba_page_size=cluster.page_size_in_blocks,
-            full_page_unmap=cluster.full_page_unmap
-        )
-
-        if not ret:
-            logger.error(f"Failed to create alceml bdev: {jm_device.alceml_bdev}")
-            return False
-
         jm_bdev = f"jm_{snode.get_id()}"
-        ret = rpc_client.bdev_jm_create(jm_bdev, jm_device.alceml_bdev, jm_cpu_mask=snode.jm_cpu_mask,
-                                        shared_placement=cluster.shared_placement,
-                                        compression_thread=False,
-                                        compression_cpu_mask=snode.compression_cpu_mask)
-        if not ret:
-            logger.error(f"Failed to create {jm_bdev}")
+        if not _create_jm_alceml_and_bdev(rpc_client, snode, cluster, jm_device.alceml_bdev, nvme_bdev,
+                                          jm_device.get_id(), jm_bdev, load=not clear_data,
+                                          wipe_on_corruption=True):
             return False
 
         if snode.enable_ha_jm:
@@ -9986,6 +10169,14 @@ def _restart_storage_node_impl(
     # eaten the FIN that would let urllib3 notice (SFAM-2834).
     _evict_node_rpc_sessions(snode)
     time.sleep(5)
+    # The first RPC below must not be the one that finds out whether the new
+    # SPDK can be reached: on Kubernetes its DNS name appears only once the
+    # operator publishes the new pod (SPDK_RPC_READY_WAIT_SEC).
+    reachable, rpc_err = _wait_spdk_rpc_ready(snode)
+    if not reachable:
+        logger.error(f"SPDK of {snode.get_id()} did not answer RPC within "
+                     f"{constants.SPDK_RPC_READY_WAIT_SEC}s after its start: {rpc_err}")
+        return False
 
     if small_bufsize:
         snode.iobuf_small_bufsize = small_bufsize
@@ -10395,6 +10586,9 @@ def _restart_storage_node_impl(
         except Exception as e:
             logger.error(e)
             _abort_restart(f"LVS recreation failed: {e}")
+            # The attempt may have taken a leadership before it failed: seat
+            # a leader now, not on the node monitor's next pass.
+            hand_back_lvs_leadership_after_abort(snode)
             return False
         if not ret:
             # Restart abort path. recreate_all_lvstores returning False is
@@ -10405,6 +10599,7 @@ def _restart_storage_node_impl(
             # name". 10:58:11 in the AWS soak run hit exactly this gap.
             _set_lvstore_status_atomic(snode.get_id(), "failed", db_controller)
             _abort_restart("recreate_all_lvstores returned False")
+            hand_back_lvs_leadership_after_abort(snode)
             return False
 
         # === Phase 10: Finalization — post all LVS recreation ===
@@ -10919,7 +11114,8 @@ def _target_is_reconnect_eligible(target_node: StorageNode):
     return target_node.status in _PEER_RECONNECT_ELIGIBLE_STATUSES
 
 
-def _detach_remote_controllers_from_peers(snode: StorageNode, db_controller):
+def _detach_remote_controllers_from_peers(snode: StorageNode, db_controller,
+                                          handed_over=frozenset()):
     """Loop 2 of graceful shutdown.
 
     For every peer in {online, down, in_restart}, detach the remote
@@ -10942,6 +11138,11 @@ def _detach_remote_controllers_from_peers(snode: StorageNode, db_controller):
     # lead to that node, not to this one; they stay.
     served_elsewhere_ids = {d.get_id() for d in snode.nvme_devices
                             if multi_attach.served_elsewhere(d, shutting_down_id)}
+    # Multi-attach: the controllers to the LUNs this shutdown hands over stay
+    # too. They hold the peers' I/O until the takeover adds the standby's
+    # export as their new path; a detached one would drop the device from
+    # the peers' distribs.
+    served_elsewhere_ids |= set(handed_over)
     peers = [
         p for p in all_peers
         if p.get_id() != shutting_down_id
@@ -11150,7 +11351,7 @@ def check_node_shutdown_preconditions(node_id, force=False, current_restart_task
     return True, ""
 
 
-def _broadcast_devices_unavailable(snode):
+def _broadcast_devices_unavailable(snode, handed_over=frozenset()):
     """Shutdown Loop 1: mark the node's JM and NVMe devices unavailable.
 
     The underlying device_set_unavailable() / set_jm_device_state()
@@ -11158,6 +11359,10 @@ def _broadcast_devices_unavailable(snode):
     fans out to all peers and skips offline/removed, so the peers update
     their cluster maps and DISTRIB stops routing IO toward these devices.
     Best effort: a failure is logged and the shutdown continues.
+
+    ``handed_over``: ids of multi-attach devices whose LUN the shutdown
+    hands over to a standby (_hand_over_luns); they are never marked
+    unavailable (empty on any other cluster).
     """
     if snode.jm_device and snode.jm_device.status != JMDevice.STATUS_REMOVED:
         logger.info("Loop 1: setting JM unavailable on peers")
@@ -11183,6 +11388,11 @@ def _broadcast_devices_unavailable(snode):
             # Multi-attach: another node serves this LUN; it is not lost
             # with this node.
             continue
+        if dev.get_id() in handed_over:
+            # Multi-attach: a standby takes this LUN over; the device stays
+            # online. On 1+0 every lvstore stripes over it, so an unavailable
+            # device fails reads on every node (2026-11-26 bed).
+            continue
         try:
             # Default cause (CAUSE_OTHER): a node-driven shutdown
             # must not count against the per-device flap budget.
@@ -11193,8 +11403,118 @@ def _broadcast_devices_unavailable(snode):
                 dev.get_id(), e)
 
 
+#: Device states whose multi-attach LUN a shutdown hands over to a standby
+#: (the states the monitor's node-loss takeover acts on).
+_LUN_HANDOVER_STATES = (NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY,
+                        NVMeDevice.STATUS_CANNOT_ALLOCATE)
+#: How long a shutdown waits for the takeovers of the LUNs it hands over:
+#: one takeover deadline plus a margin for the path switch and a warm
+#: standby's activation. A takeover still running then finishes in the
+#: background; the monitor's stopped-node backstop
+#: (storage_node_monitor._take_over_luns_of_stopped_node) covers a process
+#: that exits before it does.
+LUN_HANDOVER_WAIT_SEC = constants.MULTI_ATTACH_TAKEOVER_DEADLINE_SEC + 30
+LUN_HANDOVER_POLL_SEC = 1.0
+
+
+def _lun_handover_devices(snode, cluster, db_controller) -> list:
+    """Multi-attach clusters (only): the devices whose LUN ``snode`` serves
+    (its own and LUNs it took over) in a serving state; their LUNs are taken
+    over by a standby when the node is shut down. Empty on any other
+    cluster, without a DB read."""
+    if not multi_attach.is_multi_attach(cluster):
+        return []
+    try:
+        nodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
+    except Exception as e:                                  # noqa: BLE001
+        logger.error("LUN handover of %s: nodes not read (%s); its LUNs are "
+                     "left to the node monitor", snode.get_id(), e)
+        return []
+    return [dev for _owner, dev in multi_attach.devices_served_by(nodes, snode.get_id())
+            if dev.status in _LUN_HANDOVER_STATES]
+
+
+def _lun_handover_pending(db_controller, device_id, node_id) -> bool:
+    """Whether the LUN of ``device_id`` is still served by ``node_id`` in a
+    serving state: neither taken over nor given up (set unavailable)."""
+    try:
+        dev = db_controller.get_storage_device_by_id(device_id)
+    except KeyError:
+        return False
+    return dev.serving_node() == node_id and dev.status in _LUN_HANDOVER_STATES
+
+
+def _hand_over_luns(snode, devices, reason, wait_sec=None) -> list:
+    """Planned LUN handover of a node being shut down (multi-attach only).
+
+    Takes over every LUN in ``devices`` with the node-loss machinery
+    (storage_node_monitor._lun_takeover_worker -> lun_takeover: fence at the
+    array or by reservation first, standby export, record, path switch on
+    every ONLINE node), all LUNs in parallel, and waits until each is served
+    by another node or was given up, at most ``wait_sec``. A LUN that is not
+    taken over is set unavailable by the worker, as when its node is lost
+    (after the peers' hold when no standby can read it).
+
+    Called once the node's SPDK is stopped, as after a crash: the fence then
+    cuts off nothing that still serves, and the peers' controllers hold the
+    I/O until the standby's path is added. Returns the ids of the devices
+    not settled within the wait (logged and raised as events); never
+    raises."""
+    if not devices:
+        return []
+    try:
+        from simplyblock_core.controllers import lun_takeover
+        from simplyblock_core.services import storage_node_monitor
+    except Exception as e:                                  # noqa: BLE001
+        logger.error("LUN handover of %s not started: %s; its LUNs are left to the "
+                     "node monitor", snode.get_id(), e)
+        return [dev.get_id() for dev in devices]
+    wait_sec = LUN_HANDOVER_WAIT_SEC if wait_sec is None else wait_sec
+    node_id = snode.get_id()
+    started = time.monotonic()
+    end = started + wait_sec
+    ids = [dev.get_id() for dev in devices]
+    by_id = {dev.get_id(): dev for dev in devices}
+    logger.info("LUN handover of node %s (%s): taking over %d LUN(s): %s",
+                node_id, reason, len(ids), ids)
+    for dev in devices:
+        lun_takeover._event(snode.cluster_id, dev,
+                            f"Planned handover of LUN {dev.lun_wwn} (device {dev.get_id()}) "
+                            f"from node {node_id}: {reason}")
+    threads = []
+    for device_id in ids:
+        t = threading.Thread(target=storage_node_monitor._lun_takeover_worker,
+                             args=(device_id, node_id, reason, started),
+                             name=f"lun-handover-{device_id[:8]}", daemon=True)
+        t.start()
+        threads.append(t)
+    for t in threads:
+        t.join(timeout=max(0.0, end - time.monotonic()))
+    # The record decides: a takeover another process runs (IN_PROGRESS here)
+    # counts once it has recorded the new serving node.
+    try:
+        db_controller = DBController()
+        pending = [d for d in ids if _lun_handover_pending(db_controller, d, node_id)]
+        while pending and time.monotonic() < end:
+            time.sleep(LUN_HANDOVER_POLL_SEC)
+            pending = [d for d in pending if _lun_handover_pending(db_controller, d, node_id)]
+    except Exception as e:                                  # noqa: BLE001
+        logger.error("LUN handover of %s: outcome not read: %s", node_id, e)
+        return ids
+    logger.info("LUN handover of node %s: %d of %d LUN(s) settled in %.1fs",
+                node_id, len(ids) - len(pending), len(ids), time.monotonic() - started)
+    for device_id in pending:
+        msg = (f"LUN {by_id[device_id].lun_wwn} (device {device_id}) not handed over from node "
+               f"{node_id} within {int(wait_sec)}s of its shutdown; the takeover goes on in the "
+               f"background and the node monitor retries it")
+        logger.error(msg)
+        lun_takeover._event(snode.cluster_id, by_id[device_id], msg,
+                            lun_takeover.EventObj.LEVEL_CRITICAL)
+    return pending
+
+
 def shutdown_storage_node(node_id, force=False, keep_auto_restart=False,
-                          current_restart_task_id=None):
+                          current_restart_task_id=None, hand_over_luns=True):
     """Gracefully terminate a storage node.
 
     current_restart_task_id: bare uuid of the caller's own NODE_RESTART task
@@ -11207,6 +11527,16 @@ def shutdown_storage_node(node_id, force=False, keep_auto_restart=False,
     existing auto-restart brings it back. A genuine operator `sn shutdown`
     (CLI/API) leaves the default (False) and stays stopped until an explicit
     restart.
+
+    hand_over_luns (multi-attach clusters only): the LUNs the node serves are
+    taken over by a standby right after its SPDK is stopped, and the shutdown
+    waits for that (bounded, _hand_over_luns), instead of marking their
+    devices unavailable: on 1+0 every lvstore stripes over every device, so
+    an unavailable device fails reads cluster-wide (2026-11-26 bed: LVS_2 and
+    LVS_8 went leaderless and the cluster suspended after one `sn shutdown`).
+    The same with force. Whole-cluster stops pass False: with every node
+    going down a handover would only chase the LUNs from node to node. No
+    effect on any other cluster.
 
     Flow (graceful, force=False):
       1. FTT / concurrency guards, set node status to in_shutdown.
@@ -11356,9 +11686,17 @@ def shutdown_storage_node(node_id, force=False, keep_auto_restart=False,
         JobSchedule.FN_NEW_DEV_MIG,
     ])
 
+    # Multi-attach: the LUNs this node serves, handed over to a standby once
+    # its SPDK is stopped (_hand_over_luns). Never marked unavailable, their
+    # peers' controllers never detached. Empty on any other cluster.
+    handover = _lun_handover_devices(snode, _cluster, db_controller) if hand_over_luns else []
+    # Passed to the loops only when there is one: any other shutdown calls
+    # them exactly as before.
+    handover_arg = (frozenset(dev.get_id() for dev in handover),) if handover else ()
+
     if not force:
         # Step 3 (Loop 1): broadcast device-unavailable events.
-        _broadcast_devices_unavailable(snode)
+        _broadcast_devices_unavailable(snode, *handover_arg)
 
         # Step 4 (Loop 2): detach remote_alceml / remote_jm controllers
         # on every peer still capable of receiving an RPC. Detach (vs.
@@ -11367,7 +11705,7 @@ def shutdown_storage_node(node_id, force=False, keep_auto_restart=False,
         snode = db_controller.get_storage_node_by_id(node_id)
         logger.info("Loop 2: detaching remote controllers on peers")
         try:
-            count = _detach_remote_controllers_from_peers(snode, db_controller)
+            count = _detach_remote_controllers_from_peers(snode, db_controller, *handover_arg)
             logger.info("Loop 2: detached %d controller(s) total", count)
         except Exception as e:
             logger.warning(
@@ -11417,6 +11755,9 @@ def shutdown_storage_node(node_id, force=False, keep_auto_restart=False,
     except SNodeClientException:
         logger.error('Failed to kill SPDK')
         return False
+    if handover:
+        # Multi-attach: the planned handover, as after a crash of the node.
+        _hand_over_luns(snode, handover, "node shutdown" + (" (forced)" if force else ""))
     if force:
         # Loop 1 after the kill: the devices are gone now. Without it the
         # peers keep routing writes to them until the node's restart brings
@@ -11426,7 +11767,7 @@ def shutdown_storage_node(node_id, force=False, keep_auto_restart=False,
         # the queued IO as EIO: 2026-10-29 page copy soak, iteration 21,
         # forced shutdown + restart, LVS_1 leader on a peer failed client
         # writes after 10s of writes to the dead node's devices.
-        _broadcast_devices_unavailable(snode)
+        _broadcast_devices_unavailable(snode, *handover_arg)
     pci_address = []
     for dev in snode.nvme_devices:
         if dev.bdev_type == "aio":
@@ -11735,12 +12076,7 @@ def upgrade_automated_deployment_config():
             return False
         utils.store_config_file(updated_config, constants.NODES_CONFIG_FILE, create_read_only_file=True)
         # Set Huge page memory
-        huge_page_memory_dict: dict = {}
-        for node_config in updated_config["nodes"]:
-            numa = node_config["socket"]
-            huge_page_memory_dict[numa] = huge_page_memory_dict.get(numa, 0) + node_config["huge_page_memory"]
-        for numa, huge_page_memory in huge_page_memory_dict.items():
-            num_pages = huge_page_memory // (2048 * 1024)
+        for numa, num_pages in utils.hugepages_per_numa(updated_config["nodes"]).items():
             utils.set_hugepages_if_needed(numa, num_pages)
         logger.info("Config regenerated successfully")
         return True
@@ -11767,9 +12103,8 @@ def generate_automated_deployment_config(max_lvol, max_prov, sockets_to_use, nod
                      f"{constants.MAX_SUBSYSTEMS_PER_NODE} subsystems per storage node")
         return False
     if calculate_hp_only:
-        minimum_hp_memory = utils.calculate_hp_only(max_lvol, number_of_devices, sockets_to_use, nodes_per_socket, vcpu_count)
-        hp_number = math.ceil(minimum_hp_memory / 2)
-        logger.info(f"The required number of huge pages on this host is: {hp_number} ({minimum_hp_memory} MB)")
+        hp_number = utils.calculate_hp_only(max_lvol, number_of_devices, sockets_to_use, nodes_per_socket, vcpu_count)
+        logger.info(f"The required number of huge pages on this host is: {hp_number} ({hp_number * 2} MiB)")
         return True
     else:
         # Minimum 5 vCPUs: the smallest cluster vCPU budget (4) plus one for the
@@ -12578,6 +12913,90 @@ def restart_before_lvstore_handoff(node_id, lvs_name):
     return True, f"SPDK of {node_id[:8]} is down; its restart has not reached {lvs_name}"
 
 
+def _restart_member_lvstores(snode, db):
+    """``(lvs_name, members)`` for every lvstore ``snode`` belongs to: its own
+    (as primary) and those it holds a secondary or tertiary role in."""
+    from simplyblock_core.controllers.lvol_controller import role_secondary_ids
+    result = []
+    for owner in db.get_storage_nodes_by_cluster_id(snode.cluster_id):
+        if not owner.lvstore:
+            continue
+        ids = [owner.get_id()] + role_secondary_ids(owner)
+        if snode.get_id() not in ids:
+            continue
+        members = []
+        for nid in ids:
+            try:
+                members.append(owner if nid == owner.get_id() else db.get_storage_node_by_id(nid))
+            except KeyError:
+                continue
+        result.append((owner.lvstore, members))
+    return result
+
+
+def hand_back_lvs_leadership_after_abort(snode):
+    """Right after a restart attempt of ``snode`` aborted (SPDK killed and
+    confirmed dead, node OFFLINE), give every lvstore it belongs to a leader
+    again at once: ``[(lvs_name, leader_id or None)]``.
+
+    A restart rebuilds the node's own lvstore first and takes its leadership
+    there (demoting the acting leader), then rebuilds the lvstores it is a
+    secondary or tertiary of. When one of those fails, the whole attempt
+    aborts and kills SPDK -- with the leadership just taken. Nobody led until
+    the node monitor's takeover came round (its interval, then the proof
+    window), and the next attempt took it again: bf36 R3b (2026-11-26),
+    LVS_22 flapped between 6344ccd0 and the restarting 0b26b6da (16:59:41
+    taken, 16:59:52 a non-leader rebuild failed, 17:01:30 back on 6344ccd0;
+    again at 17:03:51), with a leaderless gap of ~100 s each time.
+
+    The leadership is not taken later instead: in a restart of several nodes
+    at once, each one's non-leader rebuilds need the other lvstores' leaders,
+    which the other restarting nodes seat in their first step.
+
+    The grant is the node monitor's proven takeover (find_leader_with_failover
+    with ``pre_handoff_restart_of``), run now rather than on its next pass:
+    only for an lvstore whose handoff cannot be under way
+    (restart_before_lvstore_handoff: SPDK of ``snode`` confirmed down, no
+    restart phase recorded), never granting while a member may still lead
+    (_leadership_proven_free). An lvstore that already has a leader keeps it.
+    Not on sync-replication clusters nor on two-node arbitrated ones, as the
+    node monitor. Never raises."""
+    db = DBController()
+    out: list[tuple[str, str | None]] = []
+    try:
+        snode = db.get_storage_node_by_id(snode.get_id())
+        if _sync_site(snode) or _cluster_two_node_arbitrated(snode.cluster_id, db=db):
+            return out
+        member_lvstores = _restart_member_lvstores(snode, db)
+    except Exception as e:                                  # noqa: BLE001
+        logger.error("Leadership hand-back after the aborted restart of %s: %s", snode.get_id(), e)
+        return out
+    for lvs_name, members in member_lvstores:
+        if not any(m.get_id() != snode.get_id() and m.status == StorageNode.STATUS_ONLINE
+                   for m in members):
+            continue
+        ok, why = restart_before_lvstore_handoff(snode.get_id(), lvs_name)
+        if not ok:
+            logger.info("No leadership hand-back for %s: %s", lvs_name, why)
+            continue
+        try:
+            leader, _ = find_leader_with_failover(members, lvs_name,
+                                                  pre_handoff_restart_of=snode.get_id())
+        except Exception as e:                              # noqa: BLE001
+            logger.error("Leadership hand-back for %s after the aborted restart of %s failed: %s",
+                         lvs_name, snode.get_id(), e)
+            continue
+        if leader is None:
+            logger.warning("%s has no leader after the aborted restart of %s; no member could "
+                           "be proven safe to lead yet (the node monitor retries)",
+                           lvs_name, snode.get_id())
+        else:
+            logger.info("%s is led by %s after the aborted restart of %s",
+                        lvs_name, leader.get_id(), snode.get_id())
+        out.append((lvs_name, leader.get_id() if leader else None))
+    return out
+
+
 def _leadership_moving_tasks_active(cluster_id, node_ids, lvs_name=None,
                                     pre_handoff_restart_of=None):
     """True when a port-allow or restart task is active on any LVS member, or
@@ -12706,6 +13125,48 @@ def _sync_grant_guard(cluster_id, lvs_name, owner_id, taker_id, *, timeout=0):
                            else f"leadership moving to {active.moving_to}" if active.moving_to
                            else "not in the active triplet")
         yield permitted and not on_lost
+
+
+def _release_nonleader_examine(rpc, node_id, lvs_name):
+    """Tell *node_id*'s SPDK that it does not lead *lvs_name* (set-leader 0 -> 0),
+    right after an examine there. ``True`` once sent.
+
+    An examine on a non-leader reads the md journal and KEEPS the result
+    "until the set-leader call" (SPDK bs_md_journal_examine_complete: "overlay
+    kept, writes go directly HOME"), so that a promotion right after can skip
+    the journal read. Nothing ever sent that call to a node that stays a
+    non-leader, so the result lingered -- and a promotion hours later reused it
+    without reading the journal and zeroed the entries the leader had written
+    since. bf36 R3b (2026-11-26): 6344ccd0 examined LVS_22 at 13:42:42 as its
+    secondary; promoted at 16:55:20 "from the examine result, no journal read",
+    it lost the leader's unhomed metadata and resurrected a deleted volume
+    (LVS_22 unloadable). The 0 -> 0 call drops the kept result (SPDK
+    bs_md_journal_pause: "the examine result is not needed").
+
+    Only when the node's own SPDK reports that it does NOT lead the lvstore:
+    the call is a demotion for a leader. Called before the node is connected
+    to the leader's hub or its port is opened, so no IO can promote it in
+    between. Best effort: a failure leaves the result kept, as before."""
+    try:
+        lvs = rpc.get_lvstore(lvs_name)
+    except Exception as e:                                  # noqa: BLE001
+        logger.warning("Not releasing the examine of %s on %s: lvstore query failed: %s",
+                       lvs_name, node_id[:8], e)
+        return False
+    if not isinstance(lvs, dict):
+        # absent, or an answer without the leadership field: not provably non-leader
+        return False
+    if lvs.get("lvs leadership"):
+        logger.warning("Not releasing the examine of %s on %s: it reports leadership",
+                       lvs_name, node_id[:8])
+        return False
+    try:
+        rpc.bdev_lvol_set_leader(lvs_name, leader=False, bs_nonleadership=True)
+    except Exception as e:                                  # noqa: BLE001
+        logger.warning("Releasing the examine of %s on %s failed: %s", lvs_name, node_id[:8], e)
+        return False
+    logger.info("Released the examine result of %s on non-leader %s", lvs_name, node_id[:8])
+    return True
 
 
 def _lvs_leadership_reported(node, lvs_name):
@@ -14898,6 +15359,10 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
                 logger.error("Non-leader build aborted: %s", reason)
                 _set_restart_phase(snode, primary_node.lvstore, "", db_controller)
                 return False
+
+        # The examine's journal result must not outlive this build: a later
+        # promotion would reuse it (_release_nonleader_examine).
+        _release_nonleader_examine(snode_rpc_client, snode.get_id(), primary_node.lvstore)
 
         # Track the deferred failover-path attach so we can run it AFTER the
         # leader port is unblocked. The in-freeze attach below uses a single
@@ -20029,6 +20494,8 @@ def create_lvstore(snode: StorageNode, ndcs, npcs, distr_bs, distr_chunk_bs, pag
         sec_rpc_client = sec_node.rpc_client()
         sec_rpc_client.bdev_examine(snode.raid)
         sec_rpc_client.bdev_wait_for_examine()
+        # A secondary never keeps its examine result (_release_nonleader_examine).
+        _release_nonleader_examine(sec_rpc_client, sec_node.get_id(), lvs_name)
 
         sec_node.write_to_db()
 

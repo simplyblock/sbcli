@@ -798,20 +798,20 @@ def _hugepage_shortfall(host_hugetlb_bytes, required_mib):
 
 
 def _hugepages_per_numa(nodes):
-    """2 MiB pages to reserve on each NUMA node for this host's node configs:
-    the sizing the init Job's apply_config has always used, so a Talos host
-    (reserved through the Talos API) and any other (written to sysfs) end up
-    with the same pool. The constants are kept as they were: a flat 1 GB of
-    headroom per node config, and pages of 2,000,000 rather than 2 MiB
-    bytes, which over-reserves by about 5 %."""
-    per_numa_bytes: dict = {}
-    for node_config in nodes:
-        hg_memory = node_config["huge_page_memory"]
-        if int(node_config["max_size"]) > 0:
-            hg_memory = max(hg_memory, node_config["max_size"])
-        numa = node_config["socket"]
-        per_numa_bytes[numa] = per_numa_bytes.get(numa, 0) + hg_memory + 1000000000
-    return {numa: mem // 2000000 for numa, mem in per_numa_bytes.items()}
+    """2 MiB pages to reserve on each NUMA node for this host's node configs
+    (core_utils.hugepages_per_numa), the sizing the init Job's apply_config
+    writes, so a Talos host (reserved through the Talos API) and any other
+    (written to sysfs) end up with the same pool. Each storage node gets
+    exactly the pages its SPDK pod requests (_spdk_hugepages_mib)."""
+    return core_utils.hugepages_per_numa(nodes)
+
+
+def _spdk_hugepages_mib(spdk_mem):
+    """The SPDK pod's hugepages-2Mi request in MiB: the storage node's pages
+    (core_utils.hugepages_2mi_pages) times 2 MiB, which is what the host
+    reserves for it. The kubelet caps the container's huge pages at this
+    request, so any page reserved beyond it would go unused."""
+    return core_utils.hugepages_2mi_pages(spdk_mem) * 2
 
 
 def _talos_sysfs_patch(pages_per_numa):
@@ -1337,7 +1337,7 @@ def spdk_process_start(body: SPDKParams):
             "L_CORES": body.l_cores,
             "CORES": core_utils.get_total_cpu_cores(body.l_cores),
             'SPDK_MEM': core_utils.convert_size(body.spdk_mem, 'MiB'),
-            'MEM_MEGA': (core_utils.convert_size(body.spdk_mem, 'MiB', round_up=True) // 2) * 2 + 512,
+            'MEM_MEGA': _spdk_hugepages_mib(body.spdk_mem),
             # the SPDK container's hard memory limit (request = limit), never
             # below the base
             'MEM2_MEGA': (core_utils.convert_size(max(body.system_mem or 0, constants.SYS_MEMORY_BASE_BYTES),

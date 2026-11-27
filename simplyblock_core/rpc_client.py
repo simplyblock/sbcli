@@ -230,6 +230,25 @@ def request_reached_remote(err: BaseException) -> bool:
     return isinstance(err, RPCConnectionError) and isinstance(err.__cause__, ReadTimeout)
 
 
+def transfer_base_unreachable(err: BaseException) -> bool:
+    """True when SPDK refused a delta transfer because the destination's base
+    cannot be reached from the source (simplyblock/spdk#108).
+
+    ``bdev_lvol_transfer`` and ``bdev_lvol_transfer_final_step`` with
+    ``allow_partial`` + ``partial_base``: when the delta falls back to whole
+    clusters and the source's parent is not ``partial_base``, SPDK must also
+    send the snapshots in between; if it cannot walk to the base through
+    snapshots open on that node (xfer_full_bridge), ``spdk_lvol_transfer``
+    returns -ENOENT before anything is sent (a final step's freeze is undone)
+    and both handlers answer ``-32602`` with ``spdk_strerror(ENOENT)``. No
+    other path of these two RPCs returns ENOENT (lookups answer ENODEV,
+    validation EINVAL), and a request without ``partial_base`` is never
+    refused this way: the caller sends it again without one (a full send).
+    """
+    return (isinstance(err, RPCRemoteError) and err.code == RPCErrorCode.invalid_params
+            and err.posix_errno == errno.ENOENT)
+
+
 _response_validator = jsonschema.validators.validator_for(_response_schema)(_response_schema)  # type: ignore[call-arg]
 
 
@@ -2090,12 +2109,12 @@ class RPCClient:
 
     def supports_two_node_arbitration(self):
         """True when the node exposes every RPC the arbiter drives
-        (constants.TWO_NODE_ARBITRATION_RPCS). Any error means no."""
-        try:
-            methods = set(self.rpc_get_methods() or [])
-        except Exception:                           # noqa: BLE001 - probe only
-            return False
-        return all(m in methods for m in constants.TWO_NODE_ARBITRATION_RPCS)
+        (constants.TWO_NODE_ARBITRATION_RPCS).
+
+        Raises:
+            RPCException: the node's method list could not be read.
+        """
+        return set(constants.TWO_NODE_ARBITRATION_RPCS) <= set(self.rpc_get_methods())
 
     def bdev_lvol_snapshot_group(self, lvs_name, snapshots):
         """One crash-consistent snapshot per consistency-group member.

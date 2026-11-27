@@ -32,7 +32,11 @@ from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.replica_chain_pending import ReplicaChainPending
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.rpc_client import RPCException
+from simplyblock_core.rpc_client import (
+    RPCException,
+    RPCRemoteError,
+    transfer_base_unreachable,
+)
 
 logger = utils.get_logger(__name__)
 utils.init_sentry_sdk(__name__)
@@ -1175,11 +1179,19 @@ def process_snap_replicate_start(task, snapshot):
     # (_ask_target_leadership_recovery); that recovery, not replication,
     # decides whether a grant is safe.
     remote_lv_node, lead_why = _stable_target_leader(remote_lv)
+    io_promotion = False
     if remote_lv_node is None:
-        # Waiting, not failing: the target's leadership is not this transfer's
-        # fault, and counting it let a leaderless window kill the task.
-        _wait_for_target_leader(task, remote_lv, lead_why)
-        return
+        # With the primary down, the transfer itself promotes the secondary
+        # (_io_promotion_receiver): IO-driven, as for client IO.
+        remote_lv_node, promo_why = _io_promotion_receiver(remote_lv)
+        if remote_lv_node is None:
+            # Waiting, not failing: the target's leadership is not this transfer's
+            # fault, and counting it let a leaderless window kill the task.
+            _wait_for_target_leader(task, remote_lv, f"{lead_why}; {promo_why}")
+            return
+        io_promotion = True
+        logger.warning("Replication task %s: target %s has no leader (%s); %s",
+                       task.uuid, remote_lv.lvs_name, lead_why, promo_why)
     _target_leader_found(task)
     # Who may receive. The transfer goes through a hub, and SPDK demuxes hub IO
     # by map id in the HUB's own lvstore (vbdev_hublvol_submit_request): the
@@ -1271,11 +1283,21 @@ def process_snap_replicate_start(task, snapshot):
         # not exist on the target cluster).
         # The hub rejects receive IO on a non-leader ("receive io for hublvol in
         # nonleader mode"); do not start a transfer that cannot land.
-        if not _require_lvs_leader(remote_lv_node, remote_lv.lvs_name, "transfer receive"):
+        # (An io_promotion transfer goes to a non-leader on purpose: its IO is
+        # what makes the secondary take over.)
+        if not io_promotion and not _require_lvs_leader(
+                remote_lv_node, remote_lv.lvs_name, "transfer receive"):
             _suspend_for_retry(task, f"target node {remote_lv_node.get_id()} not LVS "
                                      f"leader of {remote_lv.lvs_name}, retrying",
                                backoff=True, count=False)
             return
+        if io_promotion and task.function_params.get("allow_partial_landing") != remote_lv.get_id():
+            # No delta decision for this landing volume yet: pre-chaining needs
+            # metadata changes on a leader, which the target does not have.
+            # Send it in full; a resumed transfer keeps the mode it started in.
+            task.function_params.update(allow_partial=False, partial_base=0,
+                                        allow_partial_landing=remote_lv.get_id())
+            task.write_to_db()
 
         allow_partial, partial_base = _partial_transfer_decision(
             task, snapshot, replicate_to_source, remote_lv, remote_lv_node, snode.get_id())
@@ -1339,7 +1361,8 @@ def process_snap_replicate_start(task, snapshot):
         task.function_params.pop("cow_landing", None)
         task.write_to_db()
         applied: dict = {}
-        snode.rpc_client().bdev_lvol_transfer(
+        _submit_transfer(
+            task, snode.rpc_client(), snapshot,
             name=snapshot.snap_bdev,
             offset=offset,
             # SPDK sends every replication request in pieces of at most 64 KiB
@@ -1386,6 +1409,48 @@ def process_snap_replicate_start(task, snapshot):
     # the budget expires, in which case the pass-based path picks it up as
     # before.
     _await_transfer_completion(task, snapshot, snode)
+
+
+def _submit_transfer(task, rpc, snapshot, *, allow_partial, partial_base, cow_landing, applied, **kw):
+    """Start the snapshot's transfer; a delta SPDK refuses goes again as a full send.
+
+    SPDK refuses a delta whose base it cannot reach from the snapshot through
+    snapshots open on the sending node (simplyblock/spdk#108: the full-cluster
+    fallback would otherwise miss the clusters of the snapshots in between).
+    Nothing was sent then. Sending the same delta again would be refused for
+    ever, so the transfer goes without a base: whole clusters, as for any
+    transfer this runner declines a delta for. The verdict is recorded on the
+    task (allow_partial / partial_base, still keyed to this landing volume),
+    so a resumed attempt stays full and the finish does not merge. Every such
+    full send raises REPLICATION_FULL_SEND (lvol_events.replication_full_send):
+    it is the last resort, and its cause is a fault of its own.
+    """
+    try:
+        return rpc.bdev_lvol_transfer(allow_partial=allow_partial, partial_base=partial_base,
+                                      cow_landing=cow_landing, applied=applied, **kw)
+    except RPCRemoteError as e:
+        if not (allow_partial and partial_base and transfer_base_unreachable(e)):
+            raise
+        logger.warning("Replication task %s: SPDK refused the delta of %s against base "
+                       "%#x (the base is not reachable from the snapshot through open "
+                       "snapshots: %s); sending it in full instead",
+                       task.uuid, kw.get("name"), int(partial_base), e)
+        _full_send_event(snapshot.lvol, f"snapshot {kw.get('name')}", partial_base, e)
+    task.function_params["allow_partial"] = False
+    task.function_params["partial_base"] = 0
+    task.write_to_db()
+    applied.clear()
+    return rpc.bdev_lvol_transfer(allow_partial=False, partial_base=0, cow_landing=False,
+                                  applied=applied, **kw)
+
+
+def _full_send_event(lvol, what, partial_base, err):
+    """REPLICATION_FULL_SEND; never lets the event fail the transfer."""
+    try:
+        lvol_events.replication_full_send(lvol, what, partial_base, err)
+    except Exception as ev_err:                                # noqa: BLE001
+        logger.error("Could not log the full-send event of lvol %s: %s",
+                     getattr(lvol, "uuid", "?"), ev_err)
 
 
 def _counterpart_on_destination(snapshot, remote_node):
@@ -1579,6 +1644,52 @@ def _leaders_of(lvol_like):
 # (cluster id, lvstore) -> (leader id, time it was last confirmed settled)
 _SETTLED_LEADER: dict = {}
 _SETTLED_LEADER_LOCK = threading.Lock()
+
+
+def _io_promotion_receiver(remote_lv):
+    """The SECONDARY of the target lvstore, when a transfer may be sent to it
+    while the lvstore has no leader; or ``(None, why)``.
+
+    A target lvstore has no client IO, so nothing promotes its secondary when
+    its primary goes down -- but a transfer IS IO. Sent to the secondary's
+    per-lvstore hub, it takes the same path client IO takes there: the
+    non-leader forwards it to the primary's hublvol, the forward fails while
+    the primary is gone, the secondary stops forwarding and its hub takes the
+    IO-driven takeover (vbdev_hublvol_submit_request ->
+    spdk_lvs_check_active_process). SPDK decides, as for client IO: a primary
+    that still leads simply receives the forwarded IO. The control plane grants
+    nothing; the restarted primary's handoff later quiesces and demotes the
+    acting leader as after any IO-driven promotion.
+
+    Only while the primary is not online -- with every member up and none
+    leading, the guarded recovery decides (_ask_target_leadership_recovery) --
+    and only to a secondary that is online, answers, and holds the lvstore. A
+    tertiary never demuxes hub IO. bf36 R3a (2026-11-26): the target primary
+    crashed and restarted within 13 s; its lvstore stayed leaderless ~2 min and
+    the transfer sat suspended the whole time."""
+    try:
+        primary = db.get_storage_node_by_id(remote_lv.node_id)
+    except KeyError:
+        return None, f"target lvstore primary {remote_lv.node_id} unknown"
+    if primary.status == StorageNode.STATUS_ONLINE:
+        return None, f"primary {primary.get_id()[:8]} is online"
+    sid = primary.secondary_node_id
+    if not sid:
+        return None, "the target lvstore has no secondary"
+    try:
+        sec = db.get_storage_node_by_id(sid)
+    except KeyError:
+        return None, f"secondary {sid[:8]} unknown"
+    if sec.status != StorageNode.STATUS_ONLINE:
+        return None, f"secondary {sid[:8]} is {sec.status}"
+    try:
+        lvs = sec.rpc_client(timeout=5, retry=1).get_lvstore(remote_lv.lvs_name)
+    except Exception as e:                                  # noqa: BLE001
+        return None, f"secondary {sid[:8]} does not answer ({e})"
+    if not lvs:
+        return None, f"secondary {sid[:8]} does not hold {remote_lv.lvs_name}"
+    return sec, (f"primary {primary.get_id()[:8]} is {primary.status}: sending through the "
+                 f"secondary {sid[:8]}, whose incoming IO promotes it")
 
 
 def _stable_target_leader(remote_lv):

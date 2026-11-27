@@ -18,6 +18,7 @@ from simplyblock_core.controllers import (
     activation_gate,
     events_controller,
     snapshot_controller,
+    storage_events,
     tasks_controller,
 )
 from simplyblock_core.models.cluster import Cluster
@@ -134,6 +135,46 @@ def _alert_repeated_failure(task, node_id, what, msg):
         logger.warning(f"Could not log repeated-failure event: {event_error}")
 
 
+# (node_id, lvs_name) -> {lvol_id: last failure time}, and when it was last alerted.
+_member_register_failures: dict = {}
+_member_register_alerted: dict = {}
+
+
+def _note_member_registration(node, lvs_name, lvol_id, err=None, now=None):
+    """Track registration failures per lvstore member across volumes, and alert
+    when one member keeps failing (constants.LVS_MEMBER_REGISTER_FAIL_*).
+
+    The per-task alert (_alert_repeated_failure) counts the retries of ONE
+    volume's task; a member whose copy of the lvstore cannot read what the
+    leader writes fails a new volume every time instead, and replication's
+    landing volumes are deleted before any one of their tasks crosses that
+    threshold. A successful registration on the member clears its record."""
+    now = time.time() if now is None else now
+    key = (node.get_id(), lvs_name)
+    if err is None:
+        _member_register_failures.pop(key, None)
+        return False
+    window = constants.LVS_MEMBER_REGISTER_FAIL_WINDOW_SEC
+    seen = _member_register_failures.setdefault(key, {})
+    seen[lvol_id] = now
+    for k in [k for k, t in seen.items() if now - t > window]:
+        del seen[k]
+    if len(seen) < constants.LVS_MEMBER_REGISTER_FAIL_ALERT_LVOLS:
+        return False
+    last = _member_register_alerted.get(key)
+    if last is not None and now - last < constants.LVS_MEMBER_REGISTER_FAIL_REALERT_SEC:
+        return False
+    _member_register_alerted[key] = now
+    logger.error("%s on node %s failed to register %d volumes within %ds (last: %s)",
+                 lvs_name, node.get_id(), len(seen), window, err)
+    try:
+        storage_events.snode_lvs_member_register_failing(
+            node, lvs_name, len(seen), window, err)
+    except Exception as event_error:                       # noqa: BLE001
+        logger.warning(f"Could not log the member registration event: {event_error}")
+    return True
+
+
 def _run_sync_op(task):
     lvol_id = task.function_params.get("lvol_id")
     op = task.function_params.get("op")
@@ -191,9 +232,11 @@ def _run_sync_op(task):
             if _is_already_gone(err):
                 # -19 / ENODEV: nothing to act on, do not count it.
                 raise TaskDefer(msg)
+            _note_member_registration(node, lvol.lvs_name, lvol_id, err)
             _alert_repeated_failure(
                 task, task.node_id, f"Deferred lvol {op} for {lvol_id}", msg)
             raise TaskRetry(msg)
+        _note_member_registration(node, lvol.lvs_name, lvol_id)
         set_result(task, f"registered lvol {lvol_id} on {task.node_id}")
     elif op == "resize":
         # Converge to the CURRENT DB size — resize_lvol persists the new

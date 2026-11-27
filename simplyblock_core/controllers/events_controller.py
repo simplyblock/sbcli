@@ -22,6 +22,8 @@ EVENT_DISTR_IO_ERROR = "DISTR_IO_ERROR"
 #: A client LVS port was reopened FENCE_RELEASE_BUDGET times in one window
 #: and SPDK fenced it again each time; the control plane stopped reopening it.
 EVENT_FENCE_LOOP = "FENCE_LOOP"
+#: One member of an lvstore keeps failing to register volumes the leader created.
+EVENT_LVS_MEMBER_REGISTER_FAILING = "LVS_MEMBER_REGISTER_FAILING"
 #: Multi-attach array LUN mode: a LUN was (or could not be) taken over by
 #: another node after its serving node failed.
 EVENT_LUN_TAKEOVER = "LUN_TAKEOVER"
@@ -30,6 +32,10 @@ EVENT_ARRAY_LUN = "ARRAY_LUN"
 #: A replication step on the target keeps failing (e.g. the landing merge
 #: cannot get memory); the control plane backs off and keeps retrying.
 EVENT_REPLICATION_STALLED = "REPLICATION_STALLED"
+#: SPDK refused a replication delta because the destination's base is not
+#: reachable from the source (simplyblock/spdk#108); the control plane sent
+#: that transfer in full instead, which costs the whole volume on the wire.
+EVENT_REPLICATION_FULL_SEND = "REPLICATION_FULL_SEND"
 
 DOMAIN_CLUSTER = "cluster"
 DOMAIN_MANAGEMENT = "management"

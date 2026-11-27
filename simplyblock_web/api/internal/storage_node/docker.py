@@ -1,5 +1,4 @@
 import json
-import math
 import os
 import socket
 import time
@@ -1162,12 +1161,7 @@ def set_hugepages():
         return utils.get_response(False, "Config validation is incorrect")
 
     # Set Huge page memory
-    huge_page_memory_dict: dict = {}
-    for node_config in nodes:
-        numa = node_config["socket"]
-        huge_page_memory_dict[numa] = huge_page_memory_dict.get(numa, 0) + node_config["huge_page_memory"]
-    for numa, huge_page_memory in huge_page_memory_dict.items():
-        num_pages = math.ceil(huge_page_memory / (2048 * 1024))
+    for numa, num_pages in core_utils.hugepages_per_numa(nodes).items():
         core_utils.set_hugepages_if_needed(numa, num_pages)
 
     return utils.get_response(True)

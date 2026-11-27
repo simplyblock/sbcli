@@ -6,6 +6,7 @@ from uuid import UUID
 from fastapi import Request
 from pydantic import AwareDatetime, BaseModel, Field, SecretStr, field_serializer
 
+from simplyblock_core import constants
 from simplyblock_core.controllers import migration_controller
 from simplyblock_core.controllers.backup.manifest import (
     BackupExport,
@@ -238,6 +239,13 @@ class ClusterDTO(BaseModel):
     spdk_proxy_service: str
     spdk_proxy_tls_secret: str
     node_label_suffix: str
+    # Whether every distrib runs v2 write protection. An upgraded cluster stays
+    # on v1 until POST /clusters/{id}/switch-write-protection succeeds.
+    write_protection_v2: bool = False
+    # The images a node is started with when its add or restart names none,
+    # behind the cluster's image prefix.
+    default_spdk_image: str = ""
+    default_spdk_proxy_image: str = ""
 
     @field_serializer('secret', when_used='json')
     def _unwrap_secret_for_json(self, value: SecretStr) -> str:
@@ -292,6 +300,9 @@ class ClusterDTO(BaseModel):
             spdk_proxy_service=model.spdk_proxy_service,
             spdk_proxy_tls_secret=model.spdk_proxy_tls_secret,
             node_label_suffix=model.node_label_suffix,
+            write_protection_v2=model.write_protection_v2,
+            default_spdk_image=model.prefixed_image(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE),
+            default_spdk_proxy_image=model.prefixed_image(constants.SIMPLY_BLOCK_DOCKER_IMAGE),
         )
 
 
@@ -596,6 +607,10 @@ class StorageNodeDTO(BaseModel):
     # The NUMA socket the node runs on. A host running one node per socket
     # reports several nodes at one address, and this is what tells them apart.
     socket: util.Unsigned = 0
+    # The images the control plane starts the node with: those of its last add
+    # or restart, behind the cluster's image prefix.
+    spdk_image: str = ""
+    spdk_proxy_image: str = ""
     capacity: CapacityStatDTO
 
     @staticmethod
@@ -629,6 +644,8 @@ class StorageNodeDTO(BaseModel):
             failure_domain=model.failure_domain,
             site=model.site,
             socket=model.socket,
+            spdk_image=model.spdk_image,
+            spdk_proxy_image=model.spdk_proxy_image,
             capacity=CapacityStatDTO.from_model(
                 stat_obj if stat_obj else StatsObject()
             ),

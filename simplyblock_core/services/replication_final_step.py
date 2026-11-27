@@ -18,7 +18,7 @@ from simplyblock_core import constants, db_controller, utils, xfer_timing
 from simplyblock_core.controllers import replica_chain
 from simplyblock_core.models.hublvol import HubLVol
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.rpc_client import RPCException
+from simplyblock_core.rpc_client import RPCException, transfer_base_unreachable
 
 logger = utils.get_logger(__name__)
 
@@ -438,11 +438,34 @@ def run_cutover(src_node, tgt_node, lvol, tgt_lvol_composite, tgt_map_id,
     with xfer_timing.phase("final_step_transfer", lvol=lvol.get_id(),
                            batch=batch, delta=1 if partial_base else 0):
         try:
-            ret = src_rpc.bdev_lvol_transfer_final_step(
-                src_lvol_composite, tgt_map_id, tgt_snap_composite,
-                batch, hub_bdev, operation,
-                **({"partial_base": partial_base, "cow_landing": True,
-                    "applied": applied} if operation == "replicate" else {}))
+            try:
+                ret = src_rpc.bdev_lvol_transfer_final_step(
+                    src_lvol_composite, tgt_map_id, tgt_snap_composite,
+                    batch, hub_bdev, operation,
+                    **({"partial_base": partial_base, "cow_landing": True,
+                        "applied": applied} if operation == "replicate" else {}))
+            except RPCException as e:
+                if not (partial_base and transfer_base_unreachable(e)):
+                    raise
+                # simplyblock/spdk#108: SPDK cannot reach the clone's base from
+                # the live volume through snapshots open there, refused before
+                # sending anything and undid its freeze. The source stays fenced
+                # (its paths are still inaccessible), so the same step goes
+                # again at once in whole clusters, which SPDK does not refuse;
+                # a retry of the delta would be refused every time.
+                logger.warning(
+                    f"cutover lvol={lvol.uuid}: SPDK refused the final step's delta "
+                    f"against base {partial_base:#x} (not reachable from the volume "
+                    f"through open snapshots: {e}); sending it in whole clusters")
+                from simplyblock_core.services import snapshot_replication
+                snapshot_replication._full_send_event(lvol, "the cutover final step",
+                                                      partial_base, e)
+                partial_base, batch = 0, _FINAL_STEP_BATCH
+                applied.clear()
+                ret = src_rpc.bdev_lvol_transfer_final_step(
+                    src_lvol_composite, tgt_map_id, tgt_snap_composite,
+                    batch, hub_bdev, operation,
+                    partial_base=0, cow_landing=True, applied=applied)
         except RPCException as e:
             # A raise used to skip the restore below and leave the source
             # fenced (the volume dark) through every retry (SFAM-2834). SPDK
