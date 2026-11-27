@@ -604,6 +604,9 @@ class StorageNodeDTO(BaseModel):
     failure_domain: int
     # Sync replication: the site the node was added to ("" off a sync cluster).
     site: str = ""
+    # The NUMA socket the node runs on. A host running one node per socket
+    # reports several nodes at one address, and this is what tells them apart.
+    socket: util.Unsigned = 0
     # The images the control plane starts the node with: those of its last add
     # or restart, behind the cluster's image prefix.
     spdk_image: str = ""
@@ -640,6 +643,7 @@ class StorageNodeDTO(BaseModel):
             online_device_count=len([device for device in model.nvme_devices if device.status == "online" ]),
             failure_domain=model.failure_domain,
             site=model.site,
+            socket=model.socket,
             spdk_image=model.spdk_image,
             spdk_proxy_image=model.spdk_proxy_image,
             capacity=CapacityStatDTO.from_model(

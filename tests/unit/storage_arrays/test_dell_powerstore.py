@@ -24,8 +24,8 @@ from simplyblock_core.storage_arrays.base import (
 )
 from simplyblock_core.storage_arrays.client import ArrayClient
 from simplyblock_core.storage_arrays.http import RestSession
-from simplyblock_core.storage_arrays.testing import FakeTransport, make_config
-from simplyblock_core.storage_arrays.testing.dell_powerstore import contract_setup
+from tests.unit.storage_arrays.fakes import FakeTransport, make_config
+from tests.unit.storage_arrays.fakes.dell_powerstore import contract_setup
 
 GIB = 1 << 30
 

@@ -16,12 +16,12 @@ from simplyblock_core.storage_arrays.base import (
     Protocol,
 )
 from simplyblock_core.storage_arrays.client import ArrayClient
-from simplyblock_core.storage_arrays.testing import (
+from tests.unit.storage_arrays.fakes import (
     FakeError,
     FakeTransport,
     make_config,
 )
-from simplyblock_core.storage_arrays.testing.hpe_wsapi import contract_setup
+from tests.unit.storage_arrays.fakes.hpe_wsapi import contract_setup
 
 from .conftest import StaticProvider
 

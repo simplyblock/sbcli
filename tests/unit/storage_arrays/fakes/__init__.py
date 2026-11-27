@@ -1,6 +1,6 @@
 """Stateful fakes of each vendor's management REST API.
 
-Each ``testing/<vendor>.py`` module provides
+Each ``fakes/<vendor>.py`` module provides
 
 * a :class:`FakeArray` subclass that keeps volumes/hosts/mappings in memory
   and answers the subset of the vendor API its adapter uses, with the
@@ -11,7 +11,7 @@ Each ``testing/<vendor>.py`` module provides
 
 Fakes plug into ``requests`` in-process through :class:`FakeTransport` (no
 sockets), or run as a real HTTPS server with :func:`serve` / ``python -m
-simplyblock_core.storage_arrays.testing`` for end-to-end and UI testing.
+tests.unit.storage_arrays.fakes`` for end-to-end and UI testing.
 
 A fake encodes our reading of the vendor API. Passing the contract suite
 proves the adapter logic; it does not prove API fidelity -- that needs the
@@ -37,8 +37,7 @@ from requests.adapters import BaseAdapter
 from requests.structures import CaseInsensitiveDict
 
 from simplyblock_core.credentials import Credential
-
-from ..base import ArrayConfig, Initiator, Protocol
+from simplyblock_core.storage_arrays.base import ArrayConfig, Initiator, Protocol
 
 Handler = Callable[..., "Reply"]
 
@@ -149,7 +148,7 @@ class FakeArray:
         return Reply(404, {"error": f"fake: no route for {req.method} {req.path}"})
 
 
-# The LIO data path (testing.lio) reads a fake through two accessors, which
+# The LIO data path (fakes.lio) reads a fake through two accessors, which
 # every vendor fake implements:
 #
 # * ``lio_volume_ids()``: the ids of the live volumes, as the vendor's adapter
@@ -271,7 +270,7 @@ def serve(fake: FakeArray, host: str = "127.0.0.1", port: int = 8443,
     """Serve ``fake`` over HTTPS (a throwaway self-signed certificate is
     generated unless ``certfile``/``keyfile`` are given). Returns the server;
     call ``serve_forever()`` on it. ``after_request`` runs after every
-    request, before the answer is sent: the LIO data path (``testing.lio``)
+    request, before the answer is sent: the LIO data path (``fakes.lio``)
     catches up there, so a mapping the caller was told about is already
     presented. GETs included: on arrays with asynchronous jobs, a change
     takes effect while its job is polled."""

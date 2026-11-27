@@ -31,14 +31,14 @@ from simplyblock_core.storage_arrays.client import (
 )
 from simplyblock_core.storage_arrays.http import RestSession
 from simplyblock_core.storage_arrays.registry import ADAPTERS, ALIASES, canonical_vendor
-from simplyblock_core.storage_arrays.testing import (
+from tests.unit.storage_arrays.fakes import (
     FakeArray,
     FakeTransport,
     Reply,
     route,
     serve,
 )
-from simplyblock_core.storage_arrays.testing.pure import FakePureFlashArray
+from tests.unit.storage_arrays.fakes.pure import FakePureFlashArray
 
 from .conftest import StaticProvider
 
@@ -237,7 +237,7 @@ def test_string_options_are_read_as_the_type_of_their_default():
     from simplyblock_core.storage_arrays.adapters.hitachi_vsp import HitachiVspAdapter
     from simplyblock_core.storage_arrays.adapters.pure import PureFlashArrayAdapter
     from simplyblock_core.storage_arrays.base import AdapterContext, ArrayError
-    from simplyblock_core.storage_arrays.testing import make_config
+    from tests.unit.storage_arrays.fakes import make_config
 
     def adapter(cls, vendor, creds, **options):
         return cls(AdapterContext(make_config(vendor, "https://a.example", **options),

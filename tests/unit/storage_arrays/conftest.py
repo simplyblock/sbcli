@@ -24,7 +24,7 @@ from simplyblock_core.credentials import Credential
 from simplyblock_core.storage_arrays.base import ArrayConfig, Initiator, Protocol
 from simplyblock_core.storage_arrays.client import ArrayClient
 from simplyblock_core.storage_arrays.registry import ADAPTERS
-from simplyblock_core.storage_arrays.testing import ContractSetup, FakeTransport
+from tests.unit.storage_arrays.fakes import ContractSetup, FakeTransport
 
 VENDORS = sorted(ADAPTERS)
 
@@ -49,7 +49,7 @@ class StaticProvider:
 def fake_module(vendor: str):
     tail = ADAPTERS[vendor].split(":")[0].split(".")[-1]
     try:
-        return importlib.import_module(f"simplyblock_core.storage_arrays.testing.{tail}")
+        return importlib.import_module(f"tests.unit.storage_arrays.fakes.{tail}")
     except ModuleNotFoundError as e:
         if e.name and e.name.endswith(tail):
             pytest.skip(f"no fake for {vendor} yet")

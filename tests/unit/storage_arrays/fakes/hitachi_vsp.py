@@ -31,8 +31,8 @@ from typing import Any
 from pydantic import SecretStr
 
 from simplyblock_core.credentials import Credential
+from simplyblock_core.storage_arrays.base import Initiator, Protocol
 
-from ..base import Initiator, Protocol
 from . import ContractSetup, FakeArray, FakeError, Reply, Request, make_config, route
 
 _ROOT = "/ConfigurationManager/v1/objects"
@@ -145,7 +145,7 @@ class FakeHitachiVsp(FakeArray):
         return self._token(req)
 
 
-    # -- LIO data path (testing.lio) -----------------------------------------
+    # -- LIO data path (fakes.lio) -----------------------------------------
     def lio_volume_ids(self) -> list[str]:
         return [str(i) for i in self.ldevs]
 

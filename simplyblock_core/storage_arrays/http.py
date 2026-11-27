@@ -2,7 +2,7 @@
 
 Adapters never build ``requests`` sessions themselves, so TLS verification,
 timeouts, retries and error mapping are uniform, and tests can swap the
-transport for an in-process fake (see ``storage_arrays.testing``).
+transport for an in-process fake (see ``tests/unit/storage_arrays/fakes``).
 """
 from __future__ import annotations
 

@@ -29,8 +29,8 @@ from urllib.parse import unquote
 from pydantic import SecretStr
 
 from simplyblock_core.credentials import Credential
+from simplyblock_core.storage_arrays.base import Initiator, Protocol
 
-from ..base import Initiator, Protocol
 from . import ContractSetup, FakeArray, FakeError, Reply, Request, make_config, route
 
 _A = "/api/v1"
@@ -91,7 +91,7 @@ class FakeHpeWsapi(FakeArray):
             raise _err(401, 6, "invalid session key")
 
 
-    # -- LIO data path (testing.lio) -----------------------------------------
+    # -- LIO data path (fakes.lio) -----------------------------------------
     def lio_volume_ids(self) -> list[str]:
         return list(self.volumes)
 

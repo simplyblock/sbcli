@@ -16,8 +16,8 @@ from simplyblock_core.storage_arrays.base import (
     Protocol,
 )
 from simplyblock_core.storage_arrays.client import ArrayClient
-from simplyblock_core.storage_arrays.testing import FakeTransport
-from simplyblock_core.storage_arrays.testing.huawei_dorado import contract_setup
+from tests.unit.storage_arrays.fakes import FakeTransport
+from tests.unit.storage_arrays.fakes.huawei_dorado import contract_setup
 
 GIB = 1 << 30
 IQN_A = Initiator(protocol=Protocol.ISCSI, address="iqn.2026-01.io.sb:a")

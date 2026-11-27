@@ -23,8 +23,8 @@ from simplyblock_core.storage_arrays.base import (
     Protocol,
 )
 from simplyblock_core.storage_arrays.client import ArrayClient
-from simplyblock_core.storage_arrays.testing import FakeError, FakeTransport
-from simplyblock_core.storage_arrays.testing.netapp_ontap import (
+from tests.unit.storage_arrays.fakes import FakeError, FakeTransport
+from tests.unit.storage_arrays.fakes.netapp_ontap import (
     FakeNetAppOntap,
     contract_setup,
 )

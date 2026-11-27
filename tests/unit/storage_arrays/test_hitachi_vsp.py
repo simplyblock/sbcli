@@ -16,8 +16,8 @@ from simplyblock_core.storage_arrays.base import (
     Protocol,
 )
 from simplyblock_core.storage_arrays.client import ArrayClient
-from simplyblock_core.storage_arrays.testing import FakeTransport
-from simplyblock_core.storage_arrays.testing.hitachi_vsp import contract_setup
+from tests.unit.storage_arrays.fakes import FakeTransport
+from tests.unit.storage_arrays.fakes.hitachi_vsp import contract_setup
 
 from .conftest import StaticProvider
 

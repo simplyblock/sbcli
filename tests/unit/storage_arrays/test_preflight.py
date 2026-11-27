@@ -17,7 +17,7 @@ from simplyblock_core.storage_arrays.preflight.trace import (
     Redactor,
     ReplayAdapter,
 )
-from simplyblock_core.storage_arrays.testing import FakeTransport
+from tests.unit.storage_arrays.fakes import FakeTransport
 
 from .conftest import VENDORS, fake_module
 from .test_san_plugin import Bed
