@@ -12,8 +12,8 @@ from typing import Any, ClassVar
 from pydantic import SecretStr
 
 from simplyblock_core.credentials import Credential
+from simplyblock_core.storage_arrays.base import Initiator, Protocol
 
-from ..base import Initiator, Protocol
 from . import ContractSetup, FakeArray, FakeError, Reply, Request, make_config, route
 
 _V = r"/api/(?P<ver>2\.\d+)"
@@ -56,7 +56,7 @@ class FakePureFlashArray(FakeArray):
             raise _err("Authentication failed.", 401)
 
 
-    # -- LIO data path (testing.lio) -----------------------------------------
+    # -- LIO data path (fakes.lio) -----------------------------------------
     def lio_volume_ids(self) -> list[str]:
         return [v["id"] for v in self.volumes.values() if not v.get("destroyed")]
 

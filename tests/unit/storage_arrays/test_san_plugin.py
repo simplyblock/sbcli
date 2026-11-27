@@ -8,7 +8,7 @@ import pytest
 from simplyblock_core import array, multi_attach
 from simplyblock_core.array import san
 from simplyblock_core.storage_arrays.base import Protocol
-from simplyblock_core.storage_arrays.testing import FakeTransport
+from tests.unit.storage_arrays.fakes import FakeTransport
 
 from .conftest import VENDORS, fake_module
 

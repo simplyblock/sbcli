@@ -1,7 +1,7 @@
 """End-to-end self-test of an array plug-in against a mock array with a real
 data path, on one Linux host.
 
-The mock array (a vendor fake with its LIO mirror, ``testing.lio``) is served
+The mock array (a vendor fake with its LIO mirror, ``fakes.lio``) is served
 over HTTPS, and two iSCSI interfaces of this host, with two initiator names,
 play two storage nodes. The array plug-in of the multi-attach mode
 (``simplyblock_core.array.san``) drives the mock exactly as the control plane
@@ -19,7 +19,7 @@ checks are about the data path, on real block devices:
 Run as root on a host with LIO (``target_core_iblock``, ``iscsi_target_mod``),
 open-iscsi, and python3-rtslib-fb::
 
-    python -m simplyblock_core.storage_arrays.testing.lio_selftest --vendor pure-flasharray
+    python -m tests.unit.storage_arrays.fakes.lio_selftest --vendor pure-flasharray
 
 On WSL, the portal goes on a dummy interface, because WSL's loopback refuses
 the kernel target's listener::
@@ -37,7 +37,8 @@ import sys
 import threading
 import time
 
-from ..registry import ADAPTERS, canonical_vendor
+from simplyblock_core.storage_arrays.registry import ADAPTERS, canonical_vendor
+
 from . import FakeTransport, serve
 from .lio import ConfigfsLio, LioMirror
 

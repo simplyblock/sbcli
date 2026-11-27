@@ -25,8 +25,8 @@ from simplyblock_core.storage_arrays.base import (
 )
 from simplyblock_core.storage_arrays.client import ArrayClient
 from simplyblock_core.storage_arrays.http import RestSession
-from simplyblock_core.storage_arrays.testing import FakeTransport
-from simplyblock_core.storage_arrays.testing.dell_powermax import (
+from tests.unit.storage_arrays.fakes import FakeTransport
+from tests.unit.storage_arrays.fakes.dell_powermax import (
     SYMMETRIX_ID,
     contract_setup,
 )

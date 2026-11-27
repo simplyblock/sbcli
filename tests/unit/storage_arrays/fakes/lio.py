@@ -36,9 +36,8 @@ from typing import Any
 from typing import Protocol as TypingProtocol
 
 from simplyblock_core.credentials import Credential
-
-from ..base import ArrayConfig, Protocol
-from ..client import ArrayClient
+from simplyblock_core.storage_arrays.base import ArrayConfig, Protocol
+from simplyblock_core.storage_arrays.client import ArrayClient
 
 logger = logging.getLogger(__name__)
 

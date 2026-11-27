@@ -15,8 +15,8 @@ from simplyblock_core.storage_arrays.base import (
     Protocol,
 )
 from simplyblock_core.storage_arrays.client import ArrayClient
-from simplyblock_core.storage_arrays.testing import FakeTransport, make_config
-from simplyblock_core.storage_arrays.testing.dell_powerflex import (
+from tests.unit.storage_arrays.fakes import FakeTransport, make_config
+from tests.unit.storage_arrays.fakes.dell_powerflex import (
     FakePowerFlex,
     contract_setup,
 )

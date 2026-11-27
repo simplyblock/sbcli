@@ -56,13 +56,13 @@ LUNs are named `sb-<cluster hash><lun hash>`; a cluster never acts on a LUN of a
 ## Testing
 
 1. **Contract suite against fakes** (`tests/unit/storage_arrays/test_contract.py`).
-   `testing/<vendor>.py` is a stateful in-memory fake of the vendor's REST API: paths, JSON shapes, status codes, error bodies, async jobs, session tokens.
+   `tests/unit/storage_arrays/fakes/<vendor>.py` is a stateful in-memory fake of the vendor's REST API: paths, JSON shapes, status codes, error bodies, async jobs, session tokens.
    Every adapter runs the same suite against its fake, through a `requests` transport, with no network.
    This shows the adapter's logic is right. It does **not** show the fake matches the real API; the fakes encode our reading of each vendor's API.
 2. **Vendor unit tests** (`test_<vendor>.py`): unit conversions, identifier derivation, job polling and failures, error mapping, options.
 3. **HTTPS mock server**, for end-to-end and UI work:
    ```
-   python -m simplyblock_core.storage_arrays.testing --vendor netapp-ontap --port 8443
+   python -m tests.unit.storage_arrays.fakes --vendor netapp-ontap --port 8443
    ```
    It prints the endpoint, the CA file, the credential and the options to register.
 4. **Live tier**: the same contract suite against a simulator or a real array:

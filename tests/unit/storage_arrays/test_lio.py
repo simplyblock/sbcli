@@ -1,4 +1,4 @@
-"""The LIO data path of the mock arrays (storage_arrays.testing.lio): a fake's
+"""The LIO data path of the mock arrays (fakes.lio): a fake's
 volumes, hosts, and mappings mirrored into an iSCSI target, here into the
 in-memory backend. Every vendor fake with iSCSI runs the same scenario through
 its own adapter, which is what the control plane would send it."""
@@ -8,8 +8,8 @@ import pytest
 
 from simplyblock_core.array.san import host_wwn
 from simplyblock_core.storage_arrays.base import HostSpec, Initiator, Protocol
-from simplyblock_core.storage_arrays.testing import FakeTransport
-from simplyblock_core.storage_arrays.testing.lio import LioMirror, MemoryLio
+from tests.unit.storage_arrays.fakes import FakeTransport
+from tests.unit.storage_arrays.fakes.lio import LioMirror, MemoryLio
 
 from .conftest import VENDORS, Harness, fake_module
 

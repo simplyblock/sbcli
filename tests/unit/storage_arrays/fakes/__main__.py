@@ -1,15 +1,15 @@
 """Run a vendor fake as an HTTPS mock server.
 
-    python -m simplyblock_core.storage_arrays.testing --vendor pure-flasharray --port 8443
+    python -m tests.unit.storage_arrays.fakes --vendor pure-flasharray --port 8443
 
 Prints the accepted credential, the CA certificate path (pass its content as
 the array's ``ca_bundle``) and the options to register the array with.
 
 With ``--lio`` (root, LIO modules and python3-rtslib-fb on the host) the
 fake's volumes are real iSCSI LUNs of the kernel target, presented to the
-hosts the fake maps them to (see ``testing.lio``)::
+hosts the fake maps them to (see ``fakes.lio``)::
 
-    python -m simplyblock_core.storage_arrays.testing --vendor pure-flasharray \
+    python -m tests.unit.storage_arrays.fakes --vendor pure-flasharray \
         --host 0.0.0.0 --lio --lio-portal 10.0.0.5:3260 \
         --lio-allow iqn.1994-05.com.redhat:node1,iqn.1994-05.com.redhat:node2
 """
@@ -17,7 +17,7 @@ import argparse
 import importlib
 import json
 
-from ..registry import ADAPTERS, canonical_vendor
+from simplyblock_core.storage_arrays.registry import ADAPTERS, canonical_vendor
 
 
 def main() -> None:

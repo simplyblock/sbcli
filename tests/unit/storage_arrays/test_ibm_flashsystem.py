@@ -15,8 +15,8 @@ from simplyblock_core.storage_arrays.base import (
     Protocol,
 )
 from simplyblock_core.storage_arrays.client import ArrayClient
-from simplyblock_core.storage_arrays.testing import FakeTransport
-from simplyblock_core.storage_arrays.testing.ibm_flashsystem import contract_setup
+from tests.unit.storage_arrays.fakes import FakeTransport
+from tests.unit.storage_arrays.fakes.ibm_flashsystem import contract_setup
 
 GIB = 1 << 30
 
