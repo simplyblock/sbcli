@@ -1670,6 +1670,19 @@ jobs:
         run: |
           NAMESPACE=${NS_C1}
           MAX_POLL=300
+          # Bound every poll loop in this step by the WALL CLOCK, not by a poll
+          # count. Run 45979367229 is why: MAX_POLL=300 at ~16s an iteration (a
+          # 10s sleep plus a few kubectl round trips) is ~81 minutes, just over
+          # this step's own timeout-minutes. The loop was killed seven polls from
+          # the end, so the fall-through that hands over to the force-activate
+          # step never ran -- and because the step ended in failure rather than
+          # success, that rescue step was skipped as well, and 80 minutes
+          # produced no diagnostics at all. A poll count cannot be reasoned about
+          # against a timeout; a deadline can. MAX_POLL stays as the upper bound;
+          # STEP_DEADLINE is what actually stops the loops, with three minutes
+          # left over for the fall-through to report.
+          STEP_LIMIT_MIN=80
+          STEP_DEADLINE=$(( $(date +%s) + STEP_LIMIT_MIN * 60 - 180 ))
           echo "=== Waiting for C1 cluster active in ${NAMESPACE} ==="
 
           ADMIN_POD=""
@@ -1687,6 +1700,14 @@ jobs:
           IFS=',' read -ra C1_NODES <<< "${C1_WORKERS}"
           EXPECTED_SNODES=${#C1_NODES[@]}
           for i in $(seq 1 $MAX_POLL); do
+            # See STEP_DEADLINE above: stop polling in time for the fall-through
+            # to run, instead of letting the step be killed mid-loop.
+            if [ "$(date +%s)" -ge "$STEP_DEADLINE" ]; then
+              echo "::warning title=poll budget spent::Stopping after $i polls so this step can fall through and report; see STEP_DEADLINE."
+              kubectl -n "${NAMESPACE:-simplyblock}" get pods -o wide 2>/dev/null || true
+              kubectl -n "${NAMESPACE:-simplyblock}" get events --sort-by=.lastTimestamp 2>/dev/null | tail -40 || true
+              break
+            fi
             READY=$(kubectl -n $NAMESPACE get pods -l role=simplyblock-storage-node --no-headers 2>/dev/null | grep -c "Running" || true)
             if [ "$READY" -ge "$EXPECTED_SNODES" ]; then break; fi
             echo "snode-spdk: $READY/$EXPECTED_SNODES ($i/$MAX_POLL)"
@@ -1694,6 +1715,14 @@ jobs:
           done
 
           for i in $(seq 1 $MAX_POLL); do
+            # See STEP_DEADLINE above: stop polling in time for the fall-through
+            # to run, instead of letting the step be killed mid-loop.
+            if [ "$(date +%s)" -ge "$STEP_DEADLINE" ]; then
+              echo "::warning title=poll budget spent::Stopping after $i polls so this step can fall through and report; see STEP_DEADLINE."
+              kubectl -n "${NAMESPACE:-simplyblock}" get pods -o wide 2>/dev/null || true
+              kubectl -n "${NAMESPACE:-simplyblock}" get events --sort-by=.lastTimestamp 2>/dev/null | tail -40 || true
+              break
+            fi
             ADMIN_POD=$(kubectl -n $NAMESPACE get pods \
               -l app=simplyblock-admin-control \
               -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) || true
@@ -1744,7 +1773,28 @@ jobs:
           echo "=== Waiting for the C2 StorageCluster in ${NS_C2} ==="
           C2_CR="simplyblock-cluster-c2"
           MAX_POLL=300
+          # Bound every poll loop in this step by the WALL CLOCK, not by a poll
+          # count. Run 45979367229 is why: MAX_POLL=300 at ~16s an iteration (a
+          # 10s sleep plus a few kubectl round trips) is ~81 minutes, just over
+          # this step's own timeout-minutes. The loop was killed seven polls from
+          # the end, so the fall-through that hands over to the force-activate
+          # step never ran -- and because the step ended in failure rather than
+          # success, that rescue step was skipped as well, and 80 minutes
+          # produced no diagnostics at all. A poll count cannot be reasoned about
+          # against a timeout; a deadline can. MAX_POLL stays as the upper bound;
+          # STEP_DEADLINE is what actually stops the loops, with three minutes
+          # left over for the fall-through to report.
+          STEP_LIMIT_MIN=80
+          STEP_DEADLINE=$(( $(date +%s) + STEP_LIMIT_MIN * 60 - 180 ))
           for i in $(seq 1 $MAX_POLL); do
+            # See STEP_DEADLINE above: stop polling in time for the fall-through
+            # to run, instead of letting the step be killed mid-loop.
+            if [ "$(date +%s)" -ge "$STEP_DEADLINE" ]; then
+              echo "::warning title=poll budget spent::Stopping after $i polls so this step can fall through and report; see STEP_DEADLINE."
+              kubectl -n "${NAMESPACE:-simplyblock}" get pods -o wide 2>/dev/null || true
+              kubectl -n "${NAMESPACE:-simplyblock}" get events --sort-by=.lastTimestamp 2>/dev/null | tail -40 || true
+              break
+            fi
             PHASE=$(kubectl -n ${NS_C2} get storagecluster "${C2_CR}" \
               -o jsonpath='{.status.phase}' 2>/dev/null) || true
             if [ "${PHASE}" = "Online" ]; then
@@ -1789,6 +1839,14 @@ jobs:
           # ordering within the listing -- which is what picking "the second
           # uuid" would have done, and the listing is not ordered.
           for i in $(seq 1 $MAX_POLL); do
+            # See STEP_DEADLINE above: stop polling in time for the fall-through
+            # to run, instead of letting the step be killed mid-loop.
+            if [ "$(date +%s)" -ge "$STEP_DEADLINE" ]; then
+              echo "::warning title=poll budget spent::Stopping after $i polls so this step can fall through and report; see STEP_DEADLINE."
+              kubectl -n "${NAMESPACE:-simplyblock}" get pods -o wide 2>/dev/null || true
+              kubectl -n "${NAMESPACE:-simplyblock}" get events --sort-by=.lastTimestamp 2>/dev/null | tail -40 || true
+              break
+            fi
             OUTPUT=$(kubectl -n ${NS_C1} exec "$ADMIN_POD" -- sbctl cluster list) || true
             C2_ID=$(printf '%s\n' "$OUTPUT" | tr -d '\r' \
               | grep -iE '\bactive\b' \

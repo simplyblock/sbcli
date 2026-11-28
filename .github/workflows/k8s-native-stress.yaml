@@ -2322,7 +2322,12 @@ jobs:
           done
 
       - name: Verify and force-activate cluster if needed
-        if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
+        # !cancelled() is load-bearing. This step exists to rescue a
+        # cluster the wait step could not get to Active, but without it
+        # the default 'only if everything succeeded' meant a FAILED wait
+        # skipped the rescue -- the one case it was written for. See
+        # STEP_DEADLINE in that step and run 45979367229.
+        if: ${{ !cancelled() && github.event.inputs.use_existing_cluster != 'true' }}
         run: |
           NAMESPACE=simplyblock
           ADMIN_POD=$(kubectl -n $NAMESPACE get pods \

@@ -1516,11 +1516,32 @@ jobs:
         run: |
           NAMESPACE=simplyblock
           MAX_POLL=300
+          # Bound every poll loop in this step by the WALL CLOCK, not by a poll
+          # count. Run 45979367229 is why: MAX_POLL=300 at ~16s an iteration (a
+          # 10s sleep plus a few kubectl round trips) is ~81 minutes, just over
+          # this step's own timeout-minutes. The loop was killed seven polls from
+          # the end, so the fall-through that hands over to the force-activate
+          # step never ran -- and because the step ended in failure rather than
+          # success, that rescue step was skipped as well, and 80 minutes
+          # produced no diagnostics at all. A poll count cannot be reasoned about
+          # against a timeout; a deadline can. MAX_POLL stays as the upper bound;
+          # STEP_DEADLINE is what actually stops the loops, with three minutes
+          # left over for the fall-through to report.
+          STEP_LIMIT_MIN=${{ github.event.inputs.cluster_environment == 'local' && 40 || 80 }}
+          STEP_DEADLINE=$(( $(date +%s) + STEP_LIMIT_MIN * 60 - 180 ))
 
           # Wait for snode-spdk pods
           IFS=',' read -ra NODES <<< "${{ github.event.inputs.worker_nodes }}"
           EXPECTED=${#NODES[@]}
           for i in $(seq 1 $MAX_POLL); do
+            # See STEP_DEADLINE above: stop polling in time for the fall-through
+            # to run, instead of letting the step be killed mid-loop.
+            if [ "$(date +%s)" -ge "$STEP_DEADLINE" ]; then
+              echo "::warning title=poll budget spent::Stopping after $i polls so this step can fall through and report; see STEP_DEADLINE."
+              kubectl -n "${NAMESPACE:-simplyblock}" get pods -o wide 2>/dev/null || true
+              kubectl -n "${NAMESPACE:-simplyblock}" get events --sort-by=.lastTimestamp 2>/dev/null | tail -40 || true
+              break
+            fi
             READY=$(kubectl -n $NAMESPACE get pods -l role=simplyblock-storage-node --no-headers 2>/dev/null | grep -c "Running" || true)
             [ "$READY" -ge "$EXPECTED" ] && echo "All snode-spdk pods Running" && break
             echo "snode-spdk: $READY/$EXPECTED ($i/$MAX_POLL)"; sleep 10
@@ -1543,6 +1564,14 @@ jobs:
 
           # Poll cluster status
           for i in $(seq 1 $MAX_POLL); do
+            # See STEP_DEADLINE above: stop polling in time for the fall-through
+            # to run, instead of letting the step be killed mid-loop.
+            if [ "$(date +%s)" -ge "$STEP_DEADLINE" ]; then
+              echo "::warning title=poll budget spent::Stopping after $i polls so this step can fall through and report; see STEP_DEADLINE."
+              kubectl -n "${NAMESPACE:-simplyblock}" get pods -o wide 2>/dev/null || true
+              kubectl -n "${NAMESPACE:-simplyblock}" get events --sort-by=.lastTimestamp 2>/dev/null | tail -40 || true
+              break
+            fi
             NEW_POD=$(kubectl -n $NAMESPACE get pods -l app=simplyblock-admin-control \
               -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) || true
             NEW_PHASE=$(kubectl -n $NAMESPACE get pod "$NEW_POD" -o jsonpath='{.status.phase}' 2>/dev/null) || true
@@ -1583,7 +1612,12 @@ jobs:
           kubectl -n $NAMESPACE exec "$ADMIN_POD" -- sbctl cluster list 2>&1 || true
 
       - name: Verify and force-activate cluster if needed
-        if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
+        # !cancelled() is load-bearing. This step exists to rescue a
+        # cluster the wait step could not get to Active, but without it
+        # the default 'only if everything succeeded' meant a FAILED wait
+        # skipped the rescue -- the one case it was written for. See
+        # STEP_DEADLINE in that step and run 45979367229.
+        if: ${{ !cancelled() && github.event.inputs.use_existing_cluster != 'true' }}
         run: |
           NAMESPACE=simplyblock
           ADMIN_POD=$(kubectl -n $NAMESPACE get pods \
