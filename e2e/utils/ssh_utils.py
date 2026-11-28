@@ -5655,19 +5655,39 @@ class RunnerK8sLog:
         pod_log_dir = os.path.join(self.log_dir, pod)
         os.makedirs(pod_log_dir, exist_ok=True)
         log_file = f"{pod_log_dir}/{container}_{self.test_name}_{timestamp}_{suffix}.log"
+        err_file = f"{log_file}.stderr"
         session_name = f"{pod}_{container}_{suffix}_{self.generate_random_string()}"
 
+        # stderr goes to its OWN file, never into the log.
+        #
+        # This used to be `> {log_file} 2>&1`, and when kubectl could not
+        # start -- "failed to create fsnotify watcher: too many open files"
+        # -- that message was written INTO the log file. The result was a
+        # 54-byte file named exactly like a real SPDK log, sitting on the
+        # share as if it were evidence. It cost two investigations: 35 of 47
+        # captures in run 45994302851, and six files in 46070614145 that had
+        # to be ruled out as a second node failure before the real defect
+        # could be found.
+        #
+        # It also defeated the health check below. The stub made the file
+        # grow from 0 to 54 bytes, so `current_size > last_size` was true on
+        # the first poll and the stream was marked healthy -- a stream that
+        # had never started. With stderr split out the log file stays at 0,
+        # the stale counter advances, and the stream is restarted.
         cmd = [
             "tmux", "new-session", "-d", "-s", session_name,
             "bash", "-c",
-            f"kubectl logs --follow --tail=0 {pod} -c {container} -n {self.namespace} > {log_file} 2>&1"
+            (f"kubectl logs --follow --tail=0 {pod} -c {container}"
+             f" -n {self.namespace} > {log_file} 2> {err_file}"),
         ]
         subprocess.Popen(cmd)
         self._active_log_streams[key] = {
             "file": log_file,
+            "err": err_file,
             "session": session_name,
             "last_size": 0,
             "stale_checks": 0,
+            "reported_err": False,
         }
         return log_file, session_name
 
@@ -5681,20 +5701,51 @@ class RunnerK8sLog:
         pod_log_dir = os.path.join(self.log_dir, pod)
         os.makedirs(pod_log_dir, exist_ok=True)
         prev_log = f"{pod_log_dir}/{container}_{self.test_name}_{timestamp}_previous.log"
+        # stderr is captured, not redirected into prev_log. The old form was
+        # `> {prev_log} 2>&1`, which turned "previous terminated container
+        # not found" or an fsnotify failure into a short file named like a
+        # log. The size check below passed it, because an error message is
+        # not empty -- so the share ended up holding stubs that read as
+        # evidence. See _start_log_stream for what that cost.
         cmd = (
             f"kubectl logs --previous {pod} -c {container}"
-            f" -n {self.namespace} > {prev_log} 2>&1"
+            f" -n {self.namespace} > {prev_log}"
         )
         try:
-            subprocess.run(cmd, shell=True, timeout=120)
+            res = subprocess.run(cmd, shell=True, timeout=120,
+                                 stderr=subprocess.PIPE, text=True)
             fsize = os.path.getsize(prev_log) if os.path.exists(prev_log) else 0
-            if fsize > 0:
+            err = " ".join((res.stderr or "").split())[:300]
+            if res.returncode == 0 and fsize > 0:
                 print(f"[K8s] Saved previous-container logs for {pod}:{container} ({fsize} bytes)")
             else:
-                # Empty file — previous logs not available; clean up
-                os.remove(prev_log)
+                # Nothing usable. Remove it rather than leave a file that
+                # looks like a capture; say why, so a missing log is a
+                # reported fact and not a silent gap.
+                try:
+                    os.remove(prev_log)
+                except OSError:
+                    pass
+                print(f"[K8s] No --previous logs for {pod}:{container} "
+                      f"(rc={res.returncode}, {fsize}B){': ' + err if err else ''}")
         except Exception as exc:
             print(f"[K8s] Could not capture --previous logs for {pod}:{container}: {exc}")
+
+    @staticmethod
+    def _stream_stderr(stream_info, limit=300):
+        """First line of a follow-stream's stderr file, or "".
+
+        Reading this is what turns "the log is empty" into "kubectl could
+        not start, and here is what it said".
+        """
+        path = stream_info.get("err")
+        if not path or not os.path.exists(path):
+            return ""
+        try:
+            with open(path, "r", errors="replace") as fh:
+                return " ".join(fh.read(limit).split())
+        except OSError:
+            return ""
 
     def _is_tmux_session_alive(self, session_name):
         """Return True if a tmux session with *session_name* exists."""
@@ -5782,6 +5833,14 @@ class RunnerK8sLog:
                             stream_info["stale_checks"] = stream_info.get("stale_checks", 0) + 1
                             if stream_info["stale_checks"] >= STALE_THRESHOLD:
                                 reason = "tmux session dead" if not session_alive else "log file not growing"
+                                # Say WHY, when kubectl told us. A stream that
+                                # never started looks identical to a quiet
+                                # container unless its stderr is read out.
+                                detail = self._stream_stderr(stream_info)
+                                if detail and not stream_info.get("reported_err"):
+                                    stream_info["reported_err"] = True
+                                    print(f"[K8s] follow-stream for {key} failed to "
+                                          f"start: {detail}")
                                 print(f"[K8s] Stale follow-stream for {key} ({reason}), restarting...")
 
                                 # Kill old tmux session if still lingering
