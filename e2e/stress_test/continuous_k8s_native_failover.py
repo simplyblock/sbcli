@@ -2602,6 +2602,53 @@ class K8sNativeFailoverTest(TestClusterBase):
                      "control_plane_downtime", None)
         return fn() if callable(fn) else 0.0
 
+    # Hard ceiling on a graceful shutdown, including time the control
+    # plane spent correctly refusing. Twenty minutes is longer than any
+    # recovery observed on these labs (the slowest was 12m34s, outage 17
+    # of run 46070614145) and short enough that a cluster which never
+    # recovers still ends the run.
+    SHUTDOWN_HARD_CEILING = 20 * 60
+
+    # Refusals that mean the control plane is working, not failing.
+    #
+    # Both of these are the product protecting the cluster: the first
+    # because taking another node down would breach n+2k, the second
+    # because a device migration is still rebuilding. Neither is a reason
+    # to fail the test at the five-minute mark, and both must reach the
+    # failure message if we do give up -- run 45994302851 printed both and
+    # reported "node did not go offline".
+    _REFUSAL_PATTERNS = (
+        "resource floor",
+        "< floor",
+        "n+2k",
+        "migration task found",
+        "can not shutdown storage node",
+    )
+
+    @classmethod
+    def _shutdown_refusal(cls, out, err) -> str:
+        """Return the control plane's refusal text, or "" if it accepted.
+
+        ``sn shutdown`` reports a refusal on stdout or stderr and exits
+        zero, so there is nothing to catch -- it has to be read.
+        """
+        blob = " ".join(str(x) for x in (out, err) if x).strip()
+        if not blob:
+            return ""
+        low = blob.lower()
+        if not any(pat in low for pat in cls._REFUSAL_PATTERNS):
+            if "error" not in low:
+                return ""
+        # Collapse to the first line that carries the reason, so the
+        # failure message stays readable in Slack.
+        for line in blob.splitlines():
+            if any(pat in line.lower() for pat in cls._REFUSAL_PATTERNS):
+                return " ".join(line.split())[:300]
+        for line in blob.splitlines():
+            if "error" in line.lower():
+                return " ".join(line.split())[:300]
+        return " ".join(blob.split())[:300]
+
     def _graceful_shutdown_node(self, node: str):
         """Ask the control plane to shut *node* down, and wait until it is.
 
@@ -2622,12 +2669,22 @@ class K8sNativeFailoverTest(TestClusterBase):
         self.logger.info(f"Issuing graceful shutdown for node {node}.")
         budget = 300
         deadline = time.time() + budget
+        hard_deadline = time.time() + self.SHUTDOWN_HARD_CEILING
         cp_seen = self._control_plane_downtime()
+        last_refusal = ""
+        refusal_secs = 0.0
         while True:
+            refused = ""
             try:
-                self.sbcli_utils.shutdown_node(node_uuid=node, force=False)
+                out, err = self.sbcli_utils.shutdown_node(
+                    node_uuid=node, force=False)
+                refused = self._shutdown_refusal(out, err)
             except Exception as e:
                 self.logger.warning(f"shutdown_node raised: {e}")
+            if refused:
+                last_refusal = refused
+                self.logger.warning(
+                    f"Control plane REFUSED shutdown of {node}: {refused}")
             sleep_n_sec(20)
             node_detail = self.sbcli_utils.get_storage_node_details(node)
             if node_detail and node_detail[0].get("status") == "offline":
@@ -2642,11 +2699,43 @@ class K8sNativeFailoverTest(TestClusterBase):
             deadline += cp_now - cp_seen
             cp_seen = cp_now
 
+            # A correct refusal is not the node failing to shut down.
+            #
+            # "nodes online 2 < floor 3 (n+2k)" means another node is still
+            # out; "Migration task found" means one is rebuilding. In both
+            # cases the control plane is protecting the cluster and the
+            # answer is to wait, exactly as we already wait out an
+            # unreachable control plane above. Counting that time against a
+            # five-minute budget is what made run 45994302851 report a
+            # healthy cluster as a dead node.
+            #
+            # Bounded by SHUTDOWN_HARD_CEILING so a cluster that never
+            # recovers still ends the test instead of hanging.
+            if refused:
+                refusal_secs += 20
+                deadline += 20
+
+            # Built outside the f-strings: a replacement field cannot
+            # span lines before Python 3.12, and this tree targets 3.11.
+            why = last_refusal or (
+                "none -- it accepted the shutdown and the node stayed up")
+            refused_for = (
+                f" and {refusal_secs:.0f}s of correct refusals"
+                if refusal_secs else "")
+
+            if time.time() >= hard_deadline:
+                raise RuntimeError(
+                    f"Node {node} did not go offline within "
+                    f"{self.SHUTDOWN_HARD_CEILING // 60} minutes (hard "
+                    f"ceiling). Last refusal from the control plane: {why}"
+                )
             if time.time() >= deadline:
                 raise RuntimeError(
                     f"Node {node} did not go offline within "
                     f"{budget // 60} minutes "
-                    f"(excluding {cp_now:.0f}s of control-plane downtime)."
+                    f"(excluding {cp_now:.0f}s of control-plane downtime"
+                    f"{refused_for}). "
+                    f"Last refusal from the control plane: {why}"
                 )
             self.logger.info(f"Node {node} not yet offline; retrying shutdown...")
 

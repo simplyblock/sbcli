@@ -6557,8 +6557,19 @@ class K8sSbcliUtils:
         return mgmt_ips, sn_ips
 
     def shutdown_node(self, node_uuid, expected_error_code=None, force=False):
+        """Ask the control plane to shut a node down.
+
+        Returns the ``(stdout, stderr)`` pair. It used to return nothing,
+        which is how run 45994302851 came to be reported as "node did not go
+        offline within 5 minutes" when the control plane had in fact refused
+        twice, for two different and entirely correct reasons -- the cluster
+        was below its n+2k floor, and a device migration was in flight. Both
+        were printed here and discarded on this line. A caller that polls for
+        a result needs the refusal that explains why the result never comes.
+        """
         force_flag = " --force" if force else ""
-        self.k8s.exec_sbcli(f"{self.sbcli_cmd} -d sn shutdown {node_uuid}{force_flag}")
+        return self.k8s.exec_sbcli(
+            f"{self.sbcli_cmd} -d sn shutdown {node_uuid}{force_flag}")
 
     def suspend_node(self, node_uuid, expected_error_code=None):
         self.k8s.exec_sbcli(f"{self.sbcli_cmd} -d sn suspend {node_uuid}")

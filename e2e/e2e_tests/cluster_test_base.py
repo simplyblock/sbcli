@@ -3138,6 +3138,64 @@ class TestClusterBase:
 
     # ── Alerts endpoint sampler ─────────────────────────────────────────
 
+    def _scan_oomkills(self):
+        """Report containers OOM-killed since the last scan. K8s only.
+
+        Nothing in the harness watched for this. Run 45994302851 had the
+        storage-node agent OOM-killed ELEVEN times across three of four
+        nodes -- every kill taking a storage node offline -- and not one
+        line of the harness log said so. The run failed five hours later
+        with a message about a node that would not shut down, and the
+        cause was only found by reading the hosts' kernel logs by hand.
+
+        An OOM kill is not a symptom of the test, it is a fact about the
+        cluster, and it belongs in the log at the moment it happens.
+        Returns the number of NEW kills seen.
+        """
+        k8s = getattr(self.sbcli_utils, "k8s", None)
+        if k8s is None or not hasattr(k8s, "_exec_kubectl"):
+            return 0          # docker run: no pods to scan
+        ns = getattr(k8s, "namespace", "simplyblock")
+        # -o json, not -o jsonpath. A jsonpath template for this needs
+        # embedded tabs and newlines, and every layer between here and
+        # kubectl -- Python literal, shell, bash -c -- gets a say in how
+        # those escapes survive. json has no escapes to lose.
+        try:
+            out, _ = k8s._exec_kubectl(
+                f"kubectl -n {ns} get pods -o json",
+                supress_logs=True, timeout=60)
+            pods = (json.loads(out) or {}).get("items", [])
+        except Exception as exc:
+            self.logger.debug(f"[oomkill] scan failed: {exc}")
+            return 0
+        seen = getattr(self, "_oom_seen", None)
+        if seen is None:
+            seen = self._oom_seen = {}
+        new = 0
+        for pod in pods:
+            name = (pod.get("metadata") or {}).get("name", "?")
+            for cs in (pod.get("status") or {}).get(
+                    "containerStatuses", []) or []:
+                term = (cs.get("lastState") or {}).get("terminated") or {}
+                if term.get("reason") != "OOMKilled":
+                    continue
+                container = cs.get("name", "?")
+                count = cs.get("restartCount") or 0
+                code = term.get("exitCode")
+                key = f"{name}/{container}"
+                # restartCount only ever grows, so a higher number is
+                # a kill we have not reported yet.
+                if count <= seen.get(key, -1):
+                    continue
+                seen[key] = count
+                new += 1
+                self.logger.warning(
+                    f"[oomkill] {key} was OOMKilled (exit {code}, "
+                    f"restartCount={count}). A container at its memory "
+                    f"limit is a cluster fact, not a test artefact -- "
+                    f"see SFAM-2864.")
+        return new
+
     def start_alert_collection(self, interval=None):
         """Poll ``GET /clusters/{id}/alerts`` and record every response.
 
@@ -3320,6 +3378,14 @@ class TestClusterBase:
 
                 _write(samples_path, json.dumps(record, default=str))
 
+                # Same thread, same interval: one extra kubectl call per
+                # poll, so an OOM kill is reported when it happens rather
+                # than reconstructed from kernel logs afterwards.
+                try:
+                    stats["oomkills"] = stats.get("oomkills", 0) +                         self._scan_oomkills()
+                except Exception as exc:
+                    self.logger.debug(f"[oomkill] {exc}")
+
                 # Only transitions go to the readable log, so a condition
                 # that stands for an hour is two lines rather than twelve.
                 for aid, a in firing.items():
@@ -3367,6 +3433,7 @@ class TestClusterBase:
             "interval_sec": stats["interval"],
             "polls": stats["polls"],
             "failed_polls": stats["failures"],
+            "oomkilled_containers": stats.get("oomkills", 0),
             "alerts_raised": stats["raised"],
             "alerts_resolved": stats["resolved"],
             "max_concurrent_firing": stats["max_firing"],
